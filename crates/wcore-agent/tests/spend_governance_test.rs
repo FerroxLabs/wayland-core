@@ -528,3 +528,99 @@ async fn no_paid_mode_refuses_a_metered_model_at_the_engine() {
         "paid_model_refused"
     );
 }
+
+// ── #1203: the spend audit is keyed by the conversation, not by a coin toss ──
+
+/// #1203 c2 — one conversation, three engine lifecycles, one key.
+///
+/// Both constructors handed `install_spend_guard` a fresh
+/// `uuid::Uuid::new_v4()`, so a launch and each `--resume` wrote their records
+/// under different random keys and a `/model` rebind — the one call site that
+/// passed the real `budget_session_id()` — moved the rest of a single session
+/// onto a third. A session's authorized spend could therefore never be totalled
+/// from `~/.wayland/budget/spend-audit.jsonl`.
+///
+/// Three arms, in the order the ticket names them, all reading the SAME
+/// `session_id` off the records the sink actually wrote.
+#[tokio::test]
+#[serial_test::serial]
+async fn one_conversation_keys_every_spend_record_by_the_same_session_id() {
+    let home = HomeGuard::new();
+    let sessions = TempDir::new().expect("temp session dir");
+    let manager = wcore_agent::session::SessionManager::new(sessions.path().to_path_buf(), 10);
+    let session = manager
+        .create("anthropic", "test-model", "/tmp", None)
+        .expect("session created");
+    let session_id = session.id.clone();
+    assert!(!session_id.is_empty());
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let model = wcore_types::model_aliases::ANTHROPIC_SONNET;
+
+    // 1 — a FRESH construction, bound to the conversation the host is running.
+    let provider: Arc<dyn LlmProvider> = Arc::new(CountingProvider {
+        calls: Arc::clone(&calls),
+    });
+    let mut engine = AgentEngine::new_with_provider(
+        provider,
+        config_with_mode(model, None),
+        ToolRegistry::new(),
+        null_output(),
+    );
+    engine.set_budget_session_id(session_id.clone());
+    let _ = engine.run("first", "m1").await;
+
+    // 2 — after a `/model` rebind on that same engine.
+    let rebound: Arc<dyn LlmProvider> = Arc::new(CountingProvider {
+        calls: Arc::clone(&calls),
+    });
+    engine.rebind_provider(
+        rebound,
+        ProviderCompat::anthropic_defaults(),
+        model.to_string(),
+    );
+    let _ = engine.run("second", "m2").await;
+    drop(engine);
+
+    // 3 — a RESUME of the same session in a new engine.
+    let resumed_provider: Arc<dyn LlmProvider> = Arc::new(CountingProvider {
+        calls: Arc::clone(&calls),
+    });
+    let mut resumed = AgentEngine::resume_with_provider(
+        resumed_provider,
+        config_with_mode(model, None),
+        ToolRegistry::new(),
+        null_output(),
+        session,
+    );
+    let _ = resumed.run("third", "m3").await;
+
+    let ids: Vec<String> = home
+        .audit_lines()
+        .into_iter()
+        .filter(|v| v["kind"] == "task_spend_audit")
+        .map(|v| {
+            v["payload"]["session_id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        })
+        .collect();
+
+    assert_eq!(
+        ids.len(),
+        3,
+        "one record per task: fresh, post-rebind, resumed — got {ids:#?}"
+    );
+    assert_eq!(
+        ids,
+        vec![session_id.clone(), session_id.clone(), session_id.clone()],
+        "all three must be keyed by the conversation, not by three coin tosses"
+    );
+    // Anti-vacuity: a test that passed because every arm wrote the same
+    // PLACEHOLDER would prove nothing about grouping a real conversation.
+    assert_ne!(
+        session_id, "session-unknown",
+        "the shared key must be the session's own id"
+    );
+}

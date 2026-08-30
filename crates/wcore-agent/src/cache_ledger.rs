@@ -72,17 +72,25 @@ use crate::cache_diagnostics::{CacheBreakCause, CacheDiagnostic};
 /// On-disk schema version. Bumped when a field's meaning changes; readers
 /// refuse a version they do not understand rather than silently mis-reporting.
 ///
-/// `2` (#1163 follow-up): [`TurnSample::uncached_equivalent_usd`] changed from
-/// `f64` to `Option<f64>`, and with it the MEANING of a zero. A v1 writer set
-/// the field to `0.0` precisely when nothing could price the counterfactual —
-/// that zero is the fabricated baseline #1163 was filed about. A v2 writer
-/// omits the field in that case and writes `Some(0.0)` only for a genuine
-/// priced zero. `#[serde(default)]` decodes a v1 `0.0` as `Some(0.0)`, so
-/// reading a v1 file at schema 1 reproduces the ticket verbatim on the fixed
-/// build — the same `saving_usd = -cost`, now additionally graded
-/// `saving_truth=priced`. The version is what lets the reader tell the two
-/// zeros apart; see [`migrate_v1_counterfactual`].
+/// **v1 -> v2 (#1205/#1163 follow-up).** [`TurnSample::uncached_equivalent_usd`]
+/// changed from `f64` to `Option<f64>` in v0.13.10 without this constant
+/// moving, and with it the MEANING of a zero. A v1 writer set the field to
+/// `0.0` precisely when nothing could price the counterfactual — the fabricated
+/// baseline #1163 was filed about — while `#[serde(default)]` decodes that as
+/// `Some(0.0)`, "a genuine priced zero". Measured on the FIXED build against a
+/// v0.13.9-format ledger: `cache report` printed
+/// `saving_usd=-0.061389 ... saving_truth=priced`, i.e. it reproduced #1163
+/// verbatim AND certified the fabricated saving as trustworthy.
+///
+/// v1 rows are migrated by [`load`] rather than refused: their billed
+/// `cost_usd` and `cost_source` are still facts and are worth showing. Only the
+/// counterfactual is dropped — see [`migrate_v1_counterfactuals`] for why ALL
+/// of it goes, not only the zeros.
 pub const LEDGER_SCHEMA: u32 = 2;
+
+/// The v1 on-disk schema — readable, but only after
+/// [`migrate_v1_counterfactuals`] strips the field whose meaning changed.
+pub const LEDGER_SCHEMA_V1: u32 = 1;
 
 /// Directory name under the Wayland home holding one ledger per session.
 pub const LEDGER_DIR: &str = "cache-ledger";
@@ -419,6 +427,14 @@ pub enum LedgerError {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CacheLedger {
     pub schema: u32,
+    /// #1205 — set by [`load`] when this ledger came off disk at an OLDER
+    /// schema and was migrated in memory. Not persisted: it is a fact about
+    /// THIS read, and a re-save writes the current schema honestly. Readers use
+    /// it to refuse to CERTIFY a migrated ledger — some of what it recorded
+    /// cannot be recovered, and `trustworthy=true` over it is the claim #1205
+    /// is about.
+    #[serde(skip)]
+    pub migrated_from_schema: Option<u32>,
     /// The engine's `conversation_id` — the same id the Flux sticky-routing
     /// header and `cache_health_warn` telemetry carry.
     pub session_id: String,
@@ -443,6 +459,7 @@ impl CacheLedger {
         let now = now_rfc3339();
         Self {
             schema: LEDGER_SCHEMA,
+            migrated_from_schema: None,
             session_id: session_id.into(),
             started_at: now.clone(),
             updated_at: now,
@@ -455,6 +472,15 @@ impl CacheLedger {
 
     pub fn is_empty(&self) -> bool {
         self.turns.is_empty() && self.compactions.is_empty()
+    }
+
+    /// #1205 — was this ledger written by an older schema and migrated on read?
+    ///
+    /// A migrated ledger has had at least one field's meaning reinterpreted, so
+    /// it must not be certified. `cache verify` reports `trustworthy=false`
+    /// over one even when every round-trip it holds was provider-reported.
+    pub fn is_migrated(&self) -> bool {
+        self.migrated_from_schema.is_some()
     }
 
     /// Next round-trip index (1-based).
@@ -849,35 +875,47 @@ pub fn save(ledger: &CacheLedger, path: &Path) -> Result<(), LedgerError> {
     })
 }
 
-/// Undo the v1 zero-counterfactual default (#1163).
+/// #1205 — a v1 row's `uncached_equivalent_usd` is not a price.
 ///
-/// v1 stored the counterfactual as a bare `f64` and wrote `0.0` when the model
-/// had no catalog row, so the saving rendered as `-cost` against a baseline
-/// nobody computed. v2 makes the field optional and omits it in that case, but
-/// `#[serde(default)]` cannot tell a v1 `0.0` from a v2 `Some(0.0)` — only the
-/// schema version can. Every v1 zero is therefore mapped back to `None`, which
-/// is what that writer actually knew.
+/// v0.13.9 and earlier wrote the field unconditionally as a plain `f64`
+/// (`engine.rs:17129`, `uncached_equivalent_usd: uncached.usd`), so on disk it
+/// conflates three different facts: a real catalog price, a provider-family
+/// CEILING, and `0.0` meaning "nothing could price this at all". v2
+/// distinguishes them by ABSENCE.
 ///
-/// A v1 turn whose counterfactual was a genuine priced zero (a round-trip that
-/// processed no tokens) is demoted to unknown by this. That is the safe
-/// direction: an unknown saving renders as unknown, whereas a false zero
-/// renders as a confident negative number, which is the ticket.
-fn migrate_v1_counterfactual(ledger: &mut CacheLedger) {
+/// EVERY v1 counterfactual is dropped, not only the zeros. lane/f13-misc
+/// migrated only `Some(0.0)` on the premise that "a non-zero v1 counterfactual
+/// is unambiguous"; v0.13.9's own source refutes that premise. Its
+/// `resolve_turn_cost` "reports `priced = true` for BOTH an exact catalog row
+/// and the `ProviderCompat` family fallback" (its comment, verbatim), and the
+/// counterfactual call recorded no `cost_source` of its own — so a non-zero v1
+/// figure may be a conservative family ceiling, and the v2 writer refuses to
+/// emit one of those precisely because "subtracting a real billed figure from a
+/// ceiling is not a measurement". Keeping it on read would preserve exactly the
+/// figure the writer is forbidden to produce. Dropping it is also what the
+/// ledger's own rule ("one unknown row makes the session total unknown")
+/// already prescribes.
+///
+/// `cost_usd` and `cost_source` are untouched: what was BILLED did not change
+/// meaning.
+fn migrate_v1_counterfactuals(ledger: &mut CacheLedger) {
     let mut laundered = 0u64;
     for turn in &mut ledger.turns {
-        if turn.uncached_equivalent_usd == Some(0.0) {
-            turn.uncached_equivalent_usd = None;
+        if turn.uncached_equivalent_usd.take().is_some() {
             laundered += 1;
         }
     }
-    // wayland#1205 c3 — count them. A demoted row is a figure this build had
-    // to GUESS the meaning of, and `verify` is the surface that must not
-    // certify a file carrying one.
+    // wayland#1205 c3 — count the rows actually DEMOTED, not every row in the
+    // file. A v1 row that carried no counterfactual at all lost nothing, and
+    // the count is what tells an operator why `verify` refused. The refusal
+    // itself keys on `migrated_from_schema`, which is set for every v1 file.
     ledger.laundered_counterfactual_round_trips = laundered;
+    ledger.migrated_from_schema = Some(ledger.schema);
     ledger.schema = LEDGER_SCHEMA;
 }
 
-/// Read one ledger, refusing a schema this build cannot account for.
+/// Read one ledger, migrating a schema this build still understands and
+/// refusing one it does not.
 ///
 /// Every older schema needs its OWN arm in the match below — a version range
 /// would silently apply the v1 migration to a v2 file the day
@@ -897,7 +935,7 @@ pub fn load(path: &Path) -> Result<CacheLedger, LedgerError> {
         })?;
     match ledger.schema {
         LEDGER_SCHEMA => {}
-        1 => migrate_v1_counterfactual(&mut ledger),
+        LEDGER_SCHEMA_V1 => migrate_v1_counterfactuals(&mut ledger),
         found => {
             return Err(LedgerError::SchemaMismatch {
                 path: path.to_path_buf(),
@@ -1545,11 +1583,24 @@ mod tests {
         );
     }
 
-    /// The migration must not invent unknowns where the writer knew something.
-    /// A v1 row with a real, non-zero counterfactual keeps it, so an operator
-    /// upgrading does not lose the savings they could already see.
+    /// A v1 row's NON-zero counterfactual is dropped too, and this test was
+    /// inverted at merge time on evidence rather than on preference.
+    ///
+    /// lane/f13-misc asserted the opposite here — that a real, non-zero v1
+    /// figure survives, "so an operator upgrading does not lose the savings
+    /// they could already see". Its premise was that a non-zero v1
+    /// counterfactual is unambiguous. `git show v0.13.9:.../engine.rs` refutes
+    /// it: `resolve_turn_cost` "reports `priced = true` for BOTH an exact
+    /// catalog row and the `ProviderCompat` family fallback" (v0.13.9's own
+    /// comment), the counterfactual call recorded no `cost_source`, and the v2
+    /// writer refuses a family preset outright because "subtracting a real
+    /// billed figure from a ceiling is not a measurement". Preserving the
+    /// figure on read would smuggle in exactly what the writer is forbidden to
+    /// emit.
+    ///
+    /// What was BILLED is untouched — that never changed meaning.
     #[test]
-    fn a_legacy_priced_counterfactual_survives_the_migration() {
+    fn a_legacy_nonzero_counterfactual_is_dropped_because_v1_could_not_say_where_it_came_from() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("legacy-priced.json");
         let mut v = legacy_v1_ledger_json(0.02);
@@ -1557,29 +1608,50 @@ mod tests {
         std::fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
 
         let back = load(&path).unwrap();
-        assert_eq!(back.turns[0].uncached_equivalent_usd, Some(0.05));
+        assert_eq!(
+            back.turns[0].uncached_equivalent_usd, None,
+            "a v1 non-zero may be a provider-family ceiling and the file does \
+             not say which; an unknown saving is honest, a ceiling-derived one \
+             is not"
+        );
+        assert_eq!(back.laundered_counterfactual_round_trips, 1);
+        assert!(back.is_migrated());
+        // The billed figure survives intact.
+        assert!((back.turns[0].cost_usd - 0.02).abs() < 1e-12);
         let s = back.summarize();
-        assert!((s.cache_saving_usd().expect("priced") - 0.03).abs() < 1e-9);
-        assert_eq!(s.counterfactual_unpriced_round_trips, 0);
+        assert_eq!(s.cache_saving_usd(), None);
+        assert_eq!(s.counterfactual_unpriced_round_trips, 1);
+        assert_eq!(
+            s.cost_truth(),
+            CostTruth::Priced,
+            "only the saving is unknown; the provider-reported spend is spend"
+        );
     }
 
     /// wayland#1205 c3, NARROWNESS — `laundered_counterfactual_round_trips`
     /// counts the turns the migration DEMOTED, not every turn in a v1 file.
     ///
     /// Round 2's over-correction probe moved the counter outside the `if` and
-    /// the whole suite stayed green: `verify` could have been made to refuse
-    /// every pre-schema-2 ledger, including ones whose figures survived the
-    /// migration intact, with nothing objecting. A mixed file is what tells
-    /// the two apart, so it is the one graded here.
+    /// the whole suite stayed green, so the count is graded on a MIXED file.
+    /// (At merge time the mix changed: every v1 row that HAS a counterfactual
+    /// is now demoted, so the row that must not be counted is one which never
+    /// carried the field at all. The property — the counter reports rows that
+    /// lost something, not `turns.len()` — is unchanged, and it is what makes
+    /// the printed number a usable reason for the refusal.)
     #[test]
     fn the_launder_count_counts_only_the_turns_the_migration_demoted() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("legacy-mixed.json");
         let mut v = legacy_v1_ledger_json(0.02);
-        let mut priced = v["turns"][0].clone();
-        priced["uncached_equivalent_usd"] = serde_json::json!(0.05);
-        let zeroed = v["turns"][0].clone();
-        v["turns"] = serde_json::json!([zeroed, priced]);
+        let carried = v["turns"][0].clone();
+        // The row the count must NOT include: no counterfactual on disk at
+        // all, so the migration has nothing to demote on it.
+        let mut absent = v["turns"][0].clone();
+        absent
+            .as_object_mut()
+            .unwrap()
+            .remove("uncached_equivalent_usd");
+        v["turns"] = serde_json::json!([carried, absent]);
         std::fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
 
         let back = load(&path).unwrap();
@@ -1587,18 +1659,17 @@ mod tests {
         assert_eq!(back.turns.len(), 2, "premise: two v1 turns in the file");
         assert_eq!(
             back.turns[0].uncached_equivalent_usd, None,
-            "premise: turn 0 carried the v1 zero and WAS demoted"
+            "premise: turn 0 carried a v1 counterfactual and WAS demoted"
         );
         assert_eq!(
-            back.turns[1].uncached_equivalent_usd,
-            Some(0.05),
-            "premise: turn 1 carried a real figure and was NOT demoted"
+            back.turns[1].uncached_equivalent_usd, None,
+            "premise: turn 1 never carried one, so nothing was taken from it"
         );
         assert_eq!(
             back.laundered_counterfactual_round_trips, 1,
-            "only a demoted row is a figure this build had to guess the \
-             meaning of; counting the surviving one too would make `verify` \
-             refuse every pre-schema-2 ledger"
+            "only a row that actually LOST a figure is one this build had to \
+             guess the meaning of; counting `turns.len()` would make the \
+             number meaningless as a reason for the refusal"
         );
     }
 
@@ -1719,6 +1790,171 @@ mod tests {
         );
         assert_eq!(listed[0].1.session_id, "new");
         assert_eq!(latest(tmp.path()).unwrap().1.session_id, "new");
+    }
+
+    /// The exact bytes v0.13.9 wrote: schema 1, `uncached_equivalent_usd` a
+    /// bare `f64`, and `cost_source: provider_reported`. Confirmed against
+    /// `git show v0.13.9` when #1205 was filed. Hand-written rather than
+    /// serialized from the current struct, because the point of the fixture is
+    /// that the struct has CHANGED underneath it.
+    fn handwritten_v1_ledger_json(session: &str) -> serde_json::Value {
+        serde_json::json!({
+            "schema": 1,
+            "session_id": session,
+            "started_at": "2026-07-29T10:00:00.000Z",
+            "updated_at": "2026-07-29T10:05:00.000Z",
+            "session_complete": true,
+            "turns": [{
+                "turn": 0,
+                "round_trip": 1,
+                "ts": "2026-07-29T10:00:01.000Z",
+                "provider": "flux-router",
+                "model": "flux-reasoning",
+                "retention": "ephemeral5m",
+                "uncached_input_tokens": 1_200,
+                "cache_read_tokens": 58_000,
+                "cache_write_tokens": 0,
+                "output_tokens": 400,
+                "cost_usd": 0.061389,
+                "cost_source": "provider_reported",
+                "uncached_equivalent_usd": 0.0,
+                "watermark_tokens": 59_200,
+                "conservative_watermark_tokens": 60_000,
+                "autocompact_threshold_tokens": 150_000,
+                "emergency_limit_tokens": 197_000
+            }],
+            "compactions": []
+        })
+    }
+
+    /// #1205 c1/c4 — a v1 row's `0.0` meant "nothing could price this". Under
+    /// `#[serde(default)]` it decoded as `Some(0.0)`, "a genuine priced zero",
+    /// and the measured consequence was `cache report` printing
+    /// `saving_usd=-0.061389 ... saving_truth=priced` — #1163 reproduced
+    /// verbatim on the build that fixed it, now certified.
+    #[test]
+    fn a_v1_row_does_not_decode_its_zero_counterfactual_as_a_priced_zero() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = ledger_path(tmp.path(), "legacy");
+        std::fs::create_dir_all(tmp.path()).unwrap();
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&handwritten_v1_ledger_json("legacy")).unwrap(),
+        )
+        .unwrap();
+
+        let ledger = load(&path).expect("a v1 ledger is readable, not refused");
+        assert_eq!(ledger.migrated_from_schema, Some(1));
+        assert_eq!(ledger.schema, LEDGER_SCHEMA);
+        assert!(ledger.is_migrated());
+        assert_eq!(
+            ledger.turns[0].uncached_equivalent_usd, None,
+            "the v1 zero is not a price"
+        );
+        assert_eq!(
+            ledger.turns[0].cache_saving_usd(),
+            None,
+            "and so there is no saving to report"
+        );
+        // What was BILLED did not change meaning and must survive intact.
+        assert!((ledger.turns[0].cost_usd - 0.061389).abs() < 1e-12);
+        assert_eq!(ledger.turns[0].cost_source, CostSource::ProviderReported);
+
+        let s = ledger.summarize();
+        assert_eq!(s.cache_saving_usd(), None);
+        assert_eq!(s.saving_truth(), CostTruth::Unpriced);
+        assert_eq!(s.counterfactual_unpriced_round_trips, 1);
+        assert_eq!(
+            s.cost_truth(),
+            CostTruth::Priced,
+            "the provider-reported spend is still spend; only the saving is unknown"
+        );
+    }
+
+    /// #1205 — a schema this build has never heard of is still refused. The
+    /// migration must not turn `load` into a function that accepts anything.
+    #[test]
+    fn the_migration_does_not_make_load_accept_every_schema() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("v0.json");
+        let mut v = handwritten_v1_ledger_json("ancient");
+        v["schema"] = serde_json::json!(0);
+        std::fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+        assert!(matches!(
+            load(&path),
+            Err(LedgerError::SchemaMismatch { found: 0, .. })
+        ));
+    }
+
+    /// #1206 c2 — the whole pipeline the engine uses, from the detector to the
+    /// vocabulary written on disk. `cause_of_diagnostic` is the exact call
+    /// `AgentEngine::record_cache_ledger_turn` makes at engine.rs, and
+    /// `InvalidationCause::Expired` is what it used to return here.
+    #[test]
+    fn a_prefix_reused_under_growing_input_writes_no_expired_invalidation() {
+        use crate::cache_diagnostics::{CacheBreakDetector, CacheStats};
+        use wcore_types::message::{ContentBlock, Role};
+        use wcore_types::tool::ToolDef;
+
+        let messages = vec![wcore_types::message::Message::new(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "stable".into(),
+            }],
+        )];
+        let tools: Vec<ToolDef> = Vec::new();
+
+        let mut detector = CacheBreakDetector::new();
+        for _ in 0..3 {
+            detector.record_request("model-a", "prompt", &tools, &messages);
+            detector.check_response(CacheStats {
+                input_tokens: 500,
+                cache_read_tokens: 40_000,
+                cache_creation_tokens: 0,
+            });
+        }
+        detector.record_request("model-a", "prompt", &tools, &messages);
+        let diag = detector
+            .check_response(CacheStats {
+                input_tokens: 150_000,
+                cache_read_tokens: 40_000,
+                cache_creation_tokens: 0,
+            })
+            .unwrap();
+
+        assert_eq!(
+            cause_of_diagnostic(&diag),
+            None,
+            "nothing was invalidated, so nothing may be recorded as one: {diag:?}"
+        );
+        assert_ne!(
+            cause_of_diagnostic(&diag),
+            Some(InvalidationCause::Expired),
+            "and least of all `expired`"
+        );
+    }
+
+    /// #1206 — the cause the detector reaches when it refuses to blame the
+    /// server must not arrive on disk as `expired` either. It lands as
+    /// `prefix_not_cached`, which is what the branch that produces it actually
+    /// knows: the prefix was not carrying the session on the previous turn and
+    /// did not fall on this one. `unknown` would discard that.
+    #[test]
+    fn a_refuted_ttl_break_is_published_as_prefix_not_cached_not_expired() {
+        assert_ne!(
+            invalidation_cause_of(&CacheBreakCause::PrefixNotCached),
+            InvalidationCause::Expired
+        );
+        assert_eq!(
+            invalidation_cause_of(&CacheBreakCause::PrefixNotCached),
+            InvalidationCause::PrefixNotCached
+        );
+        assert_eq!(
+            cause_of_diagnostic(&CacheDiagnostic::FullMiss {
+                cause: CacheBreakCause::PrefixNotCached
+            }),
+            Some(InvalidationCause::PrefixNotCached)
+        );
     }
 
     #[test]

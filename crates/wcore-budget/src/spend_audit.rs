@@ -324,6 +324,31 @@ impl SpendAuditor {
         self.inner.lock().dispatches.push(dispatch);
     }
 
+    /// #1203 — re-key the open task onto the session it actually belongs to.
+    ///
+    /// The engine installs its spend guard before a session exists, so the
+    /// auditor is constructed with a placeholder. The record is not written
+    /// until [`Self::finish`], so the id can still be corrected — and it must
+    /// be, or one conversation's records land under an identity nothing else
+    /// in the system uses and its authorized spend can never be totalled.
+    ///
+    /// A no-op once the record has been emitted: what was written is what the
+    /// log says, and rewriting the accumulator afterwards would only make the
+    /// in-memory state disagree with the file.
+    pub fn rebind_session(&self, session_id: &str) {
+        let mut state = self.inner.lock();
+        if state.finished || state.session_id == session_id {
+            return;
+        }
+        state.session_id = session_id.to_owned();
+    }
+
+    /// The session this task's record will be keyed by.
+    #[must_use]
+    pub fn session_id(&self) -> String {
+        self.inner.lock().session_id.clone()
+    }
+
     /// Note an authorized escalation.
     pub fn escalated(&self, record: EscalationRecord) {
         self.inner.lock().escalations.push(record);

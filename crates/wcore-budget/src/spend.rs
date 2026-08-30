@@ -348,6 +348,21 @@ impl EscalationGate {
         }
     }
 
+    /// #1203 — re-key the gate onto the authoritative session id.
+    ///
+    /// `EscalationRecord.session_id` is copied from here, so a gate left on the
+    /// placeholder its constructor was handed scopes every escalation reason to
+    /// an identity that does not survive a resume.
+    pub fn set_session_id(&mut self, session_id: impl Into<String>) {
+        self.session_id = session_id.into();
+    }
+
+    /// The session id escalation records are keyed by.
+    #[must_use]
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
     /// The model this run is currently authorized up to.
     #[must_use]
     pub fn authorized(&self) -> &ModelSpendProfile {
