@@ -2781,6 +2781,17 @@ fn a_discovered_store_the_lexical_gate_cannot_see_is_admitted() {
     #[cfg(windows)]
     let _ = std::os::windows::fs::symlink_dir(root.join("odb-link"), root.join("c/.git/objects"));
 
+    // ROUTE D — a VENDORED gitfile checkout. Its store is store-shaped, so it
+    // lands in the visible half, and it is the only visible store arm 1 cannot
+    // answer on its own: `pkg-git/objects` is not a `(control, store)` pair.
+    // Without it the known-positive half below would be graded entirely by the
+    // LEXICAL arm and would stay green with arm 3 stubbed out — which is how
+    // the red arm caught this test being vacuous on its own subject.
+    mkdir(&root.join("vendor/pkg-git/objects/ab"));
+    put(&root.join("vendor/pkg-git/objects/ab/cd1234"));
+    std::fs::create_dir_all(root.join("vendor/pkg")).unwrap();
+    std::fs::write(root.join("vendor/pkg/.git"), b"gitdir: ../pkg-git\n").unwrap();
+
     // The wrong-refusal control, asserted first: an ordinary workspace file
     // must be admitted, or every `false` below is a guard that answers nothing.
     let policy = WorkspacePolicy::contained(&root);
@@ -2805,6 +2816,16 @@ fn a_discovered_store_the_lexical_gate_cannot_see_is_admitted() {
         !visible.is_empty() && !hidden.is_empty(),
         "the fixture must produce BOTH a gate-visible and a gate-hidden store, \
          got visible={visible:?} hidden={hidden:?}"
+    );
+
+    // ANTI-VACUITY on the known-positive half specifically. A store that is a
+    // lexical `(control, store)` pair is refused by ARM 1 whatever arm 3 does,
+    // so a `visible` set containing only those grades nothing this test is
+    // about. At least one must be arm 3's alone.
+    assert!(
+        visible.iter().any(|s| !is_vcs_store_dir(s)),
+        "the visible half must contain a store the LEXICAL arm cannot answer, \
+         or stubbing arm 3 out leaves this test green: {visible:?}"
     );
 
     for store in &visible {
