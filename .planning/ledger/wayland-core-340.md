@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "The MCP malware gate does not cover every launch, and its doc claims it does"
 status: open
-last_verified_commit: 247112b9c
+last_verified_commit: 4e7da4338
 criteria:
   - id: c1
     text: "The malware gate's doc comment states the coverage the gate actually has, rather than asserting every stdio launch is checked before execution"
@@ -29,18 +29,18 @@ criteria:
     evidence: "test:crates/wayland-ijfw/src/mcp.rs::a_package_runner_spec_is_never_spawned_by_the_probe"
     owner: core
     note: "MOVED BEHIND, not reordered - mcp.rs:283 returns true for a package-runner command without spawning at all, so the probe no longer executes package-runner argv. Stage 1 (npx --version, names no package) still runs. Negative control a_non_runner_command_that_cannot_start_is_still_rejected keeps the probe from becoming always-true. CAVEAT: the test is cfg(unix) while the fixture uses a Windows npx.cmd spelling, so the Windows branch is unexercised."
-  - id: c6
-    text: "The malware gate's MODULE doc comment is graded by a test, so the coverage boundary cannot be deleted or replaced by the complete-coverage claim without a failure"
-    state: met
-    evidence: "test:crates/wcore-mcp/src/malware_gate.rs::the_module_doc_states_the_same_coverage_boundary"
-    owner: core
-    note: "ADDED 2026-08-30 to close a bookkeeping hole the verifier named on c1: the module-doc lint was described in prose and anchored nowhere, so the ledger gate's 'every met criterion is anchored to something that still exists' check never touched it and deleting the lint would not have been caught. It is a separate criterion rather than a second token on c1 because this ledger's own rule is one machine-resolvable evidence token per criterion - 'a criterion needing two pieces of evidence is two criteria'. c1 keeps its operator-doc anchor (tests/malware_gate_doc_boundary.rs, landed by lane/f13-n-mcp-gate); this grades the OTHER half, the doc a developer reads, which is the doc the ticket was actually filed about. The lint reads only the `//!` lines, never the whole file, because its own string literals live in that file and grading the file text would let the assertions satisfy themselves; it carries a positive control on the section header and a negative control proving the `//!` filter is not a no-op. RED ARM 2026-08-30: rewriting 'NOT covered' to 'also handled' in the `//!` lines ONLY - `grep -c '\"NOT covered\",'` still 1, so the test's own literal was untouched - fails with 'the module doc is missing the coverage boundary: \"NOT covered\"'; re-adding 'Every stdio launch is checked before execution.' to the doc fails with 'the module doc has regained the complete-coverage claim'; restored and touched, both green. A FIRST attempt at that red arm was INVALID and is recorded because it is the trap: a whole-file replace rewrote the test's required literal too, so the mutant passed and looked like an ungraded guard."
   - id: c5
     text: "Each runner form has a test pinning which token is queried - uvx, npx, pipx run, pipx install, --from and --with"
     state: met
     evidence: "test:crates/wcore-tools/src/osv_check.rs::every_registry_runner_form_is_checked"
     owner: core
     note: "Pins the queried token for npx, bunx, bun x, pnpm dlx, yarn dlx, npm exec, npm x, uvx, uv tool run and deno run npm:. The remaining named forms are pinned elsewhere: pipx run / pipx install / --spec by pipx_run_queries_the_package_not_the_subcommand, and --from / --with by the_gate_queries_the_from_package_not_the_entry_point. The issue's claim that pipx run queries the literal 'run' is refuted by the tree."
+  - id: c6
+    text: "The malware gate's MODULE doc comment is graded by a test, so the coverage boundary cannot be deleted or replaced by the complete-coverage claim without a failure"
+    state: met
+    evidence: "test:crates/wcore-mcp/src/malware_gate.rs::the_module_doc_states_the_same_coverage_boundary"
+    owner: core
+    note: "ADDED 2026-08-30 to close a bookkeeping hole the verifier named on c1: the module-doc lint was described in prose and anchored nowhere, so the ledger gate's 'every met criterion is anchored to something that still exists' check never touched it and deleting the lint would not have been caught. It is a separate criterion rather than a second token on c1 because this ledger's own rule is one machine-resolvable evidence token per criterion - 'a criterion needing two pieces of evidence is two criteria'. c1 keeps its operator-doc anchor (tests/malware_gate_doc_boundary.rs, landed by lane/f13-n-mcp-gate); this grades the OTHER half, the doc a developer reads, which is the doc the ticket was actually filed about. The lint reads only the `//!` lines, never the whole file, because its own string literals live in that file and grading the file text would let the assertions satisfy themselves; it carries a positive control on the section header and a negative control proving the `//!` filter is not a no-op. RED ARM 2026-08-30: rewriting 'NOT covered' to 'also handled' in the `//!` lines ONLY - `grep -c '\"NOT covered\",'` still 1, so the test's own literal was untouched - fails with 'the module doc is missing the coverage boundary: \"NOT covered\"'; re-adding 'Every stdio launch is checked before execution.' to the doc fails with 'the module doc has regained the complete-coverage claim'; restored and touched, both green. A FIRST attempt at that red arm was INVALID and is recorded because it is the trap: a whole-file replace rewrote the test's required literal too, so the mutant passed and looked like an ungraded guard."
 ---
 
 The OSV malware gate refuses an MCP stdio launch whose command names a package
