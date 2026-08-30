@@ -1504,7 +1504,7 @@ fn enforce_approval_gate_contract(
     if declared.correlation != "call_id" {
         return Err(std::io::Error::other(format!(
             "approval_required declares correlation={:?}, but `resume_token` is the bridge \
-                secret and is EMPTY on an ordinary tool gate. The public handle is `call_id`              (`correlation_id` always equals it), and an ordinary gate is answered with \
+                secret and is EMPTY on an ordinary tool gate. The public handle is `call_id` (`correlation_id` always equals it), and an ordinary gate is answered with \
                 tool_approve/tool_deny keyed by call_id.",
             declared.correlation
         ))
