@@ -2576,6 +2576,67 @@ fn is_fn_signature(line: &str) -> bool {
 /// A prose rule in a doc comment does not do this. "A comment is not a guard":
 /// the same class was documented once already and the next call site repeated
 /// it anyway.
+/// FerroxLabs/wayland-core#356 c4 — the SAME obligation on the OTHER resolver.
+///
+/// c4 reads: "If both resolvers remain, the reason each call site picked one is
+/// stated AT the call site." Both do remain, so the obligation is symmetric,
+/// and grading only the weak one graded half a sentence: a reader standing at a
+/// `canon_existing_ancestor` call could no more see that a choice had been made
+/// than a reader standing at a `canon_for_scope` one. Driven by the same
+/// enclosing-function instrument, from a table, so a THIRD resolver is one row.
+fn resolver_sites_without_a_reason(
+    source: &str,
+    needle: &str,
+    marker: &str,
+) -> (usize, Vec<String>) {
+    let lines: Vec<&str> = source.lines().collect();
+    let mut sites = 0usize;
+    let mut unlabelled: Vec<String> = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//") || !line.contains(needle) {
+            continue;
+        }
+        if line.contains(&format!("fn {needle}")) {
+            continue;
+        }
+        sites += 1;
+        let start = lines[..index]
+            .iter()
+            .rposition(|above| is_fn_signature(above))
+            .map_or(0, |at| at + 1);
+        if !lines[start..index]
+            .iter()
+            .any(|above| above.contains(marker))
+        {
+            unlabelled.push(format!("line {}: {}", index + 1, trimmed));
+        }
+    }
+    (sites, unlabelled)
+}
+
+#[test]
+fn every_strong_resolver_site_states_which_resolver_and_why() {
+    const SOURCE: &str = include_str!("../workspace_policy.rs");
+
+    let (sites, unlabelled) = resolver_sites_without_a_reason(
+        SOURCE,
+        "canon_existing_ancestor(",
+        "resolver: `canon_existing_ancestor`",
+    );
+    // Known-positive control, and the anti-vacuity one: an instrument that
+    // found no sites would pass on a file with none.
+    assert!(
+        sites >= 5,
+        "the scan found only {sites} `canon_existing_ancestor` call sites —          the instrument is looking at the wrong thing"
+    );
+    assert!(
+        unlabelled.is_empty(),
+        "core#356 c4: these `canon_existing_ancestor` call sites do not say          which resolver they use or why. Both resolvers remain in this file,          so the obligation is symmetric with the `canon_for_scope` one:\n{}",
+        unlabelled.join("\n")
+    );
+}
+
 #[test]
 fn every_weak_resolver_site_states_which_resolver_and_why() {
     const SOURCE: &str = include_str!("../workspace_policy.rs");
@@ -2693,5 +2754,176 @@ fn probe_vcs_content_stores_per_traversed_directory() {
         "PROBE dirs={n} sink={sink} total={:?} per_dir_us={:.3}",
         elapsed,
         elapsed.as_secs_f64() * 1e6 / (n as f64)
+    );
+}
+
+// ===========================================================================
+// FerroxLabs/wayland-core#384 c3 — no documented-but-uncalled enforcement
+// predicate remains in workspace_policy.rs.
+// ===========================================================================
+
+/// Doc-comment phrases that constitute an ENFORCEMENT CLAIM: the sentence a
+/// reader would take as "this is the check that does the refusing".
+///
+/// `is_session_write_granted` said "the predicate `SandboxedFs`'s mutating
+/// operations ask" and had no production call site at all. The class is not
+/// "an unused function" — dead code is a lint's job — it is a function whose
+/// DOCUMENTATION points a future author at a check that nothing runs.
+/// A SHAPE, not a list of the sites that exist today. This file's own
+/// convention for "this is the one place the question is answered" is a
+/// capitalised definite article — `THE read-content refusal`, `THE exec-time
+/// shell gate predicate`, `THE ONE ANSWER` — and the obligation forms are
+/// `must not`, `must be REFUSED`, `must stay denied`. Enumerating the current
+/// predicates instead would grade the instances rather than the class, which
+/// is how the previous three sweeps of this kind were refuted.
+const ENFORCEMENT_CLAIMS: &[&str] = &[
+    "THE ",
+    "the predicate ",
+    "must not ",
+    "must be REFUSED",
+    "must stay denied",
+];
+
+/// Every `pub fn` in `source` whose doc block makes an enforcement claim and
+/// whose name appears NOWHERE in `callers`.
+///
+/// Pure, so the known-positive controls below can drive it with a synthetic
+/// source instead of hoping the real tree happens to contain an example.
+fn documented_but_uncalled(source: &str, callers: &str) -> Vec<String> {
+    let mut doc = String::new();
+    let mut orphans = Vec::new();
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("///") {
+            doc.push_str(rest);
+            doc.push('\n');
+            continue;
+        }
+        if trimmed.starts_with("//") || trimmed.starts_with("#[") {
+            continue;
+        }
+        let is_fn = trimmed.starts_with("pub fn ") || trimmed.starts_with("pub async fn ");
+        if is_fn && ENFORCEMENT_CLAIMS.iter().any(|claim| doc.contains(claim)) {
+            let name = trimmed
+                .trim_start_matches("pub ")
+                .trim_start_matches("async ")
+                .trim_start_matches("fn ")
+                .split('(')
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            if !name.is_empty() && !callers.contains(&format!("{name}(")) {
+                orphans.push(name);
+            }
+        }
+        if !trimmed.is_empty() {
+            doc.clear();
+        }
+    }
+    orphans
+}
+
+/// Every production `.rs` under `crates/*/src`, concatenated — the corpus a
+/// call site must appear in.
+///
+/// `tests.rs` and anything under a `tests/` directory are excluded on purpose:
+/// a predicate whose only callers are its own tests is exactly the shape this
+/// gate exists to catch, and counting them would make it pass vacuously.
+/// LIMITATION, stated rather than hidden: an inline `#[cfg(test)]` module in
+/// some OTHER crate's `src` file would count as a caller. No such caller exists
+/// today, and the alternative is parsing Rust in a test.
+fn production_call_sites() -> String {
+    let crates_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates/wcore-tools has a parent")
+        .to_path_buf();
+    let mut corpus = String::new();
+    let mut stack = vec![crates_dir];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if path
+                    .file_name()
+                    .is_some_and(|n| n == "tests" || n == "target")
+                {
+                    continue;
+                }
+                stack.push(path);
+                continue;
+            }
+            if path.extension().is_some_and(|e| e == "rs")
+                && !path.ends_with("workspace_policy.rs")
+                && !path.file_name().is_some_and(|n| n == "tests.rs")
+                && let Ok(body) = std::fs::read_to_string(&path)
+            {
+                corpus.push_str(&body);
+            }
+        }
+    }
+    corpus
+}
+
+#[test]
+fn no_documented_enforcement_predicate_is_uncalled() {
+    const SOURCE: &str = include_str!("../workspace_policy.rs");
+
+    // ---- KNOWN-POSITIVE CONTROLS, in the same test ---------------------
+    // A gate whose detector matches nothing passes on any tree at all. These
+    // two drive the SAME function that grades the real file.
+    const FAKE: &str = "\
+/// The write sibling, and the predicate `SandboxedFs`'s mutating operations
+/// ask.
+pub fn is_totally_dead(&self, path: &Path) -> bool { true }
+
+/// The predicate the guard asks on every read.
+pub fn is_actually_called(&self, path: &Path) -> bool { true }
+
+/// An ordinary helper nobody claims enforces anything.
+pub fn unclaimed_and_uncalled(&self) -> bool { true }
+";
+    assert_eq!(
+        documented_but_uncalled(FAKE, "self.is_actually_called(&canon)"),
+        vec!["is_totally_dead".to_string()],
+        "control: the detector must flag a documented-but-uncalled predicate, \
+         must NOT flag one that has a call site, and must NOT flag a function \
+         that makes no enforcement claim"
+    );
+
+    // THE anti-vacuity control. If the claim vocabulary matched nothing in the
+    // REAL file, every assertion below would pass on any tree whatsoever — the
+    // permanently-green twin of a permanently-red gate.
+    let claimants = documented_but_uncalled(SOURCE, "");
+    assert!(
+        claimants.len() >= 8,
+        "control: the claim vocabulary matched only {claimants:?} enforcement \
+         predicates in workspace_policy.rs. This gate grades what it matches; \
+         if the file's wording moved, move ENFORCEMENT_CLAIMS with it"
+    );
+
+    let callers = production_call_sites();
+    assert!(
+        callers.len() > 500_000,
+        "control: the call-site corpus is {} bytes — the walk found almost \
+         nothing and every predicate would look uncalled",
+        callers.len()
+    );
+    assert!(
+        callers.contains("denies_read_content("),
+        "control: the corpus must contain a call site we KNOW exists, or an \
+         empty read would make this gate pass vacuously"
+    );
+
+    // ---- the real grade ------------------------------------------------
+    let orphans = documented_but_uncalled(SOURCE, &callers);
+    assert!(
+        orphans.is_empty(),
+        "core#384 c3: these predicates document themselves as enforcement \
+         points and nothing in production calls them. Either wire each one in \
+         or delete it with its doc comment, the way #384 did for \
+         is_session_write_granted: {orphans:?}"
     );
 }

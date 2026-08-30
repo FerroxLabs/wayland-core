@@ -1679,6 +1679,18 @@ impl<F: VirtualFs> SandboxedFs<F> {
         self.contain_granted(path, true).await
     }
 
+    /// **THE predicate the mutating VFS path asks about a standing grant**,
+    /// with [`live_grant_roots`](Self::live_grant_roots) supplying the roots.
+    ///
+    /// FerroxLabs/wayland-core#384: `WorkspacePolicy::is_session_write_granted`
+    /// used to carry this sentence — "the predicate `SandboxedFs`'s mutating
+    /// operations ask" — while having no production call site at all. It was
+    /// deleted and the claim moved HERE, to the pair that is actually asked, so
+    /// a reader looking for the write-grant enforcement point finds the code
+    /// that runs. The two were never interchangeable: this one resolves the
+    /// dangling-link boundary itself (`landing_prefix`) before comparing
+    /// against the live roots, and evaluates expiry at use time.
+    ///
     /// Falls through to [`contain`](Self::contain) first so the ordinary
     /// in-workspace path is byte-for-byte unchanged, and so a session with no
     /// grants behaves exactly as it did before this existed. The grant check
@@ -1742,6 +1754,11 @@ impl<F: VirtualFs> SandboxedFs<F> {
     }
 
     /// The roots of every live grant conferring at least `write`.
+    ///
+    /// The other half of the write-grant enforcement point
+    /// ([`contain_granted`](Self::contain_granted) is the first);
+    /// FerroxLabs/wayland-core#384 moved that documentation here from an
+    /// uncalled predicate in `workspace_policy`.
     ///
     /// Expiry is evaluated HERE, at use time, not when the grant was made: a
     /// long-running turn must lose access the moment the deadline passes, not

@@ -91,7 +91,6 @@ async fn a_granted_write_folder_can_be_written_and_read_back() {
     // A write grant IMPLIES a read grant. The reverse never holds.
     assert!(policy.writable_roots().contains(&granted));
     assert!(policy.readable_roots().contains(&granted));
-    assert!(policy.is_session_write_granted(&target));
     assert!(policy.is_session_read_granted(&target));
 }
 
@@ -148,7 +147,6 @@ async fn a_read_only_grant_on_the_same_folder_still_refuses_the_write() {
         "a read grant is somewhere the agent may LOOK"
     );
     assert!(!policy.writable_roots().contains(&granted));
-    assert!(!policy.is_session_write_granted(&target));
     assert_eq!(
         std::fs::read(&target).unwrap(),
         b"%PDF-1.7".to_vec(),

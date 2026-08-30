@@ -434,7 +434,14 @@ fn walk_dir(
             // root is met at the top of the tree and never descended TO, so a
             // self-only test admitted `.git/objects/aa` and inlined the
             // objects under it.
+            //
+            // FerroxLabs/wayland-core#377 c2 — this IS a drop and it is now
+            // counted. A pruned store is content the user asked for and did
+            // not get; one entry, not one file, because the walk deliberately
+            // never learns how many files are under it. Silence here was the
+            // last uncounted drop in this function.
             if wcore_tools::workspace_policy::is_within_vcs_store_or_control_dir(&canonical) {
+                *skipped += 1;
                 continue;
             }
             // core#339 c6: `.gitignore` is judged on where the entry resolves,
@@ -447,6 +454,13 @@ fn walk_dir(
                 continue;
             }
             // Reached twice (a link back into the tree) is walked once.
+            //
+            // NOT A DROP: the entry is not missing from the payload, it is
+            // already IN it — this arm runs only after the first visit walked
+            // the same canonical directory. Counting it would report a skip
+            // for content the user did receive, which is a different lie from
+            // the silence FerroxLabs/wayland-core#377 was filed about.
+            // Graded by `a_directory_reached_twice_is_walked_once_and_not_counted_as_skipped`.
             if !visited.insert(canonical) {
                 continue;
             }
@@ -1573,6 +1587,170 @@ mod tests {
         assert!(
             payload.files.iter().any(|f| f.content == "safe\n"),
             "control: the ordinary file must still be attached"
+        );
+    }
+
+    /// The `SkippedFiles` count carried by a payload, if any.
+    fn skipped_count(warnings: &[AtWarning]) -> Option<usize> {
+        warnings.iter().find_map(|w| match w {
+            AtWarning::SkippedFiles { count } => Some(*count),
+            _ => None,
+        })
+    }
+
+    // =======================================================================
+    // FerroxLabs/wayland-core#377 c2 — no `continue` in `walk_dir` drops an
+    // entry silently.
+    // =======================================================================
+
+    /// A pruned VCS store IS a drop, and is now counted.
+    ///
+    /// #322 c4 prunes `.git`/`.hg`/`.svn`/`.bzr` and their content stores from
+    /// the walk: correct, and until now silent. The user asked for a directory
+    /// and did not get all of it; c2's sentence is that no such `continue`
+    /// leaves the payload without a `SkippedFiles` warning.
+    #[test]
+    fn a_pruned_vcs_store_is_counted_as_a_skipped_entry() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::write(root.join("ok.txt"), "safe").expect("write ok");
+        fs::create_dir_all(root.join(".git/objects/ab")).expect("git");
+        fs::write(root.join(".git/objects/ab/cd1234"), "blob").expect("obj");
+
+        let at = AtRef::parse("@./").expect("parse");
+        let payload = resolve(&at, root).expect("resolve dir");
+
+        // WRONG-REFUSAL CONTROL: the ordinary file still attaches, so this is
+        // not passing because the walk returned nothing.
+        assert!(
+            payload
+                .files
+                .iter()
+                .any(|f| f.path.display().to_string().contains("ok.txt")),
+            "control: the ordinary file must still attach: {:?}",
+            payload.files
+        );
+        assert!(
+            !payload
+                .files
+                .iter()
+                .any(|f| f.path.display().to_string().contains("cd1234")),
+            "control: the store must still be pruned"
+        );
+        assert_eq!(
+            skipped_count(&payload.warnings),
+            Some(1),
+            "core#377 c2: pruning the VCS control directory dropped an entry \
+             and must say so. Warnings: {:?}",
+            payload.warnings
+        );
+    }
+
+    /// The revisit guard is NOT a drop, and must not be counted.
+    ///
+    /// The other half of c2, and the reason it is a decision rather than a
+    /// line: a directory reached a second time through a link back into the
+    /// tree contributes its files ONCE, and they are in the payload. Counting
+    /// it would report a skip for content the user did receive.
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_reached_twice_is_walked_once_and_not_counted_as_skipped() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::create_dir_all(root.join("real")).expect("real");
+        fs::write(root.join("real/inner.txt"), "content").expect("inner");
+        std::os::unix::fs::symlink(root.join("real"), root.join("alias")).expect("link");
+
+        let at = AtRef::parse("@./").expect("parse");
+        let payload = resolve(&at, root).expect("resolve dir");
+
+        let inner: Vec<_> = payload
+            .files
+            .iter()
+            .filter(|f| f.path.display().to_string().contains("inner.txt"))
+            .collect();
+        assert_eq!(
+            inner.len(),
+            1,
+            "control: the twice-reachable file must attach exactly once: {:?}",
+            payload.files
+        );
+        assert_eq!(
+            skipped_count(&payload.warnings),
+            None,
+            "core#377 c2: a directory reached twice is not a dropped entry — \
+             its files are IN the payload. Warnings: {:?}",
+            payload.warnings
+        );
+    }
+
+    /// THE SHAPE, not the two instances. Every `continue` inside `walk_dir`
+    /// either increments the skipped counter or carries an explicit
+    /// `NOT A DROP:` justification.
+    ///
+    /// The previous pass closed the one `continue` the ticket named and left
+    /// two others uncounted; the pass before that fixed three collapsed string
+    /// literals and missed a fourth three lines below. A gate over the whole
+    /// function is what makes an N+1 impossible rather than unlikely.
+    #[test]
+    fn every_continue_in_walk_dir_is_counted_or_justified() {
+        const SOURCE: &str = include_str!("at_ref_resolve.rs");
+        let lines: Vec<&str> = SOURCE.lines().collect();
+        let start = lines
+            .iter()
+            .position(|l| l.starts_with("fn walk_dir("))
+            .expect("control: walk_dir must be in the scanned file");
+        let end = lines[start + 1..]
+            .iter()
+            .position(|l| l.starts_with("fn ") || l.starts_with("pub fn "))
+            .map_or(lines.len(), |at| start + 1 + at);
+        let body = &lines[start..end];
+
+        let mut silent: Vec<String> = Vec::new();
+        let mut total = 0usize;
+        for (index, line) in body.iter().enumerate() {
+            if line.trim() != "continue;" {
+                continue;
+            }
+            total += 1;
+            // The counter must be the IMMEDIATELY preceding statement, not
+            // merely somewhere above. A fixed look-back window is how the
+            // `canon_for_scope` version of this gate was vacuous: the note
+            // belonging to the arm NEXT DOOR satisfied it.
+            let previous = body[..index]
+                .iter()
+                .rev()
+                .find(|l| !l.trim().is_empty() && !l.trim().starts_with("//"))
+                .copied()
+                .unwrap_or("");
+            let counted = previous.trim() == "*skipped += 1;";
+            // A justification, by contrast, is prose and lives in the comment
+            // block directly above the arm.
+            let justified = body[..index]
+                .iter()
+                .rev()
+                .take_while(|l| {
+                    l.trim().is_empty()
+                        || l.trim().starts_with("//")
+                        || l.trim().starts_with("if ")
+                        || l.trim().starts_with("let ")
+                })
+                .any(|l| l.contains("NOT A DROP:"));
+            if !counted && !justified {
+                silent.push(format!("line {}: {}", start + index + 1, line.trim()));
+            }
+        }
+        assert!(
+            total >= 8,
+            "control: the scan found only {total} `continue`s in walk_dir — \
+             the instrument is looking at the wrong function"
+        );
+        assert!(
+            silent.is_empty(),
+            "core#377 c2: these `continue`s in walk_dir drop an entry without \
+             incrementing the skipped counter and without saying why that is \
+             not a drop. Add `*skipped += 1;` or a `NOT A DROP:` note:\n{}",
+            silent.join("\n")
         );
     }
 }
