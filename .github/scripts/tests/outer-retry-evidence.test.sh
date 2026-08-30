@@ -238,16 +238,45 @@ want_grep "the preserved attempts are uploaded with the JUnit artifact" \
 want_grep "the retry-flake grader is still invoked from the shared evidence gate" \
   "$ROOT/.github/scripts/assert-test-evidence.sh" "grade-retry-flakes.sh"
 
-# ...and the step that RUNS that gate must not exclude itself on a branch where
-# the macOS matrix is skipped. Measured on run 33303418632: the wrapper
-# preserved outer-attempt-1.xml, the report job downloaded it, and `report`
-# still concluded SUCCESS because this step's `if:` named only `needs.ci`,
-# which is `skipped` on every `lane/**` push that does not opt into
-# `[ci-darwin]`. This is a WIRING check and says so: it proves the condition
-# consults the containerized Linux job, not that the report check reds --
-# that is Part E's job, and a live runner's.
-want_grep "the evidence gate's own condition consults the containerized Linux job" \
-  "$CI" "needs['ci-linux'].result != 'skipped'"
+# ...and the step that RUNS that gate must not be able to exclude itself at all.
+# Measured on run 33303418632: the wrapper preserved outer-attempt-1.xml, the
+# report job downloaded it, and `report` still concluded SUCCESS because this
+# step's `if:` named only `needs.ci`, which was `skipped` on that push.
+#
+# THE ASSERTION IS DELIBERATELY NOT "the condition also names ci-linux". That
+# is the enumerating form of this check and it is worth nothing: it passes for
+# any list of job names, including a list that omits the next producing leg
+# somebody adds. "Is this job name in the condition?" is a question over an
+# open set. "Does the condition name a job AT ALL?" is decidable and total, and
+# it is the property that makes the defect impossible -- a condition with no
+# `needs` reference cannot be switched off by a job's non-admission. The gate
+# decides from the evidence it downloaded, which is the only input it needs.
+#
+# This is a WIRING check and says so: it proves the condition cannot exclude
+# itself, not that the report check reds -- that is Part E's job, and a live
+# runner's.
+gate_condition() { # the `if:` of the evidence-gate step, up to its `env:`
+  awk '/^      - name: Assert test evidence exists/ {f=1; next}
+       f && /^        env:/ {exit}
+       f {print}' "$CI"
+}
+GATE_COND=$(gate_condition)
+# ANTI-VACUITY, and it is not decoration: the assertion below is a grep for
+# ABSENCE, and an empty extraction satisfies it for free. If the step is
+# renamed or its shape changes, this arm reds instead of the absence arm
+# passing silently.
+if printf '%s' "$GATE_COND" | grep -q 'if:'; then
+  ok "the evidence gate's condition can be located (anti-vacuity)"
+else
+  bad "the evidence gate's condition can be located (anti-vacuity)"
+  printf '       | extracted: [%s]\n' "$GATE_COND"
+fi
+if printf '%s' "$GATE_COND" | grep -q 'needs'; then
+  bad "the evidence gate's condition names no upstream job"
+  printf '       | %s\n' "$GATE_COND"
+else
+  ok "the evidence gate's condition names no upstream job"
+fi
 
 # ── PART D — a setup failure must not masquerade as a test failure ─────────
 #

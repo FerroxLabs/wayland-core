@@ -2850,22 +2850,58 @@ jobs:
       # result was `skipped` while the containerized Linux job's was `success`.
       #
       # A gate that cannot fail is exactly as worthless as one that cannot
-      # pass, and this one could not fail on any branch that does not opt into
-      # the macOS matrix -- which is every lane branch in the release.
+      # pass, and this one could not fail on any run where the macOS matrix was
+      # not admitted.
+      #
+      # THE FIRST FIX FOR THIS WAS AN ENUMERATION AND IS RETRACTED. It read
+      # `(needs.ci not skipped) || (needs['ci-linux'] not skipped)` -- it added
+      # the one job whose omission had been measured. That closes run
+      # 33303418632 and nothing else: "was one of these NAMED jobs admitted?"
+      # is a question over an OPEN set. Add a seventh producing leg, move the
+      # workspace suite to it, or have `ci-linux` itself cancel on its 120-minute
+      # timeout, and this step goes inert again with the evidence sitting in the
+      # artifact it just downloaded -- the identical defect, one job name later.
+      #
+      # THE PREDICATE IS INVERTED INSTEAD, so the class cannot recur. This step
+      # exists to answer ONE question -- "is there test evidence?" -- and that
+      # question is decidable and total from the artifact directory, which the
+      # previous step has already downloaded. It does not need to know which job
+      # produced it, and any condition that names a job is a way for the gate to
+      # be switched off by something other than the evidence. So the condition
+      # names NO job: the step runs whenever `report` itself is not cancelled,
+      # and assert-test-evidence.sh decides from what it finds.
+      # `.github/scripts/tests/outer-retry-evidence.test.sh` asserts exactly
+      # that -- that the condition contains no `needs` reference at all -- with
+      # an anti-vacuity arm that fails if the condition cannot be located, since
+      # an empty extraction would satisfy a grep-for-absence for free.
+      #
+      # ONE BEHAVIOUR CHANGE, STATED RATHER THAN SMUGGLED: previously a
+      # `cancelled` upstream leg suppressed this gate. Now it does not -- a
+      # cancelled leg leaves no evidence, and this step's own name says a test
+      # step that did not run is not a pass. `report` keeps `if: always()`, so
+      # the one case still excluded is the workflow itself being cancelled.
       - name: Assert test evidence exists (a skipped test step is not a pass)
-        if: >-
-          ${{ (needs.ci.result != 'cancelled' && needs.ci.result != 'skipped')
-              || (needs['ci-linux'].result != 'cancelled' && needs['ci-linux'].result != 'skipped') }}
+        if: ${{ !cancelled() }}
         env:
           EVIDENCE_DIR: junit-reports
           EXPECTED_MIN: 1
           LABEL: ci matrix (unit + integration)
-          UPSTREAM_RESULT: ci=${{ needs.ci.result }} ci-linux=${{ needs['ci-linux'].result }}
+          # Every dependency reports, and none is named: `toJSON(needs)` is
+          # rendered by GitHub from the `needs:` list itself, so a leg added
+          # tomorrow appears here without anyone remembering to add it. Flattened
+          # to one line because this string is interpolated into a `::error`
+          # annotation, and an annotation cannot carry a raw newline.
+          NEEDS_JSON: ${{ toJSON(needs) }}
           HINT: >-
             A leg that dies before its test step (for example at the Clippy
             step) leaves no artifact. See
             .planning/lanes/fix-clippy-gate/NOTES.md.
-        run: bash .github/scripts/assert-test-evidence.sh
+        run: |
+          UPSTREAM_RESULT=$(printf '%s' "$NEEDS_JSON" \
+            | jq -r 'to_entries | map("\(.key)=\(.value.result)") | join(" ")')
+          export UPSTREAM_RESULT
+          echo "upstream jobs      : $UPSTREAM_RESULT"
+          bash .github/scripts/assert-test-evidence.sh
 
       - name: Publish test report
         uses: dorny/test-reporter@v3
