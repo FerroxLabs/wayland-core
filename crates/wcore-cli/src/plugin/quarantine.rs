@@ -1058,6 +1058,55 @@ mod tests {
         );
     }
 
+    /// NEGATIVE CONTROL AT THE RUN LEVEL: a SUCCESSFUL quarantine `git` leaves
+    /// its daemonized descendants alone.
+    ///
+    /// This is the regression D-379 refuses, measured instead of argued. `git`
+    /// starts `git-credential-cache--daemon` on the user's behalf, that daemon
+    /// closes its stdio and outlives the `git` that spawned it, and it is
+    /// shared with the user's other `git` operations -- so a teardown that
+    /// fired on the finished path would kill it after every install that
+    /// WORKED. The unit control above proves `disarm` is honoured; this proves
+    /// `run_git` actually reaches it on a real successful run.
+    ///
+    /// The probe is that daemon's shape: a descendant that does NOT hold the
+    /// inherited pipes, so both drains reach EOF and `git` exits 0.
+    #[test]
+    fn a_successful_quarantine_git_leaves_its_daemonized_descendant_alone() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path();
+        let pids = repo.join("pids");
+        let budget = Duration::from_secs(60);
+        run_git(&["init", "-q", "."], Some(repo), budget).expect("git init");
+
+        let alias = format!(
+            "alias.daemonish=!sh -c 'sleep 300 </dev/null >/dev/null 2>&1 & \
+             printf \"%d %d\\n\" \"$$\" \"$!\" > \"{p}.tmp\" \
+             && mv \"{p}.tmp\" \"{p}\"; exit 0'",
+            p = pids.display()
+        );
+        // CONTROL ON THE ARM: this must SUCCEED. If it came back Err the run
+        // took an abandoning exit and the teardown was supposed to fire, so
+        // the assertion below would be grading the wrong path.
+        run_git(&["-c", &alias, "daemonish"], Some(repo), budget)
+            .expect("a helper that closes its stdio must let git finish cleanly");
+
+        let (_helper_shell, descendant) = recorded_pids(&pids);
+        // Give a misfiring teardown every chance to land before measuring.
+        std::thread::sleep(Duration::from_millis(300));
+        let descendant_state = process_liveness(descendant);
+        reap_group(descendant);
+
+        assert_eq!(
+            descendant_state,
+            ProcessLiveness::Live,
+            "a SUCCESSFUL quarantine git killed its own daemonized descendant \
+             ({descendant}). That is git-credential-cache--daemon after a \
+             working install, shared with the user's other git operations -- \
+             the regression D-379 exists to refuse (FerroxLabs/wayland-core#379)"
+        );
+    }
+
     /// NEGATIVE CONTROL for the guard, and it is not decoration.
     ///
     /// A guard that fired unconditionally would redden nothing above and would
