@@ -872,9 +872,16 @@ impl ExecutionBackend for ContainerBackend {
                     backend_id: BACKEND_ID.into(),
                     kind: BackendKind::Container,
                     nonce: None,
+                    // DERIVED from the filter that actually ran, never
+                    // restated. This lane's own M1 red arm mutated the filter
+                    // to a value scope and the hand-written method string
+                    // still claimed "KEY PRESENCE": an operator-facing account
+                    // of an enumeration that can disagree with the enumeration
+                    // is worth no more than no account at all.
                     method: format!(
-                        "docker ps -a --filter label={NONCE_LABEL} (KEY PRESENCE, any nonce), \
-                         each row graded against the live-task registry"
+                        "docker ps -a --filter {} , each row graded against the live-task \
+                         registry",
+                        any_nonce_filter()
                     ),
                     found,
                     enumerated: true,
@@ -905,8 +912,12 @@ async fn list_containers_with_nonce(nonce: &str) -> std::result::Result<Vec<Stri
 /// from a run whose nonce this process has never held. Labels are applied at
 /// CREATE time, so a container that never started carries one too, which is
 /// exactly the `Created` wedge #365 measured.
+fn any_nonce_filter() -> String {
+    format!("label={NONCE_LABEL}")
+}
+
 async fn list_all_labelled_containers() -> std::result::Result<Vec<(String, String)>, String> {
-    let filter = format!("label={NONCE_LABEL}");
+    let filter = any_nonce_filter();
     let format = format!("{{{{.Names}}}}\t{{{{.Label \"{NONCE_LABEL}\"}}}}");
     let rows = docker_ps(&filter, &format).await?;
     Ok(rows
