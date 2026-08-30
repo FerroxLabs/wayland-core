@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "#1166's ticket Defect 5 -- cache diagnostics off by default -- has no ledger criterion and was never graded"
 status: open
-last_verified_commit: a77a68f23
+last_verified_commit: f45e5bd83
 criteria:
   - id: c1
     text: "A decision is recorded for compact.cache_diagnostics defaulting to false: on, off, or off with the reason stated"

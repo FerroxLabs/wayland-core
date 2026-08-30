@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "The WhatsApp bridge ships a message cap borrowed from Meta's docs, and the coverage guard structurally cannot see it"
 status: open
-last_verified_commit: 00081ad24
+last_verified_commit: 894ace48d
 criteria:
   - id: c1
     text: "The bridge's cap is measured against a real baileys or whatsapp-web.js backend, or the borrowed Some(4096) is replaced by something honest (None, or a measured number) -- a borrowed number is not an answer"
