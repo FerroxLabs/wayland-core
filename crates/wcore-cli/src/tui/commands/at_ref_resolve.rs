@@ -377,6 +377,9 @@ fn walk_dir(
     skipped: &mut usize,
     truncated: &mut bool,
 ) -> Result<(), AtRefError> {
+    // NOT A DROP: truncation is already reported. `*truncated` is the
+    // payload's own signal and `resolve` turns it into a warning, so returning
+    // here withholds nothing the caller is not being told about.
     if *truncated {
         return Ok(());
     }
@@ -391,6 +394,10 @@ fn walk_dir(
     paths.sort();
 
     for path in paths {
+        // NOT A DROP: the entries after the cap are withheld, but `*truncated`
+        // is set on the line above and carries that fact to the user. This is
+        // the one exit that ends the walk while saying so by a different means
+        // than the skipped counter.
         if out.len() >= DIR_MAX_FILES {
             *truncated = true;
             return Ok(());
@@ -1684,17 +1691,48 @@ mod tests {
         );
     }
 
-    /// THE SHAPE, not the two instances. Every `continue` inside `walk_dir`
-    /// either increments the skipped counter or carries an explicit
-    /// `NOT A DROP:` justification.
+    /// Does this line's CODE (not its comments) use `kw` as a keyword?
+    ///
+    /// Token boundaries on both sides, so `returns_early` and a `continue`
+    /// inside a comment are not exits. Comments are stripped first because a
+    /// gate that can be satisfied — or tripped — by prose grades prose.
+    fn uses_keyword(line: &str, kw: &str) -> bool {
+        let code = line.split("//").next().unwrap_or("");
+        code.match_indices(kw).any(|(at, _)| {
+            let before = code[..at].chars().next_back();
+            let after = code[at + kw.len()..].chars().next();
+            let boundary = |c: char| !c.is_alphanumeric() && c != '_';
+            before.is_none_or(boundary) && after.is_none_or(boundary)
+        })
+    }
+
+    /// THE SHAPE. Every construct in `walk_dir` that can end an iteration or
+    /// the function either increments the skipped counter or carries an
+    /// explicit `NOT A DROP:` justification.
     ///
     /// The previous pass closed the one `continue` the ticket named and left
     /// two others uncounted; the pass before that fixed three collapsed string
-    /// literals and missed a fourth three lines below. A gate over the whole
-    /// function is what makes an N+1 impossible rather than unlikely.
+    /// literals and missed a fourth three lines below.
+    ///
+    /// **This gate was itself vacuous on its own subject until 2026-08-30, and
+    /// a red arm is what proved it.** It matched `line.trim() == "continue;"`
+    /// — one SPELLING of one exit. Which spellings a future author might use
+    /// to drop an entry is an open alphabet, so a gate over spellings can
+    /// always be walked around. MEASURED, not reasoned: replacing the counted
+    /// `if !meta.is_file()` arm with `return Ok(());` drops every remaining
+    /// entry in the directory with no `SkippedFiles` warning, compiles
+    /// (`cargo check -p wcore-cli --tests` exit 0), is `cargo fmt --check`
+    /// clean, and the old gate PASSED it.
+    ///
+    /// What ends an iteration is not an open alphabet. In Rust it is exactly
+    /// `continue`, `break` and `return`, and asking "does this line use one of
+    /// those three keywords" is decidable and total over the function. `?` is
+    /// deliberately excluded: it propagates an `Err` the caller surfaces, so it
+    /// is loud by construction — the opposite of the silence #377 is about.
     #[test]
-    fn every_continue_in_walk_dir_is_counted_or_justified() {
+    fn every_silent_exit_in_walk_dir_is_counted_or_justified() {
         const SOURCE: &str = include_str!("at_ref_resolve.rs");
+        const EXITS: [&str; 3] = ["continue", "break", "return"];
         let lines: Vec<&str> = SOURCE.lines().collect();
         let start = lines
             .iter()
@@ -1709,7 +1747,7 @@ mod tests {
         let mut silent: Vec<String> = Vec::new();
         let mut total = 0usize;
         for (index, line) in body.iter().enumerate() {
-            if line.trim() != "continue;" {
+            if !EXITS.iter().any(|kw| uses_keyword(line, kw)) {
                 continue;
             }
             total += 1;
@@ -1734,22 +1772,44 @@ mod tests {
                         || l.trim().starts_with("//")
                         || l.trim().starts_with("if ")
                         || l.trim().starts_with("let ")
+                        || l.trim().starts_with("*truncated")
                 })
                 .any(|l| l.contains("NOT A DROP:"));
             if !counted && !justified {
                 silent.push(format!("line {}: {}", start + index + 1, line.trim()));
             }
         }
+        // ANTI-VACUITY. Two separate ways this instrument can grade nothing:
+        // pointed at the wrong function, or its keyword matcher silently
+        // matching none. The second count is the one the old gate would have
+        // failed — it saw 11 exits where there are 13.
         assert!(
-            total >= 8,
-            "control: the scan found only {total} `continue`s in walk_dir — \
-             the instrument is looking at the wrong function"
+            total >= 13,
+            "control: the scan found only {total} loop/function exits in              walk_dir — the instrument is looking at the wrong function, or              `uses_keyword` has stopped matching"
+        );
+        // KNOWN-POSITIVE CONTROL on the matcher itself, in the same run. An
+        // empty result reads as "no silent exits" and is the most common way
+        // for a source-scanning gate to be wrong, so `uses_keyword` is made to
+        // answer on a line of each shape — including the two it must REFUSE.
+        for kw in EXITS {
+            assert!(
+                uses_keyword(&format!("            {kw};"), kw),
+                "control: `uses_keyword` must match a bare `{kw}`"
+            );
+        }
+        assert!(
+            uses_keyword("            return Ok(());", "return")
+                && uses_keyword("                continue 'entries;", "continue"),
+            "control: `uses_keyword` must match an exit that carries a value              or a label"
+        );
+        assert!(
+            !uses_keyword("            // continue here would drop it", "continue")
+                && !uses_keyword("            let returned = f();", "return"),
+            "control: `uses_keyword` must refuse a comment and an identifier,              or every line grades as an exit and `silent` is noise"
         );
         assert!(
             silent.is_empty(),
-            "core#377 c2: these `continue`s in walk_dir drop an entry without \
-             incrementing the skipped counter and without saying why that is \
-             not a drop. Add `*skipped += 1;` or a `NOT A DROP:` note:\n{}",
+            "core#377 c2: these exits from walk_dir end an iteration or the              function without incrementing the skipped counter and without              saying why that is not a drop. Add `*skipped += 1;` or a              `NOT A DROP:` note:\n{}",
             silent.join("\n")
         );
     }
