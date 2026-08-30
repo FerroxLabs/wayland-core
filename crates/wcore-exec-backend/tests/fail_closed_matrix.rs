@@ -575,10 +575,16 @@ async fn the_local_scan_finds_an_orphan_that_no_registry_remembers() {
     .expect("plant a registryless orphan");
     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
 
-    let evidence = wcore_exec_backend::orphan::scan_one("local", &nonce, reference_budget())
-        .await
-        .unwrap()
-        .expect("the local backend exists");
+    let evidence = wcore_exec_backend::orphan::scan_one(
+        "local",
+        // This test wants ONE run's residue: it planted the process itself and holds
+        // the nonce. It is the scoped question, stated (core#366 d2).
+        wcore_exec_backend::contract::OrphanScope::Nonce(&nonce),
+        reference_budget(),
+    )
+    .await
+    .unwrap()
+    .expect("the local backend exists");
 
     // Reap the plant AND its descendants. Killing only the direct child leaves
     // the `sleep` grandchild behind — nextest marks the test leaky, which is

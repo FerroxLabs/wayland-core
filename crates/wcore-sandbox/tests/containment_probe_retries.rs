@@ -9,8 +9,8 @@
 //! containment property at all, which is the exact defect #362 records.
 //!
 //! So the list is not trusted. This test DERIVES the set of binaries that can
-//! produce a vacuous containment result — the integration-test files that call
-//! the one function that panics on one — and requires the config to cover it.
+//! produce a vacuous containment result — the source files that call the one
+//! function that panics on one — and requires the config to cover it.
 //!
 //! It cannot resolve a nextest filterset, so it checks the literal spelling.
 //! That is the same limitation, and the same remedy, as
@@ -23,6 +23,28 @@
 //! `tests/` would have granted every one of them a silent exemption, which is
 //! the same shape of gap as the nonce-scoped scan in core#366: a query that
 //! cannot see the thing it is supposed to find.
+//!
+//! # Why every file is CLASSIFIED rather than some files SKIPPED
+//!
+//! The first version of this file drew the boundary by directory name and got
+//! it wrong. One helper read `crates/<crate>/tests/*.rs` non-recursively; its
+//! companion walked `crates/` but skipped any directory called `tests`. The
+//! union of the two is not the workspace — it omits
+//! `crates/<crate>/tests/<subdir>/**`, which is 38 real files today including
+//! `crates/wcore-sandbox/tests/common/mod.rs`, a shared helper in the very
+//! crate being pinned. A caller planted there was covered by NEITHER test and
+//! ran green with `retries = 2`, reproduced under review.
+//!
+//! Two hand-drawn regions that are meant to tile a space do not tile it, and
+//! nothing in the code says so. So the shape changed rather than the region:
+//! there is now ONE walk, it visits every `.rs` file under `crates/`, and each
+//! file is CLASSIFIED — either into the integration binaries that can carry it
+//! ([`Compiled::IntegrationBinaries`]) or into a target `binary(=<stem>)`
+//! cannot name ([`Compiled::NotNameableByBinaryFilter`]). The classifier is
+//! total: it returns a variant for every path, and a control asserts the two
+//! buckets sum to the number of files walked. "Which directories do I skip"
+//! is undecidable over an open alphabet of layouts; "every file lands in
+//! exactly one of two buckets" is decidable and checkable, and the check runs.
 
 use std::path::{Path, PathBuf};
 
@@ -71,52 +93,114 @@ fn calls_the_vacuity_source(body: &str) -> bool {
         .any(|line| line.contains(&call) || line.contains(&path_mention))
 }
 
-fn read_rs_files(dir: &Path) -> Vec<(String, String)> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
+/// Where a `.rs` file's code ends up, and therefore whether a nextest
+/// `binary(=<name>)` operand can select it.
+///
+/// TOTAL over paths: [`classify`] returns one of these for every file it is
+/// handed, and never `None`. That is the property the previous
+/// skip-these-directories shape did not have.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Compiled {
+    /// Into these integration-test binaries. More than one when the file is a
+    /// module that any of a crate's test binaries may `mod`-include: the
+    /// attribution is deliberately over-inclusive, because demanding a pin the
+    /// file may not need costs a config line while missing one grants a silent
+    /// exemption.
+    IntegrationBinaries(Vec<String>),
+    /// Into a crate's lib or bin target. A unit test there runs inside that
+    /// target's own test binary, which `binary(=<file stem>)` cannot name.
+    NotNameableByBinaryFilter,
+}
+
+/// The nextest integration-test binaries a crate's `tests/` directory produces:
+/// `tests/<stem>.rs` is the binary `<stem>`, and `tests/<dir>/main.rs` is the
+/// binary `<dir>` (cargo's two auto-discovery rules for test targets).
+fn integration_binary_roots(crate_dir: &Path) -> Vec<String> {
+    let tests = crate_dir.join("tests");
+    let Ok(entries) = std::fs::read_dir(&tests) else {
         return Vec::new();
     };
     let mut out = Vec::new();
     for entry in entries {
         let path = entry.expect("readable dir entry").path();
-        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
+        };
+        if path.is_dir() {
+            if path.join("main.rs").is_file() {
+                out.push(name.to_owned());
+            }
+        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+            out.push(name.trim_end_matches(".rs").to_owned());
         }
-        let stem = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .expect("utf-8 file stem")
-            .to_owned();
-        out.push((
-            stem,
-            std::fs::read_to_string(&path).expect("readable source"),
-        ));
     }
-    out
-}
-
-/// Every `crates/<crate>/tests/*.rs` in the workspace, as `(binary name, body)`.
-/// A file directly under `tests/` is one nextest binary whose name is the file
-/// stem, which is exactly the operand `binary(=...)` takes.
-fn workspace_integration_test_files() -> Vec<(String, String)> {
-    let crates = repo_root().join("crates");
-    let mut out = Vec::new();
-    for entry in std::fs::read_dir(&crates).expect("the workspace has a crates/ directory") {
-        let path = entry.expect("readable dir entry").path();
-        out.extend(read_rs_files(&path.join("tests")));
-    }
-    out
-}
-
-/// Integration-test binary names anywhere in the workspace that call
-/// [`VACUITY_SOURCE`].
-fn binaries_that_can_report_a_vacuous_probe() -> Vec<String> {
-    let mut out: Vec<String> = workspace_integration_test_files()
-        .into_iter()
-        .filter(|(_, body)| calls_the_vacuity_source(body))
-        .map(|(name, _)| name)
-        .collect();
     out.sort();
     out.dedup();
+    out
+}
+
+/// Classify one `.rs` file living under `crates/`. `rel` is relative to
+/// `crates/`, so its first component is the crate directory.
+///
+/// Every path yields a variant. A file under a crate's `tests/` subtree that
+/// belongs to a crate with no integration binary at all cannot be named by
+/// `binary(=...)` either, and is classified as such rather than being dropped —
+/// the fail-closed direction, since that answer makes the file an OFFENDER
+/// somebody has to deal with instead of an exemption nobody sees.
+fn classify(crates_root: &Path, rel: &Path) -> Compiled {
+    let parts: Vec<&str> = rel
+        .components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .collect();
+    // <crate>/tests/... is the only integration-test shape.
+    if parts.len() >= 3 && parts[1] == "tests" {
+        let rest = &parts[2..];
+        if rest.len() == 1 {
+            return Compiled::IntegrationBinaries(vec![rest[0].trim_end_matches(".rs").to_owned()]);
+        }
+        let roots = integration_binary_roots(&crates_root.join(parts[0]));
+        if roots.is_empty() {
+            return Compiled::NotNameableByBinaryFilter;
+        }
+        return Compiled::IntegrationBinaries(roots);
+    }
+    Compiled::NotNameableByBinaryFilter
+}
+
+/// One walk, every `.rs` file under `crates/`, each classified.
+///
+/// `target` is excluded because it is build output rather than source — the
+/// only exclusion, and it removes no source file. Everything that remains is
+/// classified; nothing is skipped.
+fn workspace_rs_files() -> Vec<(PathBuf, Compiled, String)> {
+    let crates_root = repo_root().join("crates");
+    let mut out = Vec::new();
+    let mut stack = vec![crates_root.clone()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries {
+            let path = entry.expect("readable dir entry").path();
+            if path.is_dir() {
+                if path.file_name().and_then(|n| n.to_str()) != Some("target") {
+                    stack.push(path);
+                }
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let rel = path
+                .strip_prefix(&crates_root)
+                .expect("walked from crates/")
+                .to_path_buf();
+            let compiled = classify(&crates_root, &rel);
+            let body = std::fs::read_to_string(&path).expect("readable source");
+            out.push((path, compiled, body));
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
     out
 }
 
@@ -148,9 +232,71 @@ fn zero_retry_filters(config: &str) -> Vec<(String, String)> {
     out
 }
 
+/// CONTROL shared by both tests: the walk is total.
+///
+/// Asserts the two buckets sum to the number of files walked, and that the
+/// walk actually reaches a file in a `tests/` SUBDIRECTORY — the exact region
+/// the previous two-helper shape omitted. If somebody restores a
+/// skip-this-directory walk, this fires rather than silently exempting
+/// whatever is behind it.
+fn total_classification(files: &[(PathBuf, Compiled, String)]) {
+    assert!(
+        files.len() > 100,
+        "CONTROL: the walk found only {} .rs files under crates/, so an empty result would \
+         prove nothing. Did the layout move?",
+        files.len()
+    );
+    let bucketed = files
+        .iter()
+        .filter(|(_, c, _)| {
+            matches!(
+                c,
+                Compiled::IntegrationBinaries(_) | Compiled::NotNameableByBinaryFilter
+            )
+        })
+        .count();
+    assert_eq!(
+        bucketed,
+        files.len(),
+        "CONTROL: classification must be TOTAL — every walked file lands in exactly one bucket. \
+         {} of {} did.",
+        bucketed,
+        files.len()
+    );
+    let nested_test_files = files
+        .iter()
+        .filter(|(path, _, _)| {
+            let parts: Vec<_> = path.components().collect();
+            parts
+                .iter()
+                .position(|c| c.as_os_str() == "tests")
+                .is_some_and(|i| parts.len() > i + 2)
+        })
+        .count();
+    assert!(
+        nested_test_files > 0,
+        "CONTROL: the walk reached NO file in a `tests/` subdirectory. That region is exactly \
+         what the previous non-recursive derivation missed, and a walk that cannot see it \
+         cannot fail on it. Restore a recursive walk."
+    );
+}
+
 #[test]
 fn every_binary_that_can_report_a_vacuous_containment_probe_is_unretryable() {
-    let binaries = binaries_that_can_report_a_vacuous_probe();
+    let files = workspace_rs_files();
+    total_classification(&files);
+
+    let mut binaries: Vec<String> = files
+        .iter()
+        .filter(|(_, _, body)| calls_the_vacuity_source(body))
+        .filter_map(|(_, compiled, _)| match compiled {
+            Compiled::IntegrationBinaries(names) => Some(names.clone()),
+            Compiled::NotNameableByBinaryFilter => None,
+        })
+        .flatten()
+        .collect();
+    binaries.sort();
+    binaries.dedup();
 
     // POSITIVE CONTROL. A scan that silently found nothing would make every
     // assertion below vacuously true, which is the failure mode this whole
@@ -202,63 +348,34 @@ fn every_binary_that_can_report_a_vacuous_containment_probe_is_unretryable() {
     }
 }
 
-/// The remaining way to reach the vacuity source is from a UNIT test, which
-/// lives in its crate's lib binary rather than in a `tests/` binary of its own.
-/// `binary(=<file stem>)` cannot name one, so the mechanism above cannot cover
-/// it — and a mechanism that silently does not cover a case is the defect this
-/// file exists to prevent.
+/// The remaining way to reach the vacuity source is from source that compiles
+/// into a crate's lib or bin target rather than into a `tests/` binary of its
+/// own. `binary(=<file stem>)` cannot name one, so the mechanism above cannot
+/// cover it — and a mechanism that silently does not cover a case is the defect
+/// this file exists to prevent.
 ///
 /// Nothing does this today. This asserts that, so the day somebody does, the
 /// failure says what to do instead of the pin quietly missing them.
 #[test]
 fn no_unit_test_reaches_the_vacuity_source_where_the_pin_cannot_name_it() {
-    let crates = repo_root().join("crates");
-    let mut offenders = Vec::new();
-    let mut scanned = 0usize;
-    let mut stack = vec![crates];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries {
-            let path = entry.expect("readable dir entry").path();
-            if path.is_dir() {
-                // `tests/` is covered by the derivation above; `target` is not
-                // source at all.
-                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if name != "tests" && name != "target" {
-                    stack.push(path);
-                }
-                continue;
-            }
-            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-                continue;
-            }
-            // The definition itself is not a caller.
-            if path.ends_with("src/test_support.rs") {
-                continue;
-            }
-            let body = std::fs::read_to_string(&path).expect("readable source");
-            scanned += 1;
-            if calls_the_vacuity_source(&body) {
-                offenders.push(path);
-            }
-        }
-    }
+    let files = workspace_rs_files();
+    total_classification(&files);
 
-    // CONTROL: a walk that found no files would make the assertion below
-    // vacuous. `crates/` has hundreds of `.rs` files.
-    assert!(
-        scanned > 100,
-        "CONTROL: the walk scanned only {scanned} .rs files under crates/, so an empty offender \
-         list would prove nothing. Did the layout move?"
-    );
+    let offenders: Vec<&PathBuf> = files
+        .iter()
+        .filter(|(path, _, _)| !path.ends_with("src/test_support.rs"))
+        .filter(|(_, compiled, _)| *compiled == Compiled::NotNameableByBinaryFilter)
+        .filter(|(_, _, body)| calls_the_vacuity_source(body))
+        .map(|(path, _, _)| path)
+        .collect();
+
     assert!(
         offenders.is_empty(),
-        "core#362 c4: {offenders:?} reach `{VACUITY_SOURCE}` from library source rather than from \
-         a `tests/` file. A unit test lives in its crate's lib binary, which `binary(=<stem>)` \
-         cannot name, so the `retries = 0` pin in .config/nextest.toml does NOT cover it and a \
-         vacuous containment result there can still be retried into a pass. Move the call into a \
-         `tests/` binary and pin that binary, or extend the pin mechanism to name lib binaries."
+        "core#362 c4: {offenders:?} reach `{VACUITY_SOURCE}` from source that compiles into a \
+         crate's lib or bin target rather than into a `tests/` binary. Such a test runs inside \
+         that target's own test binary, which `binary(=<stem>)` cannot name, so the \
+         `retries = 0` pin in .config/nextest.toml does NOT cover it and a vacuous containment \
+         result there can still be retried into a pass. Move the call into a `tests/` binary and \
+         pin that binary, or extend the pin mechanism to name lib binaries."
     );
 }

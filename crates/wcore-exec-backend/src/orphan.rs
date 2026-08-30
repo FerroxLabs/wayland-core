@@ -35,7 +35,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::contract::{BackendKind, OrphanScan, ResourceBudget};
+use crate::contract::{BackendKind, OrphanScan, OrphanScope, ResourceBudget};
 use crate::error::Result;
 
 /// What a backend relies on to take a process tree down with it.
@@ -224,43 +224,50 @@ impl OrphanEvidence {
     }
 }
 
-/// Scan every reference backend this build carries for surfaces still carrying
-/// `nonce`.
-pub async fn scan_all(nonce: &str, limits: ResourceBudget) -> Result<Vec<OrphanEvidence>> {
-    let mut out = Vec::new();
-    for reference in crate::reference_backends(limits)? {
-        let scan = reference.backend.scan_orphans(nonce).await?;
-        out.push(OrphanEvidence::from_scan(&scan));
-    }
-    out.sort_by(|a, b| a.backend_id.cmp(&b.backend_id));
-    Ok(out)
-}
-
-/// Scan every reference backend for surfaces it created under ANY nonce.
+/// Scan every reference backend this build carries, in `scope`.
 ///
-/// The companion to [`scan_all`], and the one that can see a leftover from a
-/// run this process never held the nonce for (core#366). A backend with no
-/// unscoped enumeration reports NOT-MEASURED here, never zero.
-pub async fn scan_all_any_nonce(limits: ResourceBudget) -> Result<Vec<OrphanEvidence>> {
+/// # The scope is a parameter, and there is no default (core#366 d2)
+///
+/// This function used to hardcode the nonce-scoped question. Everything built
+/// on it therefore inherited a scope its author never chose, and one of those
+/// things is an operator-facing gate — `wayland-core backend scan`, whose
+/// non-zero exit a human wires into CI. It printed `count 0 (MEASURED)` with a
+/// labelled leftover sitting in `docker ps -a`, because the only question it
+/// could ask was "is there residue under the nonce I am holding", and a fresh
+/// nonce can never match a previous run's container.
+///
+/// Adding a second, unscoped function beside this one would have fixed the one
+/// caller that was named in the ticket and left every other caller — and every
+/// future caller — on the silent default. It was tried in this lane's first
+/// pass and shipped with ZERO callers while the surface it existed for stayed
+/// broken. Taking [`OrphanScope`] instead makes the choice non-optional: the
+/// caller set and what each one asks is now whatever `cargo check` accepts,
+/// not whatever a note claims.
+pub async fn scan_all(
+    scope: OrphanScope<'_>,
+    limits: ResourceBudget,
+) -> Result<Vec<OrphanEvidence>> {
     let mut out = Vec::new();
     for reference in crate::reference_backends(limits)? {
-        let scan = reference.backend.scan_orphans_any_nonce().await?;
+        let scan = reference.backend.scan_orphans_in_scope(scope).await?;
         out.push(OrphanEvidence::from_scan(&scan));
     }
     out.sort_by(|a, b| a.backend_id.cmp(&b.backend_id));
     Ok(out)
 }
 
-/// Scan one named backend.
+/// Scan one named backend, in `scope`. Same rule as [`scan_all`]: the caller
+/// states the scope, because the caller is the only one who knows which
+/// question it means.
 pub async fn scan_one(
     backend_id: &str,
-    nonce: &str,
+    scope: OrphanScope<'_>,
     limits: ResourceBudget,
 ) -> Result<Option<OrphanEvidence>> {
     let Some(reference) = crate::reference_backend_named(backend_id, limits)? else {
         return Ok(None);
     };
-    let scan = reference.backend.scan_orphans(nonce).await?;
+    let scan = reference.backend.scan_orphans_in_scope(scope).await?;
     Ok(Some(OrphanEvidence::from_scan(&scan)))
 }
 
@@ -503,15 +510,49 @@ mod tests {
         assert!(m.label().contains("DockerContainerReap"));
     }
 
+    /// Every variant of the upstream authority, DERIVED rather than restated.
+    ///
+    /// The previous version of the test below compared one hand-written list
+    /// against another: an `allowed` array typed here, and the string literals
+    /// typed into `mechanism_for`. Neither could notice `wcore-sandbox`
+    /// renaming a variant or adding a fourth — and this crate DEPENDS on
+    /// `wcore-sandbox`, so the authority was reachable the whole time. A
+    /// stale name here is not cosmetic: it is printed to an operator by
+    /// `wayland-core backend scan` as the mechanism a backend relies on.
+    ///
+    /// Both rot modes are now COMPILE errors rather than green tests. The
+    /// match has no wildcard, so a fourth variant upstream fails to compile
+    /// here; the names come from the derived `Debug`, so a rename fails to
+    /// compile too.
+    fn every_upstream_mechanism() -> Vec<String> {
+        use wcore_sandbox::backends::process_tree::ProcessTreeMechanism;
+        let all = [
+            ProcessTreeMechanism::LinuxPidNamespaceReap,
+            ProcessTreeMechanism::DockerContainerReap,
+            ProcessTreeMechanism::WindowsJobObject,
+        ];
+        for mechanism in all {
+            match mechanism {
+                ProcessTreeMechanism::LinuxPidNamespaceReap
+                | ProcessTreeMechanism::DockerContainerReap
+                | ProcessTreeMechanism::WindowsJobObject => {}
+            }
+        }
+        all.iter().map(|m| format!("{m:?}")).collect()
+    }
+
     #[test]
     fn only_the_three_proven_mechanism_names_are_ever_spelled() {
-        // If a fourth name appears here, someone has invented a mechanism that
-        // `wcore-sandbox` does not implement.
-        let allowed = [
-            "LinuxPidNamespaceReap",
-            "DockerContainerReap",
-            "WindowsJobObject",
-        ];
+        let allowed = every_upstream_mechanism();
+        // CONTROL: an empty or truncated derivation would make the assertion
+        // below vacuously true, which is the failure this rewrite exists to
+        // remove rather than reproduce.
+        assert_eq!(
+            allowed.len(),
+            3,
+            "CONTROL: wcore-sandbox's ProcessTreeMechanism must still carry exactly the three \
+             proven mechanisms; derived {allowed:?}"
+        );
         for kind in [
             BackendKind::Local,
             BackendKind::Container,
@@ -524,8 +565,11 @@ mod tests {
             } = mechanism_for(kind)
             {
                 assert!(
-                    allowed.contains(&process_tree_mechanism.as_str()),
-                    "{kind:?} claims an unrecognised mechanism: {process_tree_mechanism}"
+                    allowed.contains(&process_tree_mechanism),
+                    "{kind:?} claims a mechanism wcore-sandbox does not implement: \
+                     {process_tree_mechanism}. The authority is \
+                     wcore_sandbox::backends::process_tree::ProcessTreeMechanism, which spells \
+                     {allowed:?}, and this string is printed to an operator by `backend scan`."
                 );
             }
         }

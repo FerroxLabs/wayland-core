@@ -13,7 +13,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand};
 
 use wcore_exec_backend::conformance::{reference_budget, reference_task};
-use wcore_exec_backend::contract::ExecutionTask;
+use wcore_exec_backend::contract::{ExecutionTask, OrphanScope};
 use wcore_exec_backend::receipt::ExecutionReceipt;
 use wcore_exec_backend::{reference_backend_named, reference_backends};
 
@@ -77,8 +77,10 @@ pub enum BackendCmd {
     /// reaping mechanism each backend actually relies on.
     Scan {
         /// The task id, which is also its nonce for the reference task.
+        /// Omit it (and `--nonce`) for the UNSCOPED scan (core#366): every
+        /// surface this product created, whatever run created it.
         #[arg(long = "task-id")]
-        task_id: String,
+        task_id: Option<String>,
         /// An explicit nonce, when it differs from the task id.
         #[arg(long)]
         nonce: Option<String>,
@@ -235,7 +237,7 @@ pub async fn run(args: BackendArgs) -> Result<()> {
             task_id,
             nonce,
             json,
-        } => scan(&task_id, nonce.as_deref(), json).await,
+        } => scan(task_id.as_deref(), nonce.as_deref(), json).await,
         BackendCmd::Receipt {
             cmd:
                 ReceiptCmd::Verify {
@@ -391,6 +393,19 @@ async fn execute(backend: &str, task_path: Option<&std::path::Path>, out: &PathB
     Ok(())
 }
 
+/// The CLI's ONLY conversion from operator input to a scan scope.
+///
+/// core#366 d2: absent input means the WIDER question, never the narrower one.
+/// The asymmetry is deliberate — an unscoped scan that finds nothing is a
+/// slower true answer, while a scoped scan that finds nothing over a real
+/// leftover is a false one, and it is the false one that shipped.
+fn orphan_scope(nonce: Option<&str>) -> OrphanScope<'_> {
+    match nonce {
+        Some(nonce) => OrphanScope::Nonce(nonce),
+        None => OrphanScope::AnyNonce,
+    }
+}
+
 async fn cancel(task_id: &str, backend: Option<&str>) -> Result<()> {
     let backends = reference_backends(reference_budget())?;
     let mut observed = false;
@@ -426,36 +441,38 @@ async fn cancel(task_id: &str, backend: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Both operator surfaces reach the scanner through
+/// `wcore_exec_backend::orphan::scan_all`, which takes an [`OrphanScope`] and
+/// has no default. Two surfaces with two private paths into the scanner is
+/// what let one of them keep asking the nonce-scoped question after the other
+/// was fixed (core#366 d2).
 async fn orphans(nonce: Option<&str>) -> Result<()> {
-    let backends = reference_backends(reference_budget())?;
+    let scope = orphan_scope(nonce);
+    println!("scope: {}", scope.label());
+    if nonce.is_none() {
+        println!(
+            "       A row marked LEFTOVER is a surface no live task in this process carries a \
+             nonce for."
+        );
+    }
+    let evidence = wcore_exec_backend::orphan::scan_all(scope, reference_budget()).await?;
     let mut unscannable = 0usize;
     let mut found = 0usize;
-    match nonce {
-        Some(nonce) => println!("scope: run {nonce} only"),
-        None => println!(
-            "scope: EVERY run (unscoped, core#366). A row marked LEFTOVER is a surface no \
-             live task in this process carries a nonce for."
-        ),
-    }
-    for reference in &backends {
-        let scan = match nonce {
-            Some(nonce) => reference.backend.scan_orphans(nonce).await?,
-            None => reference.backend.scan_orphans_any_nonce().await?,
-        };
+    for e in &evidence {
         println!(
             "{:<10} enumerated={:<5} found={} via {}",
-            scan.backend_id,
-            scan.enumerated,
-            scan.found.len(),
-            scan.method
+            e.backend_id,
+            e.is_observed(),
+            e.orphan_count.unwrap_or(0),
+            e.method
         );
-        for item in &scan.found {
+        for item in &e.rows {
             println!("           - {item}");
         }
-        if !scan.enumerated {
-            unscannable += 1;
+        match e.orphan_count {
+            Some(n) => found += n as usize,
+            None => unscannable += 1,
         }
-        found += scan.found.len();
     }
     println!(
         "\n{found} orphan(s) found; {unscannable} surface(s) could NOT be enumerated. An \
@@ -583,21 +600,30 @@ fn diff(paths: &[PathBuf]) -> Result<()> {
     Ok(())
 }
 
-/// F25-05: `wayland-core backend scan --task-id <id>`.
+/// F25-05: `wayland-core backend scan [--task-id <id>]`.
 ///
 /// Prints the RAW enumeration alongside the count so an operator can check the
 /// scanner's own work, and names each backend's reaping mechanism so nobody has
 /// to infer it. A surface that could not be enumerated prints NOT MEASURED —
 /// never zero, because "did not look" and "looked and found nothing" are
 /// different facts and only one of them is evidence.
-async fn scan(task_id: &str, nonce: Option<&str>, json: bool) -> Result<()> {
-    let nonce = nonce.unwrap_or(task_id);
-    let evidence = wcore_exec_backend::orphan::scan_all(nonce, reference_budget()).await?;
+///
+/// `--task-id` is OPTIONAL as of core#366 d2. It used to be required, which
+/// made this — the scriptable surface, the one whose non-zero exit a human
+/// wires into a gate — structurally incapable of asking anything but "is there
+/// residue under the nonce I already hold". Measured against a real container
+/// labelled with a nonce nobody held, it answered `count 0 (MEASURED)`.
+/// Without the flag the scope is now [`OrphanScope::AnyNonce`] and the same
+/// leftover is reported and exits non-zero.
+async fn scan(task_id: Option<&str>, nonce: Option<&str>, json: bool) -> Result<()> {
+    let effective = nonce.or(task_id);
+    let scope = orphan_scope(effective);
+    let evidence = wcore_exec_backend::orphan::scan_all(scope, reference_budget()).await?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&evidence)?);
     } else {
-        println!("orphan scan for task {task_id} (nonce {nonce})");
+        println!("orphan scan, scope: {}", scope.label());
         for e in &evidence {
             println!();
             println!("  backend    {}", e.backend_id);
@@ -631,7 +657,10 @@ async fn scan(task_id: &str, nonce: Option<&str>, json: bool) -> Result<()> {
         evidence.len()
     );
     if found > 0 {
-        bail!("{found} orphaned execution surface(s) still carry nonce {nonce}");
+        bail!(
+            "{found} orphaned execution surface(s) found in scope: {}",
+            scope.label()
+        );
     }
     Ok(())
 }

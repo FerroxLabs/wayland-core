@@ -314,6 +314,46 @@ pub struct OrphanScan {
     pub enumerated: bool,
 }
 
+/// Which runs an orphan scan covers.
+///
+/// # Why this is a parameter and not a convention (core#366 d2)
+///
+/// The scope used to be implicit: `scan_orphans(nonce)` was the only shape a
+/// caller could write, so a caller that wanted "every run" had no way to say
+/// so and silently got "the one run whose nonce I already hold" — a question
+/// that can never return a previous run's leftover. The remedy that names one
+/// call site and moves it is the same shape as the defect: it leaves every
+/// OTHER caller, and every caller written next month, with the same silent
+/// default. `wayland-core backend scan` was exactly that caller, and it
+/// reported a MEASURED zero over a real labelled leftover.
+///
+/// So there is no default. Every entry point that is not a backend
+/// implementing its own enumeration takes an `OrphanScope`, which means the
+/// complete set of callers and what each one asks is derived BY THE COMPILER —
+/// a new caller cannot compile without choosing — rather than from a
+/// hand-written list that is stale the moment somebody adds the next one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrphanScope<'a> {
+    /// One run's residue, and nothing else. What `cancel()` wants: it
+    /// re-enumerates by the cancelled task's own nonce to check its own
+    /// removal, and a wider scope would make it report other tasks' surfaces
+    /// as its residual.
+    Nonce(&'a str),
+    /// Every surface this product created, whatever run created it —
+    /// including runs this process never held a nonce for.
+    AnyNonce,
+}
+
+impl OrphanScope<'_> {
+    /// The scope in words, for an operator-facing line.
+    pub fn label(&self) -> String {
+        match self {
+            OrphanScope::Nonce(nonce) => format!("run {nonce} only"),
+            OrphanScope::AnyNonce => "EVERY run (unscoped, core#366)".to_string(),
+        }
+    }
+}
+
 /// The provider-neutral execution backend.
 #[async_trait]
 pub trait ExecutionBackend: Send + Sync {
@@ -394,6 +434,23 @@ pub trait ExecutionBackend: Send + Sync {
             found: Vec::new(),
             enumerated: false,
         })
+    }
+
+    /// Scan in an EXPLICIT scope. The one entry point for a caller that is not
+    /// a backend enumerating its own surfaces.
+    ///
+    /// core#366 d2. This dispatches to the two methods above and adds no
+    /// behaviour of its own, which is the point: the nonce-scoped contract
+    /// `cancel()` depends on is untouched, and at the same time no caller can
+    /// reach the scanner without stating which of the two questions it is
+    /// asking. `scan_orphans` is still there and still nonce-scoped, so
+    /// choosing the scoped question stays possible; what is no longer possible
+    /// is getting it by default and never knowing there was another one.
+    async fn scan_orphans_in_scope(&self, scope: OrphanScope<'_>) -> Result<OrphanScan> {
+        match scope {
+            OrphanScope::Nonce(nonce) => self.scan_orphans(nonce).await,
+            OrphanScope::AnyNonce => self.scan_orphans_any_nonce().await,
+        }
     }
 }
 
