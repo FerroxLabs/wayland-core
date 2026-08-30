@@ -56,8 +56,10 @@ pub struct DeferColdConfig {
     /// on the turn a tool is hydrated. Before that pass, stub mode left the
     /// stubs interleaved at their registry slots and a hydration rewrote the
     /// whole wire prefix from index 1 — the wayland#1171 re-bill on a
-    /// documented config path. Guarded by
-    /// `hydration_leaves_the_tools_prefix_byte_identical_in_both_catalog_modes`.
+    /// documented config path. Guarded from inside `wcore-agent`, against the
+    /// engine's own pipeline rather than a re-composition of these helpers, by
+    /// `stub_mode_hydration_leaves_the_engine_tools_prefix_byte_identical` and
+    /// `both_catalog_modes_agree_on_the_engine_hot_prefix` (engine.rs).
     pub catalog: bool,
     /// HARD cap on the catalog line's name-list length in chars — even a
     /// single name is dropped when it alone exceeds the budget (the suffix

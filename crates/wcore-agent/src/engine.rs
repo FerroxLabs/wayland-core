@@ -22597,6 +22597,218 @@ mod set_config_tests {
         );
     }
 
+    /// FerroxLabs/wayland#1209 probe fixture — the registry order of the
+    /// session the ticket measured, as outbound tool defs.
+    fn prefix_probe_defs() -> Vec<wcore_types::tool::ToolDef> {
+        [
+            "Bash",
+            "Delegate",
+            "Edit",
+            "Forge",
+            "Glob",
+            "Grep",
+            "Read",
+            "Spawn",
+            "ToolSearch",
+            "Workflow",
+            "Write",
+        ]
+        .iter()
+        .map(|name| builtin_tool(name))
+        .collect()
+    }
+
+    /// Everything ahead of the mutable region for that fixture: the eight
+    /// tools of `DeferColdConfig::default_hot_allowlist` it registers.
+    const PREFIX_PROBE_HOT: usize = 8;
+
+    /// An engine in the requested catalog mode whose LIVE registry can
+    /// dispatch the three cold tools — the direct-call hydration recorder
+    /// refuses a name the registry does not hold.
+    fn prefix_probe_engine(catalog: bool) -> super::AgentEngine {
+        let mut engine = make_engine("m");
+        engine.tools = Arc::new(hydration_registry(&["Delegate", "Spawn", "Workflow"]));
+        engine.config.builtin_tools.defer_cold.catalog = catalog;
+        engine
+    }
+
+    /// ONE turn through the engine's OWN per-turn tool pipeline
+    /// (`AgentEngine::apply_tool_deferral`), serialized with the real
+    /// Anthropic wire encoder: the assertion surface is the bytes the
+    /// provider sees, not an internal `Vec` order.
+    fn prefix_probe_wire(engine: &super::AgentEngine) -> Vec<serde_json::Value> {
+        wcore_providers::anthropic_shared::build_tools(
+            &engine.apply_tool_deferral(prefix_probe_defs()),
+        )
+    }
+
+    fn prefix_probe_names(wire: &[serde_json::Value]) -> Vec<String> {
+        wire.iter()
+            .map(|t| t["name"].as_str().unwrap_or_default().to_string())
+            .collect()
+    }
+
+    fn first_differing_wire_index(
+        a: &[serde_json::Value],
+        b: &[serde_json::Value],
+    ) -> Option<usize> {
+        (0..a.len().min(b.len())).find(|&i| a[i] != b[i])
+    }
+
+    /// FerroxLabs/wayland#1209 — with the catalog fold OFF
+    /// (`builtin_tools.defer_cold.catalog = false`, a documented knob) a
+    /// hydration must not rewrite the cached `tools[]` prefix. Turning the
+    /// fold off opts out of a TOKEN optimisation; it must not silently opt
+    /// out of prompt-cache stability.
+    ///
+    /// Measured before the fix, verbatim from the ticket: turn1 `[Bash,
+    /// Delegate, Edit, Forge, Glob, Grep, Read, Spawn, ToolSearch, Workflow,
+    /// Write]` -> turn2 `[Bash, Edit, Forge, Glob, Grep, Read, ToolSearch,
+    /// Write, Delegate, Spawn, Workflow]`, first differing wire index
+    /// `Some(1)`.
+    ///
+    /// Bound to PRODUCTION on purpose: it calls `apply_tool_deferral`, the
+    /// engine's only composition of the ordering helpers, so deleting the
+    /// `sink_deferred_to_tail` step from that call site reddens it. The
+    /// earlier guard re-composed the same helpers in the same order inside
+    /// the test, which graded the helpers and stayed green when the
+    /// production step was removed (verifier arm RA-E).
+    #[test]
+    fn stub_mode_hydration_leaves_the_engine_tools_prefix_byte_identical() {
+        let mut engine = prefix_probe_engine(false);
+        let turn1 = prefix_probe_wire(&engine);
+
+        // The arm is genuinely stub mode, not catalog mode wearing its name:
+        // all eleven tools are on the wire and the cold ones are stubs.
+        assert_eq!(
+            turn1.len(),
+            11,
+            "stub mode must keep every tool on the wire: {:?}",
+            prefix_probe_names(&turn1)
+        );
+        assert!(
+            turn1.iter().any(|t| t["description"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("(Deferred)")),
+            "stub mode must emit per-tool stubs: {:?}",
+            prefix_probe_names(&turn1)
+        );
+
+        // Hydrate through the ENGINE's own recorder — the direct-call path a
+        // lax provider takes — rather than by writing the field.
+        for cold in ["Delegate", "Spawn", "Workflow"] {
+            engine.record_called_deferred_tool(cold);
+        }
+        assert_eq!(
+            engine.hydrated_tool_names,
+            vec![
+                "Delegate".to_string(),
+                "Spawn".to_string(),
+                "Workflow".to_string()
+            ],
+            "the engine must have recorded the hydration it is about to serve"
+        );
+
+        let turn2 = prefix_probe_wire(&engine);
+        assert_eq!(
+            prefix_probe_names(&turn1)[1],
+            prefix_probe_names(&turn2)[1],
+            "wayland#1209: the hydration turn rewrote wire index 1\n \
+             turn 1: {:?}\n turn 2: {:?}",
+            prefix_probe_names(&turn1),
+            prefix_probe_names(&turn2)
+        );
+        assert_eq!(
+            serde_json::to_string(&turn1[..PREFIX_PROBE_HOT]).unwrap(),
+            serde_json::to_string(&turn2[..PREFIX_PROBE_HOT]).unwrap(),
+            "wayland#1209: the hydration turn rewrote the cached tools[] prefix\n \
+             turn 1: {:?}\n turn 2: {:?}",
+            prefix_probe_names(&turn1),
+            prefix_probe_names(&turn2)
+        );
+        assert!(
+            first_differing_wire_index(&turn1, &turn2).is_none_or(|i| i >= PREFIX_PROBE_HOT),
+            "first differing wire index must be inside the tail-mutable region, got {:?}\n \
+             turn 1: {:?}\n turn 2: {:?}",
+            first_differing_wire_index(&turn1, &turn2),
+            prefix_probe_names(&turn1),
+            prefix_probe_names(&turn2)
+        );
+
+        // A PARTIAL hydration is the harder case: two stubs stay behind, so
+        // the admitted one cannot simply be "the whole tail".
+        let mut partial = prefix_probe_engine(false);
+        partial.record_called_deferred_tool("Spawn");
+        let turn_partial = prefix_probe_wire(&partial);
+        assert_eq!(
+            serde_json::to_string(&turn1[..PREFIX_PROBE_HOT]).unwrap(),
+            serde_json::to_string(&turn_partial[..PREFIX_PROBE_HOT]).unwrap(),
+            "a single-tool hydration rewrote the cached prefix: {:?}",
+            prefix_probe_names(&turn_partial)
+        );
+        assert_eq!(
+            prefix_probe_names(&turn_partial).last().map(String::as_str),
+            Some("Spawn"),
+            "the hydrated tool must append at the tail: {:?}",
+            prefix_probe_names(&turn_partial)
+        );
+
+        // Positive control: catalog = true, the path #1171 already fixed. It
+        // holds the same property before and after this change, which is what
+        // proves the arm above measures the mode and not the harness.
+        let mut control = prefix_probe_engine(true);
+        let cat1 = prefix_probe_wire(&control);
+        for cold in ["Delegate", "Spawn", "Workflow"] {
+            control.record_called_deferred_tool(cold);
+        }
+        let cat2 = prefix_probe_wire(&control);
+        assert_eq!(
+            cat1.len(),
+            PREFIX_PROBE_HOT,
+            "control: catalog mode folds the stubs away: {:?}",
+            prefix_probe_names(&cat1)
+        );
+        assert_eq!(
+            serde_json::to_string(&cat1[..PREFIX_PROBE_HOT - 1]).unwrap(),
+            serde_json::to_string(&cat2[..PREFIX_PROBE_HOT - 1]).unwrap(),
+            "control arm broke: catalog mode rewrote its own prefix\n \
+             turn 1: {:?}\n turn 2: {:?}",
+            prefix_probe_names(&cat1),
+            prefix_probe_names(&cat2)
+        );
+    }
+
+    /// The `sink_deferred_to_tail` pass must be invisible to catalog mode —
+    /// the fold deletes exactly the defs the sink moved. Pinning catalog
+    /// mode's wire names against stub mode's hot prefix proves both modes
+    /// share ONE ordering discipline rather than each having its own. Driven
+    /// through `apply_tool_deferral` so it grades the engine, not the helpers.
+    #[test]
+    fn both_catalog_modes_agree_on_the_engine_hot_prefix() {
+        let stub = prefix_probe_wire(&prefix_probe_engine(false));
+        let catalog = prefix_probe_wire(&prefix_probe_engine(true));
+        // Catalog mode carries the deferred inventory on `ToolSearch`, so it
+        // moves that ONE entry to the tail (wayland#1171); stub mode has no
+        // carrier and leaves it in place. Modulo that documented carrier
+        // move, both modes emit the same hot tools in the same registry
+        // order — one discipline, not two.
+        let mut stub_hot = prefix_probe_names(&stub)[..PREFIX_PROBE_HOT].to_vec();
+        let carrier = stub_hot
+            .iter()
+            .position(|name| name == "ToolSearch")
+            .expect("ToolSearch is never deferred, so it is in the hot prefix");
+        let carrier = stub_hot.remove(carrier);
+        stub_hot.push(carrier);
+        assert_eq!(
+            prefix_probe_names(&catalog),
+            stub_hot,
+            "the two modes disagree on the hot prefix\n stub: {:?}\n catalog: {:?}",
+            prefix_probe_names(&stub),
+            prefix_probe_names(&catalog)
+        );
+    }
+
     /// Codex verify finding (catalog fold edge): on lax providers (no
     /// constrained decoding) the model can call a catalog-only tool
     /// DIRECTLY; the engine dispatches it by registry name, leaving a
