@@ -286,6 +286,56 @@ async fn no_conflict_without_a_publish_names_an_intercepted_save() {
         }
     );
 
+    // 6. RealFs, the postcondition-AUTHORITY arm — the FIRST refusal
+    //    `compare_exchange_file` can take, before the precondition is ever
+    //    consulted. A mutation prepared against one path object, offered at
+    //    another. Reached by preparing elsewhere rather than by racing.
+    let elsewhere = dir.path().join("elsewhere.txt");
+    std::fs::write(&elsewhere, b"prepared against this one").unwrap();
+    let prepared = RealFs.observe_file(&elsewhere).await.unwrap();
+    let rebound = IntendedFileMutation::from_observation(&prepared, b"ours".to_vec());
+    assert_eq!(
+        RealFs.compare_exchange_file(&real, &rebound).await.unwrap(),
+        FileMutationOutcome::Conflict {
+            current: FileObservation::Present(FileContentIdentity::from_bytes(b"after")),
+            intercepted_save: None,
+        }
+    );
+
+    // 7. InMemoryFs, the same arm. Separate code, so graded separately.
+    let mem_elsewhere = PathBuf::from("/w/elsewhere.txt");
+    mem.write(&mem_elsewhere, b"prepared against this one")
+        .await
+        .unwrap();
+    let mem_prepared = mem.observe_file(&mem_elsewhere).await.unwrap();
+    let mem_rebound = IntendedFileMutation::from_observation(&mem_prepared, b"ours".to_vec());
+    assert_eq!(
+        mem.compare_exchange_file(&mp, &mem_rebound).await.unwrap(),
+        FileMutationOutcome::Conflict {
+            current: FileObservation::Present(FileContentIdentity::from_bytes(b"after")),
+            intercepted_save: None,
+        }
+    );
+
+    // 8. InMemoryFs, the arm where the destination already holds exactly the
+    //    intended bytes but the prepared object underneath them is a different
+    //    generation — same bytes, different file. Not `AlreadyApplied`, and
+    //    still nothing published.
+    let settled = PathBuf::from("/w/settled.txt");
+    mem.write(&settled, b"settled").await.unwrap();
+    let pinned = mem.observe_file(&settled).await.unwrap();
+    let same_bytes = IntendedFileMutation::from_observation(&pinned, b"settled".to_vec());
+    mem.write(&settled, b"settled").await.unwrap();
+    assert_eq!(
+        mem.compare_exchange_file(&settled, &same_bytes)
+            .await
+            .unwrap(),
+        FileMutationOutcome::Conflict {
+            current: FileObservation::Present(FileContentIdentity::from_bytes(b"settled")),
+            intercepted_save: None,
+        }
+    );
+
     // Sensitivity control. The arms above would all pass against a backend
     // that answered `Conflict { intercepted_save: None }` to EVERYTHING, which
     // would make this test vacuous. The same mutations against a matching
@@ -302,4 +352,162 @@ async fn no_conflict_without_a_publish_names_an_intercepted_save() {
         mem.compare_exchange_file(&mp, &fresh).await.unwrap(),
         FileMutationOutcome::Applied { .. }
     ));
+}
+
+// ---------------------------------------------------------------------------
+// #1248 — the SHAPE, not the three instances.
+// ---------------------------------------------------------------------------
+
+/// Comment lines carry no code, and `FileMutationOutcome::Conflict` appears in
+/// doc links in this tree.
+fn without_comment_lines(source: &str) -> String {
+    source
+        .lines()
+        .map(|line| {
+            let t = line.trim_start();
+            if t.starts_with("//") || t.starts_with('*') {
+                ""
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Every `FileMutationOutcome::Conflict` in `source` whose own brace group does
+/// not name `intercepted_save`, and how many sites were examined to say so.
+///
+/// The count comes back so a caller can refuse a run that examined nothing: an
+/// empty offender list off an empty scan reads exactly like a clean tree.
+fn conflict_sites_missing_the_notice(source: &str) -> (usize, Vec<String>) {
+    const NEEDLE: &str = "FileMutationOutcome::Conflict";
+    let cleaned = without_comment_lines(source);
+    let (mut seen, mut offenders, mut from) = (0usize, Vec::new(), 0usize);
+
+    while let Some(rel) = cleaned[from..].find(NEEDLE) {
+        let at = from + rel;
+        from = at + NEEDLE.len();
+        seen += 1;
+
+        let rest = &cleaned[from..];
+        let Some(open) = rest.find('{') else {
+            offenders.push(rest.chars().take(90).collect::<String>());
+            continue;
+        };
+        let mut depth = 0usize;
+        let mut end = None;
+        for (i, c) in rest[open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(open + i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let group = end.map_or(&rest[open..], |e| &rest[open..=e]);
+        if !group.contains("intercepted_save") {
+            offenders.push(format!("{NEEDLE} {}", group.replace('\n', " ")));
+        }
+    }
+    (seen, offenders)
+}
+
+fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            rust_sources(&p, out);
+        } else if p.extension().is_some_and(|e| e == "rs") {
+            out.push(p);
+        }
+    }
+}
+
+/// #1248, asked as a decidable question instead of as a list.
+///
+/// Three consumers of `Conflict` existed when this was written — `write.rs`,
+/// `edit.rs`, and wcore-agent's `rollback_tool.rs` — and all three discarded
+/// the notice. Fixing three sites is an enumeration, and an enumeration is
+/// correct only until the fourth consumer is written: the field is an
+/// `Option`, so ignoring it is silent and compiles.
+///
+/// The total form of the same question is: does any production site NAME
+/// `FileMutationOutcome::Conflict` without naming `intercepted_save` inside
+/// its own brace group? A construction site cannot fail that — the compiler
+/// requires every field — so what it actually decides is the CONSUMER
+/// question, over the whole workspace, including consumers that do not exist
+/// yet. `Conflict { .. }` is precisely the defect this issue reports, one
+/// layer up, and it is now a test failure rather than a code review.
+#[test]
+fn no_production_site_names_a_conflict_without_naming_the_notice() {
+    // The checker's own known-positive control, in the same test: a scan that
+    // silently matched nothing would satisfy every assertion below.
+    let (bad_seen, bad) = conflict_sites_missing_the_notice(
+        "match o { Ok(FileMutationOutcome::Conflict { .. }) => refuse() }",
+    );
+    assert_eq!(
+        (bad_seen, bad.len()),
+        (1, 1),
+        "the checker missed a known offender"
+    );
+    let (good_seen, good) = conflict_sites_missing_the_notice(
+        "match o { Ok(FileMutationOutcome::Conflict { intercepted_save, .. }) => n(intercepted_save) }",
+    );
+    assert_eq!(
+        (good_seen, good.len()),
+        (1, 0),
+        "the checker rejects a known-good site"
+    );
+    assert_eq!(
+        conflict_sites_missing_the_notice("/// see FileMutationOutcome::Conflict { .. } in vfs.rs")
+            .0,
+        0,
+        "the checker reads doc comments as code"
+    );
+
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("crates/<crate> has two ancestors")
+        .to_path_buf();
+    let mut files = Vec::new();
+    for crate_dir in std::fs::read_dir(workspace.join("crates"))
+        .unwrap()
+        .flatten()
+    {
+        rust_sources(&crate_dir.path().join("src"), &mut files);
+    }
+    assert!(
+        files.len() > 100,
+        "the walk found {} production sources, so it did not run over this \
+         workspace and a clean result would mean nothing",
+        files.len()
+    );
+
+    let (mut examined, mut offenders) = (0usize, Vec::new());
+    for file in &files {
+        let (seen, bad) =
+            conflict_sites_missing_the_notice(&std::fs::read_to_string(file).unwrap());
+        examined += seen;
+        offenders.extend(bad.into_iter().map(|b| format!("{}: {b}", file.display())));
+    }
+    assert!(
+        examined >= 10,
+        "only {examined} Conflict sites were examined; the query stopped \
+         matching the tree it grades"
+    );
+    assert!(
+        offenders.is_empty(),
+        "these sites name a Conflict and drop the intercepted-save notice \
+         (#1248): {offenders:#?}"
+    );
 }
