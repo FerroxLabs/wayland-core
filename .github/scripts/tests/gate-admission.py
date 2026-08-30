@@ -45,7 +45,14 @@ except ImportError:  # pragma: no cover - the caller installs it and re-runs
     sys.exit(1)
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-WORKFLOWS = sorted(glob.glob(os.path.join(ROOT, ".github", "workflows", "*.yml")))
+WF_DIR = os.path.join(ROOT, ".github", "workflows")
+# BOTH extensions, and the count is checked against the directory listing below:
+# a `*.yml` glob silently excludes a `.yaml` file, and an excluded workflow is a
+# workflow this sweep certifies without reading.
+WORKFLOWS = sorted(glob.glob(os.path.join(WF_DIR, "*.yml"))
+                   + glob.glob(os.path.join(WF_DIR, "*.yaml")))
+ON_DISK = sorted(f for f in os.listdir(WF_DIR)
+                 if os.path.isfile(os.path.join(WF_DIR, f)))
 SCRIPTS = sorted(glob.glob(os.path.join(ROOT, ".github", "scripts", "*.sh")))
 
 # The closed set. Both survive an earlier failed step AND cannot be falsified by
@@ -127,6 +134,12 @@ emit(
     len(parsed) >= 10,
     "the workflow corpus is the whole directory (control: >=10 files)",
     "parsed %d" % len(parsed),
+)
+missed = sorted(set(ON_DISK) - set(os.path.basename(p) for p in WORKFLOWS))
+emit(
+    not missed,
+    "no file in .github/workflows/ is outside the sweep",
+    "not swept: " + repr(missed),
 )
 info("workflow files parsed: %d" % len(parsed))
 
