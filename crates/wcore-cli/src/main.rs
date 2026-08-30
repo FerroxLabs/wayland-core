@@ -3445,7 +3445,7 @@ fn emit_runtime_diagnostics(
     state: &RuntimeDiagnosticsState,
     lifecycle: &McpLifecycleCatalog,
     boot_managers: &[Arc<McpManager>],
-    dynamic_managers: &[Arc<McpManager>],
+    dynamic_managers: &RuntimeMcpManagers,
     registry: &wcore_tools::registry::ToolRegistry,
     writer: &dyn ProtocolEmitter,
 ) {
@@ -3633,8 +3633,8 @@ fn mcp_removal_cleanup_outcome(cleanup_failures: &[String]) -> McpRemovalOutcome
     }
 }
 
-/// FerroxLabs/wayland#1234 — drop a runtime-added MCP manager from EVERY live
-/// structure that holds it, as one operation.
+/// FerroxLabs/wayland#1234 — the live set of runtime-added MCP managers, held
+/// as a type that cannot express "dropped but not withdrawn".
 ///
 /// `McpCatalogRefresh` keeps its own `Arc<McpManager>` from
 /// `register_runtime_server`, so removing a server used to mean two
@@ -3652,21 +3652,107 @@ fn mcp_removal_cleanup_outcome(cleanup_failures: &[String]) -> McpRemovalOutcome
 /// removes a server, the server announces `tools/list_changed`, and its tools
 /// come back into the live registry.
 ///
-/// Fusing the two is the fix rather than adding the missing line at each
-/// removal site: after this there is no statement that drops the manager
-/// without also withdrawing it, so a removal path added later cannot omit the
-/// withdrawal by forgetting it existed.
-fn withdraw_runtime_mcp_manager(
-    name: &str,
-    engine: &mut wcore_agent::engine::AgentEngine,
-    dynamic_managers: &mut Vec<Arc<McpManager>>,
-) {
-    if let Some(refresh) = engine.mcp_catalog_refresh() {
-        refresh.forget_runtime_server(name);
+/// Fusing the two into one helper was the first fix. It was not enough: the
+/// helper was optional, and the lint that was supposed to make it mandatory
+/// counted a literal spelling of the retain predicate. See
+/// [`runtime_mcp_managers`] for why the `Vec` itself had to go.
+mod runtime_mcp_managers {
+    use std::sync::Arc;
+
+    use wcore_mcp::manager::McpManager;
+
+    /// The live set of runtime-added MCP managers.
+    ///
+    /// A newtype rather than a bare `Vec<Arc<McpManager>>`, because the defect
+    /// this closes is *a removal that forgets the catalog withdrawal* and the
+    /// `Vec` is what made that expressible. `McpCatalogRefresh` keeps its own
+    /// `Arc<McpManager>` from `register_runtime_server`, so dropping a manager
+    /// from the live set is only half a removal; the other half is
+    /// `forget_runtime_server`, and both host-protocol removal paths did the
+    /// first and not the second.
+    ///
+    /// The first attempt fused the two into one helper and guarded the helper
+    /// with a source lint that counted the retain predicate's literal text.
+    /// That guard is undecidable over an open alphabet and was measurably
+    /// vacuous: the same drop spelled `manager.hosts_server(server_id)`, or
+    /// written with `remove`, `swap_remove`, `drain`, `truncate` or `clear`,
+    /// matches no needle -- and the historical second removal site DID spell
+    /// the name `&command.name`, so the lint's count read 1 at the pre-fix
+    /// parent, exactly what it asserts after the fix.
+    ///
+    /// So the question is inverted rather than answered. "Does this statement
+    /// drop a manager without withdrawing it?" is undecidable; "does this type
+    /// offer any removal other than the withdrawal?" is decidable and total.
+    /// `live` is private to this module, and the only removal the type
+    /// publishes is [`RuntimeMcpManagers::withdraw`], which performs the
+    /// withdrawal itself. A drop without a withdrawal is not something a
+    /// future caller can write and get wrong -- it is something the compiler
+    /// refuses, because no such operation exists on the type.
+    pub(crate) struct RuntimeMcpManagers {
+        /// Private to this module. This privacy IS the fix; widening it, or
+        /// adding any second mutator beside `admit` and `withdraw`, reopens
+        /// FerroxLabs/wayland#1234.
+        live: Vec<Arc<McpManager>>,
     }
-    dynamic_managers
-        .retain(|manager| !(manager.hosts_server(name) || manager.health().contains_key(name)));
+
+    impl RuntimeMcpManagers {
+        pub(crate) fn new() -> Self {
+            Self { live: Vec::new() }
+        }
+
+        /// The only way in.
+        pub(crate) fn admit(&mut self, manager: Arc<McpManager>) {
+            self.live.push(manager);
+        }
+
+        pub(crate) fn len(&self) -> usize {
+            self.live.len()
+        }
+
+        pub(crate) fn is_empty(&self) -> bool {
+            self.live.is_empty()
+        }
+
+        pub(crate) fn iter(&self) -> std::slice::Iter<'_, Arc<McpManager>> {
+            self.live.iter()
+        }
+
+        /// The only way out: drop every manager hosting `name` from the live
+        /// set AND withdraw the server from the engine's catalog refresh, as
+        /// one operation a caller cannot half-perform.
+        ///
+        /// Nothing here consults `is_alive()`. That flag is what kept the
+        /// original defect a leak rather than a resurrection --
+        /// `refresh_signalled_tools` skips a transport reporting dead -- but
+        /// `is_alive() -> true` after `close()` is the trait DEFAULT and the
+        /// right answer for a stateless HTTP transport, so a withdrawal that
+        /// leaned on it would be a withdrawal that sometimes does not happen.
+        pub(crate) fn withdraw(
+            &mut self,
+            name: &str,
+            engine: &mut wcore_agent::engine::AgentEngine,
+        ) {
+            if let Some(refresh) = engine.mcp_catalog_refresh() {
+                refresh.forget_runtime_server(name);
+            }
+            self.live.retain(|manager| {
+                !(manager.hosts_server(name) || manager.health().contains_key(name))
+            });
+        }
+    }
+
+    impl<'a> IntoIterator for &'a RuntimeMcpManagers {
+        type Item = &'a Arc<McpManager>;
+        type IntoIter = std::slice::Iter<'a, Arc<McpManager>>;
+
+        fn into_iter(self) -> Self::IntoIter {
+            self.live.iter()
+        }
+    }
 }
+// end runtime_mcp_managers -- the source lint below delimits the module here.
+
+use runtime_mcp_managers::RuntimeMcpManagers;
 
 /// wayland#1165 — the teardown half of `AddMcpServer { replace: true }`.
 ///
@@ -3690,7 +3776,7 @@ async fn teardown_runtime_mcp_for_replace(
     runtime_diagnostics: &mut RuntimeDiagnosticsState,
     lifecycle: &McpLifecycleCatalog,
     engine: &mut wcore_agent::engine::AgentEngine,
-    dynamic_managers: &mut Vec<Arc<McpManager>>,
+    dynamic_managers: &mut RuntimeMcpManagers,
 ) -> Result<(), String> {
     // Nothing this process introduced is under this name: the add that follows
     // is an ordinary first connect.
@@ -3748,7 +3834,7 @@ async fn teardown_runtime_mcp_for_replace(
         let _ = lifecycle.mark_cleanup_unverified(name, reason.clone());
         return Err(reason);
     }
-    withdraw_runtime_mcp_manager(name, engine, dynamic_managers);
+    dynamic_managers.withdraw(name, engine);
     runtime_diagnostics.remove_runtime_declaration(name);
     let _ = lifecycle.complete_stopping(name);
     Ok(())
@@ -3763,7 +3849,7 @@ async fn remove_runtime_mcp_server(
     runtime_diagnostics: &mut RuntimeDiagnosticsState,
     lifecycle: &McpLifecycleCatalog,
     engine: &mut wcore_agent::engine::AgentEngine,
-    dynamic_managers: &mut Vec<Arc<McpManager>>,
+    dynamic_managers: &mut RuntimeMcpManagers,
     writer: &dyn ProtocolEmitter,
 ) {
     if mcp_removal_request_id_invalid(&command) {
@@ -3848,7 +3934,7 @@ async fn remove_runtime_mcp_server(
         );
         return;
     }
-    withdraw_runtime_mcp_manager(&command.name, engine, dynamic_managers);
+    dynamic_managers.withdraw(&command.name, engine);
     runtime_diagnostics.remove_runtime_declaration(&command.name);
     let _ = lifecycle.complete_stopping(&command.name);
 
@@ -3878,7 +3964,7 @@ async fn note_deferred_mcp_connect(
     engine: &mut wcore_agent::engine::AgentEngine,
     writer: &ProtocolWriter,
     output: &Arc<dyn OutputSink>,
-    dynamic_managers: &mut Vec<Arc<McpManager>>,
+    dynamic_managers: &mut RuntimeMcpManagers,
     late_mcp: &mut LateMcpBinder,
 ) -> Option<PendingDeferredMcp> {
     let DeferredMcpConnectResult {
@@ -3945,7 +4031,7 @@ fn integrate_deferred_mcp(
     resolved_servers: &HashMap<String, McpServerConfig>,
     reservations: &mut HashMap<String, McpConnectionReservation>,
     writer: &ProtocolWriter,
-    dynamic_managers: &mut Vec<Arc<McpManager>>,
+    dynamic_managers: &mut RuntimeMcpManagers,
     late_mcp: &mut LateMcpBinder,
     skill_refs: &mut Vec<SkillRef>,
 ) -> bool {
@@ -4005,7 +4091,7 @@ fn integrate_deferred_mcp(
     if let Some(refresh) = catalog_refresh {
         refresh.register_runtime_server(&mgr, resolved_servers);
     }
-    dynamic_managers.push(mgr);
+    dynamic_managers.admit(mgr);
     true
 }
 
@@ -4069,7 +4155,7 @@ async fn settle_deferred_mcp_before_message(
     engine: &mut wcore_agent::engine::AgentEngine,
     writer: &ProtocolWriter,
     output: &Arc<dyn OutputSink>,
-    dynamic_managers: &mut Vec<Arc<McpManager>>,
+    dynamic_managers: &mut RuntimeMcpManagers,
     runtime_diagnostics: Option<&mut RuntimeDiagnosticsState>,
     late_mcp: &mut LateMcpBinder,
 ) -> bool {
@@ -5528,7 +5614,7 @@ async fn run_json_stream_mode(
     let mut cmd_rx = spawn_stdin_reader(writer.clone());
 
     // --- Pre-message phase: accept AddMcpServer commands ---
-    let mut dynamic_managers: Vec<Arc<McpManager>> = Vec::new();
+    let mut dynamic_managers = RuntimeMcpManagers::new();
     let mut mcp_removal_ledger = McpRemovalLedger::default();
     let mut first_cmd: Option<ProtocolCommand> = None;
 
@@ -5796,7 +5882,7 @@ async fn run_json_stream_mode(
                             reservation.complete_failed(reason.clone());
                             // Retain the typed health outcome for local runtime
                             // diagnostics even though no live tools exist.
-                            dynamic_managers.push(mgr_arc);
+                            dynamic_managers.admit(mgr_arc);
                             eprintln!("[mcp] connect failed for '{name}': {reason}");
                             output.emit_error(
                                 &format!("AddMcpServer '{name}' failed: {reason}"),
@@ -5852,7 +5938,7 @@ async fn run_json_stream_mode(
                         if let Some(refresh) = engine.mcp_catalog_refresh() {
                             refresh.register_runtime_server(&mgr_arc, &single_configs);
                         }
-                        dynamic_managers.push(mgr_arc);
+                        dynamic_managers.admit(mgr_arc);
                         reservation.complete_ready();
                         let _ = writer.emit(&ProtocolEvent::McpReady {
                             name,
@@ -9508,7 +9594,7 @@ mod tests {
             vec![tool("quick_echo")],
         )]));
         let writer = ProtocolWriter::new();
-        let mut dynamic_managers = Vec::new();
+        let mut dynamic_managers = RuntimeMcpManagers::new();
         // Mark the server itself non-deferred to prove the refresh reapplies
         // the global cold policy before ToolSearch snapshots the live tools.
         let resolved = HashMap::from([(
@@ -9671,7 +9757,7 @@ mod tests {
         )]);
         let mut reservations = lifecycle_reservations(&resolved);
         let writer = ProtocolWriter::new();
-        let mut dynamic_managers = Vec::new();
+        let mut dynamic_managers = RuntimeMcpManagers::new();
         assert!(
             integrate_deferred_mcp(
                 &mut engine,
@@ -9761,7 +9847,7 @@ mod tests {
             .expect("valid test server config"),
         )]);
         let writer = ProtocolWriter::new();
-        let mut dynamic_managers = Vec::new();
+        let mut dynamic_managers = RuntimeMcpManagers::new();
         let mut reservations = lifecycle_reservations(&resolved);
 
         assert!(integrate_deferred_mcp(
@@ -9963,7 +10049,7 @@ mod tests {
         let writer = ProtocolWriter::new();
         let mut deferred_mcp_rx = Some(rx);
         let mut pending_deferred_mcp = None;
-        let mut dynamic_managers = Vec::new();
+        let mut dynamic_managers = RuntimeMcpManagers::new();
         let mut late_mcp = inert_late_binder();
 
         let ready = settle_deferred_mcp_before_message(
@@ -10062,7 +10148,7 @@ mod tests {
         let output: Arc<dyn OutputSink> = Arc::new(wcore_agent::output::null_sink::NullSink);
         let mut deferred_mcp_rx = Some(rx);
         let mut pending_deferred_mcp = None;
-        let mut dynamic_managers = Vec::new();
+        let mut dynamic_managers = RuntimeMcpManagers::new();
 
         let commands = [
             ProtocolCommand::InitHistory {
@@ -10185,7 +10271,7 @@ mod tests {
             vec![tool("quick_echo")],
         )]));
         let writer = ProtocolWriter::new();
-        let mut dynamic_managers = Vec::new();
+        let mut dynamic_managers = RuntimeMcpManagers::new();
         let mut reservations = HashMap::new();
         assert!(
             !integrate_deferred_mcp(
@@ -10234,7 +10320,7 @@ mod tests {
         });
         let writer = ProtocolWriter::new();
         let output: Arc<dyn OutputSink> = Arc::new(wcore_agent::output::null_sink::NullSink);
-        let mut dynamic_managers = Vec::new();
+        let mut dynamic_managers = RuntimeMcpManagers::new();
         let mut late_mcp = inert_late_binder();
 
         assert!(
@@ -11041,7 +11127,7 @@ mod tests {
             .expect("valid test server config"),
         )]);
         let writer = ProtocolWriter::new();
-        let mut dynamic_managers = Vec::new();
+        let mut dynamic_managers = RuntimeMcpManagers::new();
         let mut reservations = lifecycle_reservations(&resolved);
         assert!(integrate_deferred_mcp(
             &mut engine,
@@ -11116,7 +11202,7 @@ mod tests {
         server_config.allowed_tools = Some(Vec::new());
         let resolved = HashMap::from([("locked".to_string(), server_config)]);
         let writer = ProtocolWriter::new();
-        let mut dynamic_managers = Vec::new();
+        let mut dynamic_managers = RuntimeMcpManagers::new();
         let mut reservations = lifecycle_reservations(&resolved);
         assert!(integrate_deferred_mcp(
             &mut engine,
@@ -11171,7 +11257,7 @@ mod tests {
 
         // ARM A — the server is removed through the production withdrawal.
         let (mut engine, mut managers, fixture, defer_cold) = live_runtime_mcp_fixture();
-        withdraw_runtime_mcp_manager("warehouse", &mut engine, &mut managers);
+        managers.withdraw("warehouse", &mut engine);
         assert!(
             managers.is_empty(),
             "the removal must drop the manager from the live set"
@@ -11206,12 +11292,83 @@ mod tests {
         );
     }
 
+    /// FerroxLabs/wayland#1234 — the same property, driven through the
+    /// PRODUCTION `RemoveMcpServer` handler instead of through the withdrawal.
+    ///
+    /// The test above calls the withdrawal directly, so before the live set
+    /// became a type nothing but a source lint bound the host-protocol handler
+    /// to it — and that lint was a text needle any differently-spelled removal
+    /// walked straight past. Two things now bind them. The compiler: the
+    /// handler holds a `RuntimeMcpManagers`, whose only removal IS the
+    /// withdrawal. And this test: the real `remove_runtime_mcp_server` runs end
+    /// to end, and the announced tool still does not come back.
+    #[tokio::test]
+    async fn the_remove_mcp_server_handler_withdraws_from_the_catalog_refresh() {
+        let (mut engine, mut managers, fixture, defer_cold) = live_runtime_mcp_fixture();
+        let server_config = to_mcp_server_config(
+            "stdio",
+            Some("unused-test-command".to_string()),
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+        )
+        .expect("valid test server config");
+        let mut runtime_diagnostics = RuntimeDiagnosticsState::from_launch(
+            &wcore_config::config::Config::default(),
+            &wcore_config::resolution_provenance::ConfigResolutionProvenance::default(),
+            None,
+            wcore_protocol::diagnostics::RuntimeEngineMode::Unknown,
+            wcore_protocol::diagnostics::RuntimeWorkspaceKind::Unknown,
+        );
+        assert!(
+            runtime_diagnostics.record_runtime_declaration("warehouse", &server_config),
+            "the fixture server must be admissible for removal"
+        );
+        let lifecycle = McpLifecycleCatalog::new();
+        let mut removal_ledger = McpRemovalLedger::default();
+        let writer = ProtocolWriter::new();
+
+        remove_runtime_mcp_server(
+            RemoveMcpServerCommand {
+                lifecycle_version: MCP_LIFECYCLE_VERSION,
+                request_id: "req-1234-handler-withdrawal".to_string(),
+                name: "warehouse".to_string(),
+            },
+            &mut removal_ledger,
+            &mut runtime_diagnostics,
+            &lifecycle,
+            &mut engine,
+            &mut managers,
+            &writer,
+        )
+        .await;
+
+        assert!(
+            managers.is_empty(),
+            "the production handler must drop the manager from the live set"
+        );
+        fixture.register_and_announce("warehouse_audit_export");
+        let refresh = engine.mcp_catalog_refresh().expect("refresh installed");
+        let registry = engine.registry_mut().expect("registry must be mutable");
+        assert!(
+            refresh.apply(registry, &defer_cold).await.is_empty(),
+            "the production handler must leave the refresh nothing to poll"
+        );
+        assert!(
+            engine.tools().get("warehouse_audit_export").is_none(),
+            "a server removed through the host protocol must not resurrect its tools"
+        );
+    }
+
     /// One runtime-added MCP server, connected through the production
     /// `integrate_deferred_mcp` path so it is registered with the catalog
     /// refresh exactly as a live session registers it.
     fn live_runtime_mcp_fixture() -> (
         wcore_agent::engine::AgentEngine,
-        Vec<Arc<McpManager>>,
+        RuntimeMcpManagers,
         Arc<GrowingTestTransport>,
         wcore_config::tools::DeferColdConfig,
     ) {
@@ -11245,7 +11402,7 @@ mod tests {
         .expect("valid test server config");
         let resolved = HashMap::from([("warehouse".to_string(), server_config)]);
         let writer = ProtocolWriter::new();
-        let mut dynamic_managers = Vec::new();
+        let mut dynamic_managers = RuntimeMcpManagers::new();
         let mut reservations = lifecycle_reservations(&resolved);
         assert!(integrate_deferred_mcp(
             &mut engine,
@@ -11296,33 +11453,72 @@ mod tests {
             "a rolled-back /mcp add must leave nothing in the refresh"
         );
 
-        // FerroxLabs/wayland#1234 — the removal half, counted as a SHAPE
-        // rather than as a list of sites. Both host-protocol removal paths
-        // used to drop the manager from `dynamic_managers` inline and never
-        // withdraw it from the refresh; fixing them by adding the missing line
-        // twice would leave the next removal path free to omit it again. So
-        // the lint is: main.rs has exactly ONE place that drops a runtime
-        // manager, and that place also forgets it.
-        let drop_manager = concat!("!(manager.hosts_", "server(name)");
+        // FerroxLabs/wayland#1234 — the removal half.
+        //
+        // The previous version of this lint counted the literal
+        // `!(manager.hosts_server(name)`. That is a needle over an OPEN
+        // alphabet — the same drop spelled with any other variable name, or
+        // written with `remove`, `swap_remove`, `drain`, `truncate` or
+        // `clear`, matches nothing — and it was vacuous against the very
+        // regression it names: the historical second removal site spelled the
+        // name `&command.name`, so the count read 1 at the pre-fix parent,
+        // exactly what it read after the fix.
+        //
+        // The predicate is inverted rather than extended. The live set is now
+        // a newtype whose `Vec` is private to `mod runtime_mcp_managers`, so
+        // "drop a manager without withdrawing it" is not something any caller
+        // in this file can express: the COMPILER refuses it, not a string
+        // search. The single remaining way to reopen the defect is a second
+        // mutator added INSIDE that module, so that is all this counts — and
+        // it counts a CLOSED SET of method names over the module's own body,
+        // not a list of forbidden spellings. Any method added, renamed or
+        // removed fails here and forces the decision to be taken deliberately.
+        let module = main_src
+            .split(concat!("mod runtime_mcp_", "managers {"))
+            .nth(1)
+            .expect("the runtime-manager module exists")
+            .split(concat!("// end runtime_mcp_", "managers"))
+            .next()
+            .expect("the module is delimited");
+        let mut methods: Vec<&str> = module
+            .match_indices("fn ")
+            .map(|(at, _)| {
+                module[at + 3..]
+                    .split(['(', '<'])
+                    .next()
+                    .expect("a name follows `fn `")
+                    .trim()
+            })
+            .collect();
+        methods.sort_unstable();
         assert_eq!(
-            main_src.matches(drop_manager).count(),
-            1,
-            "exactly one place in main.rs may drop a runtime MCP manager \
-             (withdraw_runtime_mcp_manager); a second one is a removal path \
-             that can forget the catalog withdrawal"
+            methods,
+            vec![
+                "admit",
+                "into_iter",
+                "is_empty",
+                "iter",
+                "len",
+                "new",
+                "withdraw"
+            ],
+            "RuntimeMcpManagers publishes exactly one removal, `withdraw`, and \
+             that is the only reason its Vec is private. A method added here is \
+             the last remaining way to drop a runtime MCP manager without \
+             withdrawing it from the catalog refresh — decide deliberately, \
+             then update this list"
         );
         assert_eq!(
             main_src.matches(forget).count(),
             1,
-            "that one place must be the only forget_runtime_server call site"
+            "`withdraw` must be the only forget_runtime_server call site"
         );
-        let helper = main_src
-            .split("fn withdraw_runtime_mcp_manager(")
+        let withdrawal = module
+            .split("fn withdraw(")
             .nth(1)
-            .expect("the single withdrawal helper exists");
-        let body = &helper[..helper.find("\n}\n").expect("helper body ends")];
+            .expect("the single withdrawal exists");
         assert!(
-            body.contains(forget) && body.contains(drop_manager),
+            withdrawal.contains(forget) && withdrawal.contains(".retain("),
             "dropping the manager and withdrawing it from the refresh must be \
              ONE operation, not two statements a caller can split"
         );
