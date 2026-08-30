@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "The Anthropic provider builds /v1/v1/messages and //v1/messages -- the defect #1178 fixed on the OpenAI wire, still armed here"
 status: open
-last_verified_commit: 2980fa45
+last_verified_commit: 1775bc762
 criteria:
   - id: c1
     text: "https://api.anthropic.com/v1 and https://api.anthropic.com/ as base_url both produce POST /v1/messages"

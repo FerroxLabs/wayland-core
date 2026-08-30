@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "Two hand-cut authority parsers miss the backslash spelling: the WebFetch prompt calls https://evil.example\\@github.com Trusted, and provider_info.local calls a public endpoint local"
 status: open
-last_verified_commit: 2980fa45
+last_verified_commit: 1775bc762
 criteria:
   - id: c1
     text: "web_fetch_risk(\"https://evil.example\\@github.com/x\") is Risk::External"

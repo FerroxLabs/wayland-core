@@ -2,9 +2,9 @@
 issue: 1252
 repo: FerroxLabs/wayland
 kind: defect
-title: "Two more hand-cut authority parsers survive #1243: /doctor suppresses its base-url caveat, and a browser origin pattern normalises to a different host"
+title: "Three more hand-cut authority parsers survive #1243: /doctor suppresses its base-url caveat, a browser origin pattern normalises to a different host, and a redaction renders the smuggled host as the surviving one"
 status: open
-last_verified_commit: 2980fa45
+last_verified_commit: 1775bc762
 criteria:
   - id: c1
     text: "With base_url = https://evil.example\\@api.openai.com/v1 and provider openai, /doctor PRINTS the base-url caveat naming the vendor host"
@@ -26,6 +26,11 @@ criteria:
     state: not-met
     owner: core
     note: "Filed 2026-08-30 by lane f13-w2-provider-url while closing wayland#1243, by the elimination sweep that ticket's c4 demanded. Nothing has been done. The controls are named in the criterion on purpose: #1243`s own red arm showed that a mutation which simply refuses everything passes the positive test and destroys the feature (mutation M8 there reddened the genuine-loopback control), so each site needs both directions. doctor/mod.rs:1856-1863 already has a host_of test block to extend; policy.rs has its allowlist tests in the same file."
+  - id: c5
+    text: "scrub_detail over a smuggled authority does not name the surviving host as the allowlisted one: scrub_detail(r\"https://evil.example\\@github.com/x\") differs from scrub_detail(\"https://user:pw@github.com/x\"), with a test carrying both alongside a control that an ordinary credential-bearing URL is still redacted"
+    state: not-met
+    owner: core
+    note: "Added 2026-08-30 by lane f13-w2-provider-url after an independent verifier swept with a third instrument this lane had not used. Nothing has been done. SITE C, the lowest of the three. crates/wcore-config/src/portability/redact.rs:157 (strip_url_userinfo, reached via scrub_detail on DiscoveredItem::details) cuts with find(\"://\") + rest.find(\\'/\\') + find(\\'@\\'). Measured by faithful transcription: r\"https://evil.example\\@github.com/x\" and \"https://user:pw@github.com/x\" BOTH emit \"https://<redacted>@github.com/x\" -- identical, so the reader cannot tell the first dials evil.example -- while the control \"https://github.com/x\" is returned unchanged. Bounded: redaction only, it over-redacts rather than under-redacts, and it is a display path rather than a gate. RECORDED BECAUSE THE MISS IS THE FINDING: this lane\\'s sweep enumerated cutting IDIOMS (rsplit_once(\\'@\\'), split([\\'/\\',\\'?\\',\\'#\\'])) and find(\"://\") is not in that alphabet. Enumerating idioms over an open alphabet cannot terminate; the decidable question is the inverted one -- which functions return a host- or authority-shaped value WITHOUT going through url::Url -- and that is what c3 should be graded against."
 ---
 
 Found while closing wayland#1243, by the elimination sweep that ticket`s c4
