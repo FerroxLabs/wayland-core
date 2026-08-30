@@ -65,41 +65,93 @@ fn status_json() -> serde_json::Value {
 /// Create `<escape>`, ignore any failure, then print `<RAN>` — one shell
 /// command, identical inside and out.
 ///
-/// The Windows spelling is not a translation for tidiness: `touch` does not
-/// exist under `cmd.exe` and `;` is not a command separator there, so the
-/// previous single Unix spelling made cmd reject the whole line. The child
-/// printed nothing, the baseline arm failed on "the uncontained baseline did
-/// not run", and `sandbox exec` was never reached — the containment
-/// differential was never taken on Windows at all.
+/// THE DIALECT IS READ FROM THE PRODUCT, NOT FROM THE PLATFORM, and that
+/// distinction is the whole of FerroxLabs/wayland-core#387. `cmd` really does
+/// need its own spelling — `touch` does not exist there and `;` is not a
+/// command separator, so a single Unix spelling made cmd reject the whole line
+/// and the differential was never taken on Windows at all. But a
+/// `cfg!(windows)` arm answers a question nobody asked: since
+/// FerroxLabs/wayland#1164 the shell tool resolves a real `bash.exe` wherever
+/// the host has one, so on both CI Windows legs the cmd spelling was handed to
+/// Git-for-Windows bash.
+///
+/// MEASURED, SeanDesktop, Windows 11 build 26200, binary at 70a47aaed, with
+/// `sandbox exec` driving the identical escape twice into the user profile
+/// directory (the same out-of-policy target `escape_target()` picks):
+///
+/// ```text
+/// POSIX spelling  ->  child printed F28_CHILD_RAN, escape file LANDED
+/// cmd   spelling  ->  child printed F28_CHILD_RAN, escape file DID NOT LAND
+/// ```
+///
+/// `copy` is not a bash command and `>nul 2>nul` are bash file redirects, so
+/// the write failed while `echo` still ran — the child looked alive, the
+/// escape looked contained, and the test read that as `sandbox status`
+/// understating what the backend enforces. It was not: the escape lands,
+/// `confines_filesystem=false` is HONEST, and the broken instrument was this
+/// probe. That is why the arm asserting the claim is not overstated must be
+/// written in the dialect the child will actually be given.
 fn probe(escape: &Path) -> String {
-    let escape = escape.display();
-    #[cfg(windows)]
-    let script = format!("copy /y nul \"{escape}\" >nul 2>nul & echo {RAN}");
-    #[cfg(not(windows))]
-    let script = format!("touch {escape} 2>/dev/null; echo {RAN}");
-    script
+    if interpreter_is_posix() {
+        // Git-for-Windows bash reads a drive path with forward slashes; the
+        // display form's backslashes would be eaten as escapes.
+        let escape = escape.display().to_string().replace('\\', "/");
+        format!("touch '{escape}' 2>/dev/null; echo {RAN}")
+    } else {
+        let escape = escape.display();
+        format!("copy /y nul \"{escape}\" >nul 2>nul & echo {RAN}")
+    }
+}
+
+/// The interpreter `sandbox exec` will actually drive, read from the product.
+///
+/// `sandbox exec` runs THE agent shell tool, so its interpreter is whatever
+/// `bash_shell_argv_prefix()` resolved — and since FerroxLabs/wayland#1164
+/// that is a real `bash.exe` on any Windows host with Git for Windows, which
+/// both CI Windows legs have. Asking the same function the subject asks is
+/// what keeps the two arms of the differential in one dialect.
+fn interpreter() -> Vec<String> {
+    wcore_config::shell::bash_shell_argv_prefix()
+}
+
+fn interpreter_is_posix() -> bool {
+    wcore_config::shell::shell_prefix_is_posix(&interpreter())
 }
 
 /// Run `probe` uncontained, from `cwd`, and return the child's output.
 ///
-/// On Windows the payload must reach `cmd.exe` VERBATIM. `Command::arg`
-/// applies `CommandLineToArgvW` quoting on top of it (an inner `"` becomes
-/// `\"`), and cmd does not understand that escaping — the redirect target
-/// arrives as literal backslash-quotes and the write fails before it can
-/// demonstrate anything. The product's own sandboxed path already avoids this
-/// (see `quote_cmd_payload` in `wcore-sandbox`), so handing the payload over
-/// raw here is what makes both arms of the differential execute the identical
-/// command text.
+/// Spawned through the SAME argv prefix `sandbox exec` will use, so the
+/// baseline and the product arm differ only in containment. Running the
+/// baseline under a hard-coded `cmd` while the product ran bash is what let
+/// the two arms disagree for a reason that had nothing to do with the sandbox.
+///
+/// Where that prefix IS `cmd`, the payload must reach it VERBATIM.
+/// `Command::arg` applies `CommandLineToArgvW` quoting on top of it (an inner
+/// `"` becomes `\"`), and cmd does not understand that escaping — the redirect
+/// target arrives as literal backslash-quotes and the write fails before it
+/// can demonstrate anything. The product's own sandboxed path already avoids
+/// this (see `quote_cmd_payload` in `wcore-sandbox`). A POSIX shell needs the
+/// opposite: `-c <line>` is one ordinary argv entry and `raw_arg` would
+/// re-split it.
 fn run_uncontained(probe: &str, cwd: &Path) -> std::process::Output {
-    let mut command = Command::new(shell());
-    command.arg(shell_flag());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.raw_arg(probe);
+    let prefix = interpreter();
+    let (program, flags) = prefix
+        .split_first()
+        .expect("a shell prefix names a program");
+    let mut command = Command::new(program);
+    command.args(flags);
+    if interpreter_is_posix() {
+        // A POSIX shell takes `-c <line>` as one ordinary argv entry.
+        command.arg(probe);
+    } else {
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.raw_arg(probe);
+        }
+        #[cfg(not(windows))]
+        command.arg(probe);
     }
-    #[cfg(not(windows))]
-    command.arg(probe);
     command
         .current_dir(cwd)
         .output()
@@ -289,12 +341,4 @@ fn sandbox_status_never_reports_a_containment_bypass() {
         status["backend"].as_str().is_some_and(|b| b != "none"),
         "`sandbox status` must name the backend it selected: {status}"
     );
-}
-
-fn shell() -> &'static str {
-    if cfg!(windows) { "cmd" } else { "/bin/sh" }
-}
-
-fn shell_flag() -> &'static str {
-    if cfg!(windows) { "/C" } else { "-c" }
 }
