@@ -53,4 +53,3 @@ rather than a tightening of the existing code. It wants its own review.
 
 It is the SOLE remaining blocker on core#350 c5 (a green nightly-windows-soak),
 now that core#374 is closed.
-||||||| merged common ancestors
