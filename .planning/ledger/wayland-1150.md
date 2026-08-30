@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "[Bug]: Absurd Input Token Size"
 status: open
-last_verified_commit: dba806bc4
+last_verified_commit: 4d7aa2757
 criteria:
   - id: c1
     text: "An unlisted model no longer gets a fabricated 200,000-token window; it sizes from the bottom of the range"
