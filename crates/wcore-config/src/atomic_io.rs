@@ -186,9 +186,28 @@ enum Swap {
 /// primitive's atomicity: a second `RENAME_EXCHANGE` / `RENAME_SWAP` where the
 /// publish was one, and a replacing rename on Windows where the publish was
 /// `ReplaceFileW`.
+///
+/// A non-exchange is a FAILURE, not a rollback (#1202). `publish_displacing`
+/// answers `Vacant` when the destination name no longer resolves and
+/// `Unsupported` when the primitive is unavailable; in both the publish still
+/// stands and `displaced` is the only surviving copy of the pre-image.
+/// Discarding the [`Swap`] discriminant here reported those as a clean
+/// rollback, so the caller unlinked that copy and told the user the
+/// destination was untouched — silent data loss behind a false refusal, which
+/// is the fail-open this module refuses everywhere else.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn restore(displaced: &Path, dest: &Path) -> std::io::Result<()> {
-    publish_displacing(displaced, dest).map(|_| ())
+    match publish_displacing(displaced, dest)? {
+        Swap::Displaced(_) => Ok(()),
+        Swap::Vacant => Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "the destination name no longer exists, so nothing was exchanged back",
+        )),
+        Swap::Unsupported => Err(std::io::Error::other(
+            "the exchange primitive that published is no longer available, \
+             so nothing was exchanged back",
+        )),
+    }
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -677,6 +696,113 @@ mod tests {
             .filter(|n| n != "f.txt")
             .collect();
         assert!(strays.is_empty(), "left behind {strays:?}");
+    }
+
+    /// #1202. A rollback that exchanged NOTHING is a restore FAILURE, not a
+    /// clean refusal.
+    ///
+    /// [`restore`] is the inverse exchange, and it can come back having
+    /// swapped nothing: `Swap::Vacant` when the destination NAME has
+    /// disappeared since the publish (an external `rm`, a `git checkout`, an
+    /// editor that unlinks before writing — precisely the non-cooperating
+    /// writer #1155 exists to survive), `Swap::Unsupported` when the primitive
+    /// is no longer available. `restore` used to discard that discriminant
+    /// with `.map(|_| ())`, so both answered `Ok(())`: the publish still
+    /// stood, [`discard_displaced`] then unlinked the pre-image — the only
+    /// copy of the user's bytes — and the caller was handed `Ok(Err(why))`,
+    /// whose documented contract is "the destination is exactly as it was".
+    /// edit.rs renders `changed_under_write` off that, so the user was told
+    /// the write was refused while the new bytes sat published and the
+    /// original was gone.
+    ///
+    /// The window is driven directly rather than sampled: the check closure
+    /// deletes the destination and THEN refuses, which is the one ordering
+    /// that places the unlink between the two exchanges.
+    ///
+    /// Only `Vacant` is reachable from a live test — a filesystem that served
+    /// `RENAME_EXCHANGE` one syscall ago still serves it — but `Vacant` and
+    /// `Unsupported` leave `restore` through the same match, so the arm this
+    /// reddens is the arm both take.
+    #[test]
+    fn a_restore_that_exchanged_nothing_is_a_failure_not_a_rollback() {
+        const ORIGINAL: &[u8] = b"the only copy of the user's bytes";
+
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("f.txt");
+        std::fs::write(&p, ORIGINAL).unwrap();
+
+        let mut handed: Option<Vec<u8>> = None;
+        let outcome = atomic_write_checked(&p, b"ours", |observed| {
+            handed = observed.map(<[u8]>::to_vec);
+            // Between the publish and the rollback the destination NAME goes
+            // away, so the second exchange has nothing to swap with.
+            std::fs::remove_file(&p).unwrap();
+            Err("changed under the write".to_owned())
+        });
+
+        // Fixture control. If the check was not handed the displaced
+        // pre-image then the publish never happened and nothing below is
+        // measuring a rollback at all.
+        assert_eq!(
+            handed.as_deref(),
+            Some(ORIGINAL),
+            "fixture: the check was not handed the displaced pre-image, so this \
+             never reached the rollback"
+        );
+
+        // THE property: the user's bytes are still on disk. Found by scanning
+        // rather than by name, because after a failed restore they live under
+        // whatever name `keep_displaced` settled on.
+        let survivors: Vec<PathBuf> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|f| std::fs::read(f).is_ok_and(|b| b == ORIGINAL))
+            .collect();
+        assert_eq!(
+            survivors.len(),
+            1,
+            "the original bytes did not survive a rollback that exchanged \
+             nothing; the directory holds {:?}",
+            std::fs::read_dir(dir.path())
+                .unwrap()
+                .map(|e| e.unwrap().file_name())
+                .collect::<Vec<_>>()
+        );
+
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            // `Ok(Err(why))` promises the destination is exactly as it was,
+            // and it is not — the publish stands and the original is under
+            // another name. The caller must be told this FAILED.
+            let Err(err) = outcome else {
+                panic!(
+                    "a rollback that exchanged nothing was reported as a clean \
+                     refusal ({outcome:?}); edit.rs renders `changed_under_write` \
+                     off that and tells the user nothing was changed"
+                );
+            };
+            let msg = err.to_string();
+            let Some((_, named)) = msg.split_once("preserved at ") else {
+                panic!("the failure does not name where the original was kept: {msg}");
+            };
+            assert_eq!(
+                Path::new(named),
+                survivors[0].as_path(),
+                "the failure names {named}, but the surviving copy is {}",
+                survivors[0].display()
+            );
+            assert_eq!(std::fs::read(named).unwrap(), ORIGINAL);
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            // Windows publishes with `ReplaceFileW` and restores with a plain
+            // replacing rename, which succeeds against an absent destination:
+            // the pre-image simply comes back. The refusal is honest there, so
+            // the outcome is the ordinary `Ok(Err(why))` and the survivor is
+            // the destination itself.
+            assert_eq!(outcome.unwrap(), Err("changed under the write".to_owned()));
+            assert_eq!(survivors[0], p);
+        }
     }
 
     /// An absent destination has nothing to exchange with, so the check is told
