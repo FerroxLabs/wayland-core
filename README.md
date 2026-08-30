@@ -6,7 +6,7 @@
 
 ### The self-evolving AI agent. Brilliant today, smarter tomorrow.
 
-**Most AI tools are as good as they'll ever be the day you install them. Wayland Core isn't — it convenes a council of rival models on your hardest problems, fuses their best answer into one, and rewrites its own prompts to get sharper every single run. Terminal-first, on your keys, in Rust.**
+**Most AI tools are as good as they'll ever be the day you install them. Wayland Core isn't — it convenes a council of rival models on your hardest problems, fuses their best answer into one, and rewrites and re-scores its own skill prompts against an eval harness, keeping only what wins. Terminal-first, on your keys, in Rust.**
 
 Terminal-first · Multi-provider · Self-evolving · MCP-native · Embeddable · Apache-2.0
 
@@ -23,7 +23,7 @@ Terminal-first · Multi-provider · Self-evolving · MCP-native · Embeddable ·
 
 ---
 
-Most agents are frozen the day you install them, and married to one model. Wayland Core is neither. Hand it a hard problem and it convenes a **council of rival models** that cross-audit into one answer ([Crucible](#crucible--a-mixture-of-providers-council)). It **rewrites and scores its own prompts** between runs ([GEPA](#self-evolution-gepa)). Every tool runs in an OS-native sandbox behind a single egress gate, and it speaks [MCP](https://modelcontextprotocol.io/) in both directions — all from one Rust binary, on your keys. It's the engine inside [Wayland Desktop](https://getwayland.com), but it stands alone: a one-shot command, a full-screen TUI, or a headless stream you embed.
+Most agents are frozen the day you install them, and married to one model. Wayland Core is neither. Hand it a hard problem and it convenes a **council of rival models** that cross-audit into one answer ([Crucible](#crucible--a-mixture-of-providers-council)). It **rewrites and scores its own prompts** between runs ([GEPA](#self-evolution-gepa)). Shell execution runs in an OS-native sandbox, every outbound call passes a single egress gate, and it speaks [MCP](https://modelcontextprotocol.io/) in both directions — all from one Rust binary, on your keys. It's the engine inside [Wayland Desktop](https://getwayland.com), but it stands alone: a one-shot command, a full-screen TUI, or a headless stream you embed.
 
 > **Wayland Core** is the engine, on its own, open (this repo, Apache-2.0). **[Wayland Desktop](https://getwayland.com)** is the GUI product built on it. Core is the engine; Desktop is one application that embeds it.
 
