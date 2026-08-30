@@ -222,6 +222,79 @@ mod disclosure_tests {
         assert_eq!(json["known_limitations"][0], "it does not do the thing");
     }
 
+    /// TOTAL over the struct's fields, not over the ones somebody remembered
+    /// to serialise.
+    ///
+    /// # The N+1 this exists to make impossible
+    ///
+    /// `#368` c6's fix made the disclosure TOTAL over the backends that
+    /// declare a limitation. One level up, the same hole is still open: the
+    /// operator's read is `SandboxStatus`, and a field can reach the struct
+    /// and never reach `--json`, which is the arm a host integration and every
+    /// script read. Nothing graded that, and `#400` c1 is about to add exactly
+    /// such a field (`blocks_powershell`).
+    ///
+    /// The question is inverted rather than enumerated: not "did somebody
+    /// remember to serialise this field?", which is undecidable over the
+    /// fields nobody has added yet, but "is the JSON key set EQUAL to the
+    /// struct's field set?", which is decidable and total. A field added and
+    /// not serialised reddens here; so does a key serialised under a name no
+    /// field has.
+    ///
+    /// The human arm is NOT made total here and that is a stated gap, not an
+    /// oversight: it renders labels (`binds cwd authority`), not field names,
+    /// so field-name equality cannot decide it. Making it total needs one
+    /// label table driving both arms, which is a bigger change than an RC
+    /// wants; the two disclosure fields it turns on are graded above.
+    #[test]
+    fn every_status_field_reaches_the_json_arm() {
+        let src = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/sandbox_cmd.rs"),
+        )
+        .expect("this file is readable from its own test");
+        let open_brace = src
+            .find("pub struct SandboxStatus {")
+            .expect("the struct this test is about must be findable")
+            + "pub struct SandboxStatus {".len();
+        let body = &src[open_brace..];
+        let body = &body[..body.find("\n}\n").expect("the struct must close")];
+        let mut fields: Vec<String> = body
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("pub "))
+            .filter_map(|l| l.split(':').next())
+            .map(|s| s.trim().to_owned())
+            .collect();
+
+        // POSITIVE CONTROL on the scanner. A find that silently drifted would
+        // leave an empty field list, and an empty set compares equal to an
+        // empty set -- the vacuity this whole file exists to close.
+        assert!(
+            fields.len() >= 8,
+            "the scanner found only {} fields on SandboxStatus; it is not \
+             reading the struct: {body:?}",
+            fields.len()
+        );
+
+        let json = bare().to_json();
+        let mut keys: Vec<String> = json
+            .as_object()
+            .expect("the status must serialise as an object")
+            .keys()
+            .cloned()
+            .collect();
+        fields.sort();
+        keys.sort();
+        assert_eq!(
+            fields, keys,
+            "every field of `SandboxStatus` must reach the `--json` arm and \
+             nothing else may: a host integration reads that and nothing \
+             else, so a field the struct carries and the JSON drops is a \
+             disclosure the desktop app cannot surface. Add the key in \
+             `to_json`, and an arm in this module if an operator has to be \
+             able to act on it."
+        );
+    }
+
     /// A backend with nothing to disclose must emit JSON `null` and an EMPTY
     /// list, never an empty string or a reassuring placeholder. A consumer
     /// that sees `""` cannot tell "no cause recorded" from "cause is blank",
