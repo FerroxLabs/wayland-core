@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "RemoveMcpServer never withdraws the server from McpCatalogRefresh"
 status: open
-last_verified_commit: 4e7da4338
+last_verified_commit: b92b9656e
 criteria:
   - id: c1
     text: "RemoveMcpServer withdraws the server from McpCatalogRefresh, so a removed server's manager is no longer polled regardless of what its transport reports about liveness"

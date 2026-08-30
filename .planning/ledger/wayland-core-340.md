@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "The MCP malware gate does not cover every launch, and its doc claims it does"
 status: open
-last_verified_commit: 4e7da4338
+last_verified_commit: b92b9656e
 criteria:
   - id: c1
     text: "The malware gate's doc comment states the coverage the gate actually has, rather than asserting every stdio launch is checked before execution"

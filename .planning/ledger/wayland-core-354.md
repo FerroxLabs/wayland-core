@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "MCP malware gate: make the OSV fail-open an explicit operator choice (strict/permissive)"
 status: open
-last_verified_commit: 4e7da4338
+last_verified_commit: b92b9656e
 criteria:
   - id: c1
     text: "A config key selects the malware-gate mode, permissive or strict, defaulting to today's permissive behaviour"
