@@ -30,58 +30,6 @@ mod passthrough;
 
 use catalogue::CATALOGUE_CEILINGS;
 
-/// FerroxLabs/wayland#1232 -- every open-weights id carried by the `if`-chain
-/// families, tagged with the FAMILY whose vendor operates it when its hosts
-/// disagree too widely for one static figure to be true of all of them. The
-/// tag is a key into [`VENDOR_OPERATED_ENDPOINTS`], never a single provider
-/// name: "the vendor that operates this family" is a SET of endpoint
-/// identities in every case, and naming one member of that set is the defect
-/// this const was rewritten to make unrepresentable.
-///
-/// WHY A GATE AND NOT A DELETION. AGENTS.md's third model-limits rule forbids a
-/// static arm for an open-weights id served at wildly different limits by
-/// different hosts, and on the 2026-08-30 models.dev pull seven of these span
-/// 3.5x-8.2x across 19-64 endpoints. Deleting those arms is NOT free, and not
-/// symmetric with the Qwen precedent: an arm revokes `should_omit_max_tokens`,
-/// but that omission only exists on an OMIT-SAFE preset (`gemini`,
-/// `openrouter`, `flux-router`). DeepSeek's and MiniMax's own endpoints are
-/// plain `openai_compat_provider` presets, which are NOT omit-safe -- so on the
-/// vendor's own API a missing arm restores no natural ceiling at all. It drops
-/// output to `UNKNOWN_CAP` (8,192) and the window to `UNVERIFIED_CONTEXT_WINDOW`
-/// (32,768): the 47x cut #1157 was filed to fix, re-introduced.
-///
-/// So the defect is not the figures, it is the KEY -- #1232's own words, "keyed
-/// on the model id alone, with no provider in the key". Scoping the seven to
-/// their vendor gives every caller the right answer at once:
-///
-///   * the vendor's endpoint keeps the vendor's verified figures, unchanged;
-///   * an omit-safe reseller route (`openrouter` / `flux-router`) resolves
-///     `None`, which RESTORES the omission and lets that host apply its own
-///     natural ceiling -- the outcome a deletion was wanted for;
-///   * any other host resolves `None` too, so the window falls to
-///     `UNVERIFIED_CONTEXT_WINDOW` (32,768, below every measured host) and the
-///     output to `UNKNOWN_CAP` (8,192, which IS the measured host floor for
-///     both families: nebius serves minimax-m2.5 at 8,192 and deepinfra serves
-///     deepseek-v4-pro at 8,192). It errs LOW, where a wrong high number is
-///     ceiling death (#165).
-///
-/// THE FIVE ROWS THAT ARE NOT GATED are the point of measuring instead of
-/// exempting the family: `deepseek-v4-flash-vision-exp` (1.05x),
-/// `deepseek-v4-pro-0813` (1.05x), `minimax-m2.5-highspeed` (1.0x),
-/// `minimax-m2.7` (1.3x) and `minimax-m2.7-highspeed` (1.02x) have hosts that
-/// AGREE, so gating them would replace a real ceiling with a low guess for no
-/// benefit -- the harm this rule exists to prevent, in the other direction.
-///
-/// ORDERED LONGEST-FRAGMENT-FIRST, and the ordering is load-bearing: the lookup
-/// is a substring match, so `deepseek-v4-flash-vision-exp` must be tested
-/// BEFORE `deepseek-v4-flash` or it inherits the gated row's verdict and loses
-/// an arm its hosts agree on. `open_weights_rows_are_longest_fragment_first`
-/// asserts that structurally rather than trusting this sentence.
-///
-/// Spreads measured on the 2026-08-30 models.dev pull (`host_spread` over every
-/// provider, vendor and third-party alike); control: `claude-opus-5` is
-/// 1,000,000 -> 1,000,000 across 31 hosts, i.e. 1.0x, and is not an
-/// open-weights id at all.
 /// The endpoint identities operated by each open-weights family's vendor, as
 /// `ProviderCompat::provider_type()` spells them -- the only string
 /// `model_output_ceiling` ever sees.
@@ -138,6 +86,58 @@ const VENDOR_API_DOMAINS: &[(&str, &[&str])] = &[
     ("minimax", &["minimax.io", "minimaxi.com"]),
 ];
 
+/// FerroxLabs/wayland#1232 -- every open-weights id carried by the `if`-chain
+/// families, tagged with the FAMILY whose vendor operates it when its hosts
+/// disagree too widely for one static figure to be true of all of them. The
+/// tag is a key into [`VENDOR_OPERATED_ENDPOINTS`], never a single provider
+/// name: "the vendor that operates this family" is a SET of endpoint
+/// identities in every case, and naming one member of that set is the defect
+/// this const was rewritten to make unrepresentable.
+///
+/// WHY A GATE AND NOT A DELETION. AGENTS.md's third model-limits rule forbids a
+/// static arm for an open-weights id served at wildly different limits by
+/// different hosts, and on the 2026-08-30 models.dev pull seven of these span
+/// 3.5x-8.2x across 19-64 endpoints. Deleting those arms is NOT free, and not
+/// symmetric with the Qwen precedent: an arm revokes `should_omit_max_tokens`,
+/// but that omission only exists on an OMIT-SAFE preset (`gemini`,
+/// `openrouter`, `flux-router`). DeepSeek's and MiniMax's own endpoints are
+/// plain `openai_compat_provider` presets, which are NOT omit-safe -- so on the
+/// vendor's own API a missing arm restores no natural ceiling at all. It drops
+/// output to `UNKNOWN_CAP` (8,192) and the window to `UNVERIFIED_CONTEXT_WINDOW`
+/// (32,768): the 47x cut #1157 was filed to fix, re-introduced.
+///
+/// So the defect is not the figures, it is the KEY -- #1232's own words, "keyed
+/// on the model id alone, with no provider in the key". Scoping the seven to
+/// their vendor gives every caller the right answer at once:
+///
+///   * the vendor's endpoint keeps the vendor's verified figures, unchanged;
+///   * an omit-safe reseller route (`openrouter` / `flux-router`) resolves
+///     `None`, which RESTORES the omission and lets that host apply its own
+///     natural ceiling -- the outcome a deletion was wanted for;
+///   * any other host resolves `None` too, so the window falls to
+///     `UNVERIFIED_CONTEXT_WINDOW` (32,768, below every measured host) and the
+///     output to `UNKNOWN_CAP` (8,192, which IS the measured host floor for
+///     both families: nebius serves minimax-m2.5 at 8,192 and deepinfra serves
+///     deepseek-v4-pro at 8,192). It errs LOW, where a wrong high number is
+///     ceiling death (#165).
+///
+/// THE FIVE ROWS THAT ARE NOT GATED are the point of measuring instead of
+/// exempting the family: `deepseek-v4-flash-vision-exp` (1.05x),
+/// `deepseek-v4-pro-0813` (1.05x), `minimax-m2.5-highspeed` (1.0x),
+/// `minimax-m2.7` (1.3x) and `minimax-m2.7-highspeed` (1.02x) have hosts that
+/// AGREE, so gating them would replace a real ceiling with a low guess for no
+/// benefit -- the harm this rule exists to prevent, in the other direction.
+///
+/// ORDERED LONGEST-FRAGMENT-FIRST, and the ordering is load-bearing: the lookup
+/// is a substring match, so `deepseek-v4-flash-vision-exp` must be tested
+/// BEFORE `deepseek-v4-flash` or it inherits the gated row's verdict and loses
+/// an arm its hosts agree on. `open_weights_rows_are_longest_fragment_first`
+/// asserts that structurally rather than trusting this sentence.
+///
+/// Spreads measured on the 2026-08-30 models.dev pull (`host_spread` over every
+/// provider, vendor and third-party alike); control: `claude-opus-5` is
+/// 1,000,000 -> 1,000,000 across 31 hosts, i.e. 1.0x, and is not an
+/// open-weights id at all.
 const OPEN_WEIGHTS_HOST_SPREAD: &[(&str, Option<&str>)] = &[
     // --- hosts AGREE: the arm stays keyed on the id alone. ---
     ("deepseek-v4-flash-vision-exp", None), // 1.05x over 12 hosts
@@ -1298,6 +1298,108 @@ mod tests {
         }
     }
 
+    /// Every endpoint name `family`'s vendor is known to answer on, derived
+    /// from `providers.toml` base-URL hosts plus the family key itself -- and
+    /// never from [`VENDOR_OPERATED_ENDPOINTS`], so a test built on this can
+    /// still fail when that const is wrong.
+    fn vendor_endpoint_names(family: &str) -> Vec<String> {
+        use crate::catalog::ProviderCatalog;
+
+        let catalog = ProviderCatalog::bundled().expect("the bundled catalog parses");
+        let domains = super::VENDOR_API_DOMAINS
+            .iter()
+            .find(|(f, _)| *f == family)
+            .map_or(&[] as &[&str], |&(_, d)| d);
+        let mut names = vec![family.to_string()];
+        for e in &catalog.providers {
+            let host = e
+                .base_url
+                .split_once("://")
+                .map_or(e.base_url.as_str(), |(_, rest)| rest)
+                .split('/')
+                .next()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if domains
+                .iter()
+                .any(|d| host == *d || host.ends_with(&format!(".{d}")))
+                && !names.contains(&e.id)
+            {
+                names.push(e.id.clone());
+            }
+        }
+        names
+    }
+
+    /// #1232 -- the identity axis a catalog-shaped test cannot see: a builtin
+    /// provider ALIAS that resolves onto a DIFFERENT canonical slug.
+    ///
+    /// `--provider alibaba` is the default DashScope route, and it never
+    /// reaches `model_output_ceiling` spelled `alibaba` at all:
+    /// `parse_builtin_provider` folds `qwen | alibaba | dashscope` onto
+    /// `ProviderType::Qwen`, whose slug is `qwen`, and builtins resolve BEFORE
+    /// the bundled catalog. `vendor_operated_catalog_endpoints_keep_their_arm`
+    /// grades catalog ids, so it is structurally blind to this route -- and
+    /// this is the N+1: fixing the catalog ids alone would still have left the
+    /// commonest first-party DeepSeek route on `UNKNOWN_CAP`.
+    ///
+    /// The oracle is the product's OWN resolver, not a list: every vendor
+    /// endpoint name is pushed through `parse_builtin_provider` ->
+    /// `provider_type_slug` and the resulting slug must keep the arm. A new
+    /// alias added to the resolver is graded the day it lands.
+    #[test]
+    fn builtin_alias_routes_to_a_vendor_endpoint_keep_their_arm() {
+        let gated: Vec<(&str, &str)> = super::OPEN_WEIGHTS_HOST_SPREAD
+            .iter()
+            .filter_map(|&(frag, family)| family.map(|f| (frag, f)))
+            .collect();
+        assert_eq!(gated.len(), 7, "the gated set changed shape: {gated:?}");
+
+        let mut respelled: Vec<String> = Vec::new();
+        let mut checked = 0usize;
+        for family in ["deepseek", "minimax"] {
+            for name in vendor_endpoint_names(family) {
+                let Some(kind) = crate::config::parse_builtin_provider(&name) else {
+                    continue;
+                };
+                let slug = crate::config::provider_type_slug(kind);
+                if slug != name {
+                    respelled.push(format!("{name} -> {slug}"));
+                }
+                for &(fragment, gated_family) in &gated {
+                    if gated_family != family {
+                        continue;
+                    }
+                    checked += 1;
+                    assert!(
+                        model_output_ceiling(slug, fragment).is_some(),
+                        "`--provider {name}` resolves to the builtin slug \
+                         `{slug}`, which is the ONLY string \
+                         `model_output_ceiling` ever sees on that route -- and \
+                         `{fragment}` resolves NO arm there, so a first-party \
+                         user gets UNKNOWN_CAP (8,192) output and a 32,768 \
+                         window. Add `{slug}` to VENDOR_OPERATED_ENDPOINTS."
+                    );
+                }
+            }
+        }
+
+        // NON-VACUITY. Without a RE-SPELLING this test is just a slower copy of
+        // the catalog one: the whole class it exists for is the alias whose
+        // slug differs from the endpoint's own name.
+        assert!(
+            !respelled.is_empty(),
+            "no vendor endpoint name was re-spelled by `parse_builtin_provider`, \
+             so this test graded nothing it exists for (`alibaba` -> `qwen` is \
+             the route that broke)"
+        );
+        assert!(
+            checked >= 7,
+            "only {checked} (endpoint, id) pairs graded, and {respelled:?} \
+             re-spelled -- the derivation stopped finding the vendor's routes"
+        );
+    }
+
     /// #1232 -- the check that does NOT read `VENDOR_OPERATED_ENDPOINTS` for
     /// its answer, and the reason the first cut of the scoping shipped.
     ///
@@ -1377,10 +1479,7 @@ mod tests {
                          ({}), but `{fragment}` resolves NO arm there -- that \
                          endpoint's users get UNKNOWN_CAP (8,192) and a 32,768 \
                          window, the #1157 cut",
-                        catalog
-                            .get(id)
-                            .map(|e| e.base_url.as_str())
-                            .unwrap_or("?")
+                        catalog.get(id).map(|e| e.base_url.as_str()).unwrap_or("?")
                     ));
                 }
             }
@@ -1401,7 +1500,10 @@ mod tests {
             .map(|e| e.id.as_str())
             .filter(|id| !deepseek_ids.contains(id))
             .collect();
-        assert!(third_party.len() > 50, "control set is too small to mean anything");
+        assert!(
+            third_party.len() > 50,
+            "control set is too small to mean anything"
+        );
         for id in third_party {
             assert_eq!(
                 model_output_ceiling(id, "deepseek-v4-pro"),

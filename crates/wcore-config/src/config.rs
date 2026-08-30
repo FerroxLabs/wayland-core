@@ -3303,7 +3303,7 @@ pub fn credentials_storage_path() -> PathBuf {
         .join("credentials.toml")
 }
 
-fn parse_builtin_provider(s: &str) -> Option<ProviderType> {
+pub(crate) fn parse_builtin_provider(s: &str) -> Option<ProviderType> {
     match s {
         "anthropic" => Some(ProviderType::Anthropic),
         "openai" => Some(ProviderType::OpenAI),

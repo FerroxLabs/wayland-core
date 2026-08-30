@@ -276,6 +276,108 @@ def provider_scoped_arms(limits_path: str) -> set[str]:
         if vendor != "None"
     }
 
+def vendor_operated_endpoints(limits_path: str) -> dict[str, list[str]]:
+    """The endpoint-identity PREFIXES each gated family's vendor is scoped to.
+
+    Parsed out of `VENDOR_OPERATED_ENDPOINTS` in limits.rs, for the same reason
+    `provider_scoped_arms` parses its const: an exemption restated here would
+    outlive the code that earns it.
+
+    Failing CLOSED on a parse failure or an empty parse is deliberate and is
+    the difference between this and the check it replaces: a silently empty map
+    would make `scan_vendor_endpoint_coverage` grade nothing and report PASS,
+    which is the exact shape ("empty output reads as absent") that let the
+    first cut of #1232 through.
+    """
+    src = open(limits_path, encoding="utf-8").read()
+    m = re.search(
+        r"const VENDOR_OPERATED_ENDPOINTS: &\[\(&str, &\[&str\]\)\] = &\[(.*?)\n\];",
+        src,
+        re.S,
+    )
+    if not m:
+        raise SystemExit(
+            "FATAL: could not locate `const VENDOR_OPERATED_ENDPOINTS` in "
+            f"{limits_path}. The gate cannot verify a vendor set it cannot "
+            "read -- failing closed."
+        )
+    out = {
+        family: re.findall(r'"([^"]+)"', members)
+        for family, members in re.findall(
+            r'\("([^"]+)",\s*&\[([^\]]*)\]\)', m.group(1)
+        )
+    }
+    if not out or not all(out.values()):
+        raise SystemExit(
+            "FATAL: `VENDOR_OPERATED_ENDPOINTS` parsed to an empty or "
+            f"partly-empty map ({out!r}) in {limits_path} -- failing closed "
+            "rather than grading nothing and printing PASS."
+        )
+    return out
+
+
+def scan_vendor_endpoint_coverage(limits_path: str | None = None,
+                                  rust: dict[str, list[str]] | None = None) -> list[Finding]:
+    """Rule 3's OTHER half: a scoped arm must still reach every VENDOR endpoint.
+
+    `provider_scoped_arms` answers "is this arm scoped?" and throws the vendor
+    away. That is exactly half the property. Scoping an arm to the wrong
+    identity is not a smaller version of leaving it global -- it is the #1157
+    cut (UNKNOWN_CAP 8,192 output, UNVERIFIED_CONTEXT_WINDOW 32,768) delivered
+    to the vendor's own first-party users, which is worse than the over-claim
+    the scoping was for. `deepseek` shipped scoped to the single name
+    `deepseek`, while THIS FILE has recorded since #1176 that the DeepSeek V4
+    family is also served first-party by the Alibaba tenants.
+
+    So the two artefacts are cross-checked, and neither is allowed to be the
+    oracle for itself: every provider `PASSTHROUGH_VENDORS` declares
+    vendor-operated for an open-weights family must be covered by one of the
+    prefixes limits.rs scopes that family to. Prefix coverage is the same
+    `p == v or p.startswith(v + "-")` rule `provider_operates` applies in Rust,
+    restated here on purpose -- a match rule imported from the artefact under
+    test could not disagree with it.
+
+    Decidable and TOTAL over the declared set, which is the point: this does not
+    enumerate the tenants that broke, it fails on any member of the set that is
+    not covered, including one added to `PASSTHROUGH_VENDORS` tomorrow.
+    """
+    rust = vendor_operated_endpoints(limits_path or DEFAULT_CHAIN) if rust is None else rust
+    findings: list[Finding] = []
+    graded = 0
+    for family in sorted(PASSTHROUGH_OPEN_WEIGHTS):
+        declared = PASSTHROUGH_VENDORS.get(family, [])
+        prefixes = rust.get(family)
+        if not prefixes:
+            findings.append(Finding("FAIL", (
+                f"`{family}` is an open-weights family with PROVIDER-SCOPED "
+                f"arms, but limits.rs scopes it to NO endpoint identity. Its "
+                f"arm is then dead on every route including the vendor's own: "
+                f"UNKNOWN_CAP (8,192) output and a 32,768 window for "
+                f"first-party users.")))
+            continue
+        for provider in declared:
+            graded += 1
+            if any(provider == v or provider.startswith(v + "-") for v in prefixes):
+                continue
+            findings.append(Finding("FAIL", (
+                f"`{provider}` is declared a VENDOR-OPERATED {family} endpoint "
+                f"by PASSTHROUGH_VENDORS in this file, but limits.rs scopes the "
+                f"{family} arms to {prefixes} and none of those is a prefix of "
+                f"it. `model_output_ceiling` therefore returns None there, and "
+                f"that endpoint's users get UNKNOWN_CAP (8,192) output and an "
+                f"UNVERIFIED_CONTEXT_WINDOW (32,768) window -- the 47x cut "
+                f"#1157 was filed to remove, delivered to the vendor's own "
+                f"first-party route. Add the missing identity prefix to "
+                f"VENDOR_OPERATED_ENDPOINTS.")))
+    if graded == 0:
+        findings.append(Finding("FAIL", (
+            "scan_vendor_endpoint_coverage graded ZERO vendor endpoints. "
+            "PASSTHROUGH_VENDORS and PASSTHROUGH_OPEN_WEIGHTS no longer "
+            "intersect, so this check is silently vacuous -- an empty result "
+            "reads as PASS and it is not one.")))
+    return findings
+
+
 # Specialty modalities the chain deliberately excludes: they are MUCH smaller
 # than the text tier and an over-claim would 400 them, so they fail open to the
 # unknown path on purpose.
@@ -453,10 +555,12 @@ def scan_open_weights_arms(catalogue: dict, rows, today=None,
                 f"`{mid}` is an OPEN-WEIGHTS id ({family}) served at {low} to "
                 f"{high} ({high / low:.1f}x) across {len(hosts)} endpoints, and "
                 f"its arm is PROVIDER-SCOPED (OPEN_WEIGHTS_HOST_SPREAD, "
-                f"gh#1232): the vendor's own endpoint resolves the verified "
-                f"figures and every other host resolves None. Rule 3 forbids an "
-                f"arm 'keyed on the id alone'; this one is not. NOT a failure, "
-                f"and NOT debt -- nothing expires.")))
+                f"gh#1232): EVERY endpoint identity the family's vendor "
+                f"operates (VENDOR_OPERATED_ENDPOINTS, cross-checked against "
+                f"PASSTHROUGH_VENDORS by scan_vendor_endpoint_coverage) "
+                f"resolves the verified figures, and every other host resolves "
+                f"None. Rule 3 forbids an arm 'keyed on the id alone'; this one "
+                f"is not. NOT a failure, and NOT debt -- nothing expires.")))
             listed_and_violating.add(mid)
             continue
         entry = debt.get(mid)
@@ -1181,6 +1285,46 @@ def self_test() -> int:
     if not ok:
         failures.append("provider_scoped_arms parses the Rust const")
 
+    # P25. #1232 FIX. The vendor SET, graded against the real limits.rs. This
+    #      is the check the first cut could not express: `provider_scoped_arms`
+    #      keeps membership and discards the vendor, so a scoped-to-the-wrong-
+    #      identity arm was indistinguishable from a correct one.
+    found = scan_vendor_endpoint_coverage(DEFAULT_CHAIN)
+    ok = not any(f.kind == "FAIL" for f in found)
+    print(f"  [{'ok' if ok else 'BROKEN'}] every PASSTHROUGH_VENDORS endpoint is "
+          f"covered by limits.rs's VENDOR_OPERATED_ENDPOINTS")
+    if not ok:
+        failures.append("vendor endpoint coverage")
+    # P26. THE RED ARM, kept as a permanent case: the shape that shipped and was
+    #      refuted -- one vendor name per family. It must FAIL, and it must name
+    #      the Alibaba tenants, or this check has stopped catching its own bug.
+    found = scan_vendor_endpoint_coverage(
+        rust={"deepseek": ["deepseek"], "minimax": ["minimax"]})
+    fails = [f.text for f in found if f.kind == "FAIL"]
+    ok = bool(fails) and any("alibaba" in t for t in fails)
+    print(f"  [{'ok' if ok else 'BROKEN'}] scoping an arm to ONE vendor name "
+          f"fails, naming the first-party tenants it strands ({len(fails)} FAIL)")
+    if not ok:
+        failures.append("one-name scoping is caught")
+    # P27. FAIL CLOSED. An empty map must not read as "nothing to grade" -- the
+    #      way a silently-empty query reads as absence.
+    found = scan_vendor_endpoint_coverage(rust={})
+    ok = any(f.kind == "FAIL" for f in found)
+    print(f"  [{'ok' if ok else 'BROKEN'}] an empty vendor set FAILS rather "
+          f"than grading nothing")
+    if not ok:
+        failures.append("empty vendor set fails closed")
+    # P28. THE CONTROL FOR P26: a set that covers the declared endpoints by
+    #      PREFIX -- not by enumeration -- must PASS, or P26 would be satisfied
+    #      by any check that always fails.
+    found = scan_vendor_endpoint_coverage(
+        rust={"deepseek": ["deepseek", "alibaba"], "minimax": ["minimax"]})
+    ok = not any(f.kind == "FAIL" for f in found)
+    print(f"  [{'ok' if ok else 'BROKEN'}] a prefix that covers every declared "
+          f"tenant passes without enumerating them")
+    if not ok:
+        failures.append("prefix coverage passes")
+
     # P13. THE CONTROL FOR P12, and the reason the suppression is a MEASUREMENT
     #      rather than a family-wide exemption. Same family, same floor, but
     #      every host agrees: the id is armable and its absence is the #165
@@ -1311,7 +1455,8 @@ def main() -> int:
     findings = (scan(catalogue, entries)
                 + scan_passthrough(catalogue, passthrough)
                 + scan_open_weights_arms(catalogue, passthrough,
-                                         scoped=provider_scoped_arms(DEFAULT_CHAIN)))
+                                         scoped=provider_scoped_arms(DEFAULT_CHAIN))
+                + scan_vendor_endpoint_coverage(DEFAULT_CHAIN))
     return report(findings, len(entries), len(passthrough))
 
 

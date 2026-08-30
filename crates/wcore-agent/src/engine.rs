@@ -6226,6 +6226,13 @@ impl AgentEngine {
     /// through [`Self::authoritative_session_id`], so it cannot leave the
     /// audit key behind without also making the budget ledger disagree with
     /// itself.
+    ///
+    /// SINGLE means single: [`Self::budget_session_id`] delegates here rather
+    /// than setting the handle too. That is not tidiness. While it had its own
+    /// `set`, neutering this function changed no observable behaviour and
+    /// `one_conversations_spend_records_share_one_key_across_a_resume_and_a_rebind`
+    /// stayed green -- the function the ledger cites as the mechanism was
+    /// unguarded, and a reader deleting it would have been told nothing.
     fn publish_spend_session(&self) {
         if let Some(id) = self.authoritative_session_id() {
             self.spend_guard.session().set(id);
@@ -6233,13 +6240,16 @@ impl AgentEngine {
     }
 
     fn budget_session_id(&self) -> String {
-        match self.authoritative_session_id() {
-            Some(id) => {
-                self.spend_guard.session().set(&id);
-                id
-            }
-            None => "session-unknown".to_string(),
-        }
+        // #1203 -- publishes THROUGH the single writer rather than setting the
+        // handle itself. It used to carry its own `spend_guard.session().set()`
+        // as a side effect of a getter, which made the "single writer" claim on
+        // `publish_spend_session` false and, worse, made that function dead to
+        // the test suite: neutering it left the property alive here, so no test
+        // could see it go. A second writer is not a redundancy, it is a place
+        // the invariant can be maintained by accident.
+        self.publish_spend_session();
+        self.authoritative_session_id()
+            .unwrap_or_else(|| "session-unknown".to_string())
     }
 
     /// #388 — whether an actual provider CAP (token or monetary) governs this
