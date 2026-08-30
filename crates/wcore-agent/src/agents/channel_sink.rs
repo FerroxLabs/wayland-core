@@ -165,6 +165,31 @@ impl ChannelSink {
     /// is what recovers an UNCLOSED `<think>`: the filter eats to end of
     /// stream rather than leak a runaway tail, and without this flush that
     /// tail would be silently dropped instead of shown.
+    /// #1242 - drain what `filter` is still WITHHOLDING and relay it as one
+    /// last `text_delta` on `msg_id`, before the `stream_end` that closes the
+    /// message.
+    ///
+    /// Same shape and same reason as `ProtocolSink::drain_withheld_text`: the
+    /// relay IS the wire a parent host reads, so a child whose answer ends in
+    /// `<` or in an unclosed `<thinking>` would otherwise be relayed short of
+    /// what the child's own history stored. Ordered before
+    /// [`Self::flush_reasoning`] for the same reason that sink is: one drain
+    /// order for every consumer of the filter, NOT to prevent a double report.
+    /// This sink also flushes after every chunk, so the capture buffer is
+    /// already empty when `finish` truncates it and an unclosed block is
+    /// relayed twice, exactly as `ProtocolSink::drain_withheld_text`
+    /// documents.
+    fn drain_withheld_text(&self, filter: &parking_lot::Mutex<ReasoningFilter>, msg_id: &str) {
+        let recovered = filter.lock().finish();
+        if recovered.is_empty() {
+            return;
+        }
+        self.relay(ProtocolEvent::TextDelta {
+            text: recovered,
+            msg_id: msg_id.to_string(),
+        });
+    }
+
     fn flush_reasoning(&self, filter: &parking_lot::Mutex<ReasoningFilter>, msg_id: &str) {
         let captured = filter.lock().take_captured_delta();
         if !captured.is_empty() {
@@ -285,9 +310,12 @@ impl OutputSink for ChannelSink {
         _cache_read: u64,
         finish_reason: FinishReason,
     ) {
-        // #1129: an unclosed reasoning block reaches the host instead of
-        // vanishing with the turn.
+        // #1242 then #1129, on BOTH lanes: withheld text first, then the
+        // reasoning capture. The lanes interleave and each has its own state
+        // machine, so each is drained against its own msg_id.
+        self.drain_withheld_text(&self.reasoning, msg_id);
         self.flush_reasoning(&self.reasoning, msg_id);
+        self.drain_withheld_text(&self.chunk_reasoning, &self.chunk_msg_id());
         self.flush_reasoning(&self.chunk_reasoning, &self.chunk_msg_id());
         self.relay(ProtocolEvent::StreamEnd {
             msg_id: msg_id.to_string(),

@@ -302,6 +302,20 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
             // falling back to the cumulative usage for old producers;
             // default 0 when both are None — the projection gates the
             // `· N tok` meta on `tokens > 0` so a 0 reads cleanly).
+            // #1242 — drain whatever the filter is still withholding into
+            // the visible buffer BEFORE the reasoning capture is taken.
+            // `process` holds back an undecided `<`-prefix and everything
+            // after an unclosed reasoning tag; the engine's history-side
+            // filter has recovered both since #1222, so without this the
+            // screen and the stored turn disagree about the same answer.
+            // Before `take_captured` because `finish` retracts the unclosed
+            // block's span from the capture buffer — otherwise the same bytes
+            // would appear once as the answer and once as a Thought.
+            let recovered = app.session.reasoning_filter.finish();
+            if !recovered.is_empty() {
+                app.session.run_showed_answer = true;
+                app.session.streaming.push_str(&recovered);
+            }
             let captured = app.session.reasoning_filter.take_captured();
             let thinking_to_push: Option<TurnElement> = if captured.is_empty() {
                 None
@@ -1922,8 +1936,13 @@ pub fn hydrate_history(messages: &[Message]) -> (Vec<TurnView>, Vec<ToolCardMode
                             // every resume. Same treatment the live stream
                             // gets at the `TextDelta` arm above: the body
                             // becomes a collapsed thought, not prose.
+                            // #1242 — one complete string rather than a
+                            // stream, so the drain is unconditional: anything
+                            // `process` withheld is by definition never going
+                            // to be decided by more input.
                             let mut filter = ReasoningFilter::new();
-                            let visible = filter.process(text);
+                            let mut visible = filter.process(text);
+                            visible.push_str(&filter.finish());
                             let captured = filter.take_captured();
                             if !captured.is_empty() {
                                 turn.elements.push(TurnElement::Thinking {
