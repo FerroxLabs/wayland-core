@@ -38,5 +38,34 @@ an empty result could not read as absence: FerroxLabs/wayland-core#252 and
 FerroxLabs/wayland#737 / #754 are the PowerShell EXECUTION failures, and none of
 them is about the posture surface.
 
+A SECOND INSTANCE OF THE SAME CLASS, found in the same sweep and recorded here
+rather than filed separately, because the remedy is the same one and splitting it
+would give two tickets one fix. `SessionSandboxBackend`
+(crates/wcore-agent/src/orchestration/anvil/forge.rs:167) is a DECORATOR over a
+real `SandboxRegistry`. It delegates `execute`, `name`, `is_available`,
+`enforces_read_deny` and `blocks_powershell` -- and does NOT delegate
+`known_limitations` or `unavailable_reason`, so through it both fall back to the
+trait defaults `vec![]` and `None`. Any future status read taken through that
+decorator would report a backend with no known limitations and no reason for
+being unavailable, which is precisely the reassurance #368 c6 was filed about.
+
+It is NOT reached today: the decorator is Anvil's gate-closure executor and
+nothing projects `SandboxStatus` through it, so this is a latent hole, not a live
+one -- and it is stated as latent rather than as a bug, because overstating it
+here would be the same failure the ticket is about. It is NOT fixed here for one
+stated reason: `forge.rs` is in the generated Desktop contract corpus's
+`SOURCE_INPUTS`, so a six-line delegation forces a corpus regeneration, and
+churning that at RC time to close an unreached path is a worse trade than
+recording it. Whoever takes c1 delegates both methods in the same change.
+
+Note also what the scanner in
+`crates/wcore-sandbox/tests/declared_limitations_are_registered.rs` can and
+cannot see: it walks `wcore-sandbox/src` only, so it is TOTAL over that crate and
+BLIND to a `SandboxBackend` implementation in any other -- which is how the
+decorator above escapes it. Widening it to the workspace would sweep in the many
+test doubles in `wcore-tools` and turn a decidable check into a maintained
+denylist, so the boundary is deliberate and is written down here rather than
+discovered later.
+
 Nothing here reopens the Windows filesystem-sandbox or AppContainer decision.
 This is disclosure only.
