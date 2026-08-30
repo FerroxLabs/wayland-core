@@ -13,6 +13,10 @@ serde_json.workspace  = true
 async-trait.workspace = true
 chrono.workspace      = true
 thiserror.workspace   = true
+# FerroxLabs/wayland#1243: the ONE authority parser (src/url_authority.rs).
+# Pure, no OS surface, and the same parser reqwest dials with - which is the
+# whole point: a hand cut here disagreeing with the request is the bug class.
+url.workspace         = true
 sha2.workspace        = true
 
 # `process_liveness` and `job_object` only. This crate holds no other OS-facing

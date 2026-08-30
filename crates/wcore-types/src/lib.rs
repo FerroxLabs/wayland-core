@@ -26,6 +26,7 @@ pub mod reasoning_filter;
 pub mod skill_types;
 pub mod spawner;
 pub mod tool;
+pub mod url_authority;
 pub mod utf8_stream;
 pub mod workspace_trust;
 
