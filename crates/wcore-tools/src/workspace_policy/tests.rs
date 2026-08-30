@@ -2857,7 +2857,7 @@ fn production_call_sites() -> String {
             }
             if path.extension().is_some_and(|e| e == "rs")
                 && !path.ends_with("workspace_policy.rs")
-                && !path.file_name().is_some_and(|n| n == "tests.rs")
+                && path.file_name().is_none_or(|n| n != "tests.rs")
                 && let Ok(body) = std::fs::read_to_string(&path)
             {
                 corpus.push_str(&body);
