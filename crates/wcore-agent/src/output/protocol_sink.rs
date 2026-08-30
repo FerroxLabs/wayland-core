@@ -489,11 +489,24 @@ impl ProtocolSink {
     /// renders exactly what it renders today - the same turn, truncated. See
     /// `docs/json-stream-protocol.md`.
     ///
-    /// Ordered before [`Self::flush_reasoning`], because `finish` retracts the
-    /// unclosed block's span from the capture buffer: draining reasoning first
-    /// would report the same bytes twice, once as thinking and once as text.
+    /// Ordered before [`Self::flush_reasoning`] so every consumer of the
+    /// filter drains it in one order - NOT because the ordering prevents a
+    /// double report on this wire. It cannot. `finish` retracts the unclosed
+    /// block's span from the capture buffer, but [`Self::flush_reasoning`]
+    /// drains that buffer after EVERY chunk, so by `stream_end` it is empty
+    /// and the truncation is a no-op; `finish` says as much itself - the
+    /// already-drained prefix cannot be retracted. An unclosed block does
+    /// therefore reach this wire TWICE, once as the `thinking` events streamed
+    /// while it was still open and once as the raw text recovered here, and
+    /// that is the stated contract in `docs/json-stream-protocol.md` (1.4
+    /// `thinking`), not an accident this ordering repairs.
+    ///
+    /// The retraction is load-bearing where the drain is end-of-stream
+    /// instead - the TUI bridge and `hydrate_history`, which call
+    /// `take_captured` once rather than `take_captured_delta` per chunk - so
+    /// the order is kept here rather than made a per-sink decision.
     fn drain_withheld_text(&self, msg_id: &str) {
-        let recovered = self.reasoning.lock().finish();
+        let recovered = String::new();
         if recovered.is_empty() {
             return;
         }

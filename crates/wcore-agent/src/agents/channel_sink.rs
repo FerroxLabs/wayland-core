@@ -173,8 +173,12 @@ impl ChannelSink {
     /// relay IS the wire a parent host reads, so a child whose answer ends in
     /// `<` or in an unclosed `<thinking>` would otherwise be relayed short of
     /// what the child's own history stored. Ordered before
-    /// [`Self::flush_reasoning`] for the same reason - `finish` retracts the
-    /// unclosed span from the capture buffer.
+    /// [`Self::flush_reasoning`] for the same reason that sink is: one drain
+    /// order for every consumer of the filter, NOT to prevent a double report.
+    /// This sink also flushes after every chunk, so the capture buffer is
+    /// already empty when `finish` truncates it and an unclosed block is
+    /// relayed twice, exactly as `ProtocolSink::drain_withheld_text`
+    /// documents.
     fn drain_withheld_text(&self, filter: &parking_lot::Mutex<ReasoningFilter>, msg_id: &str) {
         let recovered = filter.lock().finish();
         if recovered.is_empty() {
