@@ -22,6 +22,7 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Write `contents` to `path` atomically and durably.
 ///
@@ -129,7 +130,17 @@ pub fn atomic_write_checked<P: AsRef<Path>>(
         }
         // No exchange to make, or none available. Both fall back to reading the
         // destination and then renaming over it, which is racy — see above.
-        Swap::Vacant | Swap::Unsupported => {
+        //
+        // The two are NOT equally routine, and this is the single place the
+        // difference is observable, so it is recorded here and nowhere else:
+        // `Vacant` means the destination did not exist and there was nothing
+        // to lose; `Unsupported` means the publish this module promises was
+        // refused and the write is proceeding on the design that #370
+        // measured losing 7 of 169 interleaved saves on Windows.
+        swap @ (Swap::Vacant | Swap::Unsupported(_)) => {
+            if let Swap::Unsupported(why) = &swap {
+                note_degraded_publish(dest, why);
+            }
             let observed = match std::fs::read(dest) {
                 Ok(bytes) => Some(bytes),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -176,8 +187,62 @@ enum Swap {
     Displaced(PathBuf),
     /// The destination does not exist, so there was nothing to displace.
     Vacant,
-    /// This platform, kernel or filesystem has no such primitive.
-    Unsupported,
+    /// This platform, kernel or filesystem has no such primitive, or the
+    /// one it has REFUSED this call. The payload names which, verbatim from
+    /// the OS where there is an OS answer.
+    ///
+    /// The reason is carried rather than dropped because the two are not the
+    /// same event and only one of them is routine. "Windows has no exchange
+    /// primitive" is a property of the platform; `ReplaceFileW` returning
+    /// `ERROR_SHARING_VIOLATION` because the user's editor holds the
+    /// destination open is a property of THIS write, and it is the case in
+    /// which the fallback below can lose the editor's bytes (#370). A caller
+    /// that cannot tell them apart cannot report either.
+    Unsupported(String),
+}
+
+/// How many publishes have degraded from the exchange primitive to the racy
+/// check-then-rename fallback since this process started.
+///
+/// Process-global rather than per-write because the caller of
+/// [`atomic_write_checked`] is not the party who needs to know: the operator
+/// is. See [`degraded_publish_count`].
+static DEGRADED_PUBLISHES: AtomicU64 = AtomicU64::new(0);
+
+/// The number of times [`atomic_write_checked`] has fallen back to the racy
+/// publish in this process.
+///
+/// **This exists because the degrade used to be invisible.** Every failure of
+/// `ReplaceFileW` — including the `ERROR_SHARING_VIOLATION` an open editor
+/// produces, which is the reported scenario — answered [`Swap::Unsupported`]
+/// and the write silently continued on check-then-rename, the design measured
+/// losing 7 of 169 interleaved saves on Windows (`#370`). Nothing counted it,
+/// nothing logged it, and no caller could see it, so "the guarantee holds on
+/// Windows" was unfalsifiable rather than true.
+///
+/// A counter and not a `Result`: the fallback still publishes the caller's
+/// bytes, so failing the write here would turn a rare loss into a common
+/// refusal. What the caller loses is the STRENGTH of the guarantee, and that
+/// is an operator-visible fact, not a per-call error.
+pub fn degraded_publish_count() -> u64 {
+    DEGRADED_PUBLISHES.load(Ordering::Relaxed)
+}
+
+/// Record one degrade, both for the operator (log) and for a test (counter).
+///
+/// `error!` and not `warn!`: with `RUST_LOG` unset only ERROR reaches stderr,
+/// so a warning here would satisfy the letter of "logged" while remaining
+/// exactly as invisible as the silence it replaces.
+fn note_degraded_publish(dest: &Path, why: &str) {
+    DEGRADED_PUBLISHES.fetch_add(1, Ordering::Relaxed);
+    tracing::error!(
+        target: "wcore_config::atomic_io",
+        dest = %dest.display(),
+        why = %why,
+        "the publish-and-displace primitive was refused, so this write fell back \
+         to check-then-rename, which can lose a save that arrives inside the \
+         check window (FerroxLabs/wayland-core#370)"
+    );
 }
 
 /// Put `displaced` back at `dest`, undoing a [`Swap::Displaced`] publish.
@@ -203,10 +268,10 @@ fn restore(displaced: &Path, dest: &Path) -> std::io::Result<()> {
             std::io::ErrorKind::NotFound,
             "the destination name no longer exists, so nothing was exchanged back",
         )),
-        Swap::Unsupported => Err(std::io::Error::other(
+        Swap::Unsupported(why) => Err(std::io::Error::other(format!(
             "the exchange primitive that published is no longer available, \
-             so nothing was exchanged back",
-        )),
+             so nothing was exchanged back ({why})"
+        ))),
     }
 }
 
@@ -267,6 +332,26 @@ fn keep_displaced(tmp: tempfile::TempPath, displaced: &Path) -> std::io::Result<
 ///   Windows arm now asserts the post-publication reading and will fail the
 ///   Windows CI job if any of the above is wrong.
 ///
+///   **THE WINDOWS GUARANTEE, DECLARED (#370).** It is weaker than the unix
+///   one and this is the sentence that says so, because the alternative —
+///   `#342` c3's "the same guarantee holds on Windows, where the product
+///   ships" — was measured false. `ReplaceFileW` succeeding gives the full
+///   guarantee. `ReplaceFileW` FAILING does not, and it fails for ordinary
+///   reasons: an editor holding the destination open without
+///   `FILE_SHARE_DELETE` gives `ERROR_SHARING_VIOLATION`, and every failure
+///   degrades to check-then-rename, which loses a save that arrives inside
+///   the check window. Measured on Windows 11 build 26200 at `retries = 0`:
+///   **7 of 169** interleaved saves lost on the Edit path (4.1%), **1 of 144**
+///   on the VFS path (0.7%), and in 4 of 24 executions the editor's own
+///   `rename` was instead refused outright with `ERROR_ACCESS_DENIED`.
+///
+///   So what Windows ships is: *a save is never lost SILENTLY.* Every
+///   degrade is counted by [`degraded_publish_count`] and logged at `error!`
+///   before the racy publish runs, so the window in which bytes can be lost
+///   is always announced. That is the property
+///   `a_refused_replacefilew_is_counted_and_not_silent` grades, and it is
+///   what a caller on Windows may rely on. It is NOT "no save is lost".
+///
 /// - **Everything else** — [`Swap::Unsupported`], and the caller falls back to
 ///   re-check-then-rename.
 ///
@@ -306,7 +391,9 @@ fn publish_displacing(a: &Path, b: &Path) -> std::io::Result<Swap> {
         Some(libc::ENOENT) => Ok(Swap::Vacant),
         // ENOSYS: kernel older than 3.15. EINVAL / EOPNOTSUPP: the filesystem
         // does not implement the flag.
-        Some(libc::ENOSYS) | Some(libc::EINVAL) | Some(libc::EOPNOTSUPP) => Ok(Swap::Unsupported),
+        Some(libc::ENOSYS) | Some(libc::EINVAL) | Some(libc::EOPNOTSUPP) => {
+            Ok(Swap::Unsupported(format!("renameat2(RENAME_EXCHANGE): {err}")))
+        }
         _ => Err(err),
     }
 }
@@ -332,7 +419,9 @@ fn publish_displacing(a: &Path, b: &Path) -> std::io::Result<Swap> {
     match err.raw_os_error() {
         Some(libc::ENOENT) => Ok(Swap::Vacant),
         // A volume without VOL_CAP_INT_RENAME_SWAP: FAT, SMB, and others.
-        Some(libc::ENOTSUP) | Some(libc::EOPNOTSUPP) | Some(libc::EINVAL) => Ok(Swap::Unsupported),
+        Some(libc::ENOTSUP) | Some(libc::EOPNOTSUPP) | Some(libc::EINVAL) => {
+            Ok(Swap::Unsupported(format!("renamex_np(RENAME_SWAP): {err}")))
+        }
         _ => Err(err),
     }
 }
@@ -359,7 +448,9 @@ fn publish_displacing(a: &Path, b: &Path) -> std::io::Result<Swap> {
     }
 
     let Some(stem) = a.file_name() else {
-        return Ok(Swap::Unsupported);
+        return Ok(Swap::Unsupported(
+            "the staged file has no file name, so no sibling backup name can be derived".to_owned(),
+        ));
     };
     let mut backup_name = stem.to_os_string();
     backup_name.push(".wl-displaced");
@@ -396,12 +487,14 @@ fn publish_displacing(a: &Path, b: &Path) -> std::io::Result<Swap> {
     if err.raw_os_error() == Some(ERROR_FILE_NOT_FOUND) {
         return Ok(Swap::Vacant);
     }
-    Ok(Swap::Unsupported)
+    Ok(Swap::Unsupported(format!("ReplaceFileW: {err}")))
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn publish_displacing(_a: &Path, _b: &Path) -> std::io::Result<Swap> {
-    Ok(Swap::Unsupported)
+    Ok(Swap::Unsupported(
+        "this target has no publish-and-displace primitive".to_owned(),
+    ))
 }
 
 /// Copy an EXISTING destination's permission bits onto the temp file that is
@@ -660,6 +753,78 @@ mod tests {
             "the publish precedes the check, so the check is handed what it displaced"
         );
         assert_eq!(std::fs::read(&p).unwrap(), b"new");
+    }
+
+    /// #370 NEGATIVE CONTROL — the silent degrade is OBSERVABLE when it fires.
+    ///
+    /// The ticket's contract is that `Swap::Unsupported` on Windows must stop
+    /// being silent. A test that only asserted the counter's existence would
+    /// pass with the counter never reached, so this REPRODUCES the reported
+    /// scenario rather than modelling it: an editor's handle on the
+    /// destination, shared for read and write but NOT for delete.
+    /// `ReplaceFileW` has to rename that destination aside, which needs
+    /// DELETE access, so the kernel refuses it with `ERROR_SHARING_VIOLATION`
+    /// and the publish degrades — the exact path #370 measured losing bytes.
+    ///
+    /// `>` and not `+ 1` deliberately: the counter is process-global and the
+    /// unit tests in this binary run in parallel, so a sibling degrading
+    /// concurrently must not redden this. Monotonic and never reset, so `>`
+    /// still fails if `note_degraded_publish` stops counting — which is the
+    /// mutation this arm exists to catch.
+    #[cfg(windows)]
+    #[test]
+    fn a_refused_replacefilew_is_counted_and_not_silent() {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::Storage::FileSystem::{
+            CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_SHARE_READ,
+            FILE_SHARE_WRITE, OPEN_EXISTING,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("held.txt");
+        std::fs::write(&p, b"theirs").unwrap();
+
+        let wide: Vec<u16> = p.as_os_str().encode_wide().chain(Some(0)).collect();
+        // SAFETY: `wide` is a NUL-terminated UTF-16 buffer owned by a local
+        // that outlives the call; both pointer parameters are the documented
+        // NULL for "no security attributes" and "no template file".
+        let held = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                FILE_GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                std::ptr::null_mut(),
+            )
+        };
+        assert!(
+            held != INVALID_HANDLE_VALUE,
+            "fixture: the destination could not be held open ({}), so nothing \
+             below reproduces the sharing violation",
+            std::io::Error::last_os_error()
+        );
+
+        let before = degraded_publish_count();
+        // The outcome is deliberately not asserted. With the destination held
+        // without FILE_SHARE_DELETE the fallback's own `persist` is refused
+        // too, which is #370's SECOND Windows failure (the editor's save gets
+        // `ERROR_ACCESS_DENIED` rather than losing bytes). What is asserted is
+        // the property the ticket asks for: the degrade was not silent.
+        let _outcome = atomic_write_checked(&p, b"ours", |_| Ok(()));
+        let after = degraded_publish_count();
+        // SAFETY: `held` is a live handle this test opened and has not closed.
+        unsafe {
+            CloseHandle(held);
+        }
+
+        assert!(
+            after > before,
+            "a refused ReplaceFileW fell back to the racy publish without \
+             counting it: degraded_publish_count stayed at {before}"
+        );
     }
 
     /// A refused publish leaves the destination byte-identical. The publish has
