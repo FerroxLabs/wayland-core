@@ -8,16 +8,15 @@
 //! This is a copy of that test's setup with three levers the graded test does
 //! not have:
 //!
-//!   * `SPILL_PROBE_BYTES`   — the tool-result payload size, so the runtime can
-//!                             be measured against payload and the relationship
-//!                             read off rather than guessed at.
-//!   * `SPILL_PROBE_CEILING` — the context ceiling. Raising it above the payload
-//!                             turns the #636 shed OFF while leaving every other
-//!                             byte of the fixture identical, which is the
-//!                             control that separates "the spill path is slow"
-//!                             from "handling a payload this size is slow".
-//!   * phase timing          — fixture construction, `engine.run()`, and the
-//!                             read-back through the jail are timed separately.
+//! * `SPILL_PROBE_BYTES` — the tool-result payload size, so the runtime can be
+//!   measured against the payload and the relationship read off rather than
+//!   guessed at.
+//! * `SPILL_PROBE_CEILING` — the context ceiling. Raising it above the payload
+//!   turns the #636 shed OFF while leaving every other byte of the fixture
+//!   identical, which is the control that separates "the spill path is slow"
+//!   from "handling a payload this size is slow".
+//! * phase timing — fixture construction, `engine.run()`, and the read-back
+//!   through the jail are timed separately.
 //!
 //! It is `#[ignore]`d, so it costs the suite nothing and is run deliberately
 //! with `--run-ignored all`.
