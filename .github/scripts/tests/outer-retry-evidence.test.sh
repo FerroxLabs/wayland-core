@@ -289,6 +289,85 @@ rm -rf "$D"
 want_grep "the evidence tree is reserved before any root-owned target/ exists" \
   "$CI" "mkdir -p target/nextest/ci/outer-attempts"
 
+
+# ── PART E — the COMPOSED report check, not a grep for its name ────────────
+#
+# wayland#1177 c2 asks for "a test demonstrating that a failure on attempt 1
+# followed by a pass on attempt 2 is still visible to the REQUIRED `report`
+# CHECK". Parts A-D grade the wrapper and the grader as separate programs, and
+# Part C then greps ci.yml for the string that wires them together. A grep for
+# a filename is not a demonstration that the report check sees anything: the
+# 0.13.12 close-sweep refuted the earlier revision of this suite on exactly
+# that point, and the proof it gave is that all 19 cases were GREEN on a tree
+# where the mechanism was 100% inoperative on the real runner.
+#
+# This part removes the substitution. It builds the artifact tree the `report`
+# job actually downloads -- attempt 2's clean junit.xml beside the preserved
+# outer-attempts/ directory -- and then RUNS `.github/scripts/assert-test-
+# evidence.sh`, which IS the entry point the required check invokes, rather
+# than asserting that its name appears somewhere. The composed stack is what
+# is graded, because a trait-level pass through each half separately is what
+# let the break ship.
+ASSERT_GATE="$ROOT/.github/scripts/assert-test-evidence.sh"
+
+# report_gate <label> <evidence-dir> <want-exit>
+report_gate() {
+  local label="$1" dir="$2" want="$3" out rc
+  out=$(cd "$ROOT" && EVIDENCE_DIR="$dir" FLAKE_ALLOWLIST="$EMPTY_ALLOWLIST" \
+    FLAKE_GATE_TODAY="2026-08-29" UPSTREAM_RESULT="success" MIN_TESTS=1 \
+    EXPECTED_MIN=1 LABEL="outer-retry-evidence self-test" \
+    bash "$ASSERT_GATE" 2>&1)
+  rc=$?
+  if [ "$rc" = "$want" ]; then
+    ok "$label"
+  else
+    bad "$label (want exit=$want, got exit=$rc)"
+    printf '%s\n' "$out" | sed 's/^/       | /'
+  fi
+  LAST_REPORT_OUT="$out"
+}
+
+E_PASS="$TMP/report-composed"
+clean_junit "$E_PASS/junit.xml"
+failing_junit "$E_PASS/outer-attempts/outer-attempt-1.xml" "races_under_load"
+printf 'success\n' >"$E_PASS/outer-attempts/final-status.txt"
+
+# THE CRITERION ITSELF: attempt 1 failed, attempt 2 passed, and the required
+# check reds the run over it.
+report_gate "attempt-1 failure retried into a pass REDS the required report check" \
+  "$E_PASS" 1
+
+case "$LAST_REPORT_OUT" in
+  *"wayland#1177"*)
+    ok "the required check names the erased failure and the ticket" ;;
+  *)
+    bad "the required check names the erased failure and the ticket (got: $LAST_REPORT_OUT)" ;;
+esac
+case "$LAST_REPORT_OUT" in
+  *"races_under_load"*)
+    ok "the required check names WHICH test was erased" ;;
+  *)
+    bad "the required check names WHICH test was erased (got: $LAST_REPORT_OUT)" ;;
+esac
+
+# NEGATIVE CONTROL 1 — without the preserved attempt the very same tree is
+# GREEN. Without this arm the case above is satisfied by a gate that reds
+# everything, which is worth nothing.
+E_CLEAN="$TMP/report-composed-clean"
+clean_junit "$E_CLEAN/junit.xml"
+report_gate "the same evidence set with NO preserved attempt stays green" \
+  "$E_CLEAN" 0
+
+# NEGATIVE CONTROL 2 — a step that failed on its FINAL attempt is already red
+# on its own account and its junit.xml still describes the failure. Reporting
+# it here as well would turn every ordinary red into a second, misleading
+# complaint about retries, so this must stay green.
+E_FINAL="$TMP/report-composed-final-failure"
+clean_junit "$E_FINAL/junit.xml"
+failing_junit "$E_FINAL/outer-attempts/outer-attempt-1.xml" "races_under_load"
+printf 'failure\n' >"$E_FINAL/outer-attempts/final-status.txt"
+report_gate "a step that failed on its FINAL attempt is not double-reported" \
+  "$E_FINAL" 0
 echo ""
 echo "outer-retry-evidence: ${PASS} passed, ${FAIL} failed"
 [ "$FAIL" -eq 0 ]
