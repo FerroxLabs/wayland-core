@@ -4,39 +4,80 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "The VFS write path discards the intercepted-save notice, so a preserved file is left on disk with nothing naming it"
 status: open
-last_verified_commit: 09d06e1ff
+last_verified_commit: e581dda5a
 criteria:
   - id: c1
     text: "FileMutationOutcome::Conflict (or an equivalent typed channel out of compare_exchange_file) carries the intercepted-save path instead of discarding the Refusal"
-    state: not-met
+    state: met
     owner: core
-    note: "FILED 2026-08-30 by lane/f13-w2-dataloss as the DECOMPOSED remainder of wayland#1239 c2. Nothing has been done. Today `compare_exchange_file` matches the publish result with `Err(_)` and reports `Conflict { current }`, so the `Refusal` -- including `intercepted_save()`, which names where a save displaced by the rollback was preserved -- never leaves the VFS layer."
+    evidence: "file:crates/wcore-tools/src/vfs.rs:613:intercepted_save: refusal.intercepted_save().map(Path::to_path_buf)"
+    note: "`FileMutationOutcome::Conflict` gained `intercepted_save: Option<PathBuf>` and the retraction arm changed from `Err(_)` to `Err(refusal)`, so the one fact a refusal knows and the filesystem does not now leaves the VFS layer. The enum lost `Copy` (a `PathBuf` is not `Copy`); `cargo clippy --workspace --all-targets -- -D warnings` exit 0 covers every consumer of that change workspace-wide. The field is `Option` and NOT defaulted: all six producers that refuse BEFORE a publish set it to `None` explicitly, which is what c4 grades. Carried rather than re-derived because it is NOT derivable -- after a successful retraction the destination holds exactly what it held either way, so re-observing it (which is what the Conflict renderers did) cannot tell a refusal that cost somebody something from one that cost nothing. Verified live: `the_vfs_path_names_a_save_the_refusal_displaced` asserts the destination is byte-identical to the pre-image at the moment the notice is surfaced. RED under R0 (the reconstructed unfixed tree, `Err(_) => Ok(Conflict { current })`, `cargo check -p wcore-tools --tests` exit 0) and under R2 (the two renderers ignore the field, check exit 0): nextest exit 100 in both. Logs: /root/lane-scratch-s4-1248/."
   - id: c2
     text: "The VFS Write and Edit paths render the same distinction the direct paths do: a refusal that displaced a save does not end \"Nothing was changed.\" and does name where those bytes are"
-    state: not-met
+    state: met
     owner: core
-    note: "FILED 2026-08-30. Nothing has been done. The direct paths already do this through `unsaved_work::refusal_message` (wayland#1239); write.rs:219 and edit.rs:318 reconstruct a `why` from the re-observed state instead and always take the `changed_under_write` wording, which ends 'Nothing was changed.' RE-MEASURED at HEAD while closing the lane/f13-w2-dataloss F2 objection, so this entry does not rot on line numbers and so the coverage question is answered by a check rather than by assumption: the two match arms are write.rs:219 and edit.rs:318, and the two `changed_under_write` renders inside them are write.rs:227 and edit.rs:321. Those are two of the FOUR production `changed_under_write` call sites; the other two (write.rs:249, edit.rs:336) are the `is_compare_exchange_unsupported` re-read arms, where no publish ran and no `Refusal` exists, and they are out of scope here for that reason -- c4 is what keeps them so. c2 as filed already covers both in-scope arms, so nothing was added to this issue and no further gap was filed."
+    evidence: "test:crates/wcore-tools/src/edit.rs::the_vfs_edit_path_names_a_save_the_refusal_displaced"
+    note: "SAME distinction means the same function, found in the tree first and then reused rather than re-worded: the direct paths call `unsaved_work::refusal_message`, whose whole body is now `conflict_message(display_path, refusal.why(), refusal.intercepted_save())`. `conflict_message` is the ONE decision site on every path, and write.rs and edit.rs's VFS arms call it with the outcome's field. The displacing wording is therefore byte-identical to the direct path's -- `changed_under_write_displacing_a_save`, which does not contain 'Nothing was changed.' and does end '...they are preserved at <path>. Read <file> as it stands now, reconcile it with <path>, and redo the change against that.' GRADED ON THE PUBLIC TOOL SURFACE, not on a helper: both tests drive `execute_with_ctx` on a real `WriteTool`/`EditTool` over a real `RealFs`, and every assertion is on the returned `ToolResult.content` and on the directory as it actually stands. Edit is graded separately from Write rather than by analogy because they render off SEPARATE match arms and the Edit arm did not even destructure the outcome before this. A THIRD consumer existed and also discarded the notice -- `wcore-agent`'s `RollbackTool` (rollback_tool.rs) -- found by enumerating consumers from the tree, not from the ticket, which names only two; it now names the preserved path in its suspension reason. RED under R2 (both renderers reverted to `changed_under_write` while c1's carrying stayed intact; `cargo check -p wcore-tools --tests` exit 0): nextest exit 100, both VFS tests failing at 'the user is not told where their save went'. Logs: /root/lane-scratch-s4-1248/r2-run.txt."
   - id: c3
     text: "A test drives compare_exchange_file through a refusal that displaced a save and asserts the SURFACED tool text against the preserved file on disk; shown RED against today's Err(_)"
-    state: not-met
+    state: met
     owner: core
-    note: "FILED 2026-08-30. Nothing has been done. The window is drivable at the wcore-config level exactly as wayland#1239's triple drives it -- the check closure IS the exchange-to-verdict window -- but the VFS precondition closure is built inside `compare_exchange_file`, so this needs a fixture at the vfs level rather than a reused one."
+    evidence: "test:crates/wcore-tools/src/write.rs::the_vfs_path_names_a_save_the_refusal_displaced"
+    note: "REGRESSION arm, not a mutation of finished code. R0 reconstructs the unfixed tree exactly: `git checkout` of the pre-lane vfs.rs, write.rs, edit.rs, rollback_tool.rs and vfs_compare_exchange.rs, with ONLY the test scaffolding re-inserted -- the `publish_window` module, its four-line consult, and the two tests. The production logic under test is then literally today's `Err(_) => Ok(FileMutationOutcome::Conflict { current })` with today's `changed_under_write` renderers. `cargo check -p wcore-tools --tests` exit 0 BEFORE the red was believed; `cargo nextest run` exit 100, and the panic is the defect's own sentence: 'the user is not told where their save went: Refused to overwrite /tmp/.tmpv4YSvH/f.txt: ... Nothing was changed. Read the file as it stands now and redo the change against that.' Both VFS tests failed the same way; the failure is at the OBSERVABLE, after the fixture controls passed, which proves the unfixed tree really did reach the retraction arm and really did preserve a file. The test asserts the surfaced text against the preserved file found by SCANNING the directory for the save's bytes (exactly one survivor, not the destination), so the assertion is on the file that is actually on disk rather than on a path the test computed. The window has one entrance: reaching this state needs a save to land on the published inode strictly BETWEEN the publish exchange and the restore exchange, the only vfs code in that window is the pure `precondition.matches(observation_of(displaced))`, and a racer on a microsecond window is a flake generator. `vfs::publish_window` is therefore a `#[cfg(test)]` module, keyed by DESTINATION so one probing test cannot contaminate another's compare-exchange, and it substitutes exactly one thing -- the REASON the publish is refused. The exchange, the restore, `keep_displaced`, the `Refusal`, what `compare_exchange_file` carries and what the tool renders are all production code. Fixture control in the test itself: the window was entered EXACTLY ONCE and was handed the pre-image, without which every other assertion would also pass on a pre-flight conflict, which is a different arm. Unix exchange platforms only -- see residual. Logs: /root/lane-scratch-s4-1248/red0-run.txt."
   - id: c4
     text: "A Conflict produced WITHOUT an atomic_write_checked refusal -- the pre-flight classification arms, the InMemoryFs backend, the containment wrapper -- still renders exactly the wording it renders today, with a test that fails if c1's new field is treated as always-present"
-    state: not-met
+    state: met
     owner: core
-    note: "FILED 2026-08-30. Nothing has been done. This is the anti-overcorrection criterion: `Conflict` has construction sites where no publish was ever attempted, and the new field must be absent there rather than defaulted into a claim about a save nobody displaced."
+    evidence: "test:crates/wcore-tools/tests/issue_1248_conflict_notice_test.rs::no_conflict_without_a_publish_names_an_intercepted_save"
+    note: "Producers enumerated from the tree with a control in the same call (`git grep -n 'FileMutationOutcome::Conflict' -- crates` plus `FileMutationOutcome::Applied` as the known-positive): SEVEN construction sites, six of which refuse before any publish (vfs.rs RealFs postcondition-authority / precondition, InMemoryFs postcondition-authority / already-intended / precondition, SandboxedFs containment) and one of which is the retraction arm. Enumeration was not trusted: EVERY one of the six was fabricated to `Some(PathBuf::from(\"/fabricated\"))` one at a time, each confirmed to COMPILE (`cargo check -p wcore-tools --tests` exit 0) before any verdict, and the c4 tests asked whether they noticed. The FIRST sweep found three arms UNGRADED -- RealFs postcondition-authority, InMemoryFs postcondition-authority, InMemoryFs already-intended -- so three arms were added, reached by preparation rather than by racing (`IntendedFileMutation::from_observation` bound to a different path object, and a same-bytes rewrite that changes the in-memory generation). The second sweep reddens all 6/6. The RENDERER half is graded separately: making `conflict_message` treat the field as always-present (`unwrap_or_else(|| Path::new(display_path))`, check exit 0) reddens all three wording tests -- nextest exit 100, 3 failed of 5, run with `--no-fail-fast` so the count is the whole selection and not a cancellation. The wording tests assert BOTH ways: byte-equality against `changed_under_write(display_path, why)` and, independently, that the text still ends 'Nothing was changed. Read the file as it stands now and redo the change against that.' and does not contain 'preserved at'. The `is_compare_exchange_unsupported` re-read arms (write.rs, edit.rs) still render `changed_under_write` and are deliberately untouched: they are entered only when `compare_exchange_file` returned `Err` unsupported, so no `atomic_write_checked` ran and no `Refusal` exists. Logs: /root/lane-scratch-s4-1248/sweep.txt, r4b-run.txt."
 ---
 
-Decomposed out of wayland#1239 rather than folded into it.
+The VFS path -- the one `write_through_vfs` takes whenever a `ToolContext` is present, which is
+every dispatched tool call -- matched `atomic_write_checked`'s refusal as `Err(_)` and reported
+`Conflict { current }`. The bytes a non-cooperating editor saved inside the exchange-to-verdict
+window were preserved on disk under a `.tmpXXXXXX` sibling by wayland#1239, and then nothing
+named them: the user was told "Nothing was changed."
 
-wayland#1239 makes `atomic_write_checked` preserve a save that landed inside its own
-exchange-to-verdict window and name it in `Refusal::intercepted_save()`, and both DIRECT tool
-paths render that. The VFS path -- the one taken whenever a `ToolContext` is present -- drops the
-`Refusal` on the floor, so the preserved file sits under a `.tmpXXXXXX` sibling and the user is
-told nothing was changed.
+All four criteria are met at the commit recorded above. The issue is closeable by whoever owns
+closing it; this lane does not close issues.
 
-Not data loss: wayland#1239 c1 is a disjunction and the preservation half holds on both paths.
-What is missing is the notice, which is the same shape wayland#1241 closed one layer down.
+## The shape, not the three instances
 
-Criteria are taken verbatim from the issue's Acceptance section. Nothing has been done.
+Three consumers of `Conflict` existed and all three discarded the notice. The ticket names two;
+`wcore-agent`'s `RollbackTool` is the third, and it was found by enumerating consumers from the
+tree rather than from the ticket. Fixing three sites is an enumeration, and an enumeration is
+correct only until the fourth consumer is written -- the field is an `Option`, so ignoring it is
+silent and compiles.
+
+`no_production_site_names_a_conflict_without_naming_the_notice` asks the total form of the same
+question instead: does any production site NAME `FileMutationOutcome::Conflict` without naming
+`intercepted_save` inside its own brace group? A construction site cannot fail that -- the
+compiler requires every field -- so what it decides is the CONSUMER question, over every
+`crates/*/src` file in the workspace, including consumers that do not exist yet. `Conflict { .. }`
+is precisely this defect one layer up, and it is now a test failure rather than a code review.
+
+The checker carries its own known-positive control in the same test (a known-bad snippet must be
+reported, a known-good one must not, a doc comment must not be read as code), refuses a run that
+walked fewer than 100 sources, and refuses a run that examined fewer than 10 `Conflict` sites --
+because an empty offender list off an empty scan reads exactly like a clean tree. Scope is
+sound: the only workspace member outside `crates/` is `workspace-hack`, and the eight files in
+the tree that mention `FileMutationOutcome` are all under `crates/`.
+
+RED arm for the guard: restoring `rollback_tool.rs`'s consumer to `Ok(FileMutationOutcome::Conflict { .. })`
+(`cargo check -p wcore-agent --tests` exit 0) reddens it, naming the offending file and pattern.
+
+## Residual
+
+Named, not silent:
+
+* **Windows.** Both c3 tests are `#[cfg(any(target_os = "linux", target_os = "macos"))]`. On
+  Windows `atomic_write_checked` publishes with `ReplaceFileW` and restores with a plain
+  replacing rename, which hands nothing back to judge, so no save can be intercepted there and
+  `intercepted_save` is structurally always `None`. c4's control tests, the producer sweep's
+  subject and the source guard all run on every platform.
+* **`RollbackTool` renders its own sentence.** It names the preserved path, so the notice is not
+  lost, but it composes bespoke prose instead of going through `conflict_message`, because its
+  surface is a suspension reason and not a tool refusal. The source guard covers the
+  discard-the-field failure there; it does not force the wording to converge.
+* **The `publish_window` seam is `#[cfg(test)]` code inside `vfs.rs`.** Same shape as
+  `WriteTool::publish_window_probe` from wayland#1241, and for the same measured reason.
