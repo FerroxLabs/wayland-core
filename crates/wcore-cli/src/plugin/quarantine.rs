@@ -417,12 +417,97 @@ pub fn build_git_command(args: &[&str], cwd: Option<&Path>) -> std::process::Com
     cmd
 }
 
-fn run_git(args: &[&str], cwd: Option<&Path>, timeout: Duration) -> Result<String> {
-    let mut cmd = build_git_command(args, cwd);
+/// Tear down the detached session `harden_against_credential_prompt` created.
+///
+/// # Why a group signal, and not `Child::kill`
+///
+/// The hardening calls `setsid(2)` in the child, so the child is a session
+/// leader AND a process-group leader whose pgid equals its pid, and every
+/// helper `git` spawns — credential, askpass, transport — inherits that group.
+/// `Child::kill` signals ONE pid. On the abort paths that reaped the leaf and
+/// left the helpers running in a session this process no longer owns: no group
+/// signal reached them, and having no controlling terminal, no hangup ever
+/// would either. That is the leak `FerroxLabs/wayland-core#379` reports, and it
+/// is a consequence of the hardening rather than of `git` — before `setsid` the
+/// helpers shared our group and our terminal, so they were strictly MORE
+/// reachable. The teardown therefore belongs beside the hardening, which is why
+/// it lives in this file and next to it.
+///
+/// # Why addressing the group by the child's pid stays safe after the reap
+///
+/// A pid is not recycled while it is still in use as a process-group id: POSIX
+/// forbids reusing a pgid while the group has members, and Linux keeps the
+/// `struct pid` alive for its `PIDTYPE_PGID` holders. So `kill(-pgid, …)` after
+/// the leader has been waited on either reaches the surviving members of OUR
+/// group or fails with `ESRCH`; it cannot land on an unrelated process that
+/// happened to inherit the number. That property is what lets the drain-grace
+/// exit below call this at all — there, `git` itself has already been reaped.
+///
+/// # What this does NOT reach, stated rather than implied
+///
+/// * A descendant that calls `setsid`/`setpgid` for itself leaves the group and
+///   is out of reach of any group signal. Hard containment is the sandbox's
+///   job (a PID namespace or a Job Object), never a process group's.
+/// * On Windows the hardening creates no session and no group — `DETACHED_PROCESS`
+///   is a creation-time console decision — so there is nothing here for a group
+///   signal to address and descendants remain reachable only through a Job
+///   Object. Windows never regressed the way unix did (it had no group teardown
+///   to lose), but it has no teardown either. Tracked as its own remainder;
+///   see the ledger entry for #379.
+///
+/// The cost is deliberate and bounded to the FAILING exits. `git`'s own
+/// `git-credential-cache--daemon` is in this group when `git` started one, and
+/// on those exits it dies with the rest. That is why the successful exit does
+/// not call this: killing a shared credential daemon after an install that
+/// WORKED would be a product regression, and a drained pipe is evidence no
+/// descendant is holding our stdio open.
+#[cfg(unix)]
+fn terminate_hardened_tree(child_pid: u32) {
+    let Ok(pgid) = libc::pid_t::try_from(child_pid) else {
+        return;
+    };
+    // `kill(0, …)` addresses the CALLER'S group and `kill(-1, …)` every process
+    // we may signal. Neither is this tree, and both are catastrophic here.
+    if pgid <= 1 {
+        return;
+    }
+    // SAFETY: a negative target addresses the process GROUP `pgid`, which this
+    // process created by spawning a `setsid` child and has not handed to anyone
+    // else. `kill` touches no memory in this address space.
+    unsafe {
+        libc::kill(-pgid, libc::SIGKILL);
+    }
+}
 
+/// No-op counterpart: see the unix doc comment for why Windows has no session
+/// or process group for a group signal to address.
+#[cfg(not(unix))]
+fn terminate_hardened_tree(_child_pid: u32) {}
+
+fn run_git(args: &[&str], cwd: Option<&Path>, timeout: Duration) -> Result<String> {
+    run_hardened(
+        build_git_command(args, cwd),
+        &format!("git {args:?}"),
+        timeout,
+    )
+}
+
+/// Run an already-hardened command to completion, with the wall-clock guard,
+/// the bounded drains, and the session teardown on every failing exit.
+///
+/// Split out of `run_git` so a test can drive the REAL control flow — the
+/// timeout branch and the drain-grace branch both tear the tree down here —
+/// without needing a `git` on `PATH` that can be made to hang on demand.
+/// `label` is what the caller calls this process in an error message, and is
+/// `git ["clone", …]` for every production call.
+fn run_hardened(mut cmd: std::process::Command, label: &str, timeout: Duration) -> Result<String> {
     let mut child = cmd
         .spawn()
         .map_err(|e| PluginCliError::Git(format!("spawn git: {e}")))?;
+    // Captured before anything can reap the child: after the wait its `id()` is
+    // still readable, but taking it here keeps the teardown's input independent
+    // of the `Child`'s state.
+    let child_pid = child.id();
 
     let mut out_pipe = child.stdout.take().expect("stdout piped");
     let mut err_pipe = child.stderr.take().expect("stderr piped");
@@ -446,11 +531,14 @@ fn run_git(args: &[&str], cwd: Option<&Path>, timeout: Duration) -> Result<Strin
             Some(s) => break s,
             None => {
                 if start.elapsed() > timeout {
+                    // The group FIRST, while the leader is still unreaped, then
+                    // the leaf and its corpse. Either order is safe (see
+                    // `terminate_hardened_tree`), this one needs no argument.
+                    terminate_hardened_tree(child_pid);
                     let _ = child.kill();
                     let _ = child.wait();
                     return Err(PluginCliError::Git(format!(
-                        "git {:?} timed out after {} ms",
-                        args,
+                        "{label} timed out after {} ms",
                         timeout.as_millis()
                     )));
                 }
@@ -459,12 +547,28 @@ fn run_git(args: &[&str], cwd: Option<&Path>, timeout: Duration) -> Result<Strin
         }
     };
 
-    let out = join_drain(h_out, "stdout")?;
-    let err = join_drain(h_err, "stderr")?;
+    // The OTHER door onto the same abandoned tree. Here the process exited and
+    // was reaped, and a helper it spawned is still holding the inherited pipe —
+    // so a descendant is provably alive, in the detached session, with the
+    // install about to fail. Returning without this is the #379 leak reached by
+    // the drain guard instead of by the wall clock.
+    let out = match join_drain(h_out, "stdout") {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            terminate_hardened_tree(child_pid);
+            return Err(e);
+        }
+    };
+    let err = match join_drain(h_err, "stderr") {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            terminate_hardened_tree(child_pid);
+            return Err(e);
+        }
+    };
     if !status.success() {
         return Err(PluginCliError::Git(format!(
-            "git {:?} failed: {}",
-            args,
+            "{label} failed: {}",
             String::from_utf8_lossy(&err).trim()
         )));
     }
@@ -513,6 +617,9 @@ fn env_u64(key: &str, default: u64) -> u64 {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use wcore_types::process_liveness::{
+        ProcessGroupCensus, ProcessLiveness, process_group_census, process_liveness,
+    };
 
     /// Every quarantine `git` spawn carries the credential-prompt pins.
     ///
@@ -606,6 +713,190 @@ mod tests {
         assert!(
             elapsed < budget,
             "it must be the drain guard that fires, not the wall-clock guard: {elapsed:?}"
+        );
+    }
+
+    /// The two pids a probe script records, once the file it writes is whole.
+    ///
+    /// The script writes to `<path>.tmp` and renames, so a partial read is not
+    /// possible; the loop is for the ordinary case where the probe has not been
+    /// scheduled yet. Fails rather than returning a guess.
+    fn recorded_pids(path: &Path) -> (u32, u32) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Ok(text) = std::fs::read_to_string(path) {
+                let mut fields = text.split_whitespace();
+                if let (Some(first), Some(second)) = (fields.next(), fields.next()) {
+                    if let (Ok(first), Ok(second)) = (first.parse(), second.parse()) {
+                        return (first, second);
+                    }
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the probe never recorded its pids at {}",
+                path.display()
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// SIGKILL a process group, ignoring every failure.
+    ///
+    /// Test-local cleanup ONLY: the assertions below are taken BEFORE this runs
+    /// so that a red arm still reports what survived instead of tidying the
+    /// evidence away, and this then stops a failing run leaving five minutes of
+    /// `sleep` on the host.
+    fn reap_group(pgid: u32) {
+        if let Ok(pgid) = libc::pid_t::try_from(pgid) {
+            if pgid > 1 {
+                // SAFETY: signalling a process group this test created.
+                unsafe {
+                    libc::kill(-pgid, libc::SIGKILL);
+                }
+            }
+        }
+    }
+
+    /// THE WALL-CLOCK EXIT. A hardened child that never exits is torn down as a
+    /// whole session, not as one pid.
+    ///
+    /// The child is spawned through `harden_against_credential_prompt` and run
+    /// through `run_hardened`, so this grades the production control flow;
+    /// `run_git` is that function with a `git` command built for it. `/bin/sh`
+    /// stands in for `git` because the leak has to be provoked on demand and no
+    /// real `git` invocation hangs to order.
+    ///
+    /// Shape: background a descendant, record both pids, then `exec` into a
+    /// long sleep so the direct child is unkillably idle rather than merely
+    /// slow. The descendant inherits the process group `setsid` created and
+    /// nothing else — no terminal, no parent that will outlive the kill — so
+    /// after the timeout it is reachable ONLY through a group signal. That is
+    /// precisely what a `git` credential/askpass/transport helper's background
+    /// worker is, and precisely what `Child::kill` alone cannot reach.
+    #[test]
+    fn a_timed_out_quarantine_child_takes_its_whole_session_with_it() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let pids = tmp.path().join("pids");
+        let script = format!(
+            "sleep 300 & printf '%d %d\\n' \"$$\" \"$!\" > \"{p}.tmp\" \
+             && mv \"{p}.tmp\" \"{p}\"; exec sleep 300",
+            p = pids.display()
+        );
+
+        let mut cmd = std::process::Command::new("/bin/sh");
+        cmd.arg("-c")
+            .arg(&script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        harden_against_credential_prompt(&mut cmd);
+
+        let started = Instant::now();
+        let err = run_hardened(cmd, "git [\"clone\"]", Duration::from_millis(750))
+            .expect_err("the wall-clock guard must fire on a child that never exits");
+        let elapsed = started.elapsed();
+
+        // CONTROL on the arm itself: this must be the timeout exit, not the
+        // drain exit or a spawn failure, or the teardown under test never ran.
+        let message = err.to_string();
+        assert!(
+            message.contains("timed out after"),
+            "the run must end on the WALL-CLOCK guard for this to grade the \
+             timeout teardown: {message}"
+        );
+        assert!(
+            elapsed < DRAIN_GRACE,
+            "it must be the wall-clock guard that fires, not the drain guard: {elapsed:?}"
+        );
+
+        let (leader, descendant) = recorded_pids(&pids);
+        assert_ne!(
+            leader, descendant,
+            "the probe recorded one pid twice, so the arm proves nothing"
+        );
+
+        // MEASURE FIRST. `SIGKILL` is delivered synchronously but the corpse is
+        // reaped by whoever inherits it, so allow that to land; the loop exits
+        // early on success and the assertion below reports the final state.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut descendant_state = process_liveness(descendant);
+        let mut census = process_group_census(leader);
+        while (descendant_state.is_live() || census != ProcessGroupCensus::Live(0))
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(20));
+            descendant_state = process_liveness(descendant);
+            census = process_group_census(leader);
+        }
+
+        reap_group(leader);
+
+        assert_eq!(
+            descendant_state,
+            ProcessLiveness::Dead,
+            "a descendant ({descendant}) of the timed-out quarantine child survived the \
+             timeout. `setsid` put it in a session this process does not own, so killing \
+             the direct child alone leaves it running with nobody to reap it \
+             (FerroxLabs/wayland-core#379)"
+        );
+        assert_eq!(
+            census,
+            ProcessGroupCensus::Live(0),
+            "the process group the quarantine spawn created still has live members after \
+             the timeout; `Indeterminate` is NOT zero and must not be read as success"
+        );
+    }
+
+    /// THE DRAIN-GRACE EXIT — the same abandoned tree reached by the other door.
+    ///
+    /// `git` exits promptly and IS reaped, so the wall-clock guard never fires;
+    /// what fails the install is a helper's background worker still holding the
+    /// inherited pipe. That worker is provably alive, provably in the detached
+    /// session, and until #379 it was returned from and forgotten. Graded
+    /// separately from the timeout arm because a fix applied to one branch does
+    /// not reach the other: each is reddened by its own mutation.
+    #[test]
+    fn a_helper_that_outlives_the_drain_guard_is_torn_down_with_its_session() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path();
+        let pids = repo.join("pids");
+        let budget = Duration::from_secs(60);
+        run_git(&["init", "-q", "."], Some(repo), budget).expect("git init");
+
+        let alias = format!(
+            "alias.leak=!sh -c 'sleep 300 & printf \"%d %d\\n\" \"$$\" \"$!\" \
+             > \"{p}.tmp\" && mv \"{p}.tmp\" \"{p}\"; exit 0'",
+            p = pids.display()
+        );
+        let err = run_git(&["-c", &alias, "leak"], Some(repo), budget)
+            .expect_err("the drain guard must fire on a helper holding the pipe");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("pipe is still open"),
+            "the run must end on the DRAIN guard for this to grade the drain-exit \
+             teardown: {message}"
+        );
+
+        let (_helper_shell, descendant) = recorded_pids(&pids);
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut descendant_state = process_liveness(descendant);
+        while descendant_state.is_live() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+            descendant_state = process_liveness(descendant);
+        }
+
+        reap_group(descendant);
+
+        assert_eq!(
+            descendant_state,
+            ProcessLiveness::Dead,
+            "the background worker ({descendant}) that held the pipe open survived the \
+             drain-grace exit. It is the same unreaped detached tree as the timeout \
+             path, reached through the drain guard instead of the wall clock \
+             (FerroxLabs/wayland-core#379)"
         );
     }
 }
