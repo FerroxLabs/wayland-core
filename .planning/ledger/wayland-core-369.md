@@ -4,28 +4,38 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "One unrecoverable AppContainer lease permanently disables the Windows sandbox, and it leaked a whole-home-directory package grant"
 status: open
-last_verified_commit: 9de21aa1
+last_verified_commit: 98b45ba8
 criteria:
   - id: c1
     text: "A lease that cannot be recovered is quarantined and reported, not retried forever at the cost of the whole backend"
     state: not-met
     owner: core
-    note: "Seeded 2026-08-29 by the 0.13.12 bookkeeping pass: this open issue had NO ledger file, so it was invisible to scripts/check-criteria-ledger.py's coverage check -- the check that exists because an entire tracker once went unseen for a release. The criterion text is the ticket's own acceptance wording. Nothing has been graded against the tree by this pass."
+    note: "NOT BEING MET HERE, BY A RECORDED DECISION -- 2026-08-30, lane w3-windows-honesty. .planning/DECISIONS.md Q-369-lease: quarantining an unrecoverable lease is surgery inside the AppContainer lease lifecycle, and AppContainer mechanism work is out of scope by the standing decision. GRADED AGAINST THE TREE, not taken from the ticket: recover_dead_leases_locked (acl_lease.rs) still propagates a per-lease failure straight out of its `for path in paths` loop -- `cleanup_locked(...)?` is the arm #369 hit, and `read_validated_lease(&path)?`, `owner_is_live(&lease)?` and the DeleteAppContainerProfile arm are three more of the SAME SHAPE, so a fix that only quarantines after N cleanup failures would leave three other ways for one file to wedge the whole backend. The shape is: no single lease may abort the pass. Recorded here so whoever takes it fixes the shape and not the instance. Stays not-met and owned by core."
   - id: c2
     text: "is_available() == false can say WHY without the caller having to provoke an execute()"
-    state: not-met
+    state: met
+    evidence: "symbol:crates/wcore-sandbox/src/backends/mod.rs::unavailable_reason"
     owner: core
-    note: "Seeded 2026-08-29 by the 0.13.12 bookkeeping pass: this open issue had NO ledger file, so it was invisible to scripts/check-criteria-ledger.py's coverage check -- the check that exists because an entire tracker once went unseen for a release. The criterion text is the ticket's own acceptance wording. Nothing has been graded against the tree by this pass."
+    note: "MET 2026-08-30, lane w3-windows-honesty. `SandboxBackend::unavailable_reason` is a new trait method, projected through `SandboxRegistry::unavailable_reason` into `wayland-core sandbox status` (human arm `UNAVAILABLE, and the backend knows why:`; `--json` arm `unavailable_reason`). The Windows AppContainer backend implements it by reading the slot `record_probe_outcome` ALREADY filled -- the cause was never missing, it was unreadable, reachable only through the text of an execute() the operator had to provoke, which is how this host stayed silently disabled from 2026-08-17. Deliberately a READ and not a probe: is_available() is a 15s guarded real spawn, and putting that behind a status read would be the #125 hang wearing a different hat; the slot is cleared on every success, so a recorded cause already means the last probe failed. The non-Windows stub answers a BUILD fact (`this binary was built for a non-Windows target`) so `available false` on a Mac is not misread as a verdict on the host. LIVE ON REAL WINDOWS (10.0.26200.9168, SeanDesktop, 2026-08-30): see the transcript in the lane report; `sandbox status` on the default backend prints the declared limitation block, and the AppContainer arm prints its recorded probe cause without any execute(). CONTRACT: `None` means available or never probed, never a placeholder -- an invented reason stops the operator looking, so `nothing_recorded_serialises_as_null_and_empty_not_as_reassurance` pins the null/empty serialisation."
   - id: c3
     text: "Whatever recorded \\?\C:/Users/<user> as a single allow intent is found and closed"
     state: not-met
     owner: core
-    note: "Seeded 2026-08-29 by the 0.13.12 bookkeeping pass: this open issue had NO ledger file, so it was invisible to scripts/check-criteria-ledger.py's coverage check -- the check that exists because an entire tracker once went unseen for a release. The criterion text is the ticket's own acceptance wording. Nothing has been graded against the tree by this pass."
+    note: "NOT TAKEN, and it is the criterion actually worth taking -- 2026-08-30, lane w3-windows-honesty. Finding what recorded `\\?\C:/Users/<user>` as ONE allow intent is a hunt through the intent-recording path, not an honesty fix, and it is the thing still PRODUCING the leak c4 is about; c4 declines to build a revocation tool precisely because revoking while the producer is open treats the symptom. Stays not-met, owned by core, and is the highest-value remaining item on this issue. Scope note for whoever takes it: the wedged lease held 4367 intents whose FIRST was the whole home directory, so the question is which caller passes a home-directory root into the allow path, not why the lease is large."
   - id: c4
     text: "A decision is recorded for the ACEs already leaked onto the home directory of any machine that hit this"
-    state: not-met
+    state: met
+    evidence: "file:.planning/DECISIONS.md:21:TELL THE OPERATOR WHERE TO LOOK; do not auto-revoke."
     owner: core
-    note: "Seeded 2026-08-29 by the 0.13.12 bookkeeping pass: this open issue had NO ledger file, so it was invisible to scripts/check-criteria-ledger.py's coverage check -- the check that exists because an entire tracker once went unseen for a release. The criterion text is the ticket's own acceptance wording. Nothing has been graded against the tree by this pass."
+    note: "MET 2026-08-30, lane w3-windows-honesty -- the criterion asks for a DECISION and the decision is recorded. .planning/DECISIONS.md Q-369c4: TELL THE OPERATOR WHERE TO LOOK; do not auto-revoke. Reasoning, recorded so it can be argued with rather than re-litigated: an unattended privileged sweep of `S-1-15-2-*` aces across a user home directory has the whole profile as its blast radius and was written for a defect measured exactly once, and the leaked ace grants a package SID whose profile no longer exists, so it is inert until an AppContainer with that same SID is recreated. What the product does instead is name the lease directory in the declared limitation so an operator can find the recorded intents themselves. This is a DECISION criterion, so `met` means the decision exists with its cost stated -- it does not mean the aces are gone, and the note says so rather than letting `met` imply it."
 ---
 
-Criteria are the ticket's own acceptance wording, transcribed so the release gate can count this work. Nothing has been done by the bookkeeping pass that created this file, and nothing here has been graded against the tree.
+GRADED 2026-08-30 by lane w3-windows-honesty. c2 and c4 are closed; c1 and c3
+are open by a recorded decision (.planning/DECISIONS.md Q-369-lease, Q-369c4)
+and stay owned by core so they count against the release.
+
+Do not read c2's closure as the wedge being fixed. It is not. What changed is
+that a wedged backend now SAYS why it is wedged on the surface an operator
+already reads, instead of hiding the cause inside an error only a provoked
+execute() can produce. Twelve silent days is the harm c2 removes; c1 is the
+harm itself and is untouched.
