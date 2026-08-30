@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# ADMISSION: caller-decides -- release-rehearsal.yml is manually dispatched
+# and is not a required status context; its steps are a sequence, and a
+# failure part-way through should stop the rehearsal rather than continue it.
+#
 # Rollback-rehearsal and state-separation drill (F29-04-03, SUPPLY-29-34).
 #
 # WHAT THIS CLOSES. Phase 29 built a four-state release ledger — packaging,

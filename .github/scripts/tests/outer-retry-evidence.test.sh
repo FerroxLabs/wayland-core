@@ -243,14 +243,29 @@ want_grep "the retry-flake grader is still invoked from the shared evidence gate
 # report job downloaded it, and `report` still concluded SUCCESS because this
 # step's `if:` named only `needs.ci`, which was `skipped` on that push.
 #
-# THE ASSERTION IS DELIBERATELY NOT "the condition also names ci-linux". That
-# is the enumerating form of this check and it is worth nothing: it passes for
-# any list of job names, including a list that omits the next producing leg
-# somebody adds. "Is this job name in the condition?" is a question over an
-# open set. "Does the condition name a job AT ALL?" is decidable and total, and
-# it is the property that makes the defect impossible -- a condition with no
-# `needs` reference cannot be switched off by a job's non-admission. The gate
-# decides from the evidence it downloaded, which is the only input it needs.
+# TWO FORMS OF THIS ASSERTION HAVE ALREADY BEEN REFUTED, AND BOTH FAILED THE
+# SAME WAY -- a NEGATIVE test over an OPEN alphabet:
+#
+#   v1  "the condition also names ci-linux" -- passes for any list of job
+#       names, including one that omits the next producing leg. Retracted.
+#   v2  "the condition contains no `needs` reference AT ALL" -- refuted by a
+#       verifier with two conditions that name no job and still switch the gate
+#       off: `${{ hashFiles('junit-reports/**/*.xml') != '' }}` goes inert
+#       precisely when there is no evidence, and `${{ success() }}` goes inert
+#       once any earlier step in the job has failed. `needs`-absence is
+#       NECESSARY, NEVER SUFFICIENT.
+#
+# v3 asks the POSITIVE, closed question instead: is the condition EXACTLY one
+# of {always(), !cancelled()}? That is decidable by string equality over a
+# two-element set, and those two are the only GitHub expressions that both
+# survive an earlier failed step and cannot be falsified by an upstream job.
+# Every other condition -- named, unnamed, or invented next year -- is rejected
+# without this test having to know what it is.
+#
+# The repository-wide form of this sweep, over every workflow and every gate
+# script, lives in report-gate-wiring.test.sh (it is what caught the SECOND
+# call site of the same gate, in e2e.yml). This arm stays here because it is
+# wayland#1177 c1's own anchor.
 #
 # This is a WIRING check and says so: it proves the condition cannot exclude
 # itself, not that the report check reds -- that is Part E's job, and a live
@@ -261,21 +276,65 @@ gate_condition() { # the `if:` of the evidence-gate step, up to its `env:`
        f {print}' "$CI"
 }
 GATE_COND=$(gate_condition)
-# ANTI-VACUITY, and it is not decoration: the assertion below is a grep for
-# ABSENCE, and an empty extraction satisfies it for free. If the step is
-# renamed or its shape changes, this arm reds instead of the absence arm
-# passing silently.
+# ANTI-VACUITY: if the step is renamed or its shape changes the extraction goes
+# empty, and an empty string is not in the allowlist either -- but this arm
+# names the real cause instead of letting the assertion below blame the
+# condition.
 if printf '%s' "$GATE_COND" | grep -q 'if:'; then
   ok "the evidence gate's condition can be located (anti-vacuity)"
 else
   bad "the evidence gate's condition can be located (anti-vacuity)"
   printf '       | extracted: [%s]\n' "$GATE_COND"
 fi
-if printf '%s' "$GATE_COND" | grep -q 'needs'; then
-  bad "the evidence gate's condition names no upstream job"
-  printf '       | %s\n' "$GATE_COND"
+
+# Normalise `        if: ${{ !cancelled() }}` down to `!cancelled()`: drop the
+# key, the expression wrapper and all whitespace, then compare for equality.
+admits_unconditionally() { # admits_unconditionally <raw `if:` line(s)>
+  local norm
+  norm=$(printf '%s' "$1" | tr -d '\n' | sed -e 's/^ *if: *//' \
+           -e 's/^\${{//' -e 's/}}$//' -e 's/[[:space:]]//g')
+  case "$norm" in
+    'always()'|'!cancelled()') return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+if admits_unconditionally "$GATE_COND"; then
+  ok "the evidence gate is admitted by a status-check function, nothing else"
 else
-  ok "the evidence gate's condition names no upstream job"
+  bad "the evidence gate is admitted by a status-check function, nothing else"
+  printf '       | %s\n' "$GATE_COND"
+fi
+
+# POLARITY, in the same run. An allowlist read backwards accepts everything and
+# reports a clean tree, which is indistinguishable from a correct one. These are
+# the verifier's own refuting mutations plus the two retracted forms: every one
+# of them must be REJECTED, and the two sanctioned forms must be ACCEPTED.
+polarity_fail=0
+while IFS= read -r cond; do
+  [ -z "$cond" ] && continue
+  if admits_unconditionally "        if: $cond"; then
+    polarity_fail=1
+    printf '       | wrongly accepted: %s\n' "$cond"
+  fi
+done <<'BADCONDS'
+${{ hashFiles('junit-reports/**/*.xml') != '' }}
+${{ success() }}
+${{ needs.ci.result != 'cancelled' }}
+${{ needs.ci.result != 'skipped' || needs['ci-linux'].result != 'skipped' }}
+${{ always() && needs.ci.result != 'skipped' }}
+${{ failure() }}
+BADCONDS
+if [ "$polarity_fail" -eq 0 ]; then
+  ok "the admission test rejects every condition that can go inert (polarity)"
+else
+  bad "the admission test rejects every condition that can go inert (polarity)"
+fi
+if admits_unconditionally "        if: \${{ always() }}" &&
+   admits_unconditionally "        if: !cancelled()"; then
+  ok "the admission test still accepts the two sanctioned forms (anti-vacuity)"
+else
+  bad "the admission test still accepts the two sanctioned forms (anti-vacuity)"
 fi
 
 # ── PART D — a setup failure must not masquerade as a test failure ─────────

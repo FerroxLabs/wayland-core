@@ -2686,6 +2686,22 @@ jobs:
     # `eval-gate-linux`, `build` and `all-features-check` were absent for the
     # same reason and are added with it.
     needs: [ci, ci-windows-hosted, ci-linux, eval-gate-linux, build, all-features-check]
+    #
+    # EVERY OTHER JOB IN THIS FILE MUST BE EITHER IN THAT LIST OR NAMED BELOW.
+    # `.github/scripts/tests/report-gate-wiring.test.sh` computes the job roster
+    # from this workflow and reds if any job is neither aggregated nor declared,
+    # so the next job somebody adds cannot go unaggregated in silence -- which
+    # is precisely how `ci-linux` sat outside `needs:` while `report` was
+    # required. A declaration is not an excuse; it is a recorded decision with a
+    # carrier.
+    #
+    #   not-aggregated: build-darwin-selfhosted -- it runs NO tests and uploads
+    #   no JUnit (see its own comment for the hermeticity limits that say why),
+    #   and it is gated to `push` on `lane/**`, so on `main` and on every PR --
+    #   the refs where `report` is a required context -- it does not run at all.
+    #   Aggregating it would make every lane push red whenever the personal
+    #   self-hosted Mac is offline, which is a maintainer decision and not this
+    #   lane's to take. Carrier: FerroxLabs/wayland-core#405.
     if: always()
     runs-on: ubuntu-latest
     # gh#1072. Pure aggregation — measures under a minute in every sampled
@@ -2717,26 +2733,24 @@ jobs:
       # `needs.ci.result != 'skipped'`, and `ci` is the leg most often skipped,
       # so on a rationed run the one assertion that would catch a hollow pass
       # skipped too and `report` asserted NOTHING.
+      # THE SET GRADED IS THE SET DEPENDED ON, BY CONSTRUCTION. This step used
+      # to hand-list all six dependencies beside the six in `needs:` above,
+      # with nothing keeping the two in sync: deleting one `check` line let the
+      # required check pass silently over that job, and every self-test on the
+      # branch stayed green. `${{ toJSON(needs) }}` is the whole `needs` object,
+      # so the enumeration is not corrected here -- it is gone, and cannot be
+      # reintroduced by adding a seventh dependency and forgetting a line.
+      #
+      # `!cancelled()` rather than no condition at all: a step with a plain (or
+      # absent) condition is skipped once any earlier step in the job has
+      # failed, which would make the aggregate assertion inert on exactly the
+      # runs it exists for. Enforced for every caller of an
+      # `ADMISSION: unconditional` script by report-gate-wiring.test.sh.
       - name: No dependency failed (a required check must grade what it aggregates)
-        run: |
-          set -euo pipefail
-          fail=0
-          check() {
-            case "$2" in
-              failure|cancelled)
-                echo "::error title=report::dependency '$1' concluded '$2' — the required check cannot pass over it."
-                fail=1 ;;
-              *) printf '  ok   %-22s %s\n' "$1" "$2" ;;
-            esac
-          }
-          check ci                 "${{ needs.ci.result }}"
-          check ci-windows-hosted  "${{ needs.ci-windows-hosted.result }}"
-          check ci-linux           "${{ needs.ci-linux.result }}"
-          check eval-gate-linux    "${{ needs.eval-gate-linux.result }}"
-          check build              "${{ needs.build.result }}"
-          check all-features-check "${{ needs.all-features-check.result }}"
-          [ "$fail" -eq 0 ] || exit 1
-          echo "OK: no dependency failed or was cancelled."
+        if: ${{ !cancelled() }}
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: bash .github/scripts/assert-no-dependency-failed.sh
 
       - uses: actions/checkout@v6
 
@@ -2862,20 +2876,51 @@ jobs:
       # timeout, and this step goes inert again with the evidence sitting in the
       # artifact it just downloaded -- the identical defect, one job name later.
       #
-      # THE PREDICATE IS INVERTED INSTEAD, so the class cannot recur. This step
-      # exists to answer ONE question -- "is there test evidence?" -- and that
-      # question is decidable and total from the artifact directory, which the
-      # previous step has already downloaded. It does not need to know which job
-      # produced it, and any condition that names a job is a way for the gate to
-      # be switched off by something other than the evidence. So the condition
-      # names NO job: the step runs whenever `report` itself is not cancelled,
-      # and assert-test-evidence.sh decides from what it finds. (The `env:`
-      # diagnostic below still names two jobs; that is deliberate and is
-      # explained there -- a message cannot make a gate inert.)
-      # `.github/scripts/tests/outer-retry-evidence.test.sh` asserts exactly
-      # that -- that the condition contains no `needs` reference at all -- with
-      # an anti-vacuity arm that fails if the condition cannot be located, since
-      # an empty extraction would satisfy a grep-for-absence for free.
+      # THE PREDICATE IS INVERTED INSTEAD. This step exists to answer ONE
+      # question -- "is there test evidence?" -- and that question is decidable
+      # and total from the artifact directory, which the previous step has
+      # already downloaded. It does not need to know which job produced it. So
+      # the condition names NO job: the step runs whenever `report` itself is
+      # not cancelled, and assert-test-evidence.sh decides from what it finds.
+      # (The `env:` diagnostic below still names two jobs; that is deliberate
+      # and is explained there -- a message cannot make a gate inert.)
+      #
+      # "NAMES NO JOB" IS NECESSARY AND NOT SUFFICIENT, AND SAYING OTHERWISE WAS
+      # THIS COMMENT'S OWN DEFECT. A verifier refuted the first version of the
+      # guard below -- which asserted only that the condition contained no
+      # `needs` reference -- with two conditions that name no job and still
+      # switch this step off:
+      #
+      #     if: ${{ hashFiles('junit-reports/**/*.xml') != '' }}
+      #         inert PRECISELY when there is no evidence, which is the case
+      #         this step exists to catch. It is also the literal idiom used by
+      #         `Publish test report` twelve lines below, so it is the form
+      #         somebody copies.
+      #     if: ${{ success() }}
+      #         inert once ANY earlier step in this job has failed -- which is
+      #         cause (b) measured on run 33312653107, where `No dependency
+      #         failed` failed and every later plain-expression step skipped.
+      #
+      # Both passed all 129 assertions on the branch. "Does the condition
+      # mention `needs`?" is a NEGATIVE test over an OPEN alphabet of switchable
+      # expressions; there is always another one.
+      #
+      # THE GUARD IS AN EXACT-MATCH ALLOWLIST INSTEAD: the condition must be
+      # EXACTLY one of {always(), !cancelled()}. That is decidable by string
+      # equality over a two-element set, and those two are the only GitHub
+      # expressions that BOTH survive an earlier failed step in the same job AND
+      # cannot be falsified by an upstream job's result. Anything else is
+      # rejected without the guard having to know what it is.
+      # `.github/scripts/tests/outer-retry-evidence.test.sh` asserts it for this
+      # step, with an anti-vacuity arm that fails if the condition cannot be
+      # located and a polarity arm that feeds it the refuting conditions above
+      # and requires each to be REJECTED -- an allowlist read backwards accepts
+      # everything and reports a clean tree.
+      # `.github/scripts/tests/report-gate-wiring.test.sh` runs the same rule as
+      # a SWEEP over every workflow and every script declaring `ADMISSION:
+      # unconditional`, which is what caught the SECOND caller of this same gate
+      # (e2e.yml's `Assert E2E evidence exists`, still carrying
+      # `needs.e2e.result != 'cancelled'` after this one was fixed).
       #
       # ONE BEHAVIOUR CHANGE, STATED RATHER THAN SMUGGLED: previously a
       # `cancelled` upstream leg suppressed this gate. Now it does not -- a
@@ -2892,13 +2937,17 @@ jobs:
           # into the failure annotation, not the admission gate, and a message
           # cannot switch a gate off -- so an enumeration here is a stale
           # sentence at worst, where an enumeration in the `if:` above was an
-          # inert gate. A `toJSON(needs)` form was tried and reverted: it forces
-          # this step's `run:` to become a multi-line block, and
-          # `.github/scripts/tests/failing-set.test.sh` asserts ci.yml contains
+          # inert gate. A `toJSON(needs)` form was tried and reverted (commit
+          # 925ded18d): it forces this step's `run:` to become a multi-line
+          # block, and `report-gate-wiring.test.sh:54` asserts ci.yml contains
           # the literal `run: bash .github/scripts/assert-test-evidence.sh` --
           # a guard that the report job really does invoke the shared gate.
           # That guard is worth more than a self-maintaining diagnostic, and it
-          # caught this on the first push rather than on a merge.
+          # caught this on the first push rather than on a merge. (An earlier
+          # revision of this comment credited failing-set.test.sh for that
+          # assertion; it is not there and never was. The aggregate gate above
+          # DOES take `toJSON(needs)`, because its `run:` is a script path and
+          # so has no such constraint.)
           UPSTREAM_RESULT: ci=${{ needs.ci.result }} ci-linux=${{ needs['ci-linux'].result }}
           HINT: >-
             A leg that dies before its test step (for example at the Clippy

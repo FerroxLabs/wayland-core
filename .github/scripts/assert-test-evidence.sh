@@ -1,4 +1,12 @@
 #!/usr/bin/env bash
+# ADMISSION: unconditional -- every workflow step that runs this script must
+# be admitted by a status-check function (`always()` / `!cancelled()`). This
+# gate answers ONE question, "is there test evidence?", which is decidable
+# from the artifact directory alone; any other condition is a way for it to
+# be switched off by something that is not the evidence. It switched ITSELF
+# off on run 33303418632 with the evidence already downloaded (wayland#1177
+# c1). Enforced by .github/scripts/tests/report-gate-wiring.test.sh.
+#
 # A TEST SUITE THAT NEVER RAN MUST NOT BE REPORTABLE AS ANYTHING BUT A FAILURE.
 #
 # Both aggregate "report" jobs (ci.yml and e2e.yml) publish a JUnit summary and

@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# ADMISSION: caller-decides -- the tracker job's own admission is graded
+# separately and more strongly by soak-tracker-truth.test.sh PART B/C, which
+# requires it to `needs:` every scheduled job and then RUNS the job.
+#
 # WHOLE-RUN TRUTH FOR THE NIGHTLY WINDOWS SOAK TRACKER. FerroxLabs/wayland-core#325.
 #
 # ── THE DEFECT THIS CLOSES ─────────────────────────────────────────────────
