@@ -71,6 +71,19 @@ fn wedge(name: &str, nonce: &str) {
     );
 }
 
+/// A container name no other process on this host can be using.
+///
+/// The `wedge365-` names below stay DETERMINISTIC on purpose: those tests are
+/// about a leftover holding the exact name the backend is about to derive, and
+/// a random name would delete the property under test. The orphan-scan names
+/// are arbitrary labels matched only as strings, and on a build host where
+/// several lanes run this suite at once the leading `docker rm -f` in `wedge()`
+/// lets one lane remove another's plant mid-assertion. Per-process names remove
+/// that without touching what any test measures.
+fn unique(stem: &str) -> String {
+    format!("wayland-f25-{stem}-{}", std::process::id())
+}
+
 fn remove(name: &str) {
     let _ = docker(&["rm", "-f", name]);
 }
@@ -420,7 +433,8 @@ async fn the_unscoped_scan_finds_a_leftover_from_a_run_this_process_never_made()
         println!("UNEXERCISED — no docker daemon on this host");
         return;
     }
-    let name = "wayland-f25-wedge366-unscoped";
+    let name = unique("wedge366-unscoped");
+    let name = name.as_str();
     // A nonce this process cannot be holding: `temp_state()` gave it an empty
     // registry, so nothing here has ever recorded a task at all.
     let stranger = "wedge366-nonce-from-a-run-this-process-never-made";
@@ -496,7 +510,8 @@ async fn a_container_this_process_still_holds_is_not_reported_as_a_leftover() {
         println!("UNEXERCISED — no docker daemon on this host");
         return;
     }
-    let name = "wayland-f25-wedge366-live";
+    let name = unique("wedge366-live");
+    let name = name.as_str();
     let held = "wedge366-nonce-this-process-holds";
     remove(name);
     wedge(name, held);
@@ -561,7 +576,8 @@ async fn the_operator_chain_finds_the_leftover_end_to_end() {
         println!("UNEXERCISED \u{2014} no docker daemon on this host");
         return;
     }
-    let name = "wayland-f25-wedge366-chain";
+    let name = unique("wedge366-chain");
+    let name = name.as_str();
     let stranger = "wedge366-chain-nonce-from-a-run-this-process-never-made";
     remove(name);
     wedge(name, stranger);
