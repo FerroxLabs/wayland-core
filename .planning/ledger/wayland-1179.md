@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "Absolute context buffers saturate to zero on a small served window, so a learned window cannot be used to compact"
 status: open
-last_verified_commit: f96d1933
+last_verified_commit: 6e539c41
 criteria:
   - id: c1
     text: "input_ceiling() returns a positive value on a small learned or configured window instead of saturating to zero"

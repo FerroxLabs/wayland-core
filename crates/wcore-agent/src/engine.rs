@@ -8729,9 +8729,9 @@ impl AgentEngine {
     /// `UNVERIFIED_CONTEXT_WINDOW` is a declared fallback rather than a fact.
     ///
     /// When such a window is below [`CompactConfig::minimum_workable_window`]
-    /// there is no compaction path to hand it. Core's own baseline turn - the
-    /// system prompt plus the tool schemas, before the user has typed anything
-    /// - already exceeds the input ceiling, and compaction shrinks the
+    /// there is no compaction path to hand it. Core's own baseline turn (the
+    /// system prompt plus the tool schemas, before the user has typed
+    /// anything) already exceeds the input ceiling, and compaction shrinks the
     /// conversation, not the system prompt or the tool schemas. That left two
     /// options, and #1172 c3 named the one that is not allowed: sizing the
     /// session against a window the endpoint has been observed NOT to serve is
@@ -29874,20 +29874,35 @@ mod audit_2026_05_22_tests {
         let mut engine = engine_with(provider);
         engine.compact_config.smart_enabled = true;
 
-        let mut unworkable = 0usize;
-        let mut workable_reached_the_triggers = 0usize;
-        for window in 1_024usize..=16_384 {
-            engine.compact_config.context_window = Some(window);
-            engine.compact_state.last_real_input_tokens = BASELINE;
+        // ONE pressure point through BOTH engine triggers, with every
+        // anti-thrash latch reset first, so a previous probe's fire cannot be
+        // what silences this one.
+        fn probe(engine: &mut crate::engine::AgentEngine, tokens: u64) -> (bool, bool) {
+            engine.compact_state.last_real_input_tokens = tokens;
             engine.smart_compact_armed = true;
             engine.smart_compact_exhausted = false;
             engine.smart_compact_last_turn = None;
+            let static_fires = engine.should_autocompact_now(tokens);
+            let smart_fires = match engine.smart_compact_fraction() {
+                Some(f) => engine.smart_compact_should_fire(1, f),
+                None => false,
+            };
+            (static_fires, smart_fires)
+        }
 
+        let mut unworkable = 0usize;
+        let mut workable = 0usize;
+        let mut overloaded_fired_static = 0usize;
+        let mut overloaded_fired_smart = 0usize;
+
+        for window in 1_024usize..=16_384 {
+            engine.compact_config.context_window = Some(window);
             let too_small = !engine.compact_config.supports_compaction(window);
+
             if too_small {
                 unworkable += 1;
                 // The turn loop refuses at its top, BEFORE either trigger is
-                // consulted — `an_unworkable_window_stops_the_run_and_the_
+                // consulted - `an_unworkable_window_stops_the_run_and_the_
                 // refusal_reaches_the_user` is what proves that stop is wired.
                 assert!(
                     engine.unworkable_window_refusal().is_some(),
@@ -29895,57 +29910,83 @@ mod audit_2026_05_22_tests {
                      the run would continue into the triggers"
                 );
             } else {
-                workable_reached_the_triggers += 1;
+                workable += 1;
                 assert!(
                     engine.unworkable_window_refusal().is_none(),
                     "window {window}: workable, but refused"
                 );
             }
 
-            // Belt and braces: even if the refusal were bypassed, neither
-            // trigger may fire on core's own baseline turn at ANY window in
-            // the band.
-            assert!(
-                !engine.should_autocompact_now(BASELINE),
-                "window {window}: the static autocompact trigger fired on core's \
-                 own {BASELINE}-token baseline turn, before the user typed anything"
-            );
-            let frac = engine.smart_compact_fraction();
-            let fired = match frac {
-                Some(f) => engine.smart_compact_should_fire(1, f),
-                None => false,
-            };
-            assert!(
-                !fired,
-                "window {window}: the #280 smart trigger fired on core's own \
-                 {BASELINE}-token baseline turn (fraction {frac:?})"
-            );
+            // The criterion's word is NEVER, not "not on the baseline turn".
+            // An unworkable window is unworkable at EVERY pressure, so sweep
+            // it: empty, core's own baseline turn, a full window, and four
+            // times the window. A gate written as "this fraction is absurd"
+            // rather than "this window is unworkable" passes at BASELINE and
+            // fails at 4x.
+            let overloaded = (window as u64).saturating_mul(4);
+            for tokens in [0, BASELINE, window as u64, overloaded] {
+                let (static_fires, smart_fires) = probe(&mut engine, tokens);
+                if too_small {
+                    assert!(
+                        !static_fires,
+                        "window {window}: the static autocompact trigger fired \
+                         at {tokens} tokens in a window core refuses as too \
+                         small to compact in"
+                    );
+                    assert!(
+                        !smart_fires,
+                        "window {window}: the #280 smart trigger fired at \
+                         {tokens} tokens in a window core refuses as too small \
+                         to compact in"
+                    );
+                } else if tokens <= BASELINE {
+                    assert!(
+                        !static_fires,
+                        "window {window}: the static autocompact trigger fired \
+                         on core's own {BASELINE}-token baseline turn, before \
+                         the user typed anything"
+                    );
+                    assert!(
+                        !smart_fires,
+                        "window {window}: the #280 smart trigger fired on \
+                         core's own {BASELINE}-token baseline turn, before the \
+                         user typed anything"
+                    );
+                } else if tokens == overloaded {
+                    overloaded_fired_static += usize::from(static_fires);
+                    overloaded_fired_smart += usize::from(smart_fires);
+                }
+            }
         }
 
         assert!(
-            unworkable > 0 && workable_reached_the_triggers > 0,
+            unworkable > 0 && workable > 0,
             "control: the band must contain BOTH refused and workable windows, \
              or one of the two arms above is vacuous (unworkable={unworkable}, \
-             workable={workable_reached_the_triggers})"
+             workable={workable})"
         );
-        // Control that the #280 trigger CAN fire at all through this fixture,
-        // so its silence above is the baseline turn being small, not the
-        // trigger being wedged off.
-        engine.compact_config.context_window = Some(16_384);
-        engine.compact_state.last_real_input_tokens = 12_000;
-        engine.smart_compact_armed = true;
-        engine.smart_compact_last_turn = None;
-        let frac = engine.smart_compact_fraction().expect("fraction");
-        assert!(
-            engine.smart_compact_should_fire(1, frac),
-            "control: the #280 trigger must fire under real pressure ({frac}), \
-             else every assertion above is vacuous"
+        // VACUITY CONTROL, one per trigger. The silence above has to be the
+        // window being unworkable / the turn being small - not either trigger
+        // being wedged off through this fixture. At 4x the window a WORKABLE
+        // window must fire both, at every single window in the band.
+        assert_eq!(
+            overloaded_fired_static, workable,
+            "control: the static trigger must fire at 4x a WORKABLE window \
+             (fired {overloaded_fired_static} of {workable}), else every \
+             negative above is vacuous"
+        );
+        assert_eq!(
+            overloaded_fired_smart, workable,
+            "control: the #280 trigger must fire at 4x a WORKABLE window \
+             (fired {overloaded_fired_smart} of {workable}), else every \
+             negative above is vacuous"
         );
     }
 
-    /// CONTROL for the test above: with a workable window the same fixture
-    /// runs normally. Without this, an engine that refused EVERY run would
-    /// pass the wiring test above.
+    /// CONTROL for
+    /// `an_unworkable_window_stops_the_run_and_the_refusal_reaches_the_user`:
+    /// with a workable window the same fixture runs normally. Without this, an
+    /// engine that refused EVERY run would pass that wiring test.
     #[tokio::test]
     async fn a_workable_window_is_not_refused_and_the_run_proceeds() {
         let provider = Arc::new(ScriptedProvider::new(vec![vec![
