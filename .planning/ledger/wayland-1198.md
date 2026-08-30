@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "check-criteria-ledger.py cannot detect drift in a file:<path>:<line> anchor, which is the drift it exists to catch"
 status: open
-last_verified_commit: PLACEHOLDER
+last_verified_commit: 6b4b7f89
 criteria:
   - id: c1
     text: "A file: anchor carries a required content fragment that must be present at or near the named line, or bare line anchors are refused on files above a stated size"
@@ -17,7 +17,7 @@ criteria:
     state: met
     evidence: "absent:.planning/ledger/wayland-1134.md::.github/workflows/ci.yml:18"
     owner: core
-    note: "The two wrong anchors were ci.yml:1806 and ci.yml:1888; both start `ci.yml:18` and neither replacement does, so this ONE token goes red if either comes back, which is what makes it the single evidence for a criterion about two anchors. What it proves is the removal; what proves the replacements RESOLVE is the gate itself, which now refuses a bare line and refuses a fragment that is missing, duplicated or out of window. Re-anchored to: c1 -> ci.yml:2041, the LIB leg's floor branch (`Executed $total tests, expected at least $MIN`), which is the `floored so it cannot pass while scanning nothing` half a step-name anchor would not prove; c2 -> ci.yml:2116, `done < <(python3 scripts/check-test-env-globals.py --shared-process-targets)`, where `over the targets that touch process globals` is actually decided. VERIFIED AGAINST THE OLD ANCHORS: 1806 was a bare `#` in the retry-evidence comment ~230 lines above the lib step, and 1888 was inside the swarm delegated-dispatch filterset -- a different step, and the wrong one of the two legs c2 distinguishes, exactly as the issue states."
+    note: "The two wrong anchors were ci.yml:1806 and ci.yml:1888; both start `ci.yml:18` and neither replacement does, so this ONE token goes red if either comes back, which is what makes it the single evidence for a criterion about two anchors. What it proves is the removal; what proves the replacements RESOLVE is the gate itself, which now refuses a bare line and refuses a fragment that is missing, duplicated or out of window. Re-anchored to: c1 -> ci.yml:2041, the LIB leg's floor branch (`Executed $total tests, expected at least $MIN`), which is the `floored so it cannot pass while scanning nothing` half a step-name anchor would not prove; c2 -> ci.yml:2116, `done < <(python3 scripts/check-test-env-globals.py --shared-process-targets)`, where `over the targets that touch process globals` is actually decided. VERIFIED AGAINST THE OLD ANCHORS: 1806 was a bare `#` in the retry-evidence comment ~230 lines above the lib step, and 1888 was inside the swarm delegated-dispatch filterset -- a different step, and the wrong one of the two legs c2 distinguishes, exactly as the issue states. ONE FRAGILITY, stated rather than left to be found: this token is a text absence over this file, so spelling either OLD anchor out in full -- the workflow path followed by 1806 or 1888 -- anywhere in this entry would red it. The re-anchor notes above use the short ci.yml:NNNN form for exactly that reason, and a later editor must keep doing so."
   - id: c3
     text: "--self-test proves both directions: an anchor whose content moved goes red, and a correct anchor stays green"
     state: met
