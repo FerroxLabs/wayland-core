@@ -2040,7 +2040,14 @@ impl<F: VirtualFs> SecretDenyFs<F> {
         // the same bytes by `WorkspacePolicy::secret_deny_paths_dynamic`. This
         // call site is the whole of the in-process wiring: remove it and the
         // predicate still answers correctly and still denies nothing.
-        if self.policy.is_project_secret(path) || self.policy.is_vcs_content_store(path) {
+        //
+        // core#375 / core#376: the conjunction itself lives on the policy as
+        // `denies_read_content`, not here. `GrepTool` has to refuse the same
+        // bytes and reaches them through neither this wrapper nor the OS
+        // sandbox, so the question had to be askable in one call — and asking
+        // it in one call also resolves the path ONCE instead of once per
+        // predicate.
+        if self.policy.denies_read_content(path) {
             return Err(VfsError::SecretDenied {
                 path: path.to_path_buf(),
             });

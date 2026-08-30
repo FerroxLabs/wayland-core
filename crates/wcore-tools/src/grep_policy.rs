@@ -29,23 +29,38 @@
 //!    `workspace_policy::is_secret_path_static` — the same list `Read`,
 //!    `SecretDenyFs` and the OS sandbox already use — not a second, divergent
 //!    one.
-//! 4. **Surviving match content is scrubbed** with `wcore_safety::PIIScrubber`.
+//! 4. **A path the VFS read-deny refuses is pruned from the traversal**, for
+//!    the same reason and by the SAME predicate —
+//!    [`WorkspacePolicy::denies_read_content`]. FerroxLabs/wayland-core#375:
+//!    rule 3's name list matches secret-shaped FILES, and a VCS content store
+//!    is named after neither a secret nor its own contents, so naming the
+//!    store's CONTROL directory as the search path (`Grep(path=".git")`,
+//!    `Grep(path=".svn")`) walked straight into `.git/lfs/objects/**` and
+//!    `.svn/pristine/**` — which, unlike git's zlib-compressed loose objects,
+//!    hold committed file content VERBATIM. Grep spawns its backend outside
+//!    both the VFS and the OS sandbox, so neither layer was standing there.
+//!    Asking the policy rather than adding a second name list here is the whole
+//!    point: a store reached under any parent name, at any depth, through a
+//!    gitfile or an `alternates` borrow, is covered because the VFS deny covers
+//!    it.
+//! 5. **Surviving match content is scrubbed** with `wcore_safety::PIIScrubber`.
 //!    This is not belt-and-braces: the engine's central `redact_tool_output`
 //!    ALREADY runs that scrubber over every tool result, but its
 //!    `SECRET_ASSIGNMENT` rule is `(?im)^\s*`-anchored and Grep prefixes each
 //!    hit with `path:lineno:`, which pushes the assignment off the start of the
 //!    line and makes the rule unmatchable. Scrubbing the content field alone,
 //!    with the prefix removed, is what restores it.
-//! 5. **Withholding is reported, never silent.** A search whose every hit was
+//! 6. **Withholding is reported, never silent.** A search whose every hit was
 //!    withheld must not render as "No matches found" — "could not show you" and
 //!    "there was nothing" are different answers and the model acts on them
 //!    differently.
 
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::path_validation::lex_normalize;
-use crate::workspace_policy::is_secret_path_static;
+use crate::workspace_policy::{WorkspacePolicy, is_secret_path_static};
 
 /// Cap on the number of withheld filenames named in the footer. A name is not
 /// a secret — the model needs to know WHICH file it cannot see — but an
@@ -126,7 +141,11 @@ impl Filtered {
 ///
 /// `resolved` is the already-validated, absolute, lexically normalized search
 /// target produced by `validate_search_root`.
-pub(crate) fn scope_for(resolved: &Path) -> GrepScope {
+///
+/// `policy` is this session's workspace policy when it has one (`None` for the
+/// unconfined top-level `Tool::execute` entry point, which installs no
+/// `SecretDenyFs` either, so the two layers still agree).
+pub(crate) fn scope_for(resolved: &Path, policy: Option<Arc<WorkspacePolicy>>) -> GrepScope {
     if !resolved.is_dir() {
         return GrepScope::File(lex_normalize(resolved));
     }
@@ -148,6 +167,22 @@ pub(crate) fn scope_for(resolved: &Path) -> GrepScope {
         .standard_filters(true)
         .require_git(false)
         .follow_links(false)
+        // Rule 4 (#375). Pruned at the DIRECTORY level: everything inside a
+        // content store is denied, so cutting the subtree is the same answer as
+        // asking per file at O(directories) instead of O(files) — and the
+        // per-file ask would be a canonicalization of every file in the tree.
+        // A file can only be inside a store by being under the store
+        // directory, so nothing escapes the coarser cut. Symlinks are not
+        // followed here, and a symlink entry is not `is_file()`, so it never
+        // reaches `allowed` either way.
+        .filter_entry(move |entry| {
+            if !entry.file_type().is_some_and(|kind| kind.is_dir()) {
+                return true;
+            }
+            policy
+                .as_ref()
+                .is_none_or(|policy| !policy.denies_read_content(entry.path()))
+        })
         .build()
         .flatten()
     {
@@ -209,7 +244,7 @@ impl GrepScope {
                 }
                 continue;
             }
-            // Rule 4: scrub the CONTENT only. The `path:lineno:` prefix is what
+            // Rule 5: scrub the CONTENT only. The `path:lineno:` prefix is what
             // defeats the line-anchored credential rules, so it must not be
             // part of the string handed to the scrubber.
             let (prefix, content) = line.split_at(content_start);
