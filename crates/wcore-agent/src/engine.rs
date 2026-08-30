@@ -29743,6 +29743,129 @@ mod audit_2026_05_22_tests {
         );
     }
 
+    // --- #1172 c3 / #1179: the refusal is WIRED, not merely constructed ----
+
+    /// #1172 c3 — the criterion is "so the truncation stops", and stopping is
+    /// the TURN LOOP's job, not `unworkable_window_refusal`'s.
+    ///
+    /// The round-2 verifier objection this test exists for: every other test
+    /// on this path asserts `unworkable_window_refusal().is_some()`, which
+    /// grades a function returning a string. Deleting the one production call
+    /// site (the `if let Some(refusal)` block at the turn-loop top) left the
+    /// whole 9,226-test suite byte-identically green — a future edit could
+    /// remove the compensation silently. This drives `run()` end to end and
+    /// fails if that call site goes away.
+    ///
+    /// Three things are asserted, and each one is a different way for the
+    /// wiring to be missing:
+    ///   1. the run STOPS — `FinishReason::Length`, not a normal turn;
+    ///   2. the provider is NEVER called — no truncated prompt is sent, which
+    ///      is the data loss #1172 c3 is about;
+    ///   3. the refusal TEXT reaches the user, via the same error surface the
+    ///      host reads, naming the remedy and the figure to reach.
+    #[tokio::test]
+    async fn an_unworkable_window_stops_the_run_and_the_refusal_reaches_the_user() {
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![
+            LlmEvent::TextDelta("this must never be produced".into()),
+            done_endturn(),
+        ]]));
+        let counter = provider.call_counter();
+        let mut engine = engine_with(provider);
+
+        // An operator-STATED window core cannot work in. 6,000 is the band
+        // #1179 measured: threshold 2,700 against a 3,118-token baseline turn.
+        engine.compact_config.context_window = Some(6_000);
+        assert!(
+            !engine.compact_config.supports_compaction(6_000),
+            "fixture guard: 6000 must be an unworkable window, or this test \
+             proves nothing"
+        );
+
+        let tap: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+        engine.set_error_tap(Arc::clone(&tap));
+
+        let result = engine
+            .run("summarise this repository", "m-unworkable")
+            .await
+            .expect("an unworkable window is a clean stop, not an engine error");
+
+        assert_eq!(
+            result.finish_reason,
+            FinishReason::Length,
+            "the run must TERMINATE on the unworkable window; got {result:?}"
+        );
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "core must not send a prompt the endpoint would silently truncate \
+             - that is the data loss #1172 c3 names"
+        );
+
+        let emitted = tap.lock().expect("error tap").clone();
+        let emitted = emitted.expect(
+            "the refusal must reach the user's error surface; nothing was \
+             emitted, so the run stopped without saying why",
+        );
+        assert!(
+            emitted.starts_with("Run stopped:"),
+            "the refusal, not some other error, must be what stops the run: {emitted:?}"
+        );
+        assert!(
+            emitted.contains("[compact] context_window"),
+            "the configured-source remedy must name the setting the operator \
+             actually set: {emitted:?}"
+        );
+        assert!(
+            !emitted.contains("num_ctx"),
+            "a CONFIGURED window must not be blamed on the server's num_ctx: {emitted:?}"
+        );
+        let minimum = engine.compact_config.minimum_workable_window();
+        assert!(
+            emitted.contains(&minimum.to_string()),
+            "the refusal must name the figure to reach ({minimum}): {emitted:?}"
+        );
+        // The message is read by a human. No run of stray whitespace in it.
+        assert!(
+            !emitted.contains("  "),
+            "the operator-facing refusal must not carry a run of spaces from a \
+             wrapped string literal: {emitted:?}"
+        );
+    }
+
+    /// CONTROL for the test above: with a workable window the same fixture
+    /// runs normally. Without this, an engine that refused EVERY run would
+    /// pass the wiring test above.
+    #[tokio::test]
+    async fn a_workable_window_is_not_refused_and_the_run_proceeds() {
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![
+            LlmEvent::TextDelta("hello".into()),
+            done_endturn(),
+        ]]));
+        let counter = provider.call_counter();
+        let mut engine = engine_with(provider);
+        engine.compact_config.context_window = Some(200_000);
+        assert!(engine.compact_config.supports_compaction(200_000));
+
+        let tap: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+        engine.set_error_tap(Arc::clone(&tap));
+
+        let result = engine
+            .run("say hello", "m-workable")
+            .await
+            .expect("clean run");
+        assert_eq!(result.text, "hello");
+        assert_ne!(
+            result.finish_reason,
+            FinishReason::Length,
+            "a workable window must not be refused"
+        );
+        assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(
+            tap.lock().expect("error tap").is_none(),
+            "no refusal may be emitted on a workable window"
+        );
+    }
+
     // --- A2 / B1: cancellation token plumbing -----------------------------
 
     #[tokio::test]
