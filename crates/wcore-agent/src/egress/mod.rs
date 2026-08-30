@@ -13,7 +13,7 @@ mod evidence;
 pub mod install;
 pub mod policy;
 
-pub use bridge_doorbell::BridgeConsentDoorbell;
+pub use bridge_doorbell::{BridgeConsentDoorbell, install_consent_doorbell};
 pub use classify::{AllowList, EgressVerdict, classify};
 pub use consent::{ConsentDecision, ConsentDoorbell};
 pub use defaults::build_allowlist;

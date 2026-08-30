@@ -563,6 +563,13 @@ impl OutputSink for ChannelSink {
         });
     }
 
+    /// wayland#1219: the TUI renders every `ApprovalRequired` it is sent
+    /// (`emit_approval_required` below is unconditional), so a blocking
+    /// approval caller has a real human on the other end here.
+    fn approval_surface_available(&self) -> bool {
+        true
+    }
+
     fn emit_approval_required(
         &self,
         call_id: &str,

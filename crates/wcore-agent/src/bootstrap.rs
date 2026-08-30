@@ -3034,12 +3034,19 @@ impl AgentBootstrap {
         // F09: attach the consent doorbell only to this session's policy. A
         // later ACP/Desktop session therefore cannot repoint an earlier
         // session's approval bridge.
+        //
+        // wayland#1219: install through the guard, which refuses to wire a
+        // BLOCKING consent prompt onto a sink that cannot render one. The
+        // guard's refusal is the fix for the `--json-stream` five-minute
+        // stall; the `with_hitl_suspend(true)` on that sink
+        // (`wcore_cli::json_stream_sink`) is what keeps the guard from
+        // refusing there.
         if let Some(policy) = self.session_egress_policy.as_ref() {
-            let doorbell = std::sync::Arc::new(crate::egress::BridgeConsentDoorbell::new(
+            crate::egress::install_consent_doorbell(
+                policy,
                 approval_bridge.clone(),
                 self.output.clone(),
-            ));
-            policy.set_doorbell(doorbell);
+            );
         }
 
         if self.config.builtin_tools.script.enabled {

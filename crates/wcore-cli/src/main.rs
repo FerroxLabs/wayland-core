@@ -34,7 +34,6 @@ use wcore_agent::mcp_lifecycle::{
     McpReservationOutcome,
 };
 use wcore_agent::output::OutputSink;
-use wcore_agent::output::protocol_sink::ProtocolSink;
 use wcore_agent::output::terminal::TerminalSink;
 use wcore_agent::session;
 use wcore_agent::slash::{Dispatcher as SlashDispatcher, SlashError, SlashOutcome};
@@ -5199,20 +5198,11 @@ async fn run_json_stream_mode(
     // W1 Task 10: opt-in trace_event emission via [observability]
     // structured_traces. Default off so hosts that haven't learned about
     // the variant remain undisturbed (W0 host decoder contract).
-    let protocol_sink = Arc::new(
-        ProtocolSink::new(writer.clone())
-            .with_structured_traces(config.observability.structured_traces)
-            .with_advertised_capabilities(advertised_for_sink)
-            // v0.9.4 W1.2 (F2): enable sub-agent event relay to the Desktop
-            // host. Harmless when no sub-agents spawn (no-op emission path).
-            .with_sub_agent_traces(true)
-            // The host reads the first stdout line as the handshake, so
-            // `ready` must be the first frame on every platform. Bootstrap
-            // emits diagnostics before `ready` exists (on Windows the
-            // `windows_job_object` local-shell notice does so on EVERY
-            // session); hold them until the handshake is out.
-            .deferring_info_until_ready(),
-    );
+    let protocol_sink = Arc::new(wcore_cli::json_stream_sink::build_json_stream_sink(
+        writer.clone(),
+        config.observability.structured_traces,
+        advertised_for_sink,
+    ));
     let approval_manager = Arc::new(ToolApprovalManager::new());
     // GHSA-8r7g: a protocol peer may escalate to Force only when this local
     // operator opted in at launch (--force or WAYLAND_ALLOW_WIRE_FORCE).
