@@ -49,7 +49,7 @@ fn every_failure_category_round_trips_through_the_error_frame() {
             "{wire} must decode back to the variant that wrote it"
         );
         assert_eq!(decoded.code, "engine_error");
-        assert_eq!(decoded.retryable, false);
+        assert!(!decoded.retryable);
         seen.push(wire);
     }
     seen.sort();

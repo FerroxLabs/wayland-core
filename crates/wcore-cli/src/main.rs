@@ -3715,6 +3715,8 @@ mod runtime_mcp_managers {
             self.live.push(manager);
         }
 
+        /// Test-only: production reads emptiness, not a count.
+        #[cfg(test)]
         pub(crate) fn len(&self) -> usize {
             self.live.len()
         }
