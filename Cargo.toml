@@ -233,7 +233,7 @@ reqwest = { version = "0.12", features = ["json", "stream", "multipart", "rustls
 serde      = { version = "1", features = ["derive"] }
 # `raw_value` lets the session journal hash the checksum material exactly as it
 # was written rather than a re-encoding of the decoded value — 23B-H1.
-serde_json = { version = "1", features = ["raw_value"] }
+serde_json = { version = "1", features = ["raw_value", "float_roundtrip"] }
 # #326: surface unknown / mis-sectioned config keys as warnings (rather
 # than silently dropping them) without the breaking-change risk of
 # `deny_unknown_fields`.
