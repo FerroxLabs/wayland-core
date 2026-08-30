@@ -74,6 +74,7 @@ HIGH kills a run mid-flight, too LOW only compacts early.
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import os
 import re
@@ -163,6 +164,74 @@ PASSTHROUGH_IN_SCOPE = {
     ),
     "deepseek": re.compile(r"^deepseek-v(?:[4-9]|\d\d)"),
     "minimax": re.compile(r"^minimax-m(?:[2-9]|\d\d)"),
+}
+
+# AGENTS.md's THIRD preserved rule: "Do not add a static arm for an
+# open-weights model served at wildly different limits by different hosts."
+#
+# Two of the six passthrough families publish their weights, so the same id is
+# also served by hosts that are not the vendor and that size it however they
+# like. The other four are vendor-only: nobody but Anthropic serves
+# `claude-opus-5`, so its arm cannot be wrong for somebody else's endpoint.
+#
+# This set is what stops the REPORT arm below from automating new violations.
+# `PASSTHROUGH_IN_SCOPE` is a set of FLOORS -- "this generation and everything
+# above it" -- so without this, the first `minimax-m4` or `deepseek-v5` to
+# appear on models.dev reddens the release with the instruction "Add the arm if
+# it has none, then add the row", which is precisely the arm the rule forbids.
+PASSTHROUGH_OPEN_WEIGHTS = {"deepseek", "minimax"}
+
+# What "wildly different" means, stated as a number so the gate can apply it.
+# MEASURED on the 2026-08-28 pull: `minimax-m2.5` runs 65,536 -> 228,700 across
+# 46 host rows (3.5x) and `deepseek-v4-pro` runs 128,000 -> 1,050,000 across 74
+# rows (8.2x), while a vendor-only id like `claude-opus-5` agrees to the digit
+# across every endpoint that serves it. 2.0 sits well clear of the 196,608 vs
+# 204,800 kind of noise and well below both real cases.
+HOST_SPREAD_RATIO = 2.0
+
+# Rule 3 applied to the arms that ALREADY EXIST.
+#
+# The REPORT arm in `scan_passthrough` stops the gate DEMANDING a forbidden
+# arm. It runs only for an id with no row, so it can never stop one being
+# ADDED: an open-weights id that already has a row was not spread-checked at
+# all, and a verifier broke the first version of this criterion on exactly
+# that. `scan_open_weights_arms` reads the table's own contents on every run,
+# so a new host-variable open-weights arm reddens the release the day it lands.
+#
+# MEASURED on the 2026-08-30 pull (`host_spread` over every provider, vendor
+# and third-party alike; the control `claude-opus-5` is 1,000,000 -> 1,000,000
+# across 31 hosts, i.e. 1.0x, and is not listed):
+#
+#     deepseek-v4-flash        131,072 ->   1,050,000   8.0x over 61 hosts
+#     deepseek-v4-flash-0731   256,000 ->   1,310,720   5.1x over 35 hosts
+#     deepseek-v4-pro          128,000 ->   1,050,000   8.2x over 64 hosts
+#     minimax-m2               196,608 ->   1,000,000   5.1x over 19 hosts
+#     minimax-m2.1             196,000 ->   1,000,000   5.1x over 24 hosts
+#     minimax-m2.5              65,536 ->     228,700   3.5x over 44 hosts
+#     minimax-m3               262,144 ->   1,048,576   4.0x over 43 hosts
+#
+# Five sibling rows (deepseek-v4-flash-vision-exp, deepseek-v4-pro-0813,
+# minimax-m2.5-highspeed, minimax-m2.7, minimax-m2.7-highspeed) are open-weights
+# too and their hosts AGREE, so they are not violations and are not listed --
+# which is the point of measuring rather than exempting the family.
+#
+# These seven are DEBT, not clearance. Removing an arm is a product-behaviour
+# change (an arm revokes `should_omit_max_tokens`, so the provider stops
+# applying its own natural ceiling) and the Rust test
+# `every_passthrough_vendor_model_resolves_its_arm` asserts them, so the
+# removal is graded on its own issue: FerroxLabs/wayland#1232.
+#
+# Keyed on the exact MODEL ID -- one instance per line, never a family. A line
+# for `minimax-m2.5` says nothing about `minimax-m4`, and that is deliberate:
+# an exemption keyed on the class is a gate that cannot catch the next one.
+OPEN_WEIGHTS_ARM_DEBT = {
+    "deepseek-v4-flash": ("2026-11-30", "gh#1232"),
+    "deepseek-v4-flash-0731": ("2026-11-30", "gh#1232"),
+    "deepseek-v4-pro": ("2026-11-30", "gh#1232"),
+    "minimax-m2": ("2026-11-30", "gh#1232"),
+    "minimax-m2.1": ("2026-11-30", "gh#1232"),
+    "minimax-m2.5": ("2026-11-30", "gh#1232"),
+    "minimax-m3": ("2026-11-30", "gh#1232"),
 }
 
 # Specialty modalities the chain deliberately excludes: they are MUCH smaller
@@ -257,6 +326,112 @@ def canonical(model_id: str) -> str:
     return b
 
 
+def host_spread(catalogue: dict, model_id: str):
+    """-> (low, high, [provider ids]) for one id across EVERY host, or None.
+
+    Deliberately not restricted to `PASSTHROUGH_VENDORS`. The vendor floor is
+    the right input for "is our arm honest about the vendor"; it is exactly the
+    WRONG input for "may this id have a single static arm at all", because a
+    vendor-only view cannot by construction observe the disagreement that makes
+    an open-weights id unarmable. Junk is dropped the same way it is elsewhere:
+    a missing or zero context is not a datum, and `output == context` is
+    models.dev saying UNKNOWN.
+    """
+    seen, where = [], []
+    for pid, prov in catalogue.items():
+        for mid, meta in ((prov or {}).get("models") or {}).items():
+            if canonical(mid) != model_id:
+                continue
+            ctx = (meta.get("limit") or {}).get("context")
+            if not ctx:
+                continue
+            seen.append(ctx)
+            where.append(pid)
+    if len(seen) < 2:
+        return None
+    return min(seen), max(seen), sorted(set(where))
+
+
+def open_weights_family(mid: str):
+    """-> the open-weights family `mid` belongs to, or None."""
+    for family in sorted(PASSTHROUGH_OPEN_WEIGHTS):
+        rx = PASSTHROUGH_IN_SCOPE.get(family)
+        if rx and rx.match(mid) and not PASSTHROUGH_EXCLUDE.search(mid):
+            return family
+    return None
+
+
+def scan_open_weights_arms(catalogue: dict, rows, today=None,
+                           debt=None) -> list[Finding]:
+    """AGENTS.md rule 3 over the arms that EXIST, not only over demands.
+
+    `scan_passthrough`'s open-weights branch sits inside `if mid not in table`,
+    so it grades what the gate would ASK for and nothing about what the table
+    already holds. An arm added by hand for a host-variable open-weights id was
+    therefore invisible to every guard in this repository. This pass measures
+    the host spread of every open-weights ROW on each run:
+
+      * a violating row that is not listed as debt is a FAIL -- the forward
+        direction, so a new arm cannot land silently;
+      * a listed row is REPORTED, dated, and owned by an issue;
+      * a listed row whose hosts now agree is REPORTED as stale rather than
+        failed. The measurement depends on third-party hosts, and a line keyed
+        on ONE model id cannot excuse a different id, so a stale line here is
+        untidy rather than dangerous -- unlike a class-keyed exemption;
+      * a listed row past its expiry FAILS exactly as an unlisted one does.
+    """
+    debt = OPEN_WEIGHTS_ARM_DEBT if debt is None else debt
+    today = today or datetime.date.today().isoformat()
+    findings: list[Finding] = []
+    listed_and_violating = set()
+
+    for mid, _out, our_ctx in rows:
+        family = open_weights_family(mid)
+        if family is None:
+            continue
+        spread = host_spread(catalogue, mid)
+        if not spread or spread[1] < spread[0] * HOST_SPREAD_RATIO:
+            continue
+        low, high, hosts = spread
+        shape = (f"`{mid}` is an OPEN-WEIGHTS id ({family}) with a STATIC ARM "
+                 f"recorded at context {our_ctx}, while its hosts serve it at "
+                 f"{low} to {high} ({high / low:.1f}x) across {len(hosts)} "
+                 f"endpoints. AGENTS.md rule 3 -- 'do not add a static arm for "
+                 f"an open-weights model served at wildly different limits by "
+                 f"different hosts' -- forbids that arm: `model_output_ceiling` "
+                 f"is keyed on the id alone, so the figure reaches every host "
+                 f"serving the same name.")
+        entry = debt.get(mid)
+        if entry is None:
+            findings.append(Finding("FAIL", shape + (
+                " It is not listed in OPEN_WEIGHTS_ARM_DEBT, so it is a NEW "
+                "violation. Remove the arm, or state it as dated debt with an "
+                "owning issue.")))
+            continue
+        expiry, issue = entry
+        listed_and_violating.add(mid)
+        if expiry < today:
+            findings.append(Finding("FAIL", shape + (
+                f" Its OPEN_WEIGHTS_ARM_DEBT entry ({issue}) expired on "
+                f"{expiry} and was not renewed. An expired entry fails exactly "
+                f"as an unlisted one does.")))
+            continue
+        findings.append(Finding("REPORT", shape + (
+            f" Stated debt: {issue}, expires {expiry}. Removing the arm changes "
+            f"product behaviour (an arm revokes should_omit_max_tokens), so the "
+            f"removal is graded there and not here. NOT a failure.")))
+
+    for mid in sorted(set(debt) - listed_and_violating):
+        findings.append(Finding("REPORT", (
+            f"OPEN_WEIGHTS_ARM_DEBT lists `{mid}`, which is no longer a rule-3 "
+            f"violation in this run -- either the row is gone or its hosts now "
+            f"agree within {HOST_SPREAD_RATIO}x. Delete the line. It cannot "
+            f"excuse anything else (the key is one model id), so this is "
+            f"untidiness, not a failure.")))
+
+    return findings
+
+
 def scan_passthrough(catalogue: dict, rows: list[tuple[str, int, int]]) -> list[Finding]:
     """#1176 -- grade PASSTHROUGH_VENDOR_MODELS against vendor-operated rows.
 
@@ -296,6 +471,27 @@ def scan_passthrough(catalogue: dict, rows: list[tuple[str, int, int]]) -> list[
             where = sorted(set(rec["where"]))
             floor_ctx = min(rec["ctx"])
             if mid not in table:
+                spread = (host_spread(catalogue, mid)
+                          if family in PASSTHROUGH_OPEN_WEIGHTS else None)
+                if spread and spread[1] >= spread[0] * HOST_SPREAD_RATIO:
+                    low, high, hosts = spread
+                    findings.append(Finding(
+                        "REPORT",
+                        f"[{family}] `{mid}` has no row, and it must NOT get "
+                        f"one by default: it is an OPEN-WEIGHTS id served at "
+                        f"context {low} to {high} ({high / low:.1f}x) across "
+                        f"{len(hosts)} hosts {hosts}. AGENTS.md's third rule -- "
+                        f"'do not add a static arm for an open-weights model "
+                        f"served at wildly different limits by different "
+                        f"hosts' -- forbids the arm, because `model_output_"
+                        f"ceiling` is keyed on the model id alone and would "
+                        f"hand the vendor's figure to every third-party host "
+                        f"too. An arm is permitted ONLY if it is below the "
+                        f"status-quo fallback in BOTH dimensions, per the rule's "
+                        f"own Llama exception; otherwise leave it unarmed and "
+                        f"record the decision. NOT a failure."
+                    ))
+                    continue
                 out_note = (
                     f", output={min(rec['out'])}" if rec["out"]
                     else " (output UNKNOWN -- models.dev reports output == context)"
@@ -503,6 +699,12 @@ def report(findings: list[Finding], entries_count: int,
           "older generations these tables deliberately do not arm (Claude 3.x, "
           "GPT-3.5 / o-series, DeepSeek V3+R1, the Gemini image/tts/live "
           "modalities) -- and any endpoint that is not vendor-operated.")
+    print("NOT DEMANDED (AGENTS.md rule 3): a NEW %s id whose hosts disagree by "
+          "%.1fx or more is REPORTED, never failed. Those families publish "
+          "their weights, `model_output_ceiling` is keyed on the id alone, and "
+          "a static arm would hand the vendor's figure to every third-party "
+          "host serving the same name."
+          % ("/".join(sorted(PASSTHROUGH_OPEN_WEIGHTS)), HOST_SPREAD_RATIO))
 
     if pinned:
         print("\n" + "=" * 72)
@@ -514,8 +716,8 @@ def report(findings: list[Finding], entries_count: int,
 
     if reports:
         print("\n" + "=" * 72)
-        print("REPORT -- new families seen. NOT a failure; a decision for the "
-              "release owner.")
+        print("REPORT -- new families seen, and stated rule-3 debt. NOT a "
+              "failure; a decision for the release owner.")
         print("=" * 72)
         for f in reports:
             print(f"  * {f.text}")
@@ -796,6 +998,113 @@ def self_test() -> int:
     junk["poe"] = {"models": {"claude-opus-5": {"limit": {"context": 0, "output": 0}}}}
     pcase("PASS when only a non-vendor aggregator disagrees", junk, False)
 
+    # P12. #1176 c5 / AGENTS.md rule 3. A NEW open-weights generation appears
+    #      inside an in-scope FAMILY FLOOR, and the hosts disagree wildly. The
+    #      gate must not demand an arm for it -- REPORT, never FAIL. Before
+    #      this arm existed the floor `^minimax-m(?:[2-9]|\d\d)` reddened the
+    #      release with "Add the arm if it has none", automating the exact
+    #      violation the rule forbids.
+    ow = _fixture_passthrough_catalogue(
+        minimax={"minimax-m4": {"limit": {"context": 204_800, "output": 128_000}}})
+    ow["nebius"] = {"models": {
+        "minimax-m4": {"limit": {"context": 65_536, "output": 8_192}}}}
+    ow["openrouter"] = {"models": {
+        "minimax/minimax-m4": {"limit": {"context": 196_608, "output": 16_000}}}}
+    pcase("REPORT, not FAIL, for a new open-weights id the hosts disagree on",
+          ow, False)
+    found = scan_passthrough(ow, pt_rows)
+    ok = any(f.kind == "REPORT" and "minimax-m4" in f.text for f in found)
+    print(f"  [{'ok' if ok else 'BROKEN'}] ...and it is REPORTED rather than "
+          f"passed over in silence")
+    if not ok:
+        for f in found:
+            print(f"        -> {f.kind}: {f.text}")
+        failures.append("open-weights suppression is reported")
+
+    # P15..P19. Rule 3 applied to an arm that ALREADY EXISTS. P12/P13 above
+    #      grade what the gate DEMANDS; a verifier refuted the criterion by
+    #      pointing out that an open-weights id which already has a row was
+    #      never spread-checked at all, so the rule stopped no arm from being
+    #      added. These cases grade the table's contents.
+    OW_ROWS = [("minimax-m2.5", 128_000, 204_800)]
+    DEBT_OK = {"minimax-m2.5": ("2999-01-01", "gh#1232")}
+    DEBT_OLD = {"minimax-m2.5": ("2020-01-01", "gh#1232")}
+
+    def _ow_cat(hosts):
+        return {pid: {"models": {"minimax-m2.5": {"limit": {"context": c}}}}
+                for pid, c in hosts.items()}
+
+    disagree = _ow_cat({"minimax": 204_800, "nebius": 65_536, "fireworks": 228_700})
+    agree = _ow_cat({"minimax": 204_800, "nebius": 204_800, "fireworks": 200_000})
+
+    def owcase(name, cat, rows, debt, want_fail, want_report):
+        found = scan_open_weights_arms(cat, rows, today="2026-08-30", debt=debt)
+        got_fail = any(f.kind == "FAIL" for f in found)
+        got_rep = any(f.kind == "REPORT" for f in found)
+        ok = got_fail == want_fail and got_rep == want_report
+        print(f"  [{'ok' if ok else 'BROKEN'}] {name}: "
+              f"FAIL={got_fail} (want {want_fail}), "
+              f"REPORT={got_rep} (want {want_report})")
+        if not ok:
+            for f in found:
+                print(f"        -> {f.kind}: {f.text}")
+            failures.append(name)
+
+    # P15. THE REFUTATION CASE. An arm exists for an open-weights id whose
+    #      hosts disagree, and nothing states it as debt -> FAIL.
+    owcase("FAIL on an EXISTING open-weights arm the hosts disagree on",
+           disagree, OW_ROWS, {}, True, False)
+    # P16. CONTROL: the same id and the same arm, hosts in agreement. Proves
+    #      the verdict is a MEASUREMENT and not "minimax is banned".
+    owcase("PASS on the same arm when the hosts agree",
+           agree, OW_ROWS, {}, False, False)
+    # P17. Stated debt turns the FAIL into a dated REPORT, and only for the
+    #      id named. P18 is the proof that the naming is what does it.
+    owcase("REPORT, not FAIL, when the arm is stated debt",
+           disagree, OW_ROWS, DEBT_OK, False, True)
+    # P18. A debt line for a DIFFERENT id does not cover this one -- the whole
+    #      failure mode the env-globals debt file had: a class-keyed exemption.
+    owcase("a debt line for another id does not excuse this arm",
+           disagree, OW_ROWS, {"minimax-m4": ("2999-01-01", "gh#1232")},
+           True, True)
+    # P19. An expired line fails exactly as an unlisted one does.
+    owcase("FAIL when the debt line has expired",
+           disagree, OW_ROWS, DEBT_OLD, True, False)
+    # P20. CONTROL: a VENDOR-ONLY family is out of this rule's scope entirely,
+    #      even when an aggregator publishes a wildly different figure for it.
+    vendor_only = {
+        "anthropic": {"models": {"claude-opus-5": {"limit": {"context": 1_000_000}}}},
+        "poe": {"models": {"claude-opus-5": {"limit": {"context": 8_192}}}},
+    }
+    owcase("a vendor-only id is out of rule 3's scope",
+           vendor_only, [("claude-opus-5", 128_000, 1_000_000)], {}, False, False)
+    # P21. A listed id that no longer violates is REPORTED as stale, never
+    #      failed: the measurement depends on third-party hosts, and a line
+    #      keyed on ONE model id cannot excuse a different one.
+    owcase("a debt line that no longer matches is stale, not a failure",
+           agree, OW_ROWS, DEBT_OK, False, True)
+
+    # P13. THE CONTROL FOR P12, and the reason the suppression is a MEASUREMENT
+    #      rather than a family-wide exemption. Same family, same floor, but
+    #      every host agrees: the id is armable and its absence is the #165
+    #      shape again, so it must still FAIL.
+    agreed = _fixture_passthrough_catalogue(
+        minimax={"minimax-m4": {"limit": {"context": 204_800, "output": 128_000}}})
+    agreed["nebius"] = {"models": {
+        "minimax-m4": {"limit": {"context": 204_800, "output": 128_000}}}}
+    pcase("FAIL for a new open-weights id every host serves identically",
+          agreed, True)
+
+    # P14. The suppression must not leak to the vendor-only families. Nobody
+    #      but Anthropic serves claude-opus-6; an aggregator publishing 8,192
+    #      for it is junk, not a host spread, and the missing arm is still #165.
+    leak = _fixture_passthrough_catalogue(
+        anthropic={"claude-opus-6": {"limit": {"context": 2_000_000, "output": 256_000}}})
+    leak["openrouter"] = {"models": {
+        "anthropic/claude-opus-6": {"limit": {"context": 8_192, "output": 8_192}}}}
+    pcase("FAIL still, for a vendor-only id an aggregator disagrees about",
+          leak, True)
+
     # P9. A pin suppresses ONE exact disagreement...
     pinned = _fixture_passthrough_catalogue()
     pinned["amazon-bedrock"]["models"]["claude-sonnet-4-6"] = {
@@ -902,7 +1211,9 @@ def main() -> int:
             "-- refusing to grade the table against it"
         )
 
-    findings = scan(catalogue, entries) + scan_passthrough(catalogue, passthrough)
+    findings = (scan(catalogue, entries)
+                + scan_passthrough(catalogue, passthrough)
+                + scan_open_weights_arms(catalogue, passthrough))
     return report(findings, len(entries), len(passthrough))
 
 

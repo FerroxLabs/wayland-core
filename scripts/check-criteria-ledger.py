@@ -48,12 +48,29 @@ WHAT A LEDGER FILE IS
         file:<path>:<line>         file exists AND has at least <line> lines
         file:<path>                file exists
         commit:<sha>               resolves to a commit object
+        absent:<path>::<text>      file exists AND does NOT contain <text>
 
     Prefer `test:` and `symbol:` over `file:<path>:<line>`. A line number is
     the weakest anchor here: it survives an edit that moves the code it names,
     so it can go on pointing at nothing in particular while staying green.
     `file:` with a line is for evidence that is genuinely positional -- a
     workflow step, a table row -- and the prose should say what is there.
+    `absent:` is for a criterion whose whole content is that something is
+    GONE -- a deleted allowlist entry, a removed flag, a retired code path.
+    `commit:<sha>` is the wrong anchor for those: it proves a deletion once
+    HAPPENED and stays green after a later merge resolution puts the line
+    back. That is not hypothetical. FerroxLabs/wayland#1182 c3 recorded
+    `commit:c461293f` for a flaky-allowlist deletion; merge 9c9f27b0 restored
+    the line from the other side of the resolution; the criterion went on
+    reading `met` over a file that still had the entry in it, and `git log -S`
+    did not show the resurrection because it skips merges by default.
+    `absent:` re-reads the file on every run, so a resurrection reds the gate
+    instead of surviving it.
+
+    The path must EXIST, and that is the known-positive control: an absence
+    check over a renamed or deleted file fails loudly rather than passing,
+    because an empty result reads exactly like the thing being gone.
+
     A criterion needing two pieces of evidence is two criteria. That is
     deliberate: "evidence: see the PR" is how a ledger rots into a narrative.
 
@@ -250,6 +267,7 @@ SYM_EV = re.compile(r"^symbol:(?P<p>[^:]+(?::[^:]+)*?)::(?P<n>[A-Za-z0-9_]+)$")
 DECL = r"\b(?:fn|struct|enum|union|const|static|type|trait|mod|def|class|macro_rules!)\s+%s\b"
 FILE_EV = re.compile(r"^file:(?P<p>.+?)(?::(?P<l>\d+))?$")
 COMMIT_EV = re.compile(r"^commit:(?P<s>[0-9a-f]{7,40})$")
+ABSENT_EV = re.compile(r"^absent:(?P<p>[^:]+(?::[^:]+)*?)::(?P<n>.+)$")
 SLUG = re.compile(r"^(?P<slug>[a-z0-9][a-z0-9-]*?)-(?P<num>\d+)\.md$")
 
 
@@ -312,6 +330,19 @@ def resolve_evidence(root, ev, git, shallow=False):
                 return "%s has %d lines; evidence cites line %s" % (
                     m.group("p"), n, m.group("l"))
         return None
+    m = ABSENT_EV.match(ev)
+    if m:
+        p = os.path.join(root, m.group("p"))
+        if not os.path.isfile(p):
+            # The control. An absence check over a path that is not here would
+            # otherwise pass forever on a typo or a rename -- an empty result
+            # reads exactly like the thing being gone.
+            return ("no such file: %s (an absence cannot be verified against "
+                    "a file that is not here)" % m.group("p"))
+        t = open(p, encoding="utf-8", errors="replace").read()
+        if m.group("n") in t:
+            return "%s still contains %r" % (m.group("p"), m.group("n"))
+        return None
     m = COMMIT_EV.match(ev)
     if m:
         if not git:
@@ -328,8 +359,8 @@ def resolve_evidence(root, ev, git, shallow=False):
             return "%s does not resolve to a commit in this tree" % m.group("s")
         return None
     return ("%r is not a machine-resolvable evidence token. Use "
-            "test:<path>::<name>, symbol:<path>::<name>, file:<path>[:<line>] "
-            "or commit:<sha>." % ev)
+            "test:<path>::<name>, symbol:<path>::<name>, file:<path>[:<line>], "
+            "absent:<path>::<text> or commit:<sha>." % ev)
 
 
 def validate_record(root, rec, git, shallow=False):
@@ -796,6 +827,17 @@ def self_test():
     case("symbol evidence naming an item that IS declared",
          lambda b: b.replace('"test:src/t.rs::the_boundary_is_probed"',
                              '"symbol:src/t.rs::Boundary"'), False)
+    case("absent evidence for text that really is not in the file",
+         lambda b: b.replace('"test:src/t.rs::the_boundary_is_probed"',
+                             '"absent:src/t.rs::a_line_nobody_ever_wrote"'), False)
+    case("absent evidence for text that is STILL THERE (wayland#1182 c3)",
+         lambda b: b.replace('"test:src/t.rs::the_boundary_is_probed"',
+                             '"absent:src/t.rs::pub struct Boundary"'), True,
+         expect="still contains 'pub struct Boundary'")
+    case("absent evidence over a path that is not here at all",
+         lambda b: b.replace('"test:src/t.rs::the_boundary_is_probed"',
+                             '"absent:src/gone.rs::anything"'), True,
+         expect="an absence cannot be verified against a file that is not here")
     case("evidence that is prose rather than a token",
          lambda b: b.replace('"test:src/t.rs::the_boundary_is_probed"',
                              '"see the PR, it is obviously done"'), True,

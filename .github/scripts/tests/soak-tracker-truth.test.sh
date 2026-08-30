@@ -16,6 +16,15 @@
 #          returning by omission — that REQUIRED_JOBS names EVERY job the
 #          scheduled soak actually runs, computed from the workflow itself.
 #
+#   PART C RUNS THE JOB. A and B together still only prove that a correct
+#          decision exists and that the right strings are present; the
+#          criterion (#325 c2) says a RUN whose sibling failed POSTS a red
+#          report. soak-tracker-run.test.py drives the real YAML through the
+#          real decision script and the real github-script bodies against a
+#          stubbed Octokit, and asserts on the API calls that come out — which
+#          is the only thing that grades the JOB_RESULTS interpolation, the
+#          $GITHUB_OUTPUT hand-off and the report body at all.
+#
 # Run: bash .github/scripts/tests/soak-tracker-truth.test.sh
 set -uo pipefail
 
@@ -198,6 +207,26 @@ if [ -z "$MISSING_NEEDS" ] && [ -n "$NEEDS_LINE" ]; then
   ok "the tracker job needs: every scheduled job"
 else
   bad "the tracker job needs: every scheduled job (missing: ${MISSING_NEEDS:-<no needs: line>})"
+fi
+
+# ── PART C — the job, executed ─────────────────────────────────────────────
+#
+# Skipping this half silently would leave exactly the gap #325 c2 was graded
+# against, so a missing dependency is a FAILURE here, never a skip.
+RUNNER="$HERE/soak-tracker-run.test.py"
+if [ ! -f "$RUNNER" ]; then
+  bad "the executed-job harness exists ($RUNNER)"
+elif ! python3 -c "import yaml" 2>/dev/null && ! pip install --quiet pyyaml 2>/dev/null; then
+  bad "PyYAML is available to read the workflow (install it; do not skip PART C)"
+elif ! command -v node >/dev/null 2>&1; then
+  bad "node is available to run the github-script bodies (do not skip PART C)"
+else
+  echo ""
+  if python3 "$RUNNER"; then
+    ok "PART C: the tracker job posts a red report on a red sibling, and closes only on green"
+  else
+    bad "PART C: the tracker job did not behave as #325 c2 requires (output above)"
+  fi
 fi
 
 echo ""

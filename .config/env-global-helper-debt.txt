@@ -1,0 +1,63 @@
+# Helper-attributed env-global hazards that predate the widening of
+# scripts/check-test-env-globals.py (FerroxLabs/wayland#1134 c3).
+#
+# ── WHY THIS FILE EXISTS ────────────────────────────────────────────────────
+#
+# Until 2026-08-29 the lint fired only on a `set_var` written lexically inside
+# a test fn. The identical write moved one call deep -- into an RAII env guard,
+# a `temp_state()`, a `stub_npm_on_path()` -- was classified `helper` and
+# excused, 153 sites of it, including `PinnedRetryBudget::pin`, the helper
+# #1134 opens with. Resolving callers turned that excuse into a verdict, and
+# the verdict named nine pre-existing pairs on the day it was written.
+#
+# Eight of them are listed below and are owned by FerroxLabs/wayland#1233.
+# They are DEBT, not clearance: each is a real
+# hazard under the shared-process CI leg, where one test binary is one process
+# and a sibling test's production path reads what the guard wrote. They are
+# listed rather than fixed here because fixing them means changing the tests
+# themselves, in crates this change does not otherwise touch, and a gate that
+# goes red on the day it lands is a gate someone switches off.
+#
+# ── WHAT A LINE HERE DOES AND DOES NOT DO ───────────────────────────────────
+#
+# A listed SITE is REPORTED loudly on every run and does not fail the gate.
+# Everything else fails. A line is an exemption for ONE WRITE, identified by
+# `<file>.rs::<writing fn>`, and NOT for the (binary, var) class it belongs to:
+# a second helper writing the same variable in the same test binary is a new
+# instance of the class and reds the gate with the line still sitting here.
+# That is deliberate and is the thing this file got wrong first time round --
+# a class-keyed exemption is a gate that cannot catch the next one.
+#
+# Four rules keep the list from rotting, all enforced by the gate itself and
+# all proven in both directions by `--self-test`:
+#
+#   * A write that is DIRECT -- inside the test fn -- is never exempt,
+#     whatever this file says. The exemption covers only the class the lint
+#     could not previously see.
+#   * A line must name a site. A line without the site column is refused as
+#     unparseable rather than read as a class-wide exemption.
+#   * An entry past its expiry fails exactly as an unlisted site does.
+#   * An entry that no longer matches anything fails as STALE. The list is
+#     designed to shrink, and a line that has quietly stopped applying is a
+#     line that would excuse the next write at that site for free.
+#
+# ── FORMAT ──────────────────────────────────────────────────────────────────
+#
+#   <YYYY-MM-DD expiry>  <test-binary>  <ENV_VAR>  <file.rs::fn>  <gh#NNNN>  <reason...>
+#
+# Whitespace-separated; the reason is the rest of the line and is MANDATORY.
+# The binary id is what the gate prints: `<crate>` for a lib test binary,
+# `<crate>::<target>` for an integration one. The site is the repo-relative
+# path of the file holding the `set_var` and the name of the fn it sits in,
+# both of which the gate prints beside every finding. Line numbers are
+# deliberately not part of the key: they drift on unrelated edits.
+
+2026-11-30  wcore-agent::capability_liveness_narrowing  WAYLAND_CAMOUFOX_URL  crates/wcore-agent/tests/capability_liveness_narrowing.rs::install  gh#1233  An RAII installer/guard pair writes the URL that wcore-browser production code reads, from two unserialized tests in a 4-test binary. This is the installer half.
+2026-11-30  wcore-agent::capability_liveness_narrowing  WAYLAND_CAMOUFOX_URL  crates/wcore-agent/tests/capability_liveness_narrowing.rs::drop  gh#1233  The Drop half of the same guard pair; it restores the variable, which is still a write of a global a sibling test's production path reads.
+2026-11-30  wcore-agent::skill_source_write_refusal  WAYLAND_HOME  crates/wcore-agent/tests/skill_source_write_refusal.rs::wayland_home  gh#1233  `fn wayland_home` writes WAYLAND_HOME for an unserialized test in an 11-test binary whose production readers span nine crates.
+2026-11-30  wcore-browser::sidecar_npm_install_wiring_test  PATH  crates/wcore-browser/tests/sidecar_npm_install_wiring_test.rs::stub_npm_on_path  gh#1233  `stub_npm_on_path` rewrites PATH, which wcore-config and wcore-tools production code read for shell resolution, from an unserialized test with two siblings.
+2026-11-30  wcore-channel-telegram  WAYLAND_HOME  crates/wcore-channel-telegram/src/lib.rs::cfg  gh#1233  A config helper writes WAYLAND_HOME in a 79-test lib binary; some callers hold a lock and at least one does not.
+2026-11-30  wcore-cli  WAYLAND_HOME  crates/wcore-cli/src/gateway.rs::run_gateway  gh#1233  `run_gateway` is PRODUCTION code that writes WAYLAND_HOME and is reached from an unserialized test in the 2169-test wcore-cli lib binary. Worth reading before renewing: the write is not test-only, so the fix is probably in the gateway rather than in the test.
+2026-11-30  wcore-exec-backend::conformance_matrix  WAYLAND_EXEC_BACKEND_STATE_DIR  crates/wcore-exec-backend/tests/conformance_matrix.rs::temp_state  gh#1233  `temp_state()` points the backend state dir at a tempdir from an unserialized test; same helper in three binaries.
+2026-11-30  wcore-exec-backend::container_wedge  WAYLAND_EXEC_BACKEND_STATE_DIR  crates/wcore-exec-backend/tests/container_wedge.rs::temp_state  gh#1233  Same `temp_state()` helper, 7-test binary. The direct WAYLAND_EXEC_CONTAINER_IMAGE write in this same file was fixed by stating the image instead (ContainerBackend::with_image); this one needs the state dir stated the same way.
+2026-11-30  wcore-exec-backend::live_equivalence  WAYLAND_EXEC_BACKEND_STATE_DIR  crates/wcore-exec-backend/tests/live_equivalence.rs::temp_state  gh#1233  Same `temp_state()` helper, 2-test binary.
