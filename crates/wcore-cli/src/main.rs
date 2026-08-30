@@ -11541,4 +11541,233 @@ mod tests {
             "the second fn body swallowed the first one's call"
         );
     }
+
+    /// The add-side needle's SPELLING SET, closed against `wcore-mcp`.
+    ///
+    /// `every_runtime_mcp_add_joins_the_catalog_refresh` finds construction
+    /// sites by the text `McpManager::connect`. Deriving the count from the
+    /// defect closed the "a fourth bare path leaves the count at 2" hole, but
+    /// it left a second one of exactly the same shape one level down: the
+    /// needle is an ALLOWLIST OF SPELLINGS. A fifth constructor called
+    /// `McpManager::from_configs` would be matched by nothing, every file that
+    /// used it would count zero constructions, `built == 0` would `continue`,
+    /// and the lint would stay green while the path it added had its
+    /// tools/list_changed ignored for the life of the session — the original
+    /// defect, reached through a rename.
+    ///
+    /// So the needle is not ASSERTED complete, it is CHECKED against the type
+    /// it searches for: every associated function of `McpManager` that can
+    /// hand a caller a new one must either be matched by the needle or be a
+    /// `new_for_test*` fixture constructor. Adding a production constructor
+    /// under any other name reddens this test, which is the point — the
+    /// author is then made to extend the needle rather than silently escape
+    /// it.
+    ///
+    /// GAP, recorded rather than implied away: this closes constructor
+    /// SPELLINGS on `McpManager` itself. It does not see a helper in another
+    /// crate that builds a manager and hands it to `wcore-cli` already made,
+    /// because the needle would then live in that crate's file and the walk
+    /// is scoped to `wcore-cli/src`. That is residual, and it is stated in
+    /// the #1175 ledger.
+    #[test]
+    fn the_construction_needle_matches_every_way_to_get_an_mcp_manager() {
+        let manager_src = include_str!("../../wcore-mcp/src/manager.rs");
+        // Same fragment assembly as the walk, and the same reason.
+        let needle_suffix = concat!("conn", "ect");
+
+        let constructors = self_returning_associated_fns(manager_src, "McpManager");
+
+        // POSITIVE CONTROL on the parse. If the block finder or the
+        // `-> Self` detection silently stopped matching, `constructors` would
+        // be empty and the loop below would grade nothing. Both return
+        // shapes are pinned: `-> Result<Self, McpError>` and a bare
+        // `-> Self`.
+        for known in ["connect_all", "connect_all_with_policy", "new_for_test"] {
+            assert!(
+                constructors.iter().any(|name| name == known),
+                "the McpManager constructor parse did not find {known} — it is \
+                 grading an empty or truncated set. Found: {constructors:?}"
+            );
+        }
+
+        for name in &constructors {
+            assert!(
+                name.starts_with(needle_suffix) || name.starts_with("new_for_test"),
+                "McpManager::{name} hands out a new manager but is not matched \
+                 by the `McpManager::{needle_suffix}` needle that \
+                 every_runtime_mcp_add_joins_the_catalog_refresh counts \
+                 constructions with. A runtime-add path using it would count \
+                 zero constructions and the lint would pass while its \
+                 tools/list_changed was ignored for the life of the session \
+                 (FerroxLabs/wayland#1175). Rename it, or widen the needle in \
+                 both places."
+            );
+        }
+    }
+
+    /// Every associated fn of `impl <type>` in `source` that returns a new
+    /// one — `-> Self` or `-> Result<Self, _>` — by name.
+    ///
+    /// Scoped to the inherent `impl <type> {` block at column zero, so a trait
+    /// impl or a different type's constructors cannot be mistaken for this
+    /// type's, and an inline `#[cfg(test)] mod tests` (indented) is invisible.
+    fn self_returning_associated_fns(source: &str, type_name: &str) -> Vec<String> {
+        let header = format!("impl {type_name} {{");
+        let lines: Vec<&str> = source.lines().collect();
+        let Some(start) = lines.iter().position(|line| line.trim_end() == header) else {
+            return Vec::new();
+        };
+
+        let mut names = Vec::new();
+        let mut depth = 0i32;
+        // The fn signature may wrap across lines, so the return type is read
+        // from the header joined up to the line that opens the body.
+        let mut pending: Option<(String, String)> = None;
+        for line in &lines[start..] {
+            let code = match line.find("//") {
+                Some(at) => &line[..at],
+                None => line,
+            };
+            depth += code.matches('{').count() as i32;
+            depth -= code.matches('}').count() as i32;
+
+            if let Some((name, mut header)) = pending.take() {
+                header.push(' ');
+                header.push_str(code.trim());
+                if code.contains('{') || code.trim_end().ends_with(';') {
+                    if returns_self(&header) {
+                        names.push(name);
+                    }
+                } else {
+                    pending = Some((name, header));
+                }
+            } else if let Some(name) = associated_fn_name(code) {
+                let header = code.trim().to_string();
+                if code.contains('{') || code.trim_end().ends_with(';') {
+                    if returns_self(&header) {
+                        names.push(name);
+                    }
+                } else {
+                    pending = Some((name, header));
+                }
+            }
+
+            if depth <= 0 && code.contains('}') {
+                break;
+            }
+        }
+        names
+    }
+
+    /// The fn name on a `fn` item line, whatever visibility/asyncness it
+    /// carries. `None` for anything that is not an fn item.
+    fn associated_fn_name(line: &str) -> Option<String> {
+        let mut rest = line.trim_start();
+        loop {
+            let mut advanced = false;
+            for modifier in [
+                "pub(crate)",
+                "pub(super)",
+                "pub",
+                "async",
+                "unsafe",
+                "const",
+            ] {
+                if let Some(stripped) = rest.strip_prefix(modifier)
+                    && stripped.starts_with(char::is_whitespace)
+                {
+                    rest = stripped.trim_start();
+                    advanced = true;
+                }
+            }
+            if !advanced {
+                break;
+            }
+        }
+        let rest = rest.strip_prefix("fn ")?;
+        let name: String = rest
+            .chars()
+            .take_while(|ch| ch.is_alphanumeric() || *ch == '_')
+            .collect();
+        (!name.is_empty()).then_some(name)
+    }
+
+    /// True when a joined fn signature returns a new instance of its own type.
+    fn returns_self(header: &str) -> bool {
+        let Some((_, ret)) = header.split_once("->") else {
+            return false;
+        };
+        // `Self` as a whole token: `SelfIsh` is not `Self`, and a `&self`
+        // receiver is on the other side of the `->`.
+        ret.split(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
+            .any(|token| token == "Self")
+    }
+
+    /// The parser is the thing that can silently stop finding constructors,
+    /// so it is graded directly rather than trusted.
+    #[test]
+    fn the_constructor_parse_sees_a_renamed_constructor() {
+        let source = "\
+impl McpManager {
+    pub async fn connect_all(configs: &C) -> Result<Self, McpError> {
+        todo!()
+    }
+
+    pub async fn from_configs(
+        configs: &C,
+        policy: P,
+    ) -> Result<Self, McpError> {
+        todo!()
+    }
+
+    pub fn new_for_test(entries: Vec<E>) -> Self {
+        todo!()
+    }
+
+    pub fn server_names(&self) -> Vec<String> {
+        todo!()
+    }
+}
+";
+        let found = self_returning_associated_fns(source, "McpManager");
+        assert_eq!(
+            found,
+            vec!["connect_all", "from_configs", "new_for_test"],
+            "the parse must find a rustfmt-WRAPPED signature and both return \
+             shapes, and must not mistake a `&self` method for a constructor"
+        );
+        // The fixture must actually EXERCISE the failing branch, or the
+        // guard above is graded against a source that could never redden it.
+        assert!(
+            !found
+                .iter()
+                .all(|name| name.starts_with("connect") || name.starts_with("new_for_test")),
+            "control: the synthetic source must contain a constructor the \
+             needle misses, or this proves nothing about the real check"
+        );
+
+        // NEGATIVE CONTROL on the block scoping: another type's constructors
+        // must not be collected as McpManager's, or the guard grades the
+        // wrong impl and a renamed McpManager constructor slips through.
+        let other = "\
+impl SomethingElse {
+    pub fn build() -> Self {
+        todo!()
+    }
+}
+";
+        assert!(
+            self_returning_associated_fns(other, "McpManager").is_empty(),
+            "a different type's impl block was collected"
+        );
+        // NEGATIVE CONTROL on `returns_self`: a method returning a foreign
+        // type is not a constructor.
+        assert!(!returns_self(
+            "pub fn health(&self) -> &HashMap<String, H> {"
+        ));
+        assert!(returns_self("pub fn new_for_test(e: Vec<E>) -> Self {"));
+        assert!(returns_self(
+            "pub async fn connect_all(c: &C) -> Result<Self, McpError> {"
+        ));
+    }
 }

@@ -302,3 +302,70 @@ async fn a_streamable_http_server_without_a_standalone_stream_signals_nothing() 
         "a 405 GET must not raise the tools-changed flag"
     );
 }
+
+/// FerroxLabs/wayland#1213 c4, transport half.
+///
+/// c4 is explicit that `take_tools_changed` for this transport is only safe if
+/// `is_alive`/`close` are fixed IN THE SAME CHANGE. They were — and nothing
+/// graded them, which is how a fix on a line nobody runs survives.
+///
+/// The gate this protects is `McpManager::refresh_signalled_tools`, which
+/// skips a server on `!transport.is_alive() || !transport.take_tools_changed()`
+/// — `is_alive` first. Before #1175 this transport inherited
+/// `is_alive() -> true` and had no notion of being closed, which was harmless
+/// only while it also inherited `take_tools_changed() -> false`. With the
+/// notification now reported and `is_alive` still stuck at `true`, a server
+/// the operator removed would keep its tools re-registered on every
+/// announcement: the resurrection the ticket names.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_closed_streamable_http_transport_stops_reading_as_alive() {
+    let url = spawn_streamable_server(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}",
+        "application/json",
+        &[TOOLS_CHANGED],
+        true,
+    )
+    .await;
+    let transport = StreamableHttpTransport::connect_with_policy(
+        &url,
+        &HashMap::new(),
+        true,
+        wcore_egress::default_policy(),
+    )
+    .await
+    .expect("connect to loopback streamable-http server");
+
+    // POSITIVE CONTROL: an open transport reads alive and serves requests, or
+    // the assertions after `close()` are satisfied by a transport that was
+    // never working.
+    assert!(
+        transport.is_alive(),
+        "a freshly connected transport must read as alive"
+    );
+    transport
+        .request(&JsonRpcRequest::new(1, "initialize", None))
+        .await
+        .expect("initialize");
+    assert!(
+        settle(&transport, true).await,
+        "control: this server does announce on its standalone stream, so the \
+         post-close assertion is about `is_alive` and not about a silent server"
+    );
+
+    transport.close().await.expect("close");
+
+    assert!(
+        !transport.is_alive(),
+        "a closed streamable-http transport still reads as alive, so \
+         McpManager::refresh_signalled_tools would re-list and RE-REGISTER the \
+         tools of a server the operator removed (FerroxLabs/wayland#1213 c4)"
+    );
+    let err = transport
+        .request(&JsonRpcRequest::new(2, "tools/list", None))
+        .await
+        .expect_err("a closed transport must refuse further requests");
+    assert!(
+        err.to_string().contains("closed"),
+        "unexpected error from a closed transport: {err}"
+    );
+}
