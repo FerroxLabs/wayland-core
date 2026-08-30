@@ -315,12 +315,17 @@ impl EditTool {
                     };
                 }
             }
-            Ok(FileMutationOutcome::Conflict { .. }) => {
+            Ok(FileMutationOutcome::Conflict {
+                intercepted_save, ..
+            }) => {
                 *attempt = FilesystemWriteAttempt::NotAttempted;
+                // #1248 — same distinction the direct Edit path below renders
+                // through `refusal_message`, off the same decision site.
                 return ToolResult {
-                    content: crate::unsaved_work::changed_under_write(
+                    content: crate::unsaved_work::conflict_message(
                         file_path,
                         "its contents changed on disk",
+                        intercepted_save.as_deref(),
                     ),
                     is_error: true,
                 };
@@ -754,9 +759,7 @@ mod tests {
         assert_ne!(survivors[0], p);
 
         assert!(
-            result
-                .content
-                .contains(&survivors[0].display().to_string()),
+            result.content.contains(&survivors[0].display().to_string()),
             "the user is not told where their save went: {}",
             result.content
         );

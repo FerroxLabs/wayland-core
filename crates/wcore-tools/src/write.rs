@@ -253,15 +253,25 @@ impl WriteTool {
                     };
                 }
             }
-            Ok(FileMutationOutcome::Conflict { current }) => {
+            Ok(FileMutationOutcome::Conflict {
+                current,
+                intercepted_save,
+            }) => {
                 *attempt = FilesystemWriteAttempt::NotAttempted;
                 let why = match (current, judged.is_some()) {
                     (FileObservation::Absent, true) => "it was deleted",
                     (FileObservation::Present(_), false) => "something else created it",
                     _ => "its contents changed on disk",
                 };
+                // #1248 — the reason is composed from the re-observed state,
+                // as it always was; what the state cannot say is whether the
+                // refusal displaced a save, so that comes off the outcome.
                 return ToolResult {
-                    content: crate::unsaved_work::changed_under_write(file_path, why),
+                    content: crate::unsaved_work::conflict_message(
+                        file_path,
+                        why,
+                        intercepted_save.as_deref(),
+                    ),
                     is_error: true,
                 };
             }
@@ -969,9 +979,7 @@ mod tests {
         // c2 + c3: the SURFACED text names it, and does not claim the refusal
         // cost nobody anything.
         assert!(
-            result
-                .content
-                .contains(&survivors[0].display().to_string()),
+            result.content.contains(&survivors[0].display().to_string()),
             "the user is not told where their save went: {}",
             result.content
         );
