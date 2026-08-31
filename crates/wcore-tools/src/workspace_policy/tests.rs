@@ -2713,6 +2713,283 @@ fn every_weak_resolver_site_states_which_resolver_and_why() {
     }
 }
 
+/// One function this file DEFINES whose return type is a SINGLE path.
+struct SinglePathFn {
+    name: String,
+    line: usize,
+    ret: String,
+}
+
+/// Every `-> PathBuf` / `-> Option<PathBuf>` / `-> Result<PathBuf, _>`
+/// function `source` defines, plus the total number of function signatures
+/// walked (the parser's own anti-vacuity number).
+///
+/// Signatures are joined up to the body brace rather than read one line at a
+/// time, because `cargo fmt` breaks a four-argument signature across five
+/// lines and a line-at-a-time reader would truncate it at the first comma and
+/// see no return type at all.
+fn single_path_returning_fns(source: &str) -> (Vec<SinglePathFn>, usize) {
+    let lines: Vec<&str> = source.lines().collect();
+    let mut found: Vec<SinglePathFn> = Vec::new();
+    let mut signatures = 0usize;
+
+    for (index, line) in lines.iter().enumerate() {
+        if !is_fn_signature(line) {
+            continue;
+        }
+        signatures += 1;
+
+        let mut head = String::new();
+        for candidate in lines[index..].iter().take(12) {
+            head.push(' ');
+            head.push_str(candidate.trim());
+            if candidate.contains('{') || candidate.trim_end().ends_with(';') {
+                break;
+            }
+        }
+        let head = &head[..head.find('{').unwrap_or(head.len())];
+
+        let Some(after_fn) = head.split_once("fn ") else {
+            continue;
+        };
+        let name: String = after_fn
+            .1
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        if name.is_empty() {
+            continue;
+        }
+        // The RETURN arrow is the last one before the body: an argument of
+        // type `impl Fn(&Path) -> bool` puts an arrow inside the parameter
+        // list, and reading the FIRST arrow would classify
+        // `vcs_store_entry` by its callback instead of by its result.
+        let Some(arrow) = head.rfind("->") else {
+            continue;
+        };
+        let ret = head[arrow + 2..].trim().trim_end_matches(',').trim();
+        let single_path = ret == "PathBuf"
+            || ret == "Option<PathBuf>"
+            || ret == "Result<PathBuf>"
+            || ret.starts_with("Result<PathBuf,");
+        if !single_path {
+            continue;
+        }
+        found.push(SinglePathFn {
+            name,
+            line: index + 1,
+            ret: ret.to_string(),
+        });
+    }
+
+    (found, signatures)
+}
+
+/// A parsed `// INVENTORY:` row.
+struct InventoryRow {
+    name: String,
+    class: String,
+    reason: String,
+    line: usize,
+}
+
+fn resolver_inventory(source: &str) -> Vec<InventoryRow> {
+    let lines: Vec<&str> = source.lines().collect();
+    let mut rows: Vec<InventoryRow> = Vec::new();
+
+    for (index, line) in lines.iter().enumerate() {
+        let Some(rest) = line.trim_start().strip_prefix("// INVENTORY: ") else {
+            continue;
+        };
+        let Some((name, tail)) = rest.split_once(" = ") else {
+            continue;
+        };
+        let Some((class, first)) = tail.split_once(": ") else {
+            continue;
+        };
+        // A reason wraps. Read the continuation lines too, or the gate would
+        // grade the width of the comment column instead of the reason.
+        let mut reason = first.trim().to_string();
+        for below in lines[index + 1..].iter() {
+            let trimmed = below.trim_start();
+            let Some(more) = trimmed.strip_prefix("// ") else {
+                break;
+            };
+            if more.starts_with("INVENTORY:") || more.starts_with("====") {
+                break;
+            }
+            reason.push(' ');
+            reason.push_str(more.trim());
+        }
+        rows.push(InventoryRow {
+            name: name.trim().to_string(),
+            class: class.trim().to_string(),
+            reason,
+            line: index + 1,
+        });
+    }
+
+    rows
+}
+
+/// FerroxLabs/wayland-core#402 c1 — a path-resolving function added to
+/// `workspace_policy.rs` that is not one of the resolvers already named FAILS
+/// A GATE instead of arriving silently.
+///
+/// core#356 c4's two gates ask, of a name they were GIVEN, whether its call
+/// sites explain themselves. That is the right question and it is blind in the
+/// one direction that matters: a third resolver is a name nobody gave them, so
+/// its sites need say nothing and both gates stay green. #402 is that
+/// blindness, and it is the same shape as core#377 c2 — a gate over one
+/// SPELLING replaced by a gate over a closed alphabet.
+///
+/// The closed alphabet here is structural rather than lexical: **what this file
+/// defines**. Every function whose return type is a single path is enumerated
+/// from the source and matched against the `RESOLVER INVENTORY` block, in BOTH
+/// directions — a function with no row fails, and a row with no function fails.
+/// A `resolver` row then carries core#356 c4's call-site obligation
+/// automatically, so a third resolver is one row and not a fourth hand-written
+/// test.
+///
+/// Its own red arm, run rather than modelled (see the ledger for #402 c1): add
+/// `fn canon_third(path: &Path) -> PathBuf`, call it from a predicate, and this
+/// test names `canon_third` while the two site gates pass.
+#[test]
+fn resolver_inventory_covers_every_pathbuf_returning_fn() {
+    const SOURCE: &str = include_str!("../workspace_policy.rs");
+
+    let (defined, signatures) = single_path_returning_fns(SOURCE);
+    let rows = resolver_inventory(SOURCE);
+
+    // ---- anti-vacuity controls, all of which fail CLOSED -------------------
+    // A parser that silently stopped reading, or an `include_str!` pointed at
+    // the wrong file, finds nothing — and nothing compared against nothing is
+    // the vacuous pass this whole test exists to prevent.
+    assert!(
+        SOURCE.contains("fn canon_existing_ancestor(") && SOURCE.contains("fn canon_for_scope("),
+        "known-positive control: `include_str!` did not pull workspace_policy.rs"
+    );
+    assert!(
+        signatures >= 100,
+        "the signature walker saw only {signatures} functions in \
+         workspace_policy.rs — it is not reading the file"
+    );
+    assert!(
+        defined.len() >= 12,
+        "the scan found only {} single-path-returning functions — the return \
+         type parser is looking at the wrong thing: {defined:?}",
+        defined.len(),
+        defined = defined
+            .iter()
+            .map(|f| format!("{} -> {}", f.name, f.ret))
+            .collect::<Vec<_>>()
+    );
+    for control in ["canon_existing_ancestor", "canon_for_scope", "canon"] {
+        assert!(
+            defined.iter().any(|f| f.name == control),
+            "known-positive control: `{control}` returns a single path and the \
+             scan did not find it"
+        );
+    }
+    assert!(
+        !rows.is_empty(),
+        "the RESOLVER INVENTORY block of workspace_policy.rs is missing or \
+         its rows no longer parse — the gate would compare the file against \
+         nothing (FerroxLabs/wayland-core#402 c1)"
+    );
+
+    // ---- every row is a DECISION, not a placeholder -------------------------
+    for row in &rows {
+        assert!(
+            row.class == "resolver" || row.class == "helper",
+            "line {}: `{}` is classified `{}` — the inventory admits exactly \
+             `resolver` or `helper`",
+            row.line,
+            row.name,
+            row.class
+        );
+        assert!(
+            row.reason.len() >= 20,
+            "line {}: `{}` carries no reason. #402 c3 asks for the reason \
+             WHERE THE GATE READS IT, so a later reader can tell a decision \
+             from a default",
+            row.line,
+            row.name
+        );
+    }
+    let mut names: Vec<&str> = rows.iter().map(|row| row.name.as_str()).collect();
+    names.sort_unstable();
+    let before = names.len();
+    names.dedup();
+    assert_eq!(
+        before,
+        names.len(),
+        "the RESOLVER INVENTORY block classifies a function twice; two rows \
+         can disagree and the gate would read whichever it saw first"
+    );
+
+    // ---- the gate itself, in BOTH directions --------------------------------
+    let missing: Vec<String> = defined
+        .iter()
+        .filter(|f| !rows.iter().any(|row| row.name == f.name))
+        .map(|f| format!("{} (line {}) -> {}", f.name, f.line, f.ret))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "these `-> PathBuf` functions are not in the RESOLVER INVENTORY block \
+         of workspace_policy.rs — classify each as `resolver` or `helper` with \
+         its reason, and if it is a resolver give its call sites the #356 c4 \
+         note (FerroxLabs/wayland-core#402 c1):\n{}",
+        missing.join("\n")
+    );
+    let stale: Vec<String> = rows
+        .iter()
+        .filter(|row| !defined.iter().any(|f| f.name == row.name))
+        .map(|row| format!("{} (inventory line {})", row.name, row.line))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "these RESOLVER INVENTORY rows name a function workspace_policy.rs no \
+         longer defines with a single-path return type. An inventory that \
+         outlives its code is how #402's ledger grade outlived its own \
+         evidence:\n{}",
+        stale.join("\n")
+    );
+
+    // ---- a `resolver` row CARRIES core#356 c4, from the table ----------------
+    let resolvers: Vec<&InventoryRow> = rows.iter().filter(|row| row.class == "resolver").collect();
+    assert!(
+        resolvers.len() >= 2,
+        "the inventory names {} resolvers. Both `canon_for_scope` and \
+         `canon_existing_ancestor` are still in this file and both are still \
+         reachable, so a table with fewer rows than that has been weakened \
+         rather than corrected",
+        resolvers.len()
+    );
+    for row in resolvers {
+        let (sites, unlabelled) = resolver_sites_without_a_reason(
+            SOURCE,
+            &format!("{}(", row.name),
+            &format!("resolver: `{}`", row.name),
+        );
+        assert!(
+            sites >= 1,
+            "`{}` is classified `resolver` but has no call site in this file — \
+             either it is dead, or the needle no longer matches and this row's \
+             obligation is being graded against air",
+            row.name
+        );
+        assert!(
+            unlabelled.is_empty(),
+            "core#356 c4, reached through the #402 inventory rather than \
+             through a literal name: these `{}` call sites do not say which \
+             resolver they use or why:\n{}",
+            row.name,
+            unlabelled.join("\n")
+        );
+    }
+}
+
 /// FerroxLabs/wayland-core#394 c3 / #396 c3 / #398 c3 — the INSTRUMENT for the
 /// per-traversed-directory cost `grep_policy::scope_for` pays.
 ///
@@ -2775,6 +3052,119 @@ fn probe_vcs_content_stores_per_traversed_directory() {
         "probe control: `scope_for` must still classify the root store, or the \
          syscall figure below is measuring a traversal that did nothing"
     );
+}
+
+/// FerroxLabs/wayland-core#394 c3 / #396 c3 / #398 c3 — the instrument that
+/// produced the **5 syscalls/directory** those three criteria are pinned to,
+/// ported verbatim in SHAPE so the bar can be measured rather than argued
+/// about.
+///
+/// The pin has been unmeetable for two lanes, and the reason is that the probe
+/// it names was REDEFINED under the same name. At `875bf32cb`, where 5.000 was
+/// read, `probe_vcs_content_stores_per_traversed_directory` looped
+/// `vcs_content_stores(&ordinary_dir)` `WL_PROBE_DIRS` times — its own doc
+/// comment says so: *"`grep_policy::scope_for` calls it in. `WL_PROBE_DIRS`
+/// sets the loop count"*. It never called `scope_for`, which did not yet exist
+/// on that tree under that name. So 5.000 is the cost of the PREDICATE
+/// `scope_for` pays once per directory it traverses.
+///
+/// The probe carrying that name today measures something else: a whole
+/// `scope_for` traversal of `WL_PROBE_DIRS` real directories, divided by the
+/// directory count — `opendir`/`getdents`/`statx` of the walk itself included.
+/// That is why it reads ~35 and why 35 was being compared with 5. Two
+/// questions, one name.
+///
+/// This is the first question, asked of today's code. `scope_for`'s
+/// `filter_entry` calls `policy.denies_read_content(entry.path())` once per
+/// traversed directory, so that call IS what `vcs_content_stores(&dir)` was:
+///
+/// ```text
+/// for n in 100 1100; do
+///   WL_PROBE_DIRS=$n strace -f -c -o /tmp/q.$n \
+///     cargo test -p wcore-tools --lib -- --exact --nocapture \
+///     workspace_policy::tests::probe_grep_scope_predicate_per_traversed_directory
+/// done
+/// ```
+///
+/// and `(syscalls(1100) - syscalls(100)) / 1000` is the per-directory figure,
+/// with every one-off — process startup, the fixture, the arm-2 scan and arm
+/// 4's single walk — cancelled by the subtraction.
+///
+/// Two known-positive controls in the same run, because a probe that answers
+/// nothing makes no syscalls and reports a flattering zero: the root store must
+/// still be REFUSED, and the ordinary directory must still be ADMITTED. The
+/// second is also the wrong-refusal control — a predicate that had started
+/// refusing everything would be cheap and useless.
+#[test]
+fn probe_grep_scope_predicate_per_traversed_directory() {
+    let n: usize = std::env::var("WL_PROBE_DIRS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(100);
+
+    let tmp = tempfile::tempdir().expect("workspace");
+    let root = std::fs::canonicalize(tmp.path()).expect("canonical root");
+    std::fs::create_dir_all(root.join(".git/objects/ab")).unwrap();
+    std::fs::write(root.join(".git/objects/ab/cdef"), b"x").unwrap();
+    let dir = root.join("src/deep/deeper");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let policy = WorkspacePolicy::contained(&root);
+
+    // CONTROL, known-positive: the store must still be refused. This also warms
+    // every one-off the subtraction would otherwise have to cancel.
+    assert!(
+        policy.denies_read_content(&root.join(".git/objects/ab/cdef")),
+        "probe control: the root store must still be refused, or the figure \
+         below prices a predicate that answers nothing"
+    );
+    // CONTROL, wrong-refusal: the ordinary directory `scope_for` traverses must
+    // still be admitted.
+    assert!(
+        !policy.denies_read_content(&dir),
+        "probe control: an ordinary traversed directory must stay admitted"
+    );
+
+    let mut sink = 0usize;
+    for _ in 0..n {
+        sink += usize::from(policy.denies_read_content(&dir));
+        sink += vcs_content_stores(&dir).len();
+    }
+    assert_eq!(
+        sink, 0,
+        "probe control: the loop must have asked the real predicates n times"
+    );
+}
+
+/// DECOMPOSITION arm (lane f13-s3-vcs-gate): the SECOND of the two calls
+/// `grep_policy::scope_for` makes per traversed directory, alone. Subtracting
+/// this from `probe_grep_scope_predicate_per_traversed_directory` isolates the
+/// first (`denies_read_content`), which is the half that moved.
+#[test]
+fn probe_vcs_content_stores_alone_per_traversed_directory() {
+    let n: usize = std::env::var("WL_PROBE_DIRS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(100);
+    let tmp = tempfile::tempdir().expect("workspace");
+    let root = std::fs::canonicalize(tmp.path()).expect("canonical root");
+    std::fs::create_dir_all(root.join(".git/objects/ab")).unwrap();
+    std::fs::write(root.join(".git/objects/ab/cdef"), b"x").unwrap();
+    let dir = root.join("src/deep/deeper");
+    std::fs::create_dir_all(&dir).unwrap();
+    assert!(
+        !vcs_content_stores(&root).is_empty(),
+        "probe control: the scan must find <root>/.git/objects"
+    );
+    assert!(
+        vcs_content_stores(&dir).is_empty(),
+        "probe control: an ordinary directory names no store"
+    );
+    let mut sink = 0usize;
+    for _ in 0..n {
+        sink += vcs_content_stores(&dir).len();
+    }
+    assert_eq!(sink, 0, "probe control: the loop must have run n times");
 }
 
 // ===========================================================================

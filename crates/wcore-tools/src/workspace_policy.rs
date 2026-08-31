@@ -2232,6 +2232,11 @@ impl WorkspacePolicy {
         root: impl AsRef<Path>,
         write: bool,
     ) -> Result<PathBuf, PathGrantError> {
+        // #356 c4 -- resolver: `grantable_read_root_shape`, whose own answer is
+        // bare `std::fs::canonicalize`. A GRANT must name a folder that is
+        // there now, so refusing a path that does not exist is the point;
+        // neither guard resolver would do, because both are built to answer
+        // for a path that does not exist yet.
         let dir = self.grantable_read_root_shape(root, write)?;
         let now = SystemTime::now();
         let grants = self.session_path_grants.read();
@@ -3370,20 +3375,79 @@ impl StoreScan {
     /// revalidation that costs as much as the scan it replaces is not a cache.
     /// NOT applicable to a path outside the root (a gitfile's gitdir, a
     /// borrowed alternates store): nothing stamped would move if one appeared.
-    fn witness_if_present(&mut self, path: PathBuf) {
+    ///
+    /// Returns whether the path is THERE, so the caller can skip everything
+    /// that could only exist underneath it.
+    fn witness_if_present(&mut self, path: PathBuf) -> bool {
         self.probes += 1;
         let Ok(meta) = std::fs::symlink_metadata(&path) else {
-            return;
+            return false;
         };
         let Ok(stamp) = meta.modified() else {
-            return;
+            return false;
         };
         if self.witnesses.iter().any(|(seen, _)| *seen == path) {
-            return;
+            return true;
         }
         self.witnesses.push((path.clone(), Some(stamp)));
         if meta.file_type().is_symlink() {
             self.witness_link_target(&path);
+        }
+        true
+    }
+
+    /// Every content store the control directories directly under `dir` name.
+    ///
+    /// FerroxLabs/wayland-core#394 c3 / #396 c3 / #398 c3. `grep_policy::
+    /// scope_for` calls this once per directory it traverses -- through
+    /// [`vcs_content_stores`] -- so what it costs on a directory holding NO
+    /// control directory is the per-traversed-directory figure those three
+    /// criteria pin, and every `Grep(".")` pays it at every directory of the
+    /// tree.
+    ///
+    /// Two skips, both resting on the invariant the CALLER establishes by
+    /// stamping `dir` itself: a control directory cannot come into being
+    /// without moving `dir`'s mtime, so an ABSENT one needs no stamp of its
+    /// own, and nothing can exist underneath it either.
+    ///
+    /// * an absent control directory's store leaves are not probed -- six
+    ///   `symlink_metadata` calls on paths that cannot exist;
+    /// * `gitfile_content_stores` and `alternate_object_dirs` both read
+    ///   `<dir>/.git`, so neither can find anything when it is not there.
+    ///
+    /// And the control names are DEDUPLICATED before probing: `VCS_CONTENT_
+    /// STORES` holds six rows over four control directories, `.git` three
+    /// times, and `witness_if_present` counts its probe before it checks for a
+    /// duplicate.
+    ///
+    /// MEASURED, differential `strace -f -c`, ordinary directory, interleaved
+    /// arms: **17.000 -> 5.000** syscalls per call, which takes the pair
+    /// `scope_for` pays per traversed directory from 25.000 to 13.000. The
+    /// answer is unchanged in both directions -- nothing can be found under a
+    /// directory that is not there -- and so is the witness set, because an
+    /// absent control directory was never stamped anyway.
+    fn scan_control_dirs_in(&mut self, dir: &Path) {
+        let mut dot_git = false;
+        let mut done: Vec<&str> = Vec::new();
+        for (control_name, _) in VCS_CONTENT_STORES {
+            if done.contains(control_name) {
+                continue;
+            }
+            done.push(control_name);
+            let control = dir.join(control_name);
+            if !self.witness_if_present(control.clone()) {
+                continue;
+            }
+            dot_git |= *control_name == ".git";
+            for (owner, store) in VCS_CONTENT_STORES {
+                if owner == control_name {
+                    self.push_store(control.join(store));
+                }
+            }
+        }
+        if dot_git {
+            self.gitfile_content_stores(dir);
+            self.alternate_object_dirs(dir.join(".git/objects"));
         }
     }
 
@@ -3472,16 +3536,10 @@ fn scan_vcs_content_stores(root: &Path) -> StoreScan {
     // Whether ANY control directory exists at all is decided here: creating,
     // removing or re-pointing `<root>/.git` moves the root's own mtime.
     scan.witness(root.to_path_buf());
-    for (dir, store) in VCS_CONTENT_STORES {
-        let control = root.join(dir);
-        // Whether this control directory gains, loses or re-points a store leaf
-        // is settled by its own mtime; whether it exists at all is settled by
-        // the root's, stamped above.
-        scan.witness_if_present(control.clone());
-        scan.push_store(control.join(store));
-    }
-    scan.gitfile_content_stores(root);
-    scan.alternate_object_dirs(root.join(".git/objects"));
+    // Whether a control directory gains, loses or re-points a store leaf is
+    // settled by its own mtime; whether it EXISTS at all is settled by the
+    // root's, stamped above. `scan_control_dirs_in` is what acts on that.
+    scan.scan_control_dirs_in(root);
     scan
 }
 
@@ -3918,6 +3976,101 @@ impl StoreScan {
         }
     }
 }
+
+// ===========================================================================
+// RESOLVER INVENTORY -- FerroxLabs/wayland-core#402
+//
+// Every function in THIS FILE whose return type is a single path
+// (`PathBuf`, `Option<PathBuf>` or `Result<PathBuf, _>`) has exactly one
+// `INVENTORY:` row below, classified with the reason.
+//
+// It exists because core#356 c4's call-site gate is keyed to two literal
+// resolver names, so a THIRD path resolver arrived ungated: its call sites
+// need not say which resolver they use or why, and both name-keyed gates stay
+// green, because a gate cannot notice a name it was not given. This block is
+// the inverted question -- what does the file DEFINE -- and
+// `tests::resolver_inventory_covers_every_pathbuf_returning_fn` fails when
+// the block and the file disagree in EITHER direction.
+//
+// The classification, so a new row is a decision and not a guess:
+//
+// * `resolver` -- answers "where does a path supplied from OUTSIDE this file
+//   land", for a path the caller may spell any way it likes, and this file
+//   holds more than one answer. The caller therefore has a CHOICE, and
+//   core#356 c4 obliges every call site to state which one it made. The gate
+//   enforces that per row: a row marked `resolver` has its own call sites
+//   checked for a ``resolver: `<name>``` note, so a third resolver is one row
+//   and not a fourth hand-written test.
+// * `helper` -- a private step of one resolver, a join of a path this file
+//   already owns, or a constructor of a fixed location. No choice is offered
+//   at its call sites, so no call-site note is owed -- and the reason it is
+//   owed nothing is on the row rather than in a reviewer's head.
+//
+// INVENTORY: canon_for_scope = resolver: the WEAK one. Canonicalizes what
+//   exists and re-attaches one missing leaf, so it answers where a path's
+//   SPELLING sits. Correct for advisory mirrors and $HOME lookups, wrong for
+//   a refusal.
+// INVENTORY: canon_existing_ancestor = resolver: the STRONG one. Walks the
+//   dangling tail one symlink hop at a time, so it answers where a write or a
+//   read would LAND. The resolver every `SecretDenyFs` guard predicate must
+//   use (core#383 c3).
+// INVENTORY: resolve = helper: the policy's counted wrapper over
+//   `canon_existing_ancestor` for the two guard predicates. It IS one
+//   resolver choice, already stated at its own body with the core#356 c4
+//   note; a caller of `resolve` has no second answer to pick from.
+// INVENTORY: resolve_against = helper: a private step of the VCS-declaration
+//   scan. It joins a name read out of a gitfile / commondir / alternates
+//   against that file's own directory, which git's own semantics fix; the
+//   caller chooses nothing.
+// INVENTORY: resolve_prefix = helper: the symlink-hop walk inside
+//   `canon_existing_ancestor`, called from nowhere else.
+// INVENTORY: canon_ancestor_only = helper: the walk-UP-and-append-verbatim
+//   shape core#1097 abandoned as a resolver. It follows no symlink, so
+//   `resolve_prefix` can call it without recursing into the hop walk. It must
+//   never be reached from a predicate, which is why it is not a resolver row.
+// INVENTORY: lexical_normalize = helper: applies `.` and `..` textually and
+//   touches no filesystem. It keeps an unresolvable symlink target honest for
+//   `resolve_prefix`; it resolves nothing.
+// INVENTORY: canon = helper: `canonicalize().unwrap_or(p)`, with no
+//   missing-component handling and no link hop. Used only for roots that
+//   already exist at construction time, never for a caller-supplied path.
+// INVENTORY: vcs_store_entry = helper: the per-entry decision of the
+//   secret-deny WALK, not of a caller-supplied path. It is handed an entry the
+//   walk already produced and returns that entry's own canonical path or
+//   nothing; there is no spelling to resolve, because the walk supplied it.
+// INVENTORY: secret_entry = helper: the sibling of `vcs_store_entry`, same
+//   shape and same reason -- shared verbatim by the walk's serial and parallel
+//   arms so the two cannot answer differently.
+// INVENTORY: session_output_root = helper: constructs a FIXED location under
+//   the root (`dunce::simplified(root).join(SESSION_OUTPUT_ROOT)`). A pure
+//   string operation on a path this file already owns.
+// INVENTORY: scratch_dir = helper: constructs a FIXED location under the host
+//   temp directory from the trust level. No caller-supplied path reaches it.
+// INVENTORY: auto_run_overlap = helper: SELECTS one of the auto-run locations
+//   this file already owns and returns it verbatim. Lexical, and deliberately
+//   resolves nothing -- an auto-run directory must be refused whether or not
+//   it currently exists.
+// INVENTORY: revoke_session_read_root = helper: returns the root of a grant
+//   this policy already holds, resolved when the grant was made. A lookup, not
+//   a resolution.
+// INVENTORY: grant_session_read_root = helper: the two-argument form of
+//   `grant_session_read_root_full`; it forwards and resolves nothing itself.
+// INVENTORY: grant_session_read_root_full = helper: takes the path
+//   `grantable_read_root` has already resolved and records it. The resolution
+//   is that function's, and is graded there.
+// INVENTORY: grantable_read_root = helper: the capacity half. It takes the
+//   path `grantable_read_root_shape` has already resolved and returns it
+//   unchanged, so the caller cannot re-resolve it differently -- the same
+//   single-resolution discipline `resolve` gives the guard.
+// INVENTORY: grantable_read_root_shape = resolver: the THIRD answer, and the
+//   one that proves this block is not a two-name gate rewritten. It resolves a
+//   HOST-supplied folder with bare `std::fs::canonicalize`, which REFUSES a
+//   path that does not exist. Correct for a grant -- you cannot open a folder
+//   that is not there, and a grant over a path that may yet be created is a
+//   grant over whatever later takes the name -- and wrong for a guard, which
+//   must judge where a not-yet-created file WOULD land. Its call sites carry
+//   the core#356 c4 note for that reason.
+// ===========================================================================
 
 /// Resolve a VCS-file-supplied path: absolute as written, relative against the
 /// file's own directory, then canonicalized so it compares against the rest of
