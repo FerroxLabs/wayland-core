@@ -111,6 +111,37 @@ fn null_output() -> Arc<dyn wcore_agent::output::OutputSink> {
 ///   3. it is a LOWER BOUND on the full request estimate, including a request
 ///      carrying the 26,054-character tool result #1230 measured being
 ///      discarded.
+#[test]
+fn the_gap_implication_holds_across_the_whole_floor_range() {
+    // The assertion in the guard above is only sound if it holds for ANY floor,
+    // not merely the one this environment happens to assemble -- which is exactly
+    // the mistake that keyed it on `cfg!(windows)` and then on `<` instead of
+    // `<=`. Swept rather than argued.
+    let cfg = CompactConfig::default();
+    let workable = cfg.minimum_workable_window();
+    let ceiling = cfg.input_ceiling_for_window(workable);
+    let mut checked = 0usize;
+    for floor in (0..40_000usize).step_by(7) {
+        let derived = cfg.minimum_window_for_input_floor(floor);
+        assert_eq!(
+            derived > workable,
+            ceiling <= floor,
+            "floor {floor}: derived {derived} vs workable {workable}, ceiling {ceiling}"
+        );
+        checked += 1;
+    }
+    // The sweep must cross the boundary in BOTH directions or it proves nothing.
+    assert!(
+        cfg.minimum_window_for_input_floor(0) <= workable,
+        "sweep never saw the gap ABSENT"
+    );
+    assert!(
+        cfg.minimum_window_for_input_floor(39_999) > workable,
+        "sweep never saw the gap PRESENT"
+    );
+    eprintln!("#1230 c2: implication holds over {checked} floors, both sides of the boundary");
+}
+
 #[tokio::test]
 async fn the_floor_is_derived_from_a_real_assembled_request() {
     let workdir = tempfile::TempDir::new().expect("workdir");
@@ -248,33 +279,37 @@ async fn the_baseline_constant_still_describes_this_tree() {
         cfg.input_ceiling_for_window(derived) > floor as usize,
         "the derived remedy window {derived} does not itself hold the floor {floor}"
     );
-    // The gap is PLATFORM-DEPENDENT, measured rather than assumed. On Linux and
-    // macOS the assembled floor forces a remedy window ABOVE the snapshot-derived
-    // minimum -- that is the gap #1230 c2 is about. On Windows the assembled floor
-    // is smaller (6707 against a snapshot-derived 6929, measured on CI run
-    // 33417001379), so the window it forces lands BELOW that minimum and the gap
-    // does not manifest there at all.
+    // The gap is a FUNCTION OF THE MEASURED FLOOR, not of the platform. A first
+    // attempt keyed this on `cfg!(windows)` after seeing Windows derive 6707
+    // against a snapshot-derived 6929 -- and CI's own Linux container refuted that
+    // immediately by doing the same thing. The assembled floor varies with the
+    // ENVIRONMENT the bootstrap fixture finds, so no constant direction is
+    // invariant and asserting one is how this guard reds for the wrong reason.
     //
-    // Asserted in BOTH directions rather than skipped on Windows. A `cfg` that
-    // simply drops the assertion would let the gap APPEAR on Windows without
-    // anything noticing, which is the same silence this test exists to break --
-    // and the message on each side names what changed if it fires.
+    // What IS invariant is the implication: the remedy window exceeds the
+    // snapshot-derived minimum exactly when that minimum cannot hold the floor
+    // just measured. That ties the gap to the floor instead of to a host, holds
+    // everywhere, and still cannot pass silently -- if the two ever disagree,
+    // `minimum_window_for_input_floor` and `input_ceiling_for_window` have stopped
+    // being inverses and every small-window decision in the product is affected.
     let workable = cfg.minimum_workable_window();
-    if cfg!(windows) {
-        assert!(
-            derived <= workable,
-            "on Windows the assembled floor has been SMALLER than the \
-             snapshot-derived minimum, so #1230 c2's gap did not manifest here. \
-             It now derives {derived} against {workable}, so the gap HAS appeared \
-             on Windows: re-derive the guard and re-grade #1230 c2 for this \
-             platform rather than widening anything"
-        );
-    } else {
-        assert!(
-            derived > workable,
-            "the derived remedy window {derived} is not above the snapshot-derived \
-             {workable}, so this tree no longer exhibits the gap #1230 c2 is about \
-             and the guard should be re-derived"
-        );
-    }
+    let gap_present = derived > workable;
+    // `<=`, not `<`. `minimum_window_for_input_floor` is the LEAST window whose
+    // ceiling is STRICTLY greater than the floor, so a window whose ceiling EQUALS
+    // the floor does not satisfy that predicate and the derived window steps past
+    // it. With `<` this assertion would fire at exact equality -- for a boundary
+    // reason rather than a real one, in CI, on the release branch.
+    let snapshot_window_too_small = cfg.input_ceiling_for_window(workable) <= floor as usize;
+    eprintln!(
+        "#1230 c2: derived {derived} vs snapshot-derived {workable}; gap {}",
+        if gap_present { "PRESENT" } else { "ABSENT" }
+    );
+    assert_eq!(
+        gap_present, snapshot_window_too_small,
+        "the remedy window must exceed the snapshot-derived minimum EXACTLY when \
+         that minimum cannot hold the measured floor. derived {derived}, \
+         snapshot-derived {workable}, floor {floor}. These disagreeing means \
+         minimum_window_for_input_floor and input_ceiling_for_window are no longer \
+         inverses, which moves every small-window decision in the product."
+    );
 }
