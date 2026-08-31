@@ -177,7 +177,12 @@ pub struct SandboxStatus {
 fn powershell_downgrade_note(blocks_powershell: bool, backend: &str) -> Option<String> {
     blocks_powershell.then(|| {
         format!(
-            "backend `{backend}` cannot run PowerShell, so the agent's Bash tool              DOWNGRADES a `powershell` / `pwsh` command (and `bash` / `sh`) to              `cmd /C` and runs it there: your command text is preserved, the              shell you asked for is not. A command that depends on PowerShell              syntax will fail or behave differently, and nothing else on this              host tells you why."
+            "backend `{backend}` cannot run PowerShell, so the agent's Bash tool \
+             DOWNGRADES a `powershell` / `pwsh` command (and `bash` / `sh`) to \
+             `cmd /C` and runs it there: your command text is preserved, the \
+             shell you asked for is not. A command that depends on PowerShell \
+             syntax will fail or behave differently, and nothing else on this \
+             host tells you why."
         )
     })
 }
@@ -767,6 +772,11 @@ mod disclosure_tests {
 
         // c3: the CONSEQUENCE, not only the fact. An operator who sees a
         // `powershell` command run under `cmd` has to be able to attribute it.
+        assert!(
+            !note.contains("  ") && !note.contains('\n'),
+            "the consequence is what an operator reads verbatim in both arms; \
+             runs of whitespace mean it was assembled wrong: {note:?}"
+        );
         let lower = note.to_lowercase();
         assert!(
             lower.contains("downgrad") && lower.contains("cmd"),
