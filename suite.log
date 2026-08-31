@@ -5265,3 +5265,11 @@ note: to see what the problems were, use the option `--future-incompat-report`, 
         SLOW [> 30.000s] (─────────) wcore-agent::mcp_dial_notice_e2e a_boot_dial_that_hangs_announces_itself_instead_of_going_quiet
         PASS [  30.229s] (5140/5642) wcore-agent::mcp_dial_notice_e2e a_boot_dial_that_hangs_announces_itself_instead_of_going_quiet
         PASS [  44.311s] (5141/5642) wcore-agent::engine_compact_test tc_2_6_context_overflow_sheds_tool_output_and_continues
+        PASS [  68.344s] (5142/5642) wcore-agent::workflow_limits_test fix1_dispatch_budget_aborts_with_partial_result
+────────────
+     Summary [  72.473s] 5142/5642 tests run: 5139 passed (2 slow), 3 failed, 7 skipped
+  TRY 2 FAIL [   0.250s] (5047/5642) wcore-protocol::desktop_contract_corpus checked_corpus_matches_real_serializers_byte_for_byte
+  TRY 2 FAIL [   0.559s] (5073/5642) wcore-agent::untrusted_channel_wire_test openai_wire_body_carries_only_sender_bytes_and_the_named_runtime_blocks
+  TRY 2 FAIL [   0.227s] (5078/5642) wcore-protocol::quiescence_contract the_published_corpus_is_current
+warning: 500/5642 tests were not run due to test failure (run with --no-fail-fast to run all tests, or run with --max-fail)
+error: test run failed
