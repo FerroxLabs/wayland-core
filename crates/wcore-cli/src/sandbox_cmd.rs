@@ -738,6 +738,64 @@ mod disclosure_tests {
         }
     }
 
+    /// #400 c3 ON ITS OWN, separated from c1 so it cannot be met by
+    /// inattention: the disclosure must name the CONSEQUENCE, not only the
+    /// fact.
+    ///
+    /// A row reading `blocks powershell true` is accurate and is the exact
+    /// failure `#368` c6 named in the capability booleans — unreadable as a
+    /// posture. What the operator SEES is a `powershell` command that ran
+    /// under `cmd`, and four sites in `wcore_tools::bash` are what did it. The
+    /// `tracing::warn!` on that rewrite path is not a second chance: with
+    /// `RUST_LOG` unset only `ERROR` reaches stderr, so it reaches nobody.
+    ///
+    /// The wording is not pinned; the PROPERTIES are, so an honest rewrite does
+    /// not redden and a disclosure that drops the rewrite does.
+    #[test]
+    fn the_disclosure_names_the_downgrade_and_not_only_the_refusal() {
+        let notice = super::shell_downgrade_notice("sentinel_backend");
+
+        assert!(
+            notice.contains("sentinel_backend"),
+            "the notice must name the backend it is about: {notice:?}"
+        );
+        // The rewrite, in the operator's terms.
+        assert!(
+            notice.contains("DOWNGRADED") && notice.contains("cmd /C"),
+            "the notice must say the command is downgraded and to WHAT, or an \
+             operator cannot attribute the shell they see: {notice:?}"
+        );
+        // NOT refused. An operator told only "PowerShell is blocked" would
+        // reasonably expect their command to fail; it does not, it runs
+        // somewhere else, which is the harder thing to attribute.
+        assert!(
+            notice.contains("NOT refused"),
+            "the notice must distinguish `downgraded` from `refused`: {notice:?}"
+        );
+        // TOTAL over what the rewrite actually does. The production helper
+        // `downgrade_unsupported_shell_for_sandbox` rewrites `powershell`,
+        // `pwsh`, `bash` AND `sh` prefixes; a notice naming only PowerShell
+        // leaves the operator whose `bash -c` was rewritten with nothing.
+        for shell in ["powershell", "pwsh", "bash", "sh"] {
+            assert!(
+                notice.contains(shell),
+                "`{shell}` is rewritten by \
+                 `wcore_tools::bash::downgrade_unsupported_shell_for_sandbox` and \
+                 the disclosure does not mention it: {notice:?}"
+            );
+        }
+
+        // And it must reach the arm each audience reads.
+        let mut status = bare();
+        status.blocks_powershell = true;
+        status.shell_downgrade_notice = Some(notice.clone());
+        assert_eq!(status.to_json()["shell_downgrade_notice"], notice);
+        let human = super::render_status_human(&status);
+        for line in super::textwrap_notice(&notice) {
+            assert!(human.contains(line.as_str()), "human arm dropped {line:?}");
+        }
+    }
+
     /// NEGATIVE CONTROL, and it is the arm that blocks the cheap fix. A
     /// disclosure that is printed unconditionally discloses nothing: it would
     /// pass every assertion above while telling an operator on Linux — where
