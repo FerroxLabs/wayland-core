@@ -7,6 +7,7 @@ pub use halluci_guard::{
     extract_claims,
 };
 pub use pii::PIIScrubber;
+pub use pii::perf as pii_perf;
 pub use validator::{
     BudgetExhausted, CheckSet, JudgeValidator, JudgeVerdict, LlmJudge, OutputValidator,
     ValidationCriterion, ValidationFailure, ValidationOutcome, ValidatorBudget, ValidatorError,

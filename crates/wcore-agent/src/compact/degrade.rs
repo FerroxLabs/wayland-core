@@ -67,6 +67,20 @@ pub fn shed_tool_outputs_until_under(
     ceiling: u64,
     estimate: impl Fn(&[Message]) -> u64,
 ) -> usize {
+    let __t = std::time::Instant::now();
+    let __r = shed_tool_outputs_until_under_inner(messages, storage, config, min_shed_chars, ceiling, estimate);
+    crate::perfcount::record(&crate::perfcount::SHED, __t, 0);
+    __r
+}
+
+fn shed_tool_outputs_until_under_inner(
+    messages: &mut [Message],
+    storage: &StorageDir,
+    config: &BudgetConfig,
+    min_shed_chars: usize,
+    ceiling: u64,
+    estimate: impl Fn(&[Message]) -> u64,
+) -> usize {
     if estimate(messages) < ceiling {
         return 0;
     }

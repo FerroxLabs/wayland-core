@@ -101,9 +101,15 @@ pub(crate) fn redact_tool_output(content: &str) -> String {
     // token-first cannot strand a secret: it can, and if the token
     // placeholder ever changes, re-measure both directions before assuming
     // this still holds.
-    PIIScrubber
-        .scrub(&redact_active_tokens(content))
-        .into_owned()
+    let __t = std::time::Instant::now();
+    let __a = std::time::Instant::now();
+    let __tok = redact_active_tokens(content);
+    crate::perfcount::record(&crate::perfcount::REDACT_ACTIVE_TOKENS, __a, content.len());
+    let __p = std::time::Instant::now();
+    let __out = PIIScrubber.scrub(&__tok).into_owned();
+    crate::perfcount::record(&crate::perfcount::PII_SCRUB, __p, __tok.len());
+    crate::perfcount::record(&crate::perfcount::REDACT_TOOL_OUTPUT, __t, content.len());
+    __out
 }
 
 const MAX_PENDING_BYTES: usize = 1024 * 1024;
@@ -135,6 +141,12 @@ impl StreamingRedactor {
     }
 
     pub(crate) fn push(&mut self, chunk: &str) -> Option<String> {
+        let __t = std::time::Instant::now();
+        let __r = self.push_inner(chunk);
+        crate::perfcount::record(&crate::perfcount::STREAMING_REDACTOR, __t, chunk.len());
+        __r
+    }
+    fn push_inner(&mut self, chunk: &str) -> Option<String> {
         self.line.push_str(chunk);
         let mut emitted = String::new();
         while let Some(newline) = self.line.find('\n') {

@@ -102,6 +102,7 @@ pub mod mcp_dial_notice;
 pub mod mcp_lifecycle;
 pub mod orchestration;
 pub mod output;
+pub mod perfcount;
 mod output_redaction;
 // #1138: the in-process TUI `ChannelSink` is a second `RenderArtifact`
 // producer, and it lives in `wcore-cli`. It must scrub on exactly the same

@@ -4,6 +4,37 @@ use std::sync::OnceLock;
 use base64::Engine as _;
 use regex::{Regex, RegexSet};
 
+// TEMPORARY bisecting instrumentation for wayland-core#395 c2. Not for merge.
+pub mod perf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    pub struct S { pub n: &'static str, pub ns: AtomicU64, pub c: AtomicU64 }
+    macro_rules! s { ($($i:ident=>$l:literal),*$(,)?) => {
+        $(pub static $i: S = S{n:$l, ns:AtomicU64::new(0), c:AtomicU64::new(0)};)*
+        pub static ALL: &[&S] = &[$(&$i),*];
+    }; }
+    s!{
+        WSS=>"scrub: redact_whitespace_split_secrets",
+        DIRECT=>"scrub: scrub_direct",
+        WRAPPED_RECORD=>"scrub: wrapped_record branch",
+        B64_LOOP=>"scrub: base64_candidates loop",
+        WRAPPED_LOOP=>"scrub: wrapped_base64 loop",
+        SPLITWIN=>"  split_secret_windows (all callers)",
+        DECODE=>"  decoded_contains_secret (all callers)",
+    }
+    pub fn rec(s: &S, t: std::time::Instant) {
+        s.ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        s.c.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn dump() {
+        for s in ALL {
+            if s.c.load(Ordering::Relaxed) == 0 { continue; }
+            eprintln!("PERF pii {:<42} {:>10.4}s calls={}", s.n,
+                s.ns.load(Ordering::Relaxed) as f64/1e9, s.c.load(Ordering::Relaxed));
+        }
+    }
+}
+// PERFSLOT
+
 /// Compiled PII pattern set. Each entry is (label, regex_str).
 /// Order matters: label is embedded in the replacement string.
 static PATTERNS: &[(&str, &str)] = &[
@@ -161,6 +192,13 @@ fn scrub_direct<'a>(input: &'a str) -> Cow<'a, str> {
 }
 
 fn decoded_contains_secret(candidate: &str) -> bool {
+    let __t = std::time::Instant::now();
+    let __r = decoded_contains_secret_inner(candidate);
+    perf::rec(&perf::DECODE, __t);
+    __r
+}
+
+fn decoded_contains_secret_inner(candidate: &str) -> bool {
     use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
 
     [
@@ -239,6 +277,13 @@ fn whitespace_separated_tokens(text: &str) -> Vec<(usize, usize)> {
 /// remainder still trips the detector — has exactly that second failure: it
 /// stops on the weak pattern and leaves the rest of the strong one in place.
 fn split_secret_windows(text: &str) -> Vec<SplitWindow> {
+    let __t = std::time::Instant::now();
+    let __r = split_secret_windows_inner(text);
+    perf::rec(&perf::SPLITWIN, __t);
+    __r
+}
+
+fn split_secret_windows_inner(text: &str) -> Vec<SplitWindow> {
     let tokens = whitespace_separated_tokens(text);
     if tokens.is_empty() {
         return Vec::new();
@@ -381,14 +426,20 @@ impl PIIScrubber {
     pub fn scrub<'a>(&self, input: &'a str) -> Cow<'a, str> {
         // Whitespace-split secrets first: see `redact_whitespace_split_secrets`
         // for why this cannot run after `scrub_direct`.
-        let direct = match redact_whitespace_split_secrets(input) {
+        let __t = std::time::Instant::now();
+        let __wss = redact_whitespace_split_secrets(input);
+        perf::rec(&perf::WSS, __t);
+        let __t = std::time::Instant::now();
+        let direct = match __wss {
             Cow::Borrowed(text) => scrub_direct(text),
             Cow::Owned(text) => Cow::Owned(scrub_direct(&text).into_owned()),
         };
+        perf::rec(&perf::DIRECT, __t);
         // Fast, deterministic MIME-wrapped case: streaming redaction groups a
         // pure base64 candidate before calling us. Strip arbitrary ASCII
         // whitespace and decode the whole record before the more permissive
         // embedded-candidate scan below.
+        let __t_wr = std::time::Instant::now();
         let wrapped_record = direct.bytes().any(|byte| byte.is_ascii_whitespace())
             && direct.bytes().all(|byte| {
                 byte.is_ascii_whitespace()
@@ -413,6 +464,8 @@ impl PIIScrubber {
                 return Cow::Owned("[REDACTED:ENCODED_SECRET]".to_string());
             }
         }
+        perf::rec(&perf::WRAPPED_RECORD, __t_wr);
+        let __t_b64 = std::time::Instant::now();
         let mut last = 0;
         let mut encoded = None::<String>;
         for candidate in base64_candidates().find_iter(direct.as_ref()) {
@@ -431,6 +484,8 @@ impl PIIScrubber {
             direct
         };
 
+        perf::rec(&perf::B64_LOOP, __t_b64);
+        let __t_wl = std::time::Instant::now();
         let mut last = 0;
         let mut wrapped = None::<String>;
         for candidate in wrapped_base64_candidates().find_iter(continuous.as_ref()) {
@@ -456,6 +511,7 @@ impl PIIScrubber {
             out.push_str(&replacement);
             last = candidate.end();
         }
+        perf::rec(&perf::WRAPPED_LOOP, __t_wl);
         if let Some(mut wrapped) = wrapped {
             wrapped.push_str(&continuous[last..]);
             Cow::Owned(wrapped)
