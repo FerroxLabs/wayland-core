@@ -81,3 +81,44 @@ and each proves both polarities of its reader on synthetic sources in the same t
 Net: what the release buys from Linux is that the DECISION cannot be edited away silently.
 What it still does not buy is any evidence the decision works, and #393 stays open for
 SeanDesktop.
+
+### The compile gate beside it (`just check-windows-compile`)
+
+The guard above grades the DECISION but still cannot see the two
+`#![cfg(windows)]` files themselves: they compile to nothing on Linux, so a type
+error or a stale call inside them is invisible until a Windows runner picks it
+up. `just check-windows-compile` closes that half by cross-checking the
+workspace at `x86_64-pc-windows-gnu`, and is wired into `check-all`.
+
+Measured on hetzner, 2026-08-31, with a deliberate type error appended to
+`quarantine_process_tree_windows.rs` and then reverted -- the same mutation
+graded against both instruments, so the hole and the fix are on one record:
+
+| instrument | error present | reverted |
+|---|---|---|
+| `cargo check -p wcore-cli --tests` (Linux) | RC=0 | RC=0 |
+| `cargo test -p wcore-cli --test issue_393_..._guard` (Linux) | RC=0 | RC=0 |
+| `vx just check-windows-compile` | RC=101, `error[E0308]` | RC=0 |
+
+The first two rows ARE the hole, measured rather than argued: the Linux gates
+stay green through a break in the file. Cost: ~1m04s cold against a warm dep
+graph, 1-3s warm, 668 MB of `target/x86_64-pc-windows-gnu`.
+
+Two honesty notes the release should carry:
+
+* **gnu is not msvc.** We ship `x86_64-pc-windows-msvc`. The `gnu` target shares
+  the `cfg(windows)` arms -- the whole point -- but not the ABI, the linker or
+  the C runtime. A green here means "the Windows source still compiles as
+  source", never "Windows works", and it does not substitute for the msvc legs
+  in `ci.yml`, which stay the release-blocking arm.
+* **The recipe does not use `vx`, and as first written it could never pass.**
+  `vx` keeps a private rustup store whose only installed target is
+  `x86_64-unknown-linux-gnu`, while `rustup target add` resolves to the system
+  rustup regardless of a `vx` prefix. `vx just check-windows-compile` therefore
+  failed `error[E0463]: can't find crate for std` on a CLEAN tree. That was
+  caught by running the recipe as CI runs it rather than the command its own
+  comment described. Bare `cargo` honours `rust-toolchain.toml` and resolves to
+  the pinned cargo 1.95.0 (`vx cargo` resolved to 1.97.0), so determinism is
+  kept.
+
+None of this closes c1, c2 or c3. They remain `not-met` and need SeanDesktop.
