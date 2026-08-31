@@ -20,10 +20,21 @@
 //! justified filing no follow-up.
 //!
 //! A comment cannot be type-checked, so this is the check. It is deliberately
-//! narrow: it flags a comment only when the comment is about WINDOWS, about
+//! narrow: it flags a SENTENCE only when that sentence is about WINDOWS, about
 //! the DISPLACED-SAVE subject `atomic_io.rs:442-451` governs, and asserts an
-//! IMPOSSIBILITY — and it exempts a comment that is correcting such a claim,
+//! IMPOSSIBILITY — and it exempts a sentence that is correcting such a claim,
 //! because the correction necessarily quotes it.
+//!
+//! # Sentence granularity, and why it is not a detail
+//!
+//! This guard first graded whole comment BLOCKS. MEASURED: re-injecting the
+//! exact historical sentence directly above the doc comment that corrects it
+//! did NOT redden it — the two runs of `//` lines joined into one block, the
+//! correction's own marker exempted that block, and the offence rode in on
+//! its neighbour's exemption. A false claim standing next to a true one is
+//! still a false claim, and the place a new one is most likely to be written
+//! is exactly beside the correction. So the exemption now reaches one
+//! sentence, never a block, and the adjacency case is a control below.
 //!
 //! # Why it is not vacuous
 //!
@@ -42,12 +53,12 @@
 
 use std::path::{Path, PathBuf};
 
-/// Does this comment block assert, of Windows, an impossibility about the
+/// Does this SENTENCE assert, of Windows, an impossibility about the
 /// displaced-save path?
 ///
-/// All three signal classes must be present, and no correction marker.
-fn asserts_windows_impossibility(comment: &str) -> bool {
-    let text = comment.to_lowercase();
+/// All three signal classes must be present in it, and no correction marker.
+fn asserts_windows_impossibility(sentence: &str) -> bool {
+    let text = sentence.to_lowercase();
 
     // 1. It is about Windows or about the Win32 primitive in question.
     let windows = ["windows", "replacefile", "win32"]
@@ -113,23 +124,33 @@ fn asserts_windows_impossibility(comment: &str) -> bool {
     windows && subject && impossibility && !correcting
 }
 
-/// Every consecutive run of `//`-prefixed lines in `source`, as one block each.
-fn comment_blocks(source: &str) -> Vec<String> {
-    let mut blocks = Vec::new();
+/// Every sentence of every consecutive run of `//`-prefixed lines in `source`.
+///
+/// A run is joined first so a sentence wrapped across lines is graded whole,
+/// then split on `.` — the guard's unit is the CLAIM, and a comment carries
+/// several. Fragments shorter than a claim can be are dropped, so a bare
+/// `Ok(..)` line or a table row cannot become an offender.
+fn comment_sentences(source: &str) -> Vec<String> {
+    let mut runs = Vec::new();
     let mut current: Vec<&str> = Vec::new();
     for line in source.lines() {
         let trimmed = line.trim_start();
         if let Some(rest) = trimmed.strip_prefix("//") {
             current.push(rest.trim_start_matches(['/', '!']).trim());
         } else if !current.is_empty() {
-            blocks.push(current.join(" "));
+            runs.push(current.join(" "));
             current.clear();
         }
     }
     if !current.is_empty() {
-        blocks.push(current.join(" "));
+        runs.push(current.join(" "));
     }
-    blocks
+    runs.iter()
+        .flat_map(|run| run.split('.'))
+        .map(str::trim)
+        .filter(|s| s.len() >= 20)
+        .map(str::to_owned)
+        .collect()
 }
 
 fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -175,6 +196,26 @@ fn no_doc_comment_claims_the_displaced_save_path_is_impossible_on_windows() {
          keyword alarm rather than a guard"
     );
 
+    // ADJACENCY. The hole this guard shipped with for one commit: at block
+    // granularity, the historical claim written directly above its own
+    // correction was masked by the correction's exemption, and the red arm
+    // came back green. Graded here on the real extractor, over a source
+    // fragment shaped exactly like the one that defeated it.
+    const OFFENCE_BESIDE_ITS_CORRECTION: &str = "\
+    // Windows publishes with `ReplaceFileW` and restores with a plain\n\
+    // replacing rename, which hands nothing back to judge, so no save can be\n\
+    // intercepted there at all.\n\
+    /// NO LONGER GATED TO UNIX (FerroxLabs/wayland#1268 c2). On Windows\n\
+    /// `publish_displacing` returns `Swap::Displaced(backup)`, so the\n\
+    /// intercepted_save path is reachable there.\n";
+    assert!(
+        comment_sentences(OFFENCE_BESIDE_ITS_CORRECTION)
+            .iter()
+            .any(|s| asserts_windows_impossibility(s)),
+        "an offending sentence adjacent to a correcting one is not flagged, so the guard \
+         is blind exactly where a new false claim would be written"
+    );
+
     // ---- the sweep -------------------------------------------------------
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -195,16 +236,39 @@ fn no_doc_comment_claims_the_displaced_save_path_is_impossible_on_windows() {
         files.len()
     );
 
+    // THIS FILE IS THE ONE EXCLUSION, and it is asserted rather than assumed.
+    // The guard quotes the offence it exists to catch -- in its module doc and
+    // in the controls above -- so grading itself would make it permanently red
+    // and force the quotes out, which is how the evidence gets deleted. The
+    // count is pinned at one: a second exclusion would be a way to launder a
+    // real offender into an exempt file.
+    let self_path = Path::new(file!())
+        .file_name()
+        .expect("this test file has a name")
+        .to_owned();
+    let excluded = files
+        .iter()
+        .filter(|f| f.file_name() == Some(self_path.as_os_str()))
+        .count();
+    assert_eq!(
+        excluded, 1,
+        "expected to find and exclude exactly this guard file; found {excluded}. If it is 0 \
+         the walk is not covering tests/ and the sweep grades less than it claims"
+    );
+
     let (mut comment_lines, mut offenders) = (0usize, Vec::new());
     for file in &files {
+        if file.file_name() == Some(self_path.as_os_str()) {
+            continue;
+        }
         let source = std::fs::read_to_string(file).expect("readable source");
         comment_lines += source
             .lines()
             .filter(|l| l.trim_start().starts_with("//"))
             .count();
-        for block in comment_blocks(&source) {
-            if asserts_windows_impossibility(&block) {
-                offenders.push(format!("{}: {block}", file.display()));
+        for sentence in comment_sentences(&source) {
+            if asserts_windows_impossibility(&sentence) {
+                offenders.push(format!("{}: {sentence}", file.display()));
             }
         }
     }
