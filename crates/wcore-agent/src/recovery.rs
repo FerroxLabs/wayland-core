@@ -350,11 +350,40 @@ impl RecoveryCheckpoint {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        if request.messages.len() != durable_messages.len() {
-            return Err(JournalError::InvalidTransition(
-                "prepared request message count does not match the durable conversation"
-                    .to_string(),
-            ));
+        // #559 c6 — the ONE message request assembly may ADD. When the tail
+        // user message is also the first one (turn 1), the per-turn transient
+        // injections go onto a carrier message of their own rather than into
+        // the durable first message, so that message stays byte-stable and
+        // turn 1's cache entry survives. The carrier admits nothing the
+        // append-onto-the-tail form below did not already admit — user role,
+        // text blocks only — and less: it holds no durable content, so there
+        // is nothing in it a prepared request could rewrite.
+        match request.messages.len().checked_sub(durable_messages.len()) {
+            Some(0) => {}
+            Some(1) if !durable_messages.is_empty() => {
+                let carrier = request
+                    .messages
+                    .last()
+                    .expect("checked_sub proved the prepared request is longer");
+                let text_only = !carrier.content.is_empty()
+                    && carrier
+                        .content
+                        .iter()
+                        .all(|block| matches!(block, ContentBlock::Text { .. }));
+                if !matches!(carrier.role, Role::User) || !text_only {
+                    return Err(JournalError::InvalidTransition(
+                        "prepared request adds a trailing message that is not a transient \
+                         text carrier"
+                            .to_string(),
+                    ));
+                }
+            }
+            _ => {
+                return Err(JournalError::InvalidTransition(
+                    "prepared request message count does not match the durable conversation"
+                        .to_string(),
+                ));
+            }
         }
         // #388 — the ONE rewrite request assembly makes to a durable block:
         // `stub_failed_tool_results_for_retry` replaces the body of a FAILED

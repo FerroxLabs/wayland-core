@@ -8299,6 +8299,62 @@ impl AgentEngine {
         }
     }
 
+    /// #559 c6 — the message a per-turn transient block must be attached to,
+    /// creating a dedicated trailing CARRIER when attaching to the tail would
+    /// put the block inside the first user message.
+    ///
+    /// On turn 1 the tail user message IS the first user message, so
+    /// `attach_transient_block` lands the skill-router hint and the PrePrompt
+    /// contributions at `messages[1]` of an OpenAI-shaped body — the system
+    /// prompt takes `messages[0]`. Those blocks live only in the per-turn
+    /// clone, so the same message is re-sent WITHOUT them on turn 2 and turn
+    /// 1's prompt-cache entry can never be read back. That is how the session
+    /// #559 measured reached turn 26 with `cache_read = 0` on every turn.
+    /// A carrier of their own leaves the first user message byte-stable from
+    /// turn 1 onwards, so turn 1 writes an entry later turns can read —
+    /// strictly more than the write-point rule alone, which only stops turn 1
+    /// writing a poisoned entry (c7).
+    ///
+    /// `compat.merge_same_role()` is the gate; a provider name never is
+    /// (AGENTS.md). A wire that folds adjacent same-role turns together merges
+    /// the carrier straight back into the first user message — and appends it
+    /// AFTER the sender's own words, inverting the placement rule
+    /// `attach_transient_block` exists to hold. Those wires are exactly
+    /// `anthropic` / `bedrock` / `vertex` / `minimax` / `gemini`, the only
+    /// presets that set the flag, and every one of them carries the system
+    /// prompt in its own top-level field (`system`, `systemInstruction`), so
+    /// their turn-1 request has no `messages[1]` for anything to land in.
+    ///
+    /// Returns `None` — injecting nothing — when the tail is not user-role,
+    /// exactly as both call sites did before: never orphan a `tool_use`, never
+    /// create adjacent user messages on a wire that cannot carry them.
+    fn transient_carrier<'a>(
+        messages: &'a mut Vec<Message>,
+        compat: &wcore_config::compat::ProviderCompat,
+    ) -> Option<&'a mut Message> {
+        if !matches!(messages.last()?.role, Role::User) {
+            return None;
+        }
+        // `len() == 1` is precisely "the tail user message is also the first
+        // one". A carrier pushed by an earlier injection on this same turn
+        // makes it 2, so the second injection joins that carrier instead of
+        // starting another.
+        if messages.len() == 1 && !compat.merge_same_role() {
+            // The timestamp is DERIVED from the message it follows, never
+            // minted: the session journal digests the prepared request, so a
+            // `Utc::now()` here would make a replay of the same turn hash
+            // differently and fail recovery closed.
+            let timestamp = messages.last().and_then(|m| m.timestamp);
+            messages.push(Message {
+                role: Role::User,
+                content: Vec::new(),
+                timestamp,
+                cache_breakpoint: None,
+            });
+        }
+        messages.last_mut()
+    }
+
     /// AUDIT D-6 — synthesize the `ToolResult` blocks needed to repair a
     /// trailing assistant message that carries `tool_use` blocks with no
     /// following tool-results message.
@@ -13795,8 +13851,8 @@ impl AgentEngine {
                     // point — see the `mark_cache_boundaries` call below.
                     let mut transient_tail = false;
                     if let Some(hint) = skill_hint
-                        && let Some(last) = request.messages.last_mut()
-                        && matches!(last.role, Role::User)
+                        && let Some(last) =
+                            Self::transient_carrier(&mut request.messages, &self.compat)
                     {
                         Self::attach_transient_block(last, hint);
                         transient_tail = true;
@@ -13836,8 +13892,11 @@ impl AgentEngine {
                         for line in &outcome.hook_trace {
                             tracing::debug!(target: "wcore_agent::hooks", "{line}");
                         }
-                        transient_tail |=
-                            Self::apply_pre_prompt_contribution(&mut request.messages, &outcome);
+                        transient_tail |= Self::apply_pre_prompt_contribution(
+                            &mut request.messages,
+                            &self.compat,
+                            &outcome,
+                        );
                     }
 
                     // W1 S3: place per-message cache breakpoints when the provider
@@ -19588,7 +19647,8 @@ impl AgentEngine {
     /// Returns whether anything was appended — #559 c6: the caller must know,
     /// because the message it landed on cannot be a prompt-cache write point.
     fn apply_pre_prompt_contribution(
-        request_messages: &mut [Message],
+        request_messages: &mut Vec<Message>,
+        compat: &wcore_config::compat::ProviderCompat,
         outcome: &crate::hooks::HookOutcome,
     ) -> bool {
         // Collect this turn's whole contribution (budget-capped).
@@ -19620,13 +19680,12 @@ impl AgentEngine {
         }
         // Cache-safe tail rule: only append onto a user-role tail. If the tail
         // isn't user-role, inject nothing so a later user-role turn can still
-        // surface this content (the clone is regenerated each turn).
-        let Some(last) = request_messages.last_mut() else {
+        // surface this content (the clone is regenerated each turn). #559 c6:
+        // on turn 1 that tail is also the FIRST user message, so where the wire
+        // allows it the blocks go onto a carrier of their own instead.
+        let Some(last) = Self::transient_carrier(request_messages, compat) else {
             return false;
         };
-        if !matches!(last.role, Role::User) {
-            return false;
-        }
         for text in to_append {
             // Trusted product/plugin context must not land after the user's
             // own words — see `attach_transient_block`.
@@ -38581,7 +38640,11 @@ mod session_start_apply_tests {
     fn pre_prompt_applies_into_user_tail() {
         let mut messages = vec![user_msg("hello")];
         let outcome = pre_prompt_outcome("RECALL-A");
-        super::AgentEngine::apply_pre_prompt_contribution(&mut messages, &outcome);
+        super::AgentEngine::apply_pre_prompt_contribution(
+            &mut messages,
+            &wcore_config::compat::ProviderCompat::anthropic_defaults(),
+            &outcome,
+        );
 
         assert_eq!(
             messages.len(),
@@ -38622,12 +38685,20 @@ mod session_start_apply_tests {
 
         // Turn N: fresh clone.
         let mut turn_n = vec![user_msg("hello")];
-        super::AgentEngine::apply_pre_prompt_contribution(&mut turn_n, &outcome);
+        super::AgentEngine::apply_pre_prompt_contribution(
+            &mut turn_n,
+            &wcore_config::compat::ProviderCompat::anthropic_defaults(),
+            &outcome,
+        );
         assert_eq!(turn_n[0].content.len(), 2, "appended on turn N");
 
         // Turn N+1: a NEW fresh clone (regenerated from self.messages each turn).
         let mut turn_n1 = vec![user_msg("hello")];
-        super::AgentEngine::apply_pre_prompt_contribution(&mut turn_n1, &outcome);
+        super::AgentEngine::apply_pre_prompt_contribution(
+            &mut turn_n1,
+            &wcore_config::compat::ProviderCompat::anthropic_defaults(),
+            &outcome,
+        );
         assert_eq!(
             turn_n1[0].content.len(),
             2,
@@ -38647,7 +38718,11 @@ mod session_start_apply_tests {
         };
         // The block is already present as a prior message in the request.
         let mut messages = vec![user_msg(&injected_text), user_msg("hello")];
-        super::AgentEngine::apply_pre_prompt_contribution(&mut messages, &outcome);
+        super::AgentEngine::apply_pre_prompt_contribution(
+            &mut messages,
+            &wcore_config::compat::ProviderCompat::anthropic_defaults(),
+            &outcome,
+        );
 
         assert_eq!(
             messages[1].content.len(),
@@ -38673,7 +38748,11 @@ mod session_start_apply_tests {
             ),
         ];
         let outcome = pre_prompt_outcome("RECALL-A");
-        super::AgentEngine::apply_pre_prompt_contribution(&mut messages, &outcome);
+        super::AgentEngine::apply_pre_prompt_contribution(
+            &mut messages,
+            &wcore_config::compat::ProviderCompat::anthropic_defaults(),
+            &outcome,
+        );
 
         assert_eq!(messages.len(), 2, "must not push a new message");
         assert_eq!(
@@ -38691,7 +38770,11 @@ mod session_start_apply_tests {
         let huge = "z".repeat(max_chars * 6);
         let mut messages = vec![user_msg("hello")];
         let outcome = pre_prompt_outcome(&huge);
-        super::AgentEngine::apply_pre_prompt_contribution(&mut messages, &outcome);
+        super::AgentEngine::apply_pre_prompt_contribution(
+            &mut messages,
+            &wcore_config::compat::ProviderCompat::anthropic_defaults(),
+            &outcome,
+        );
 
         let appended = match messages[0].content.first() {
             Some(ContentBlock::Text { text }) => text,
