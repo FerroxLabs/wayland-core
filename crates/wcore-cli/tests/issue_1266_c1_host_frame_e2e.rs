@@ -50,14 +50,22 @@
 //! provider over a dead endpoint reports `unknown`, so the binary is not
 //! shipping one hardcoded category.
 //!
-//! # RED ARM (recorded, re-runnable)
+//! # RED ARM (recorded, re-runnable, and MEASURED)
 //!
 //! In `crates/wcore-agent/src/engine.rs`, change the unworkable-window
 //! refusal's `FailureCategory::ContextLimit` to `FailureCategory::Unknown`,
-//! `touch` the file and rebuild the binary.
-//! [`the_context_ceiling_refusal_reaches_the_real_host_as_context_limit`] goes
-//! RED on `"unknown"` while
-//! [`the_harness_observes_a_healthy_start_and_reports_an_opaque_failure_as_unknown`] stays green.
+//! `touch` the file and rebuild. The mutation was asserted to have landed on
+//! the line and `cargo check -p wcore-cli --tests` was RC=0 before the run was
+//! believed, so this is not a mutation that merely failed to compile.
+//!
+//! Result: **1 failed, 1 passed**.
+//! [`the_context_ceiling_refusal_reaches_the_real_host_as_context_limit`] went
+//! RED with the frame arriving off the process's stdout as
+//! `{"category":"unknown", ... "core cannot operate in a window that small"
+//! ...}`, while
+//! [`the_harness_observes_a_healthy_start_and_reports_an_opaque_failure_as_unknown`]
+//! stayed green — which is the shape that matters: the mutation moved exactly
+//! the classification under test and nothing else.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
