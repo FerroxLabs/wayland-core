@@ -387,7 +387,23 @@ fn walk_dir(
 
     // Sort entries for a deterministic walk — the payload (and its tests)
     // must not depend on filesystem iteration order.
-    let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+    //
+    // core#377 c2, drop shape 1 of 3. This was
+    // `entries.flatten().map(|e| e.path()).collect()`. `ReadDir` yields a
+    // `Result` per entry, and `flatten()` discards every `Err` one BEFORE the
+    // loop below can judge it: an entry the OS refused to describe never
+    // reached the counter, so no `SkippedFiles` warning was emitted for it.
+    // No exit keyword is involved, which is why the exit gate is structurally
+    // blind to this shape and `every_entry_read_dir_yields_reaches_the_loop_or_the_counter`
+    // exists beside it.
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for entry in entries {
+        let Ok(entry) = entry else {
+            *skipped += 1;
+            continue;
+        };
+        paths.push(entry.path());
+    }
     paths.sort();
 
     for path in paths {
@@ -434,7 +450,17 @@ fn walk_dir(
             // root is met at the top of the tree and never descended TO, so a
             // self-only test admitted `.git/objects/aa` and inlined the
             // objects under it.
+            //
+            // core#377 c2, drop shape 2 of 3: this `continue` did not count.
+            // The argument for leaving it uncounted was that pruning a `.git`
+            // tree is not a skipped FILE. That reads the criterion as being
+            // about what `SkippedFiles` OUGHT to mean; its sentence is about
+            // what the user is told, and a directory the user asked for that
+            // did not arrive is the same silence whatever the reason. A
+            // slightly generous count is a warning; an absent one is the
+            // defect.
             if wcore_tools::workspace_policy::is_within_vcs_store_or_control_dir(&canonical) {
+                *skipped += 1;
                 continue;
             }
             // core#339 c6: `.gitignore` is judged on where the entry resolves,
@@ -447,7 +473,16 @@ fn walk_dir(
                 continue;
             }
             // Reached twice (a link back into the tree) is walked once.
+            //
+            // core#377 c2, drop shape 3 of 3. Counted for the same reason as
+            // the prune above, and against the same objection: the CONTENT of
+            // a revisited directory is already in the payload, so nothing is
+            // missing — but the entry is dropped, and the criterion is written
+            // over every dropped entry, not over every missing byte. Leaving
+            // one exit uncounted on a semantic argument is how the previous
+            // pass covered two shapes of three and was refuted.
             if !visited.insert(canonical) {
+                *skipped += 1;
                 continue;
             }
             walk_dir(&path, scope, ignore, visited, out, skipped, truncated)?;
@@ -1573,6 +1608,266 @@ mod tests {
         assert!(
             payload.files.iter().any(|f| f.content == "safe\n"),
             "control: the ordinary file must still be attached"
+        );
+    }
+
+    /// core#377 c2, BEHAVIOURALLY — the two drop shapes the previous pass left
+    /// uncounted on a semantic argument now reach the user.
+    ///
+    /// The two source gates beside this test prove the SHAPE of every drop in
+    /// `walk_dir`; this one drives the real `resolve()` and reads the warning
+    /// the composer would render. The third shape (an `Err` from the `ReadDir`
+    /// iterator) needs a directory replaced mid-walk or an `EIO` and is not
+    /// constructible on demand here, which is exactly why the structural gate
+    /// is the instrument for it rather than a fixture.
+    #[cfg(unix)]
+    #[test]
+    fn a_pruned_store_and_a_revisited_directory_are_both_reported_as_skipped() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::write(root.join("ok.txt"), "safe\n").expect("write ok");
+        fs::create_dir_all(root.join("sub")).expect("mkdir sub");
+        fs::write(root.join("sub/inner.txt"), "also safe\n").expect("write inner");
+
+        // CONTROL, asserted FIRST so neither assertion below can pass by the
+        // fixture being empty or the walk being broken: with nothing to drop,
+        // the walk emits no `SkippedFiles` at all.
+        let clean = resolve(&AtRef::parse("@./").expect("parse"), root).expect("resolve dir");
+        assert_eq!(
+            clean.files.len(),
+            2,
+            "control: both ordinary files must attach: {:?}",
+            clean.files
+        );
+        assert!(
+            !clean
+                .warnings
+                .iter()
+                .any(|w| matches!(w, AtWarning::SkippedFiles { .. })),
+            "control: a walk that drops nothing must not claim it skipped \
+             something: {:?}",
+            clean.warnings
+        );
+
+        // Drop shape 2: a VCS content store, pruned by core#322.
+        fs::create_dir_all(root.join(".git/objects/aa")).expect("mkdir store");
+        fs::write(root.join(".git/objects/aa/deadbeef"), "object\n").expect("write object");
+        // Drop shape 3: a link back into the tree, dropped by the revisit guard.
+        std::os::unix::fs::symlink(root.join("sub"), root.join("sub/self")).expect("symlink");
+
+        let payload = resolve(&AtRef::parse("@./").expect("parse"), root).expect("resolve dir");
+        let skipped = payload.warnings.iter().find_map(|w| match w {
+            AtWarning::SkippedFiles { count } => Some(*count),
+            _ => None,
+        });
+        assert_eq!(
+            skipped,
+            Some(2),
+            "both dropped entries — the pruned `.git` and the revisited `sub` \
+             — must be counted, so the user is told the attachment is not the \
+             whole directory: {:?}",
+            payload.warnings
+        );
+
+        // WRONG-REFUSAL CONTROL: counting a drop must not become dropping
+        // more. Every legitimate file is still attached, exactly once, and the
+        // committed object is still not.
+        assert_eq!(
+            payload.files.len(),
+            2,
+            "the ordinary files must still attach, and only once each: {:?}",
+            payload.files
+        );
+        assert!(
+            !payload.files.iter().any(|f| f.content.contains("object")),
+            "control: the store's contents must still not be inlined"
+        );
+    }
+
+    // ===========================================================================
+    // core#377 c2 — `walk_dir`'s silence.
+    // ===========================================================================
+
+    /// `at_ref_resolve.rs`, as the two gates below read it.
+    const RESOLVE_SOURCE: &str = include_str!("at_ref_resolve.rs");
+
+    /// The body of `walk_dir`, as `(line number, text)` pairs.
+    ///
+    /// Both gates are scoped to that one function: a rule stated over the whole
+    /// file would be answering a different question, and a rule stated over a fixed
+    /// line range would drift the first time anything above it moved.
+    fn walk_dir_body() -> Vec<(usize, &'static str)> {
+        let lines: Vec<&str> = RESOLVE_SOURCE.lines().collect();
+        let start = lines
+            .iter()
+            .position(|line| line.starts_with("fn walk_dir("))
+            .expect("known-positive control: `fn walk_dir(` must be in this file");
+        let end = lines[start..]
+            .iter()
+            .position(|line| *line == "}")
+            .map(|at| start + at)
+            .expect("`walk_dir` must have a closing brace at column 0");
+        lines[start..=end]
+            .iter()
+            .enumerate()
+            .map(|(offset, line)| (start + offset + 1, *line))
+            .collect()
+    }
+
+    /// core#377 c2 — every loop/function exit inside `walk_dir` either counts the
+    /// entry it drops or is one of the two truncation exits, which carry their own
+    /// warning.
+    ///
+    /// Scans the CLOSED alphabet of Rust loop/function exits — `continue`, `break`,
+    /// `return` — rather than one spelling of one of them. A gate over
+    /// `line.trim() == "continue;"` was tried on this same function and a
+    /// `return Ok(());` walked straight through it: it drops every remaining entry
+    /// in the directory, compiles, and is `cargo fmt --check` clean.
+    ///
+    /// `?` is deliberately NOT in the alphabet. It returns an `Err` the caller
+    /// renders, so it is a refusal the user sees, which is the other half of c1's
+    /// sentence and not a silent drop.
+    #[test]
+    fn every_exit_in_walk_dir_counts_what_it_drops() {
+        const KEYWORDS: [&str; 3] = ["continue", "break", "return"];
+
+        let body = walk_dir_body();
+        let mut exits = 0usize;
+        let mut findings: Vec<String> = Vec::new();
+
+        for (index, (number, line)) in body.iter().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            let Some(keyword) = KEYWORDS.iter().find(|word| {
+                trimmed
+                    .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                    .any(|token| token == **word)
+            }) else {
+                continue;
+            };
+            exits += 1;
+            // An exit sharing a line with other code cannot be judged by what sits
+            // above it, so it is refused outright rather than guessed at.
+            if !trimmed.starts_with(keyword) {
+                findings.push(format!(
+                    "line {number}: an exit shares its line with other code and \
+                 cannot be judged — put it on its own line: {trimmed}"
+                ));
+                continue;
+            }
+            let above = body[..index]
+                .iter()
+                .rev()
+                .map(|(_, text)| text.trim())
+                .find(|text| !text.is_empty() && !text.starts_with("//"))
+                .unwrap_or("");
+            // The two truncation exits: the caller is told by
+            // `AtWarning::Truncated`, which is a louder signal than a skip count.
+            let is_truncation = above == "*truncated = true;" || above == "if *truncated {";
+            if above != "*skipped += 1;" && !is_truncation {
+                findings.push(format!(
+                    "line {number}: `{trimmed}` drops an entry without \
+                 `*skipped += 1;` above it (preceded by `{above}`)"
+                ));
+            }
+        }
+
+        // Known-positive control. A renamed function, a moved brace, or a scan that
+        // stopped matching exits would find nothing and pass by looking at air.
+        assert!(
+            exits >= 12,
+            "the scan found only {exits} exits in `walk_dir` — the instrument is \
+         looking at the wrong thing"
+        );
+        assert!(
+            body.iter()
+                .filter(|(_, line)| line.trim() == "*skipped += 1;")
+                .count()
+                >= 12,
+            "the scan found almost no `*skipped += 1;` in `walk_dir` — the \
+         instrument is looking at the wrong thing"
+        );
+        assert!(
+            findings.is_empty(),
+            "core#377 c2: `AtWarning::SkippedFiles` must be emitted whenever ANY \
+         entry is dropped:\n{}",
+            findings.join("\n")
+        );
+    }
+
+    /// core#377 c2 — every entry `read_dir` yields reaches the loop that judges it,
+    /// or the counter.
+    ///
+    /// The exit gate above is structurally BLIND to this class: an iterator adapter
+    /// is not an exit, and `entries.flatten()` — the shape this function shipped
+    /// with — dropped every `Err` item with no keyword involved at all.
+    ///
+    /// This is deliberately NOT a denylist of adapters. "Which adapters drop an
+    /// element" is the same open alphabet the one-spelling gate died of. It is an
+    /// ALLOWLIST over the OCCURRENCES of the two bindings that carry an entry from
+    /// `read_dir` to the loop: each may appear only in one of the forms below, and
+    /// anything else is a finding whether it is named here or not.
+    ///
+    /// BOTH bindings, because closing only the first leaves the N+1 one line down:
+    /// a `paths.retain(..)` drops entries after the loop that fills it and before
+    /// the loop that reads them.
+    #[test]
+    fn every_entry_read_dir_yields_reaches_the_loop_or_the_counter() {
+        // Keyed to the two bindings that CARRY an entry from `read_dir` to
+        // the loop that judges it. The `let Ok(entry) = entry else {` refusal
+        // inside the first loop is not listed because it names neither
+        // binding: it is an exit, and
+        // `every_exit_in_walk_dir_counts_what_it_drops` owns it.
+        const ALLOWED: [&str; 6] = [
+            "let entries = fs::read_dir(dir).map_err(|e| AtRefError::Io {",
+            "for entry in entries {",
+            "let mut paths: Vec<PathBuf> = Vec::new();",
+            "paths.push(entry.path());",
+            "paths.sort();",
+            "for path in paths {",
+        ];
+
+        let body = walk_dir_body();
+        let mut seen = [false; ALLOWED.len()];
+        let mut findings: Vec<String> = Vec::new();
+
+        for (number, line) in &body {
+            let trimmed = line.trim();
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            let mentions = |name: &str| {
+                trimmed
+                    .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                    .any(|token| token == name)
+            };
+            if !mentions("entries") && !mentions("paths") {
+                continue;
+            }
+            match ALLOWED.iter().position(|allowed| *allowed == trimmed) {
+                Some(at) => seen[at] = true,
+                None => findings.push(format!("line {number}: {trimmed}")),
+            }
+        }
+
+        // Known-positive control, one per allowed form: a rename would silence the
+        // whole gate, and an allowlist that matches nothing accepts everything.
+        for (at, form) in ALLOWED.iter().enumerate() {
+            assert!(
+                seen[at],
+                "the allowlisted form `{form}` is no longer in `walk_dir` — the \
+             gate is describing a function that no longer exists"
+            );
+        }
+        assert!(
+            findings.is_empty(),
+            "an entry from `read_dir` is handled somewhere other than the loop \
+         that judges it or the counter that reports it. An adapter is not an \
+         exit, so `every_exit_in_walk_dir_counts_what_it_drops` cannot see \
+         this:\n{}",
+            findings.join("\n")
         );
     }
 }
