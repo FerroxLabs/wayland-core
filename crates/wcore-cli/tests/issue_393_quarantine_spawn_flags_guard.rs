@@ -188,8 +188,8 @@ fn the_composed_flags_are_applied_once_at_the_single_quarantine_spawn_site() {
     );
     let code = blank_noncode(&src);
 
-    let harden = item_span(&code, "pub fn harden_against_credential_prompt(");
-    let hardened_run = item_span(&code, "pub fn run_hardened(");
+    let harden = fn_body_span(&code, "pub fn harden_against_credential_prompt(");
+    let hardened_run = fn_body_span(&code, "pub fn run_hardened(");
 
     let calls = creation_flag_calls(&code);
     assert_eq!(
@@ -281,24 +281,52 @@ fn the_composed_flags_are_applied_once_at_the_single_quarantine_spawn_site() {
     );
 }
 
-/// The byte range of the top-level item declared by `decl`, from the
-/// declaration to the `}` that closes it in column 0.
+/// The byte range of the BODY of the function declared by `decl`, braces
+/// matched.
 ///
-/// `code` must already be [`blank_noncode`]ed, so a `}` inside a comment or a
-/// string cannot end the span early.
-fn item_span(code: &str, decl: &str) -> std::ops::Range<usize> {
-    let start = code.find(decl).unwrap_or_else(|| {
-        panic!(
-            "{QUARANTINE_SRC} no longer declares `{decl}`. The #393 wiring \
-             claim is about where the creation flags are applied, so a guard \
-             that cannot locate the function grades nothing"
-        )
-    });
-    let end = code[start..]
-        .find("\n}")
-        .map(|rel| start + rel + 2)
-        .unwrap_or_else(|| panic!("`{decl}` in {QUARANTINE_SRC} has no closing brace in column 0"));
-    start..end
+/// Brace-matched rather than "to the next `}` in column 0", because #393's
+/// ownership split lives in two METHODS -- `HardenedTree::disarm` and
+/// `HardenedTree::drop` -- whose closing braces are indented. `code` must
+/// already be [`blank_noncode`]ed, so a brace inside a comment or a string
+/// literal can neither open nor close a body.
+///
+/// `decl` must be UNIQUE in the file: a second function of the same name would
+/// otherwise silently hand back the wrong body and every assertion over it
+/// would be about code nobody meant to grade.
+fn fn_body_span(code: &str, decl: &str) -> std::ops::Range<usize> {
+    let hits = code.matches(decl).count();
+    assert_eq!(
+        hits, 1,
+        "{QUARANTINE_SRC} declares `{decl}` {hits} times; this guard addresses \
+         it by name and can only be trusted while that name resolves to one \
+         body (#393)"
+    );
+    let start = code.find(decl).expect("counted above");
+    let bytes = code.as_bytes();
+    let open = start
+        + code[start..]
+            .find('{')
+            .unwrap_or_else(|| panic!("`{decl}` in {QUARANTINE_SRC} has no body"));
+    let mut depth = 0usize;
+    let mut k = open;
+    let close = loop {
+        assert!(
+            k < bytes.len(),
+            "`{decl}` in {QUARANTINE_SRC} has an unbalanced body"
+        );
+        match bytes[k] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    break k;
+                }
+            }
+            _ => {}
+        }
+        k += 1;
+    };
+    open + 1..close
 }
 
 /// Every `.creation_flags(<arg>)` call in `code`, as `(byte offset, argument)`.
@@ -432,4 +460,102 @@ fn blank_noncode(src: &str) -> String {
         }
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+/// #393's ownership split, which is the half of the fix that decides whether a
+/// SUCCESSFUL install is a product regression.
+///
+/// `HardenedTree` holds a kill-on-close Job Object. Two exits, opposite
+/// actions, and swapping them is silent:
+///
+/// * `disarm` is the ONE site that claims a tree is finished. It must
+///   `release` the job — merely dropping the handle kills the tree, and the
+///   tree at that point includes `git-credential-cache--daemon`, which is
+///   shared with the operator's other `git` operations.
+/// * `drop` is every failing exit, including one nobody has written yet. It
+///   must `terminate`.
+///
+/// # What this can and cannot see, said plainly
+///
+/// The whole Windows half of that struct is `#[cfg(windows)]` and the type it
+/// holds — `wcore_types::job_object::WindowsJobObject` — is behind a
+/// `#![cfg(windows)]` module, so NONE of it compiles here and no Linux test can
+/// execute it. Making it executable would mean generifying `HardenedTree` over
+/// a trait and driving a Linux fake, which grades the fake.
+///
+/// So this grades the DECISION from source, in the same terms as the flags
+/// above: which of the two calls appears on which exit. It cannot see a
+/// `release` that has stopped releasing — that is #393 c1/c2 and needs the box.
+/// What it does close is the swap and the deletion, which are the edits a
+/// reviewer reading two adjacent `if let Some(job)` blocks is least likely to
+/// catch.
+#[test]
+fn the_job_is_released_on_the_finished_exit_and_terminated_on_every_other() {
+    // Positive control for the body reader, on a synthetic with two adjacent
+    // methods: it must return the SECOND one's body when asked for it, and not
+    // run on into or back out of its neighbour. A reader that returned the
+    // whole impl block would find both calls in both bodies and could never
+    // detect the swap this test exists for.
+    let synthetic = "impl T {\n    fn a(&mut self) {\n        x.release();\n    }\n    fn b(&mut self) {\n        if q { x.terminate(); }\n    }\n}\n";
+    let b = fn_body_span(synthetic, "fn b(&mut self)");
+    assert!(
+        synthetic[b.clone()].contains("x.terminate()") && !synthetic[b].contains("x.release()"),
+        "the body reader cannot separate two adjacent methods, so its verdict \
+         on disarm and drop means nothing"
+    );
+
+    let src = std::fs::read_to_string(quarantine_source_path())
+        .unwrap_or_else(|e| panic!("{QUARANTINE_SRC} could not be read ({e})"));
+    let code = blank_noncode(&src);
+
+    let disarm = &code[fn_body_span(&code, "fn disarm(&mut self)")];
+    let drop_body = &code[fn_body_span(&code, "fn drop(&mut self)")];
+
+    assert!(
+        disarm.contains("job.release()"),
+        "HardenedTree::disarm does not release the Job Object. disarm is the \
+         one site that claims a tree is FINISHED rather than abandoned; a job \
+         handle merely dropped there kills on close, so a SUCCESSFUL plugin \
+         install would take out git-credential-cache--daemon with it — a \
+         process shared with the operator's other git operations (#393)"
+    );
+    assert!(
+        !disarm.contains("job.terminate()"),
+        "HardenedTree::disarm TERMINATES the Job Object. That is the failing \
+         exit's action on the succeeding exit: every completed install would \
+         kill the tree it just finished with, including git's shared \
+         credential daemon (#393)"
+    );
+    assert!(
+        drop_body.contains("job.terminate()"),
+        "HardenedTree::drop does not terminate the Job Object. Drop is every \
+         failing exit — the wall clock, the drain grace, the try_wait error \
+         FerroxLabs/wayland-core#379 did not name, and any exit added later — \
+         and without the terminate each of them reaps the leaf and leaves \
+         every helper git spawned running, which is the whole of #393 c1"
+    );
+    assert!(
+        !drop_body.contains("job.release()"),
+        "HardenedTree::drop RELEASES the Job Object. Release is the finished \
+         exit's action on the abandoned one: it hands the tree its freedom on \
+         exactly the paths #393 exists to kill it on"
+    );
+    // Both take() the handle rather than borrowing it, so neither exit can act
+    // twice and disarm's release cannot be followed by drop's terminate.
+    for (name, body) in [("disarm", disarm), ("drop", drop_body)] {
+        assert!(
+            body.contains("self.job.take()"),
+            "HardenedTree::{name} does not `take()` the job out of the guard. \
+             disarm runs and is then followed by drop on the same value, so a \
+             handle left in place lets the release be overtaken by a terminate \
+             (#393)"
+        );
+    }
+    // The unix half of the same ownership, so a mutation that guts the Windows
+    // arm cannot pass by having gutted the other one too.
+    assert!(
+        drop_body.contains("terminate_hardened_tree("),
+        "HardenedTree::drop no longer tears down the process GROUP either, so \
+         the unix arm of FerroxLabs/wayland-core#379 is gone with it"
+    );
 }
