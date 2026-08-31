@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use tokio::sync::mpsc;
-use wcore_agent::engine::AgentEngine;
+use wcore_agent::engine::{AgentEngine, REASONING_RECOVERY_LABEL};
 use wcore_agent::output::OutputSink;
 use wcore_egress::{AllowAllPolicy, EgressClient};
 use wcore_providers::retry::{builder_send_with_retry, scope_max_retries};
@@ -758,10 +758,20 @@ async fn f_a_turn_the_reasoning_filter_emptied_is_not_blamed_on_the_endpoint() {
     // holding the model's ANSWER, not only an accurate account of not having
     // one. Without this the assertions above would be satisfied by a turn that
     // explained itself perfectly and said nothing else.
+    //
+    // The assertion is on the RECOVERY LABEL, not on the answer text. That is
+    // deliberate and it was MEASURED: `engine.rs` emits the RAW delta to the
+    // sink ("the sink keeps receiving the RAW delta ... only the durable copy
+    // is filtered"), so a sink that records `emit_text_delta` verbatim already
+    // holds `<think>I should answer this.</think>` whether or not anything was
+    // recovered. Asserting the answer text here PASSED with the recovery arm
+    // disabled -- it graded the provider's echo, not our fix. The label is
+    // emitted only by the recovery arm, so it is the half that discriminates.
     assert!(
-        text.contains("I should answer this"),
+        text.contains(REASONING_RECOVERY_LABEL),
         "wayland#1231 c2: the model's reply was there the whole time and our filter removed \
-         it; the user must end this turn holding it. Answer channel was:\n{text:?}"
+         it; the user must end this turn holding it, under a label saying where it came \
+         from. Answer channel was:\n{text:?}"
     );
 }
 
