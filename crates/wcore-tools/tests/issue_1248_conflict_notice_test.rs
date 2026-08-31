@@ -149,12 +149,33 @@ async fn real_fs_preflight_conflict_still_renders_todays_wording() {
     );
 }
 
+/// The `InMemoryFs` arm's destination, absolute on BOTH platforms.
+///
+/// `/w/f.txt` has a root but NO drive prefix, so `Path::is_absolute()` is
+/// FALSE on Windows -- the same fact `archive_tool.rs` relies on for its own
+/// Windows arm. `WriteTool` runs `validate_user_path` on the raw argument
+/// before it reaches any backend, so a POSIX-shaped literal made this test
+/// measure `PathValidationError::NotAbsolute` ("Refused to write /w/f.txt:
+/// path must be absolute") instead of the conflict renderer it names: green
+/// on Unix, and grading nothing at all on Windows (#409 c5).
+///
+/// Refusing a rooted-but-driveless path on Windows is the tool's intended
+/// contract -- such a path resolves against whichever drive happens to be
+/// current -- so the fixture moves, not the guard. The backend under test is
+/// a `HashMap<PathBuf, _>` with no notion of a real filesystem, and the
+/// wording assertion compares against the raw argument the tool echoes back,
+/// so a real Windows absolute changes nothing that is graded here.
+#[cfg(windows)]
+const MEM_DEST: &str = r"C:\w\f.txt";
+#[cfg(not(windows))]
+const MEM_DEST: &str = "/w/f.txt";
+
 /// The `InMemoryFs` backend, through the same surface. A different producer,
 /// on a backend with no `atomic_write_checked` anywhere in it.
 #[tokio::test]
 async fn in_memory_backend_conflict_still_renders_todays_wording() {
     let mem = Arc::new(InMemoryFs::new());
-    let p = PathBuf::from("/w/f.txt");
+    let p = PathBuf::from(MEM_DEST);
     mem.write(&p, b"the only copy of the user's bytes\n")
         .await
         .unwrap();
@@ -170,7 +191,7 @@ async fn in_memory_backend_conflict_still_renders_todays_wording() {
     let result = write_tool()
         .execute_with_ctx(
             json!({
-                "file_path": "/w/f.txt",
+                "file_path": MEM_DEST,
                 "content": "the only copy of the user's bytes\nand a line the agent added\n",
             }),
             &ctx,
@@ -178,7 +199,7 @@ async fn in_memory_backend_conflict_still_renders_todays_wording() {
         .await;
 
     assert!(result.is_error, "not refused at all: {}", result.content);
-    assert_unchanged_wording(&result.content, "/w/f.txt", "its contents changed on disk");
+    assert_unchanged_wording(&result.content, MEM_DEST, "its contents changed on disk");
     assert_eq!(
         mem.read(&p).await.unwrap(),
         b"what the user saved before the exchange\n"
