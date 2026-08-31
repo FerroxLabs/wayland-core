@@ -81,8 +81,13 @@ impl OutputSink for NoticeSink {
             finish,
         );
     }
-    fn emit_error(&self, msg: &str, retryable: bool) {
-        NullSink.emit_error(msg, retryable);
+    fn emit_error(
+        &self,
+        msg: &str,
+        retryable: bool,
+        category: wcore_protocol::events::FailureCategory,
+    ) {
+        NullSink.emit_error(msg, retryable, category);
     }
     fn emit_info(&self, msg: &str) {
         self.infos.lock().unwrap().push(msg.to_string());
