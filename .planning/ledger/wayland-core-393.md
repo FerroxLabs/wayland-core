@@ -4,23 +4,26 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "Windows: a quarantine git abort kills the leaf and leaves its descendants running (split from #379)"
 status: open
-last_verified_commit: d8b422fe3
+last_verified_commit: 4f2ef0ae
 criteria:
   - id: c1
     text: "On Windows, both quarantine abort paths terminate the child's descendants, not the direct process alone"
-    state: not-met
+    state: met
+    evidence: "test:crates/wcore-cli/tests/quarantine_process_tree_windows.rs::the_drain_grace_abort_takes_the_whole_process_tree_on_windows"
     owner: core
-    note: "Filed 2026-08-30 by lane/f13-w3-teardown while closing the unix arm of wayland-core#379. Not a regression: unlike unix, Windows never had a group teardown for the #338 hardening to take away, so this is a standing gap rather than a consequence of #338. Filed anyway because pre-existing is not a disposition. `terminate_hardened_tree` in crates/wcore-cli/src/plugin/quarantine.rs has a `#[cfg(not(unix))]` no-op arm and its doc comment says why: DETACHED_PROCESS is a creation-time console decision that creates no session, no process group and no job, so there is nothing for a group signal to address, and Child::kill is TerminateProcess on one pid."
+    note: "Filed 2026-08-30 by lane/f13-w3-teardown while closing the unix arm of wayland-core#379. Not a regression: unlike unix, Windows never had a group teardown for the #338 hardening to take away, so this is a standing gap rather than a consequence of #338. Filed anyway because pre-existing is not a disposition. `terminate_hardened_tree` in crates/wcore-cli/src/plugin/quarantine.rs has a `#[cfg(not(unix))]` no-op arm and its doc comment says why: DETACHED_PROCESS is a creation-time console decision that creates no session, no process group and no job, so there is nothing for a group signal to address, and Child::kill is TerminateProcess on one pid. || MET 2026-08-31 on REAL WINDOWS. BOTH abort paths, graded as two separate tests rather than two assertions in one, because c1 says BOTH and a single test stops at its first failing assertion -- one test could only ever demonstrate one of them going red. The teardown is a kill-on-close Job Object (`wcore_types::job_object::WindowsJobObject`, already shared with wcore-sandbox and the MCP stdio transport), taken in `run_hardened` and fired by `HardenedTree::drop`, which is the kernel-backed counterpart of the unix `kill(-pgid)`. THE TRAP THE TICKET NAMED IS CLOSED BY CONSTRUCTION, not by care: `CommandExt::creation_flags` is a SETTER, so the two flags are OR-ed once in `QUARANTINE_SPAWN_FLAGS` and applied at the single spawn site, and `create_suspended` is never called on this path. `attach` is used rather than `attach_running`, so the child is owned before it executes one instruction and no descendant can be created outside the job; `attach` also reads the child's SUSPEND COUNT and errors on 0, so a spawn that ever lost `CREATE_SUSPENDED` fails loudly instead of handing back a job that owns nothing, and a failure to take ownership refuses the run rather than proceeding unowned. THE SUCCESSFUL EXIT IS NOT `kill everything`: `disarm` calls the new `WindowsJobObject::release`, which clears `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` before closing the handle, because the job kills on CLOSE and `git-credential-cache--daemon` deliberately outlives the `git` that started it and is shared with the operator's other `git` operations. That is graded by its own arm. GREEN on SeanDesktop, Windows 10.0.26200.9168, at 91940861 with a clean tree: `cargo nextest run -p wcore-cli --test quarantine_process_tree_windows --retries 0` -> `3 tests run: 3 passed, 0 skipped`, exit 0. RED ARM: see c2. || RE-VERIFIED INDEPENDENTLY 2026-08-31 on real Windows 10.0.26200.9168 (SeanDesktop), clean tree, --retries 0: `3 tests run: 3 passed`. RED ARM by this lane at a DIFFERENT single site from the one already recorded, so the grade does not rest on one mutation: `job.terminate()` in `Drop for HardenedTree` replaced by `job.release()` -- the job is still created, attached and resumed, and only the teardown's claim on the tree is withdrawn. MUTATION_SITES=1, CHECK_EXIT=0, `3 tests run: 1 passed, 2 failed` -- both abort-path arms fail (the_wall_clock_abort_..., the_drain_grace_abort_...) and the success-path control still PASSES, which is what distinguishes this from a mutation that simply breaks the spawn. Restored blob 300f721d2f429c80057d63962b2380c543522d7b == HEAD blob, tree clean."
   - id: c2
     text: "A test on real Windows spawns a quarantine child that backgrounds a descendant, trips an abort path, and asserts the descendant is gone; shown RED against today's kill-the-leaf code"
-    state: not-met
+    state: met
+    evidence: "test:crates/wcore-cli/tests/quarantine_process_tree_windows.rs::the_wall_clock_abort_takes_the_whole_process_tree_on_windows"
     owner: core
-    note: "Needs SeanDesktop; there is one Windows box. Not a credential request. The unix counterparts to copy are a_timed_out_quarantine_child_takes_its_whole_session_with_it and a_helper_that_outlives_the_drain_guard_is_torn_down_with_its_session in crates/wcore-cli/src/plugin/quarantine.rs."
+    note: "Needs SeanDesktop; there is one Windows box. Not a credential request. The unix counterparts to copy are a_timed_out_quarantine_child_takes_its_whole_session_with_it and a_helper_that_outlives_the_drain_guard_is_torn_down_with_its_session in crates/wcore-cli/src/plugin/quarantine.rs. || MET 2026-08-31 on REAL WINDOWS, and shown RED against today's kill-the-leaf code exactly as written. The fixture is a `!`-alias, which reproduces the production shape -- a helper `git` starts with our stdio INHERITED and does not detach -- with no network, no credentials and no third-party helper installed: `git` runs the alias through its bundled shell, the alias re-execs this test binary as a probe, and the probe spawns a second copy that records its own pid and sleeps. That second copy is a grandchild of `git` and a great-grandchild of us, which is precisely what `TerminateProcess` on the leaf cannot reach. NON-VACUITY, three ways: the pid file must exist and parse, so a descendant that never started fails loudly instead of satisfying \"it is gone\"; a LIVENESS CONTROL runs the identical alias with nobody owning the tree and asserts the descendant is still alive after `git` exited, so the death in the graded arms is caused by the teardown and not by a descendant that ends on its own; and each arm asserts it reached ITS OWN abort (`pipe is still open` for drain-grace, `timed out after` for wall-clock) so neither can pass by taking the other's exit. RED ARM, and the FIRST ATTEMPT AT IT WAS WRONG AND IS RECORDED RATHER THAN DISCARDED: removing only the `WindowsJobObject::attach` block leaves `CREATE_SUSPENDED` with nothing to resume the child, so that arm measured a FROZEN process (`no descendant pid was recorded`, 2 timed out) -- red, but for a mechanism the ticket is not about. The real arm removes BOTH halves together, restoring `QUARANTINE_SPAWN_FLAGS = DETACHED_PROCESS` and dropping the attach, which IS the pre-fix code. See this criterion's recorded run on SeanDesktop, Windows 10.0.26200.9168; both restores blob-verified against HEAD with `git status --porcelain` empty."
   - id: c3
     text: "The change does not weaken #338: a test asserts the production build_git_command child still does not share the user's console after the fix"
-    state: not-met
+    state: met
+    evidence: "test:crates/wcore-cli/tests/quarantine_console_authority_windows.rs::quarantine_child_has_no_console_at_creation_on_windows"
     owner: core
-    note: "THE TRAP, found by reading the shared mechanism rather than assumed. wcore_types::job_object::WindowsJobObject::create_suspended is `command.creation_flags(CREATE_SUSPENDED)`, and creation_flags is a SETTER, not an OR. Composed naively with harden_against_credential_prompt's creation_flags(DETACHED_PROCESS) it silently drops one of them, and dropping DETACHED_PROCESS reopens wayland-core#338's Windows console reduction -- a fix that reproduces a defect it is adjacent to. attach_running(pid) dodges the flag conflict at the cost of a race window before the job assignment lands. Either way the composition must be PROVEN on the box, which is why this is a criterion and not a note."
+    note: "THE TRAP, found by reading the shared mechanism rather than assumed. wcore_types::job_object::WindowsJobObject::create_suspended is `command.creation_flags(CREATE_SUSPENDED)`, and creation_flags is a SETTER, not an OR. Composed naively with harden_against_credential_prompt's creation_flags(DETACHED_PROCESS) it silently drops one of them, and dropping DETACHED_PROCESS reopens wayland-core#338's Windows console reduction -- a fix that reproduces a defect it is adjacent to. attach_running(pid) dodges the flag conflict at the cost of a race window before the job assignment lands. Either way the composition must be PROVEN on the box, which is why this is a criterion and not a note. || MET 2026-08-31 on REAL WINDOWS, graded at the spawn site the composition actually happens at. `probe_through_production_git` could not grade this -- it calls `Command::output` itself and never reaches the flags `run_hardened` applies -- so a fourth arm, `probe_through_production_spawn`, drives the probe through `run_hardened` and the assertion is made THERE. GREEN: `[production_spawn] SHARES_USER_CONSOLE_BEFORE=false`, i.e. a child created with `DETACHED_PROCESS | CREATE_SUSPENDED` is still not on the operator's console, measured by `GetConsoleProcessList` from inside that child and not by the `GetConsoleWindow()` proxy #389 rules out. 3 tests run, 3 passed at --retries 0 on Windows 10.0.26200.9168. RED ARM, which is the whole reason this is a criterion and not a note: dropping `DETACHED_PROCESS` from `QUARANTINE_SPAWN_FLAGS` -- the exact silent outcome of composing two `creation_flags` calls -- compiles (MUTATION_SITES=1, CHECK_EXIT=0) and gives `3 tests run: 2 passed, 1 failed`, RED_TESTS_EXIT=100, failing at quarantine_console_authority_windows.rs:566 with `#393 c3: a child spawned through run_hardened -- with the Job Object's CREATE_SUSPENDED OR-ed into the creation flags -- is on the operator's console`. Restored blob 300f721d2f429c80057d63962b2380c543522d7b == HEAD blob, tree clean. NOTE WHAT THIS DOES AND DOES NOT SAY: #338's Windows reduction is intact after #393, and #389 c1's bypass is neither closed nor widened by it -- the same run reports `[production_spawn] ATTACH_BY_EXPLICIT_PID=SUCCEEDED SHARES_USER_CONSOLE_AFTER_EXPLICIT=true`. || RE-VERIFIED 2026-08-31 on real Windows 10.0.26200.9168 (SeanDesktop): the same run reports `[production_spawn] SHARES_USER_CONSOLE_BEFORE=false`, so DETACHED_PROCESS still lands with CREATE_SUSPENDED OR-ed beside it, and `[production_spawn] ATTACH_BY_EXPLICIT_PID=SUCCEEDED SHARES_USER_CONSOLE_AFTER_EXPLICIT=true` confirms `#393`'s containment change neither closes `#389` c1 nor widens it."
 ---
 
 Split out of `FerroxLabs/wayland-core#379` on 2026-08-30 while its unix arm was being closed,
@@ -33,92 +36,12 @@ prompt authority, not teardown; a keyword search for "quarantine Windows job obj
 "descendant process tree Windows" returned nothing, against a control search for "quarantine"
 that returned all six. There was no carrier.
 
-## What is graded off Windows, and what is not (lane `f13-w3-win-393-linux-arm`, 2026-08-31)
+CLOSED 2026-08-31 by lane `lane/f13-windows`, all three criteria met and every
+one of them measured on real Windows 10.0.26200.9168 (SeanDesktop), not
+cross-compiled -- a `--target x86_64-pc-windows-gnu` check compiles the arm and
+does not execute it.
 
-Both of this ticket's test files -- `crates/wcore-cli/tests/quarantine_process_tree_windows.rs`
-and `crates/wcore-cli/tests/quarantine_console_authority_windows.rs` -- are `#![cfg(windows)]`,
-so on every host our gates execute today they compile to ZERO tests. While that holds, the
-whole fix can be deleted and every green stays green.
+READY FOR MAINTAINER CLOSE. The online ledger gate reports DIVERGENCE for an
+all-met open issue; that is the handoff signal, and closing is a maintainer
+action this lane does not take.
 
-`crates/wcore-cli/tests/issue_393_quarantine_spawn_flags_guard.rs` closes the part of that
-which is decidable off Windows. It has no `#![cfg]` and runs on Linux, macOS and Windows
-alike. It deliberately closes NO criterion here; c1, c2 and c3 are unchanged and still
-`not-met`.
-
-WHAT IT GRADES (each shown RED on hetzner against a mutation of the production file, with
-`cargo check -p wcore-cli --tests` RC=0 first, and restored green afterwards):
-
-* the composed VALUE -- `QUARANTINE_SPAWN_FLAGS` contains `DETACHED_PROCESS`, contains
-  `CREATE_SUSPENDED`, is exactly their OR, and `DETACHED_PROCESS` is `0x8` and not `0x10`
-  (`CREATE_NEW_CONSOLE`). That last one is the mutation no source scan can see: it reads
-  identically and inverts #338. Both constants were ungated and made `pub` for this; a `u32`
-  costs nothing where it is never applied.
-* the WIRING -- `quarantine.rs` makes exactly two `creation_flags` calls, one per function;
-  `harden_against_credential_prompt`'s is `DETACHED_PROCESS`, `run_hardened`'s is the composed
-  constant and precedes the `.spawn()` it governs; and nothing here calls
-  `WindowsJobObject::create_suspended`, which is a second writer of the same field under
-  another name. That is c3's trap, read from source.
-* the release/terminate SPLIT -- `HardenedTree::disarm` releases the job and does not
-  terminate it; `Drop` terminates and does not release; both `take()` the handle; the unix
-  group teardown is still on the `Drop` path.
-
-WHAT IT DOES NOT GRADE, ON ANY HOST BUT WINDOWS:
-
-* that the flags reach `CreateProcessW` or have their effect. `std::process::Command` has no
-  `creation_flags` on unix, so off Windows they are never applied to anything.
-* that the child has no console (#338 c1 / #393 c3's own wording).
-* that the Job Object owns a DESCENDANT and kills it (c1, c2). A `release` that has stopped
-  releasing, or a `terminate` that terminates nothing, is invisible to a source scan.
-
-The wiring and split arms are source scans on purpose: nothing inside a unix process can
-observe a Windows creation flag or a Job Object, so whether the calls are there is in the
-source or nowhere -- the same argument `every_spawn_site_owns_its_tree.rs` makes for its
-wrapping ratchet, and the same cost (a deliberate refactor of this path reds them and has to
-be re-argued there). The scans blank comments and string literals first, because
-`quarantine.rs` names `creation_flags` five times in prose before calling it twice in code,
-and each proves both polarities of its reader on synthetic sources in the same test call.
-
-Net: what the release buys from Linux is that the DECISION cannot be edited away silently.
-What it still does not buy is any evidence the decision works, and #393 stays open for
-SeanDesktop.
-
-### The compile gate beside it (`just check-windows-compile`)
-
-The guard above grades the DECISION but still cannot see the two
-`#![cfg(windows)]` files themselves: they compile to nothing on Linux, so a type
-error or a stale call inside them is invisible until a Windows runner picks it
-up. `just check-windows-compile` closes that half by cross-checking the
-workspace at `x86_64-pc-windows-gnu`, and is wired into `check-all`.
-
-Measured on hetzner, 2026-08-31, with a deliberate type error appended to
-`quarantine_process_tree_windows.rs` and then reverted -- the same mutation
-graded against both instruments, so the hole and the fix are on one record:
-
-| instrument | error present | reverted |
-|---|---|---|
-| `cargo check -p wcore-cli --tests` (Linux) | RC=0 | RC=0 |
-| `cargo test -p wcore-cli --test issue_393_..._guard` (Linux) | RC=0 | RC=0 |
-| `vx just check-windows-compile` | RC=101, `error[E0308]` | RC=0 |
-
-The first two rows ARE the hole, measured rather than argued: the Linux gates
-stay green through a break in the file. Cost: ~1m04s cold against a warm dep
-graph, 1-3s warm, 668 MB of `target/x86_64-pc-windows-gnu`.
-
-Two honesty notes the release should carry:
-
-* **gnu is not msvc.** We ship `x86_64-pc-windows-msvc`. The `gnu` target shares
-  the `cfg(windows)` arms -- the whole point -- but not the ABI, the linker or
-  the C runtime. A green here means "the Windows source still compiles as
-  source", never "Windows works", and it does not substitute for the msvc legs
-  in `ci.yml`, which stay the release-blocking arm.
-* **The recipe does not use `vx`, and as first written it could never pass.**
-  `vx` keeps a private rustup store whose only installed target is
-  `x86_64-unknown-linux-gnu`, while `rustup target add` resolves to the system
-  rustup regardless of a `vx` prefix. `vx just check-windows-compile` therefore
-  failed `error[E0463]: can't find crate for std` on a CLEAN tree. That was
-  caught by running the recipe as CI runs it rather than the command its own
-  comment described. Bare `cargo` honours `rust-toolchain.toml` and resolves to
-  the pinned cargo 1.95.0 (`vx cargo` resolved to 1.97.0), so determinism is
-  kept.
-
-None of this closes c1, c2 or c3. They remain `not-met` and need SeanDesktop.

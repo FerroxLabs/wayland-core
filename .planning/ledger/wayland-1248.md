@@ -70,19 +70,19 @@ RED arm for the guard: restoring `rollback_tool.rs`'s consumer to `Ok(FileMutati
 
 Named, not silent:
 
-* **Windows -- CORRECTED 2026-08-30, the earlier claim here was FALSE.** Both c3 tests are
-  `#[cfg(any(target_os = "linux", target_os = "macos"))]` because this workspace has no Windows
-  executor, NOT because the path is unreachable. The previous note asserted `ReplaceFileW`
+* **Windows -- CLOSED 2026-08-31. The claim recorded here was FALSE, the correction stood, and
+  the coverage gap it left is now MEASURED SHUT.** The previous note asserted `ReplaceFileW`
   "hands nothing back to judge" and that `intercepted_save` is "structurally always `None`" on
   Windows. That reproduced the exact reading `wcore_config::atomic_io` already records as
-  "simply wrong about `lpBackupFileName`". Measured by compile probe on the Windows target with
-  a Linux control in the same pass: the `#[cfg(windows)]` arm of `publish_displacing` returns
-  `Swap::Displaced(backup)` and `restore` returns `Ok(Some(exchanged_out))`, both live
-  (`cargo check --target x86_64-pc-windows-gnu` = 101 with the probe, Linux control = 0), so
-  `Refusal { intercepted_save: Some(..) }` is reachable there. What is true is narrower and is
-  a COVERAGE gap, now tracked as FerroxLabs/wayland#1268: the path is unexercised on Windows,
-  and whether it behaves correctly there is unmeasured. c4's control tests, the producer
-  sweep's subject and the source guard all run on every platform.
+  "simply wrong about `lpBackupFileName`". Corrected 2026-08-30 and measured 2026-08-31 under
+  FerroxLabs/wayland#1268: both c3 tests are now UNGATED and were RUN on real Windows
+  (10.0.26200.9168, SeanDesktop, lane/f13-windows), 2 passed at `--retries 0`, with a
+  deliberately non-existent filter in the same session returning `0 tests run` so the pass is a
+  pass and not an empty selection. So `Refusal { intercepted_save: Some(..) }` is not merely
+  reachable on Windows -- it is reached, and the surfaced text names the preserved file there.
+  A source guard, `crates/wcore-config/tests/issue_1268_windows_impossibility_guard.rs`, now
+  fails the build if any doc comment in `wcore-tools` or `wcore-config` re-asserts the
+  impossibility.
 * **`RollbackTool` renders its own sentence.** It names the preserved path, so the notice is not
   lost, but it composes bespoke prose instead of going through `conflict_message`, because its
   surface is a suspension reason and not a tool refusal. The source guard covers the

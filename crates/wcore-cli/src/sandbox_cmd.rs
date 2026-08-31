@@ -550,6 +550,81 @@ mod disclosure_tests {
         );
     }
 
+    /// `#368` c6 AS WRITTEN: the CONCURRENT-IDENTITY defect specifically must
+    /// be stated where an operator reads the containment posture.
+    ///
+    /// # Why this is not covered by the test above it
+    ///
+    /// `every_declaring_backends_disclosure_reaches_both_operator_arms` grades
+    /// whatever a backend HAPPENS to declare — it reads
+    /// `backend.known_limitations()` and projects each row it finds. That is
+    /// the right shape for the totality question and it is a strictly weaker
+    /// property than this criterion, which names ONE defect.
+    ///
+    /// MEASURED on real Windows 10.0.26200.9168, on this tree, rather than
+    /// argued: deleting `APPCONTAINER_CONCURRENT_IDENTITY_LIMITATION` from
+    /// `AppContainerBackend::known_limitations` — the row `#368` c6 is about,
+    /// leaving `#369`'s row behind so the list is still non-empty — compiles
+    /// (`CHECK_EXIT=0`) and leaves all 9 disclosure tests GREEN. The operator
+    /// then reads a `sandbox status` whose KNOWN LIMITATIONS block no longer
+    /// mentions the concurrent-identity race at all, which is exactly the
+    /// state `#368` c6 forbids. So the criterion gets an arm that names its
+    /// own row; the `Vec::new()` arm the table machinery closes is a different
+    /// mutation and both are needed.
+    ///
+    /// Windows-only because `AppContainerBackend` is the compile stub
+    /// elsewhere and the posture this criterion is about is the real backend's.
+    #[cfg(windows)]
+    #[test]
+    fn the_concurrent_identity_defect_is_stated_where_the_operator_reads_the_posture() {
+        use wcore_sandbox::backends::appcontainer::{
+            APPCONTAINER_CONCURRENT_IDENTITY_LIMITATION, AppContainerBackend,
+        };
+
+        // The tracker has to travel WITH the claim: `#368` c6 asks the product
+        // to state the defect, and a statement an operator cannot chase back
+        // to an open issue is a statement they cannot act on.
+        assert!(
+            APPCONTAINER_CONCURRENT_IDENTITY_LIMITATION.contains("FerroxLabs/wayland-core#368"),
+            "the disclosure must name its tracker: {APPCONTAINER_CONCURRENT_IDENTITY_LIMITATION}"
+        );
+
+        let backend: Arc<dyn wcore_sandbox::backends::SandboxBackend> =
+            Arc::new(AppContainerBackend::new());
+        assert!(
+            backend
+                .known_limitations()
+                .contains(&APPCONTAINER_CONCURRENT_IDENTITY_LIMITATION),
+            "the real Windows AppContainer backend does not declare the \
+             concurrent-identity defect at all, so no operator surface can \
+             carry it; it declared {:?}",
+            backend.known_limitations()
+        );
+
+        // Through the SAME path an operator reads, not by hand: backend ->
+        // SandboxRegistry -> SandboxStatus -> both arms. A hand-built status is
+        // how `unavailable_reason` stayed unread through a whole release.
+        let registry = SandboxRegistry::new(Arc::new(AvailabilityStub(backend)));
+        let status = SandboxStatus::project(&registry);
+        let json = status.to_json();
+        let human = super::render_status_human(&status);
+
+        assert!(
+            json["known_limitations"]
+                .as_array()
+                .is_some_and(|entries| entries
+                    .iter()
+                    .any(|v| v == APPCONTAINER_CONCURRENT_IDENTITY_LIMITATION)),
+            "the --json arm a host integration reads does not carry the \
+             concurrent-identity defect: {json}"
+        );
+        assert!(
+            human.contains(APPCONTAINER_CONCURRENT_IDENTITY_LIMITATION),
+            "the human arm an operator reads does not print the \
+             concurrent-identity defect: {human}"
+        );
+    }
+
     /// TOTAL over the declaring backends, not over the ones somebody
     /// remembered. The table is scanned against this crate's source by
     /// `wcore-sandbox/tests/declared_limitations_are_registered.rs`, so a

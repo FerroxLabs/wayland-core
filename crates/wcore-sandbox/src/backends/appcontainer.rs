@@ -492,7 +492,7 @@ mod probe_cache_tests {
 /// `.planning/DECISIONS.md` Q-368-honesty), and this constant is what the
 /// product says INSTEAD of that fix, not on the way to it.
 #[cfg(any(windows, test))]
-pub(crate) const APPCONTAINER_CONCURRENT_IDENTITY_LIMITATION: &str = "concurrent identities interfere: a DENY applied by one execution strips \
+pub const APPCONTAINER_CONCURRENT_IDENTITY_LIMITATION: &str = "concurrent identities interfere: a DENY applied by one execution strips \
      the package grant a CONCURRENT execution holds on the same object, and a \
      grant applied after that deny cannot reach the object at all. Measured on \
      Windows 11 build 26200, roughly one run in five. Two sandboxed commands \
