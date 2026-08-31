@@ -9,13 +9,13 @@ criteria:
   - id: c1
     text: "A shared-process lib leg runs in CI, floored so it cannot pass while scanning nothing"
     state: met
-    evidence: "file:.github/workflows/ci.yml:2147:Executed $total tests, expected at least $MIN. A suite that exits 0 having run nothing"
+    evidence: "file:.github/workflows/ci.yml:2168:Executed $total tests, expected at least $MIN. A suite that exits 0 having run nothing"
     owner: core
     note: "RE-ANCHORED 2026-08-30 for wayland#1198: the old anchor ci.yml:1806 resolved on a line count alone and landed on a bare `#` inside the retry-evidence comment block, ~230 lines above the step it claimed. It now cites the LIB leg's floor branch itself -- the `exit 1` taken when the summed executed count falls under MIN -- which is the half of this criterion (`floored so it cannot pass while scanning nothing`) that a step-name anchor would not prove. ANCHOR IMPRECISE, NOT BROKEN: ci.yml:1806 now lands inside the 'Shared-process lib suite (#1134)' comment block rather than on the cargo test --workspace --lib command itself."
   - id: c2
     text: "A shared-process integration leg runs in CI over the targets that touch process globals"
     state: met
-    evidence: "file:.github/workflows/ci.yml:2222:done < <(python3 scripts/check-test-env-globals.py --shared-process-targets)"
+    evidence: "file:.github/workflows/ci.yml:2244:done < <(python3 scripts/check-test-env-globals.py --shared-process-targets)"
     note: "RE-ANCHORED 2026-08-30 for wayland#1198: the old anchor ci.yml:1888 resolved and landed inside the SWARM delegated-dispatch filterset -- a different step, and the wrong one of the two legs this criterion distinguishes. It now cites the line that feeds the integration loop, which is where `over the targets that touch process globals` is actually decided: the target list is DERIVED from the process-global scanner rather than hand-listed."
     owner: core
   - id: c3
