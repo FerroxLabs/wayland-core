@@ -37,6 +37,25 @@
 //!
 //! The invalidation tests are not decoration: a memo that never rebuilds passes
 //! every cost assertion in this file and denies nothing.
+//!
+//! **core#394 c3 / #396 c3 / #398 c3, measured 2026-08-31** — the OTHER call
+//! shape, the one `grep_policy::scope_for` pays once per directory it
+//! traverses, differential `strace -f -c` on an ordinary directory with the
+//! arms interleaved and every known-positive control green:
+//!
+//! ```text
+//!                                      before   after
+//!   vcs_content_stores(dir)            17.000    5.000   syscalls/directory
+//!   denies_read_content(dir)            8.000    8.000
+//!   ------------------------------------------------
+//!   the pair scope_for pays            25.000   13.000
+//! ```
+//!
+//! 5.000 is the figure those three criteria pin, and it is what
+//! `scan_control_dirs_in` restores: probing the store leaves of a control
+//! directory that is not there cost twelve syscalls at every directory of
+//! every `Grep(".")`, and nothing can be found under a directory that does
+//! not exist.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -89,15 +108,23 @@ async fn one_ordinary_path_guard_resolves_once_and_does_not_rescan() {
     assert_eq!(resolves, 1, "one guard must resolve the path exactly once");
     assert_eq!(scans, 1, "the first guard scans");
     assert_eq!(
-        first_probes, 41,
+        first_probes, 36,
         "the store scan's filesystem probe count moved; if that is intended, \
          update this number and re-measure the syscall figures in this file's \
          header"
     );
     // FerroxLabs/wayland-core#398 — arm 4's discovery walk is a per-policy
-    // ONE-OFF. 41 is 17 (the arm-2 scan) + 24 for one walk of this fixture;
+    // ONE-OFF. 36 is 12 (the arm-2 scan) + 24 for one walk of this fixture;
     // the whole point of the design is that the second number is paid once and
     // never revalidated, which the steady-state assertion below is what proves.
+    //
+    // It was 41 until core#394 c3 / #396 c3 / #398 c3 were measured with the
+    // instrument that set their 5-syscalls/directory bar: `scan_control_dirs_in`
+    // now skips the store leaves of an ABSENT control directory and
+    // deduplicates the four control names out of six rows, so the arm-2 scan
+    // costs 12 probes here where it cost 17. The WARM number below is
+    // untouched at three, because an absent control directory was never
+    // stamped and the witness set did not change.
     assert_eq!(
         policy.nested_walk_count(),
         1,
