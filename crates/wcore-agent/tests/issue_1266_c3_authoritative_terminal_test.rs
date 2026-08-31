@@ -27,13 +27,36 @@
 //!     upgraded to a plausible-looking `tool_runtime` — the guess #1237 c4
 //!     forbids, made on the child's behalf.
 //!
-//! RED ARM (re-runnable): in `crates/wcore-agent/src/spawner.rs`, replace
-//! `let failure_category = error.failure_category();` in
-//! `execute_resolved_launch`'s `Err(error)` arm with
-//! `let failure_category = wcore_protocol::events::FailureCategory::Unknown;`
-//! — the value the authoritative frame carried before this change. `touch` the
-//! file, confirm `cargo check -p wcore-agent --tests` RC=0 so the red is
-//! behaviour and not a build break, and rebuild.
+//! RED ARMS, MEASURED — and the first one written here did NOT redden, which
+//! is why the two arms below are stated separately rather than as one.
+//!
+//! The two children reach the authoritative terminal by DIFFERENT production
+//! sites. That was established by probe, not assumed: setting
+//! `subagent_ok_result`'s `Length` arm to `ToolRuntime` moved the ceiling
+//! child's authoritative category to `tool_runtime` while its DIAGNOSTIC frame
+//! stayed `context_limit`, so the two lanes were observed to be independent.
+//!
+//!   * ARM A — `spawner.rs`, in `subagent_ok_result`, change
+//!     `FinishReason::Length => FailureCategory::ContextLimit` to
+//!     `::ToolRuntime`. The ceiling child's run returns `Ok` with
+//!     `finish_reason = Length`, so that is the site which classifies it.
+//!     MEASURED: 3 passed, 1 FAILED —
+//!     `a_context_ceiling_child_reaches_the_authoritative_terminal_as_context_limit`.
+//!
+//!   * ARM B — `spawner.rs`, in `execute_resolved_launch`'s `Err(error)` arm,
+//!     change `let failure_category = error.failure_category();` to
+//!     `::ToolRuntime`. The opaque child's run returns `Err(ApiError)`, so that
+//!     is the site which classifies IT. The mutation must be `ToolRuntime` and
+//!     NOT `Unknown`: `Unknown` is this arm's own expected value, so mutating
+//!     to it is a red arm that cannot fail. MEASURED with `::Unknown`: 7
+//!     passed, 0 failed — vacuous. MEASURED with `::ToolRuntime`: 5 passed, 2
+//!     FAILED — the opaque assertion here AND its sibling in
+//!     `issue_1266_c3_subagent_relay_test.rs`.
+//!
+//! Both arms were run with the mutation confirmed to have landed on the CODE
+//! line (grepped, not assumed) and `cargo check -p wcore-agent --tests`
+//! reporting 0 errors first, so each red is behaviour and not a build break.
+//! Restored and `touch`ed: 7 passed.
 
 mod common;
 
