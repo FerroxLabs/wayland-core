@@ -93,3 +93,37 @@ async fn i2_probe_churned_witness_cost_vs_directory_count() {
         one_small.0, one_large.0, one_small.1, one_large.1
     );
 }
+
+/// How long does ONE write into a vendored control directory keep the whole
+/// workspace re-walking? Amplification of a single mutation.
+#[tokio::test]
+async fn i2_probe_single_touch_amplification() {
+    let (_dir, root) = build(1, 44);
+    let policy = Arc::new(WorkspacePolicy::contained(&root));
+    let fs = stack(&policy, &root);
+    let ordinary = root.join("src/deep/deeper/main.rs");
+    tokio::time::sleep(SETTLE).await;
+    fs.exists(&ordinary).await.expect("readable");
+    tokio::time::sleep(SETTLE).await;
+    let (_, _, before) = policy.guard_cost();
+    let w0 = policy.nested_walk_count();
+    // ONE lock file, as `git status` writes and removes.
+    let lock = root.join("vendor/pkg0/.git/index.lock");
+    std::fs::write(&lock, b"").unwrap();
+    std::fs::remove_file(&lock).unwrap();
+    const N: u64 = 50;
+    for _ in 0..N {
+        fs.exists(&ordinary).await.expect("readable");
+    }
+    let (_, _, after) = policy.guard_cost();
+    println!(
+        "I2-SINGLE-TOUCH walks_for_{N}_guards={} probes_total={}",
+        policy.nested_walk_count() - w0,
+        after - before
+    );
+    assert_eq!(
+        policy.nested_walk_count() - w0,
+        1,
+        "one mutation should cost at most ONE re-walk"
+    );
+}

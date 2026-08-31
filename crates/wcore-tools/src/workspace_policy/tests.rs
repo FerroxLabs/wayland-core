@@ -2715,3 +2715,33 @@ fn probe_vcs_content_stores_per_traversed_directory() {
          syscall figure below is measuring a traversal that did nothing"
     );
 }
+
+// SECOND-INSTRUMENT probe: the 875bf32cb probe body VERBATIM, run on this
+// tree, so the 5.000 syscalls/directory figure core#394 c3 / core#396 c3 pin
+// can be compared on the SAME instrument that produced it.
+#[test]
+#[ignore = "measurement probe, driven by WL_OLD_PROBE_DIRS under strace"]
+fn i2_probe_old_shape_vcs_content_stores_per_call() {
+    let n: usize = std::env::var("WL_OLD_PROBE_DIRS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(100);
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join(".git/objects/ab")).unwrap();
+    assert!(
+        !vcs_content_stores(root).is_empty(),
+        "control: the scan must find <root>/.git/objects"
+    );
+    let dir = root.join("src/deep/deeper");
+    std::fs::create_dir_all(&dir).unwrap();
+    assert!(
+        vcs_content_stores(&dir).is_empty(),
+        "control: an ordinary directory names no store"
+    );
+    let mut sink = 0usize;
+    for _ in 0..n {
+        sink += vcs_content_stores(&dir).len();
+    }
+    println!("I2-OLD-PROBE n={n} sink={sink}");
+}
