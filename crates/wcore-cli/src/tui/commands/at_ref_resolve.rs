@@ -1867,3 +1867,140 @@ mod tests {
         );
     }
 }
+
+/// INDEPENDENT VERIFIER instrument for core#377 c2 — written by the adversarial
+/// verifier lane, NOT by the lane under test, and deliberately sharing none of
+/// its fixtures.
+///
+/// The criterion is "AtWarning::SkippedFiles is emitted whenever ANY entry is
+/// dropped". The lane's own tests cover a git-ignored file, a secret, a pruned
+/// `.git`, a revisit and the file cap. This module covers the drop shapes it
+/// did NOT enumerate — a dangling symlink, a non-UTF-8 file, a non-regular
+/// file, a link out of the workspace, and a git-ignored DIRECTORY — plus a
+/// nested drop and a polarity control.
+#[cfg(test)]
+mod verify_377_c2 {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn skipped(payload: &AtPayload) -> Option<usize> {
+        payload.warnings.iter().find_map(|w| match w {
+            AtWarning::SkippedFiles { count } => Some(*count),
+            _ => None,
+        })
+    }
+
+    fn walk(root: &Path) -> AtPayload {
+        resolve(&AtRef::parse("@./").expect("parse"), root).expect("resolve dir")
+    }
+
+    fn names(payload: &AtPayload) -> Vec<String> {
+        payload
+            .files
+            .iter()
+            .map(|f| f.path.display().to_string().replace('\\', "/"))
+            .collect()
+    }
+
+    /// POLARITY CONTROL. Nothing is dropped, so there must be NO SkippedFiles
+    /// warning at all. Without this, a gate that emitted `Some(n)` for every
+    /// walk would satisfy every assertion below for free.
+    #[test]
+    fn v377_control_a_clean_tree_emits_no_skip_warning() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::write(root.join("a.txt"), "a").expect("write a");
+        fs::write(root.join("b.txt"), "b").expect("write b");
+        let payload = walk(root);
+        assert_eq!(names(&payload).len(), 2, "control: {:?}", names(&payload));
+        assert_eq!(
+            skipped(&payload),
+            None,
+            "a walk that dropped nothing must not claim a skip: {:?}",
+            payload.warnings
+        );
+    }
+
+    /// The five drop shapes the lane's fixture never produced, one of each.
+    #[cfg(unix)]
+    #[test]
+    fn v377_the_unenumerated_drop_shapes_are_counted_exactly() {
+        let outside = TempDir::new().expect("outside tempdir");
+        fs::write(outside.path().join("elsewhere.txt"), "not yours").expect("write outside");
+
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        // Delivered.
+        fs::write(root.join("ok.txt"), "safe").expect("write ok");
+        fs::write(root.join(".gitignore"), "skipme/\n").expect("write gitignore");
+        // 1: a git-ignored DIRECTORY — one entry offered, one drop, NOT one
+        //    drop per file inside it.
+        fs::create_dir(root.join("skipme")).expect("mkdir skipme");
+        for i in 0..3 {
+            fs::write(root.join("skipme").join(format!("x{i}.txt")), "x").expect("write x");
+        }
+        // 2: a dangling symlink — `fs::metadata` fails.
+        std::os::unix::fs::symlink("nowhere-at-all", root.join("dangling")).expect("dangling");
+        // 3: a file that is not valid UTF-8 — `read_to_string` fails.
+        fs::write(root.join("blob.bin"), [0xff_u8, 0xfe, 0x00, 0x80]).expect("write blob");
+        // 4: a link that resolves OUT of the workspace.
+        std::os::unix::fs::symlink(
+            outside.path().join("elsewhere.txt"),
+            root.join("escape.txt"),
+        )
+        .expect("escape link");
+        // 5: a non-regular file (a unix socket) — `metadata().is_file()` false.
+        let _sock = std::os::unix::net::UnixListener::bind(root.join("live.sock")).expect("sock");
+
+        let payload = walk(root);
+        let names = names(&payload);
+        assert!(
+            names.iter().any(|n| n.ends_with("ok.txt")),
+            "control: the ordinary file must still be attached: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.contains("skipme")),
+            "control: a git-ignored directory must not be walked: {names:?}"
+        );
+        assert_eq!(
+            names.len(),
+            2,
+            "control: only ok.txt and .gitignore should attach: {names:?}"
+        );
+        assert_eq!(
+            skipped(&payload),
+            Some(5),
+            "five entries were offered and not delivered - a git-ignored dir, a \
+             dangling link, a non-UTF-8 file, a link out of the workspace and a \
+             socket - and every one of them must be counted exactly once: {:?}",
+            payload.warnings
+        );
+    }
+
+    /// A drop two levels down reaches the ONE top-level warning: the counter is
+    /// threaded through the recursion, not reset per directory.
+    #[test]
+    fn v377_a_drop_in_a_nested_directory_is_counted_at_the_top() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::create_dir_all(root.join("a").join("b")).expect("mkdir a/b");
+        fs::write(root.join("a").join("b").join("good.txt"), "good").expect("write good");
+        fs::write(root.join("a").join("b").join(".env"), "SECRET=1").expect("write env");
+
+        let payload = walk(root);
+        assert_eq!(
+            names(&payload).len(),
+            1,
+            "control: exactly the one good file: {:?}",
+            names(&payload)
+        );
+        assert_eq!(
+            skipped(&payload),
+            Some(1),
+            "the secret dropped two levels down must reach the top-level \
+             warning: {:?}",
+            payload.warnings
+        );
+    }
+}
