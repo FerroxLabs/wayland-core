@@ -363,7 +363,7 @@ fn wire_user_turns(body: &Value) -> Vec<String> {
 /// names? A `<plugin-context …>` contribution is a multi-line envelope, so the
 /// walk tracks whether it is inside one; anything else must open with a named
 /// prefix. Returns the offending line, so a failure names it.
-fn unnamed_line_in<'a>(turn: &'a str) -> Option<&'a str> {
+fn unnamed_line_in(turn: &str) -> Option<&str> {
     let mut inside_envelope = false;
     for line in turn.lines() {
         if inside_envelope {
