@@ -157,6 +157,12 @@ impl CapSink {
     fn text(&self) -> String {
         self.text.lock().unwrap().clone()
     }
+    /// wayland#1231 moved part of this turn's user-visible output from the
+    /// error channel to the answer + info channels, so the guard below has to
+    /// be able to read them.
+    fn infos(&self) -> Vec<String> {
+        self.infos.lock().unwrap().clone()
+    }
 }
 
 impl OutputSink for CapSink {
@@ -716,21 +722,46 @@ async fn f_a_turn_the_reasoning_filter_emptied_is_not_blamed_on_the_endpoint() {
     ])])
     .await;
     let _ = h.engine.run(USER_MARKER, "").await;
-    let errors = h.sink.errors();
+
+    // UPDATED BY wayland#1231, and updated rather than deleted because BOTH of
+    // this test's original properties still hold -- what moved is the CHANNEL
+    // they hold on.
+    //
+    // This test's own doc comment names the defect it was written for: #908
+    // "turned the reporter's second symptom into their first one (not
+    // producing any response at all)". #908 fixed the DIAGNOSIS and its own
+    // ledger conceded it did not restore an answer. #1231 c2 restores the
+    // answer, so this turn no longer ends on the error channel at all -- it
+    // ends with the model's own words on the ANSWER channel, plus an info
+    // note naming the cause. Asserting `!errors.is_empty()` here would now be
+    // asserting the very silence #908 was filed about.
+    let text = h.sink.text();
+    let infos = h.sink.infos().join("\n");
+    let errors = h.sink.errors().join("\n");
+    let everything = format!("{text}\n{infos}\n{errors}");
+
     assert!(
-        !errors.is_empty(),
+        !everything.trim().is_empty(),
         "#908: a turn whose whole reply was reasoning-tagged ended with nothing said at all"
     );
-    let joined = errors.join("\n");
     assert!(
-        !joined.contains("may be incompatible"),
+        !everything.contains("may be incompatible"),
         "#908: the provider streamed a complete response and OUR filter removed it, and the \
-         user was told their endpoint may be incompatible. Got:\n{joined}"
+         user was told their endpoint may be incompatible. Got:\n{everything}"
     );
     assert!(
-        joined.contains("reasoning tags"),
-        "#908: the message must name the real cause — the reply was all reasoning — so the \
-         user does not go and re-check a working endpoint. Got:\n{joined}"
+        everything.contains("reasoning tags"),
+        "#908: the user must be told the real cause — the reply was all reasoning — so they \
+         do not go and re-check a working endpoint. Got:\n{everything}"
+    );
+    // wayland#1231 c2, the half #908 could not reach: the user ends the turn
+    // holding the model's ANSWER, not only an accurate account of not having
+    // one. Without this the assertions above would be satisfied by a turn that
+    // explained itself perfectly and said nothing else.
+    assert!(
+        text.contains("I should answer this"),
+        "wayland#1231 c2: the model's reply was there the whole time and our filter removed \
+         it; the user must end this turn holding it. Answer channel was:\n{text:?}"
     );
 }
 

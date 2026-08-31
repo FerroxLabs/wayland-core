@@ -46,7 +46,7 @@ impl LlmProvider for ScriptedProvider {
             .lock()
             .unwrap()
             .pop_front()
-            .unwrap_or_else(|| done_only());
+            .unwrap_or_else(done_only);
         let (tx, rx) = mpsc::channel(256);
         tokio::spawn(async move {
             for event in events {
