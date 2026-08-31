@@ -573,6 +573,12 @@ fn walk_dir(
     // Sort entries for a deterministic walk — the payload (and its tests)
     // must not depend on filesystem iteration order.
     let mut paths: Vec<PathBuf> = Vec::new();
+    // `clippy::manual_flatten` asks for `entries.flatten()` here. That call IS
+    // the defect core#377 c2 names: it discards the `Err` items with no
+    // keyword, no counter and no warning, and the reconciliation below can
+    // only see what the loop did NOT deliver if the loop exists to be counted
+    // against. Kept explicit on purpose.
+    #[allow(clippy::manual_flatten)]
     for entry in entries {
         // An entry the OS refused to describe never reaches the judgement
         // below. Nothing counts it here; the reconciliation does.
