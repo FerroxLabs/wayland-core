@@ -3,7 +3,7 @@ issue: 1156
 repo: FerroxLabs/wayland
 kind: defect
 title: "[Bug]: acp serve survives its parent and reparents to PPID 1 — 9 orphans found, oldest 24h, pinning 160GB"
-status: open
+status: closed
 last_verified_commit: 9de21aa1
 criteria:
   - id: c1

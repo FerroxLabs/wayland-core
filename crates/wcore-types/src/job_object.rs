@@ -237,6 +237,57 @@ impl WindowsJobObject {
         }
     }
 
+    /// Give up ownership of the tree WITHOUT killing it.
+    ///
+    /// The counterpart to [`terminate`](Self::terminate), and the only way out
+    /// of this type that leaves the processes running: [`Drop`] terminates
+    /// unconditionally, which is right for an owner that is being abandoned
+    /// and wrong for one whose work FINISHED.
+    ///
+    /// `FerroxLabs/wayland-core#393` is the caller that needs it. The
+    /// quarantine `git` teardown must take the tree on every failing exit and
+    /// must NOT take it on the successful one: `git` starts
+    /// `git-credential-cache--daemon`, which deliberately outlives the `git`
+    /// that started it and is shared with the operator's other `git`
+    /// operations, so killing it after an install that WORKED would be a
+    /// product regression. That is the same distinction the unix side draws by
+    /// disarming its group signal.
+    ///
+    /// Clearing `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` before closing the handle
+    /// is what makes the close harmless; `std::mem::forget` alone would leak a
+    /// kernel handle per successful call and, worse, leave the job alive with
+    /// the limit still armed, so the tree would die whenever the process
+    /// exited. Errors are swallowed deliberately: a failure to clear the flag
+    /// means the tree is killed on close, which is the SAFE direction for a
+    /// caller that has already decided the run is over, and there is nothing
+    /// useful the caller could do about it.
+    pub fn release(self) {
+        use std::mem;
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::JobObjects::{
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+            SetInformationJobObject,
+        };
+
+        // SAFETY: `self.0` is a live job handle with this type as its unique
+        // owner. `limits` is zeroed, so `LimitFlags` is 0 and the
+        // kill-on-close limit is cleared; the size passed is the struct's own.
+        unsafe {
+            let limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = mem::zeroed();
+            SetInformationJobObject(
+                self.0,
+                JobObjectExtendedLimitInformation,
+                &limits as *const _ as _,
+                mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+            CloseHandle(self.0);
+        }
+        // The handle is closed above, so `Drop` must not run: it would
+        // `TerminateJobObject` and `CloseHandle` a handle this function has
+        // already released.
+        mem::forget(self);
+    }
+
     /// Kill the job's whole process tree now, without waiting for the handle
     /// to be dropped. Idempotent, and a no-op on an already-empty job.
     pub fn terminate(&self) {

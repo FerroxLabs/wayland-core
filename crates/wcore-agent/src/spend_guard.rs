@@ -161,6 +161,25 @@ impl SpendGuard {
         self.policy.mode()
     }
 
+    /// #1203 — bind the guard to the authoritative session id.
+    ///
+    /// The engine constructs its guard before the session identity is known
+    /// (a fresh launch has no session yet, and the durable budget authority is
+    /// installed afterwards), so the id is late-bound rather than baked in.
+    /// Both halves move together: the auditor keys the per-task record and the
+    /// escalation gate keys every escalation record, and the two disagreeing is
+    /// how one uninterrupted session came to appear in the log as two.
+    pub fn rebind_session_id(&self, session_id: &str) {
+        self.gate.lock().set_session_id(session_id);
+        self.auditor.lock().rebind_session(session_id);
+    }
+
+    /// The session id the guard's records are currently keyed by.
+    #[must_use]
+    pub fn session_id(&self) -> String {
+        self.auditor.lock().session_id()
+    }
+
     /// The model the run is currently authorized up to.
     #[must_use]
     pub fn authorized_model(&self) -> String {

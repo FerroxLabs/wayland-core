@@ -3,7 +3,7 @@ issue: 1174
 repo: FerroxLabs/wayland
 kind: defect
 title: "Under defer_config_mcp the engine gets no catalog refresh at all: mid-session tools/list_changed is invisible for every server"
-status: open
+status: closed
 last_verified_commit: 43848f75
 criteria:
   - id: c1

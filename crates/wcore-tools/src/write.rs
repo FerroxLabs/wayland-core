@@ -21,6 +21,11 @@ use crate::vfs::{
     IntendedFileMutation,
 };
 
+/// #1241 c3 — a verdict taken inside `atomic_write_checked`'s
+/// exchange→verdict window on behalf of the tool. See
+/// [`WriteTool::publish_window_probe`].
+type PublishWindowProbe = Arc<dyn Fn(Option<&[u8]>) -> Result<(), String> + Send + Sync>;
+
 pub struct WriteTool {
     file_cache: Option<Arc<RwLock<FileStateCache>>>,
     /// INV-2: session-scoped record of the user's unsaved work, so a
@@ -28,6 +33,26 @@ pub struct WriteTool {
     /// Edit tool and with every sub-agent's tools, so one baseline and one
     /// agent-authored set govern both write surfaces.
     unsaved: Arc<UnsavedWorkGuard>,
+    /// #1241 c3 — the one seam into `atomic_write_checked`'s
+    /// exchange→verdict window, so the `RollbackFailed` arm below can be
+    /// graded through `Tool::execute` and not on the classifier alone.
+    ///
+    /// Reaching that arm for real needs the destination NAME to stop
+    /// resolving strictly BETWEEN the publish exchange and the restore
+    /// exchange. Nothing on the tool side of that window can make that
+    /// happen: the only tool-side code in it is the pure `pre_image_matches`,
+    /// and `Swap::Unsupported` cannot differ between two exchanges on one
+    /// filesystem. What is left is a racer, which is a flake generator on a
+    /// window measured in microseconds. So the unlink is done from inside the
+    /// verdict itself, which is the one ordering that is inside the window by
+    /// construction.
+    ///
+    /// `None` in production — only `with_publish_window_probe` sets it, and
+    /// that is `#[cfg(test)]`. The closure at the call site is the SAME code
+    /// either way: what a probe substitutes is the REASON the publish is
+    /// refused, never the observable #1241 c2 grades, which is what
+    /// `execute` hands back afterwards.
+    publish_window_probe: Option<PublishWindowProbe>,
 }
 
 impl WriteTool {
@@ -50,6 +75,7 @@ impl WriteTool {
         Self {
             file_cache,
             unsaved: UnsavedWorkGuard::shared(),
+            publish_window_probe: None,
         }
     }
 
@@ -63,6 +89,25 @@ impl WriteTool {
     /// go to the repository's own object store.
     pub fn with_unsaved_guard(mut self, guard: Arc<UnsavedWorkGuard>) -> Self {
         self.unsaved = guard;
+        self
+    }
+
+    /// #1241 c3 — take `probe`'s answer as the verdict on the displaced
+    /// pre-image, so a test can act from inside the exchange→verdict window.
+    ///
+    /// Test-only. See [`WriteTool::publish_window_probe`] for why the window
+    /// has no other entrance.
+    #[cfg(test)]
+    // Its only caller, `execute_reports_a_refusal_it_could_not_roll_back`, is
+    // gated to the exchange platforms (see that test's doc for why the
+    // `RollbackFailed` state it drives is unix-only), so on every other target
+    // this setter is genuinely unused rather than dead.
+    #[cfg_attr(
+        not(any(target_os = "linux", target_os = "macos")),
+        allow(dead_code, reason = "only caller is gated to the exchange platforms")
+    )]
+    pub(crate) fn with_publish_window_probe(mut self, probe: PublishWindowProbe) -> Self {
+        self.publish_window_probe = Some(probe);
         self
     }
 
@@ -216,15 +261,25 @@ impl WriteTool {
                     };
                 }
             }
-            Ok(FileMutationOutcome::Conflict { current }) => {
+            Ok(FileMutationOutcome::Conflict {
+                current,
+                intercepted_save,
+            }) => {
                 *attempt = FilesystemWriteAttempt::NotAttempted;
                 let why = match (current, judged.is_some()) {
                     (FileObservation::Absent, true) => "it was deleted",
                     (FileObservation::Present(_), false) => "something else created it",
                     _ => "its contents changed on disk",
                 };
+                // #1248 — the reason is composed from the re-observed state,
+                // as it always was; what the state cannot say is whether the
+                // refusal displaced a save, so that comes off the outcome.
                 return ToolResult {
-                    content: crate::unsaved_work::changed_under_write(file_path, why),
+                    content: crate::unsaved_work::conflict_message(
+                        file_path,
+                        why,
+                        intercepted_save.as_deref(),
+                    ),
                     is_error: true,
                 };
             }
@@ -285,6 +340,47 @@ impl WriteTool {
             content: format!("{action} {file_path} ({line_count} lines){unsaved_note}"),
             is_error: false,
         }
+    }
+}
+
+/// #1241 — which of `atomic_write_checked`'s two `Err` meanings this is, and
+/// therefore whether the direct Write path may publish unchecked.
+///
+/// `Ok(error)` — the tempfile round trip never reached a verdict at all: a
+/// cross-device rename, a directory that will not hold a sibling temp file.
+/// Nothing was published and no verdict was taken, so the unchecked fallback
+/// is still the right answer and still reports success.
+///
+/// `Err(report)` — the guard RAN, the verdict REFUSED, and the publish could
+/// not be retracted. Since #1202 that is a reachable meaning of the same
+/// `Err`, and it is the opposite situation: the new bytes are already
+/// published and the pre-image survives only under the name the error carries.
+/// Falling through would rewrite bytes that are already there, throw the
+/// refusal away, and report `Updated <path>` — success, for a write this
+/// tool's own guard had just refused, with no mention that a concurrent change
+/// was seen or that the user's original is sitting under a `.tmpXXXXXX`
+/// sibling that nothing will ever clean up.
+///
+/// Told apart by TYPE, never by the message text: an unrecognised string would
+/// read as "never reached a verdict", which is the answer that republishes.
+///
+/// Deliberately no cache update and no `note_written` on the report path. The
+/// bytes on disk are not this tool's to claim authorship of, and a cache entry
+/// left stale fails CLOSED at the next edit.
+fn unpublished_or_unrolled(
+    file_path: &str,
+    error: std::io::Error,
+) -> Result<std::io::Error, ToolResult> {
+    match wcore_config::rollback_failure(&error) {
+        Some(unrolled) => Err(ToolResult {
+            content: crate::unsaved_work::refused_but_not_rolled_back(
+                file_path,
+                unrolled.why(),
+                unrolled.preserved_at(),
+            ),
+            is_error: true,
+        }),
+        None => Ok(error),
     }
 }
 
@@ -450,23 +546,37 @@ impl Tool for WriteTool {
         // atomic exchange, so the pre-image it judges IS the one it displaced.
         let unpublishable =
             match wcore_config::atomic_write_checked(path, content.as_bytes(), |observed| {
+                // #1241 c3. `None` in production, so this is the shipped
+                // predicate on every real write.
+                if let Some(probe) = self.publish_window_probe.as_ref() {
+                    probe(observed)?;
+                }
                 crate::unsaved_work::pre_image_matches(observed, judged.as_deref())
             }) {
                 Ok(Ok(())) => None,
                 Ok(Err(why)) => {
+                    // #1239 — as in edit.rs: say so when the retraction
+                    // displaced a save, instead of the wording that promises
+                    // nothing was changed.
                     return ToolResult {
-                        content: crate::unsaved_work::changed_under_write(file_path, &why),
+                        content: crate::unsaved_work::refusal_message(file_path, &why),
                         is_error: true,
                     };
                 }
-                Err(e) => Some(e),
+                Err(e) => match unpublished_or_unrolled(file_path, e) {
+                    Ok(never_reached_a_verdict) => Some(never_reached_a_verdict),
+                    Err(report) => return report,
+                },
             };
 
         if let Some(e) = unpublishable {
             // Fallback: direct write if the tempfile round trip fails at all
             // (a cross-device rename, or a directory that will not hold a
             // sibling). The guard above did not run, so this is the one path
-            // that publishes unchecked — unchanged from before this fix.
+            // that publishes unchecked. #1241 narrowed WHICH errors get here —
+            // a refusal that could not be rolled back is diverted above — so
+            // the premise in this comment is true again: reaching this line
+            // means no verdict was ever taken.
             if let Err(e) = std::fs::write(path, content) {
                 return ToolResult {
                     content: format!("Failed to write file: {}", e),
@@ -605,6 +715,427 @@ mod tests {
         WriteTool::new(cache).with_unsaved_guard(Arc::new(
             crate::unsaved_work::UnsavedWorkGuard::new_isolated(),
         ))
+    }
+
+    /// #1241 c2 + c3. A refusal whose rollback exchanged NOTHING must not
+    /// reach the unchecked fallback, and what the user is told must carry the
+    /// name the pre-image was preserved under.
+    ///
+    /// The error is not hand-built. It comes out of a real
+    /// `atomic_write_checked` run in the state the ticket names — the
+    /// destination NAME disappearing between the two exchanges, driven
+    /// directly by deleting it from inside the check closure, which is the one
+    /// ordering that places the unlink inside the window — and is then handed
+    /// to the very function the direct Write path's `Err` arm calls.
+    ///
+    /// Unix only, and for a reason about THIS state and not about what
+    /// Windows can observe (wayland#1268): `Swap::Displaced` on the exchange
+    /// platforms is `RENAME_EXCHANGE` / `RENAME_SWAP`, whose restore FAILS
+    /// against a destination that has gone. On Windows `ReplaceFileW` answers
+    /// `ERROR_FILE_NOT_FOUND` there, `publish_displacing` maps that to
+    /// `Swap::Vacant`, and `restore`'s documented fallback -- a plain
+    /// replacing rename -- puts the pre-image back and succeeds, so no
+    /// `RollbackFailed` is produced. Nothing here says a DISPLACED save is
+    /// unobservable on Windows; that claim was false and is corrected at
+    /// `the_vfs_path_names_a_save_the_refusal_displaced`.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_refusal_that_could_not_be_rolled_back_is_not_a_fallback() {
+        const ORIGINAL: &[u8] = b"the only copy of the user's bytes";
+
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("f.txt");
+        std::fs::write(&p, ORIGINAL).unwrap();
+
+        let mut handed = None;
+        let error = wcore_config::atomic_write_checked(&p, b"ours", |observed| {
+            handed = observed.map(<[u8]>::to_vec);
+            std::fs::remove_file(&p).unwrap();
+            Err("its contents changed on disk".to_owned())
+        })
+        .expect_err("the rollback should have failed with the destination gone");
+
+        assert_eq!(
+            handed.as_deref(),
+            Some(ORIGINAL),
+            "fixture: the check was not handed the displaced pre-image, so this \
+             never reached a rollback at all"
+        );
+
+        let report = unpublished_or_unrolled("/w/f.txt", error)
+            .expect_err("a refusal that could not be rolled back was sent to the fallback");
+
+        assert!(report.is_error, "reported as a success: {}", report.content);
+        assert!(
+            !report.content.starts_with("Updated "),
+            "reported as an update: {}",
+            report.content
+        );
+
+        // c2: the text names where the pre-image is, and that name is real.
+        let survivors: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|f| std::fs::read(f).is_ok_and(|b| b == ORIGINAL))
+            .collect();
+        assert_eq!(survivors.len(), 1, "the pre-image did not survive");
+        assert!(
+            report.content.contains(&survivors[0].display().to_string()),
+            "the user is not told where the original was preserved: {}",
+            report.content
+        );
+    }
+
+    /// #1241 c2 + c3, through `WriteTool::execute`.
+    ///
+    /// The criterion's subject is "the Write tool returns", so the tool is
+    /// what is driven and what is graded: the direct, no-`ToolContext`
+    /// `execute` runs a REAL `atomic_write_checked` into the state the ticket
+    /// names — the guard refused and the publish could not be retracted — and
+    /// the assertions are on the `ToolResult` it hands back.
+    ///
+    /// The destination is unlinked from inside the exchange→verdict window by
+    /// the test-only `publish_window_probe`. That is the ONLY seam into the
+    /// window, for the reason the field's own doc gives, and it substitutes
+    /// exactly one thing: the reason the publish is refused. The exchange, the
+    /// failed restore, `keep_displaced`, `RollbackFailed`, the
+    /// `unpublished_or_unrolled` classification, the message, and the tool's
+    /// return value are all the production code.
+    ///
+    /// The new content is a SUPERSET of the pre-image on purpose: a rewrite
+    /// that drops a line is refused by the unsaved-work guard before any of
+    /// this runs, even outside a repository (`unsaved_work_no_git_test`), and
+    /// the test would then grade nothing.
+    ///
+    /// Unix exchange platforms only, for the reason
+    /// `a_refusal_that_could_not_be_rolled_back_is_not_a_fallback` gives:
+    /// `ReplaceFileW` answers `ERROR_FILE_NOT_FOUND` against a destination
+    /// that has gone, `publish_displacing` maps that to `Swap::Vacant`, and
+    /// `restore`'s plain-rename fallback succeeds, so `RollbackFailed` is not
+    /// produced on Windows. That is a statement about ROLLBACK FAILURE, not
+    /// about whether a displaced save is observable there (wayland#1268).
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn execute_reports_a_refusal_it_could_not_roll_back() {
+        const ORIGINAL: &str = "the only copy of the user's bytes\n";
+        const REWRITE: &str = "the only copy of the user's bytes\nand a line the agent added\n";
+
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("f.txt");
+        std::fs::write(&p, ORIGINAL).unwrap();
+
+        // Every entry into the window, in order, so the fixture control below
+        // can assert it was entered exactly once and with the pre-image.
+        let handed: Arc<std::sync::Mutex<Vec<Option<Vec<u8>>>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&handed);
+        let doomed = p.clone();
+        let tool =
+            tool(None).with_publish_window_probe(Arc::new(move |observed: Option<&[u8]>| {
+                recorded.lock().unwrap().push(observed.map(<[u8]>::to_vec));
+                // Inside the window by construction: the publish exchange has
+                // happened (that is what produced `observed`) and the restore
+                // exchange has not.
+                std::fs::remove_file(&doomed).unwrap();
+                Err("its contents changed on disk".to_owned())
+            }));
+
+        let result = tool
+            .execute(json!({
+                "file_path": p.to_str().unwrap(),
+                "content": REWRITE,
+            }))
+            .await;
+
+        // Fixture control. Without it every assertion below would also pass on
+        // a refusal taken BEFORE any publish, which is a different arm.
+        let handed = handed.lock().unwrap();
+        assert_eq!(
+            handed.len(),
+            1,
+            "the exchange→verdict window was entered {} times, not once, so \
+             this does not grade the arm it claims to",
+            handed.len()
+        );
+        assert_eq!(
+            handed[0].as_deref(),
+            Some(ORIGINAL.as_bytes()),
+            "the verdict was not handed the displaced pre-image, so no publish \
+             was retracted here"
+        );
+
+        assert!(result.is_error, "reported as a success: {}", result.content);
+        assert!(
+            !result.content.starts_with("Updated "),
+            "reported as an update: {}",
+            result.content
+        );
+        assert!(
+            !result.content.contains("used direct write"),
+            "the unchecked fallback republished over a refusal: {}",
+            result.content
+        );
+
+        // c2: the text names where the pre-image is, and that name is real.
+        let survivors: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|f| std::fs::read(f).is_ok_and(|b| b == ORIGINAL.as_bytes()))
+            .collect();
+        assert_eq!(
+            survivors.len(),
+            1,
+            "the pre-image did not survive: {survivors:?}"
+        );
+        assert!(
+            result.content.contains(&survivors[0].display().to_string()),
+            "the user is not told where the original was preserved: {}",
+            result.content
+        );
+    }
+
+    /// #1248 c2 + c3, through the VFS path — the one `write_through_vfs`
+    /// takes whenever a `ToolContext` is present, which is every dispatched
+    /// tool call.
+    ///
+    /// The criterion's subject is the SURFACED tool text, so the tool is what
+    /// is driven and what is graded: `execute_with_ctx` over a real `RealFs`
+    /// runs a real `compare_exchange_file`, which runs a real
+    /// `atomic_write_checked`, and the assertions are on the `ToolResult` it
+    /// hands back and on the file that is actually on disk when it does.
+    ///
+    /// The save that the retraction displaces is made from inside the
+    /// exchange to verdict window by the test-only `publish_window` probe.
+    /// That is the ONLY seam into the window, for the reason that module's own
+    /// doc gives, and it substitutes exactly one thing: the reason the publish
+    /// is refused. The exchange, the restore, `keep_displaced`, the `Refusal`,
+    /// what `compare_exchange_file` carries out of it and what this tool
+    /// renders off that are all production code.
+    ///
+    /// The new content is a SUPERSET of the pre-image on purpose: a rewrite
+    /// that drops a line is refused by the unsaved-work guard before any of
+    /// this runs, and the test would then grade nothing.
+    ///
+    /// NO LONGER GATED TO UNIX (FerroxLabs/wayland#1268 c2). It ran on
+    /// Linux/macOS only because this workspace had no Windows executor, and an
+    /// earlier version of this comment gave a STRUCTURAL reason instead --
+    /// that `ReplaceFileW` "hands nothing back to judge, so no save can be
+    /// intercepted there at all". That was false, and
+    /// `wcore_config::atomic_io` already recorded the correction in its own
+    /// words: the earlier reading "was simply wrong about `lpBackupFileName`".
+    ///
+    /// On Windows `publish_displacing` returns `Swap::Displaced(backup)` via
+    /// `ReplaceFileW`'s `lpBackupFileName`, `restore` publishes with
+    /// `ReplaceFileW` again and returns `Ok(Some(exchanged_out))`, and
+    /// `holds_exactly` then keeps a save that is not ours -- so
+    /// `intercepted_save: Some(..)` is reachable there.
+    ///
+    /// That paragraph is READ OFF `wcore_config::atomic_io`, not measured, and
+    /// this doc claims nothing stronger. What has actually been established is
+    /// that the test is COMPILE-VALID for the Windows target: `cargo check -p
+    /// wcore-tools --all-targets --target x86_64-pc-windows-gnu` is clean, and
+    /// it only became clean with "fix(atomic-io): compile the non-unix restore
+    /// arm, and ungate the intercepted-save tests" -- before that commit
+    /// `atomic_io`'s own non-unix `restore` arm failed E0532, measured by
+    /// reverting that one line and watching the same check go back to
+    /// `error[E0532]`. So no Windows measurement of this path was even
+    /// POSSIBLE on this branch until then.
+    ///
+    /// It has NEVER been executed on a Windows host. The name the preserved
+    /// file takes there is therefore unverified -- the assertions below find
+    /// it by CONTENT rather than by name, which is why they are portable --
+    /// and the ledger for FerroxLabs/wayland#1268 records c2, the Windows
+    /// execution, as not-met. Do not read this comment as evidence that it
+    /// was run.
+    #[tokio::test]
+    async fn the_vfs_path_names_a_save_the_refusal_displaced() {
+        const ORIGINAL: &str = "the only copy of the user's bytes\n";
+        const REWRITE: &str = "the only copy of the user's bytes\nand a line the agent added\n";
+        const THEIR_SAVE: &[u8] = b"what the user saved while the check was running\n";
+
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("f.txt");
+        std::fs::write(&p, ORIGINAL).unwrap();
+
+        // Every entry into the window, in order, so the fixture control below
+        // can assert it was entered exactly once and with the pre-image.
+        let handed: Arc<std::sync::Mutex<Vec<Option<Vec<u8>>>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&handed);
+        let dest = p.clone();
+        let _probe = crate::vfs::publish_window::install(
+            &p,
+            Box::new(move |observed: Option<&[u8]>| {
+                recorded.lock().unwrap().push(observed.map(<[u8]>::to_vec));
+                // Inside the window by construction: the publish exchange has
+                // happened (that is what produced `observed`) and the restore
+                // exchange has not, so this name resolves to the NEW inode and
+                // the save lands on it exactly as an editor's would.
+                std::fs::write(&dest, THEIR_SAVE).unwrap();
+                Err("its contents changed on disk".to_owned())
+            }),
+        );
+
+        let ctx = crate::context::ToolContext::test_default();
+        let result = tool(None)
+            .execute_with_ctx(
+                json!({ "file_path": p.to_str().unwrap(), "content": REWRITE }),
+                &ctx,
+            )
+            .await;
+
+        // Fixture control. Without it every assertion below would also pass on
+        // a conflict classified BEFORE any publish, which is a different arm
+        // and is what c4 pins.
+        let entries = handed.lock().unwrap().len();
+        assert_eq!(
+            entries, 1,
+            "the exchange to verdict window was entered {entries} times, not \
+             once, so this does not grade the arm it claims to"
+        );
+        assert_eq!(
+            handed.lock().unwrap()[0].as_deref(),
+            Some(ORIGINAL.as_bytes()),
+            "the verdict was not handed the displaced pre-image, so no publish \
+             was retracted here"
+        );
+
+        assert!(result.is_error, "reported as a success: {}", result.content);
+
+        // The destination is back to exactly what it held — which is why the
+        // notice cannot be recovered by re-observing it, and has to be carried.
+        assert_eq!(std::fs::read(&p).unwrap(), ORIGINAL.as_bytes());
+
+        // The user's save is on disk, under a name only the refusal knows.
+        let survivors: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|f| std::fs::read(f).is_ok_and(|b| b == THEIR_SAVE))
+            .collect();
+        assert_eq!(
+            survivors.len(),
+            1,
+            "the displaced save did not survive: {survivors:?}"
+        );
+        assert_ne!(survivors[0], p);
+
+        // c2 + c3: the SURFACED text names it, and does not claim the refusal
+        // cost nobody anything.
+        assert!(
+            result.content.contains(&survivors[0].display().to_string()),
+            "the user is not told where their save went: {}",
+            result.content
+        );
+        assert!(
+            !result.content.contains("Nothing was changed."),
+            "a refusal that displaced a save still says nothing was changed: {}",
+            result.content
+        );
+    }
+
+    /// #1241 c4, the classifier half: a round trip that never reached a
+    /// verdict must still be handed back for the unchecked fallback to
+    /// publish. Fails if the branch above widens to swallow every `Err`.
+    #[test]
+    fn a_round_trip_that_never_reached_a_verdict_is_handed_to_the_fallback() {
+        let dir = tempdir().unwrap();
+        let nowhere = dir.path().join("no-such-dir").join("f.txt");
+        let error = wcore_config::atomic_write_checked(&nowhere, b"ours", |_| Ok(()))
+            .expect_err("staging a temp file under a missing directory should fail");
+
+        let handed_back = unpublished_or_unrolled("/w/f.txt", error)
+            .expect("a genuine round-trip failure was swallowed as a refusal");
+        assert_eq!(handed_back.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    /// #1241 c4. The other meaning of `Err` — a round trip that never reached
+    /// a verdict — must still fall through to the unchecked write, publish,
+    /// and report success.
+    ///
+    /// The trigger is the one the fallback's own comment names: a directory
+    /// that will not hold a sibling temp file. It is built by nesting until
+    /// the destination path is as long as the platform will accept, so that
+    /// the destination itself opens but `.tmpXXXXXX` beside it is one
+    /// character too long. That works regardless of who is running the test,
+    /// which a permission-based fixture would not — every one of these runs as
+    /// root on the build host, where a mode-0555 directory is no obstacle.
+    ///
+    /// Unix only: the search is over `PATH_MAX`, and Windows' equivalent is
+    /// lifted by `long_path_safe_dest` on the very path under test.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_round_trip_that_never_reached_a_verdict_still_publishes_unchecked() {
+        /// A directory that will hold `f` but not a `.tmpXXXXXX` sibling.
+        /// Found by measurement rather than by arithmetic over a `PATH_MAX`
+        /// this crate would have to guess at.
+        fn dir_that_refuses_a_sibling_temp_file(base: &Path) -> Option<std::path::PathBuf> {
+            let mut dir = base.to_path_buf();
+            loop {
+                let next = dir.join("d".repeat(100));
+                if std::fs::create_dir(&next).is_err() {
+                    break;
+                }
+                dir = next;
+            }
+            // The last 100-char step failed, so the limit is inside the next
+            // hundred characters. Walk down from there and take the first
+            // length that shows both halves of the property.
+            for len in (1..=99).rev() {
+                let candidate = dir.join("d".repeat(len));
+                if std::fs::create_dir(&candidate).is_err() {
+                    continue;
+                }
+                let refuses_a_sibling = tempfile::NamedTempFile::new_in(&candidate).is_err();
+                let holds_the_destination = std::fs::write(candidate.join("f"), b"probe").is_ok();
+                if refuses_a_sibling && holds_the_destination {
+                    let _ = std::fs::remove_file(candidate.join("f"));
+                    return Some(candidate);
+                }
+            }
+            None
+        }
+
+        let base = tempdir().unwrap();
+        let Some(dir) = dir_that_refuses_a_sibling_temp_file(base.path()) else {
+            panic!(
+                "no path length on this filesystem refuses a sibling temp file \
+                 while still opening the destination, so this test cannot \
+                 reach the fallback it grades"
+            );
+        };
+        let dest = dir.join("f");
+
+        // Fixture control, restated at the moment of use: if the round trip
+        // can be staged here then nothing below measures the fallback.
+        assert!(
+            tempfile::NamedTempFile::new_in(&dir).is_err(),
+            "the fixture directory accepts a sibling temp file after all"
+        );
+
+        let tool = tool(None);
+        let result = tool
+            .execute(json!({
+                "file_path": dest.to_str().unwrap(),
+                "content": "published unchecked",
+            }))
+            .await;
+
+        assert!(
+            !result.is_error,
+            "a round trip that never reached a verdict was reported as a \
+             failure: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("used direct write"),
+            "the fallback did not run: {}",
+            result.content
+        );
+        assert_eq!(
+            std::fs::read_to_string(&dest).unwrap(),
+            "published unchecked",
+            "the fallback did not publish"
+        );
     }
 
     fn make_cache() -> Arc<RwLock<FileStateCache>> {

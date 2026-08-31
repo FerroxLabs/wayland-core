@@ -6,7 +6,7 @@
 use async_trait::async_trait;
 use wcore_egress::EgressClient as Client;
 
-use super::build_ssrf_safe_tool_client;
+use super::build_ssrf_safe_tool_client_with_origin;
 use wcore_tools::web_fetch::{
     FetchBackend, FetchOutcome, FetchRequest, WEB_FETCH_MAX_RESPONSE_BYTES,
 };
@@ -105,8 +105,23 @@ impl HttpFetchBackend {
             // and the github_api / linear / notion / gitlab backends all
             // share the same `build_ssrf_safe_tool_client` constructor so
             // the policy is one edit, not five.
-            client: build_ssrf_safe_tool_client(),
+            //
+            // wayland#1264: this backend, alone among them, is
+            // `ModelDirected` — `fetch_inner` does `self.client.get(&req.url)`
+            // with the URL straight out of tool input, so the egress
+            // classifier must shape-check it even when the host is on the
+            // operator's allowlist.
+            client: build_ssrf_safe_tool_client_with_origin(
+                wcore_egress::EgressOrigin::ModelDirected,
+            ),
         }
+    }
+
+    /// The egress origin stamped on every request this backend issues
+    /// (wayland#1264). Exposed so the wiring can be graded: without it the
+    /// stamp is a private field and a refactor could drop it silently.
+    pub fn egress_origin(&self) -> wcore_egress::EgressOrigin {
+        self.client.origin()
     }
 }
 

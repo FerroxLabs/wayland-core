@@ -108,7 +108,36 @@ pub trait OutputSink: Send + Sync {
     /// cap, IO/persistence). It is a REQUIRED argument so no error can silently
     /// claim a wrong value — the `ProtocolSink` impl previously hardcoded
     /// `retryable: false` for every error regardless of truth.
-    fn emit_error(&self, msg: &str, retryable: bool);
+    ///
+    /// `category` is FerroxLabs/wayland#1266 c1. #1237 typed the TERMINAL exit
+    /// of a run by adding a second method, `emit_run_failure`, and left this
+    /// one taking prose — so an engine error the engine itself had classified
+    /// (a tool breaker firing, a context ceiling, a local authority refusal
+    /// mid-turn) still reached the host as `unknown`, because the
+    /// classification was thrown away one frame earlier.
+    ///
+    /// #1266 c1 asks for a seam where omission is a COMPILE ERROR rather than
+    /// a default. That is why the category is a required argument here and why
+    /// `emit_run_failure` is gone rather than kept alongside: once `emit_error`
+    /// carries a category the two have the same signature and the same body at
+    /// every override, and the only thing the second method still contributed
+    /// was its trait DEFAULT — which the #1266 comment measured flattening a
+    /// category for any sink that delegates `emit_error` to an inner sink and
+    /// takes the default for `emit_run_failure`. Deleting the method removes
+    /// that hazard by construction instead of by a guard that reads one file's
+    /// text.
+    ///
+    /// The honest value is `FailureCategory::Unknown`, and it stays honest:
+    /// a site that genuinely cannot decide — an opaque provider non-2xx, an
+    /// error that arrives only as someone else's prose — must say `Unknown`
+    /// rather than pick the most plausible-looking variant. #1266 c2's control
+    /// is exactly that.
+    fn emit_error(
+        &self,
+        msg: &str,
+        retryable: bool,
+        category: wcore_protocol::events::FailureCategory,
+    );
     /// Display informational message
     fn emit_info(&self, msg: &str);
 
@@ -284,6 +313,25 @@ pub trait OutputSink: Send + Sync {
         &self,
         _activation: &wcore_protocol::events::CapabilityActivation,
     ) {
+    }
+
+    /// wayland#1219: whether this sink can actually deliver an
+    /// `ApprovalRequired` frame to a human who can answer it.
+    ///
+    /// [`emit_approval_required`](Self::emit_approval_required) is a silent
+    /// no-op on most sinks (the trait default) and on a [`ProtocolSink`] that
+    /// was not built with `with_hitl_suspend(true)`. A caller that merely
+    /// announces an approval does not care. A caller that BLOCKS on the
+    /// answer does: on a mute sink the request is never rendered, nothing
+    /// resolves it, and it hangs until the approval TTL reaps it — which the
+    /// egress path then reported to the user as "declined at the consent
+    /// prompt", a prompt that was never shown.
+    ///
+    /// So any blocking approval caller must ask this FIRST. Default `false`:
+    /// a sink opts in only by overriding, because silence is the default
+    /// behaviour of the emit methods themselves.
+    fn approval_surface_available(&self) -> bool {
+        false
     }
 
     /// W7 S4: emit ApprovalRequired (host renders modal). Default

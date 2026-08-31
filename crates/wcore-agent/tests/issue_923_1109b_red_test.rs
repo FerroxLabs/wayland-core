@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use tokio::sync::mpsc;
-use wcore_agent::engine::AgentEngine;
+use wcore_agent::engine::{AgentEngine, REASONING_RECOVERY_LABEL};
 use wcore_agent::output::OutputSink;
 use wcore_egress::{AllowAllPolicy, EgressClient};
 use wcore_providers::retry::{builder_send_with_retry, scope_max_retries};
@@ -157,6 +157,12 @@ impl CapSink {
     fn text(&self) -> String {
         self.text.lock().unwrap().clone()
     }
+    /// wayland#1231 moved part of this turn's user-visible output from the
+    /// error channel to the answer + info channels, so the guard below has to
+    /// be able to read them.
+    fn infos(&self) -> Vec<String> {
+        self.infos.lock().unwrap().clone()
+    }
 }
 
 impl OutputSink for CapSink {
@@ -168,7 +174,12 @@ impl OutputSink for CapSink {
     fn emit_tool_result(&self, _: &str, _: bool, _: &str) {}
     fn emit_stream_start(&self, _: &str) {}
     fn emit_stream_end(&self, _: &str, _: usize, _: u64, _: u64, _: u64, _: u64, _: FinishReason) {}
-    fn emit_error(&self, message: &str, _: bool) {
+    fn emit_error(
+        &self,
+        message: &str,
+        _: bool,
+        _category: wcore_protocol::events::FailureCategory,
+    ) {
         self.errors.lock().unwrap().push(message.to_string());
     }
     fn emit_info(&self, message: &str) {
@@ -711,21 +722,56 @@ async fn f_a_turn_the_reasoning_filter_emptied_is_not_blamed_on_the_endpoint() {
     ])])
     .await;
     let _ = h.engine.run(USER_MARKER, "").await;
-    let errors = h.sink.errors();
+
+    // UPDATED BY wayland#1231, and updated rather than deleted because BOTH of
+    // this test's original properties still hold -- what moved is the CHANNEL
+    // they hold on.
+    //
+    // This test's own doc comment names the defect it was written for: #908
+    // "turned the reporter's second symptom into their first one (not
+    // producing any response at all)". #908 fixed the DIAGNOSIS and its own
+    // ledger conceded it did not restore an answer. #1231 c2 restores the
+    // answer, so this turn no longer ends on the error channel at all -- it
+    // ends with the model's own words on the ANSWER channel, plus an info
+    // note naming the cause. Asserting `!errors.is_empty()` here would now be
+    // asserting the very silence #908 was filed about.
+    let text = h.sink.text();
+    let infos = h.sink.infos().join("\n");
+    let errors = h.sink.errors().join("\n");
+    let everything = format!("{text}\n{infos}\n{errors}");
+
     assert!(
-        !errors.is_empty(),
+        !everything.trim().is_empty(),
         "#908: a turn whose whole reply was reasoning-tagged ended with nothing said at all"
     );
-    let joined = errors.join("\n");
     assert!(
-        !joined.contains("may be incompatible"),
+        !everything.contains("may be incompatible"),
         "#908: the provider streamed a complete response and OUR filter removed it, and the \
-         user was told their endpoint may be incompatible. Got:\n{joined}"
+         user was told their endpoint may be incompatible. Got:\n{everything}"
     );
     assert!(
-        joined.contains("reasoning tags"),
-        "#908: the message must name the real cause — the reply was all reasoning — so the \
-         user does not go and re-check a working endpoint. Got:\n{joined}"
+        everything.contains("reasoning tags"),
+        "#908: the user must be told the real cause — the reply was all reasoning — so they \
+         do not go and re-check a working endpoint. Got:\n{everything}"
+    );
+    // wayland#1231 c2, the half #908 could not reach: the user ends the turn
+    // holding the model's ANSWER, not only an accurate account of not having
+    // one. Without this the assertions above would be satisfied by a turn that
+    // explained itself perfectly and said nothing else.
+    //
+    // The assertion is on the RECOVERY LABEL, not on the answer text. That is
+    // deliberate and it was MEASURED: `engine.rs` emits the RAW delta to the
+    // sink ("the sink keeps receiving the RAW delta ... only the durable copy
+    // is filtered"), so a sink that records `emit_text_delta` verbatim already
+    // holds `<think>I should answer this.</think>` whether or not anything was
+    // recovered. Asserting the answer text here PASSED with the recovery arm
+    // disabled -- it graded the provider's echo, not our fix. The label is
+    // emitted only by the recovery arm, so it is the half that discriminates.
+    assert!(
+        text.contains(REASONING_RECOVERY_LABEL),
+        "wayland#1231 c2: the model's reply was there the whole time and our filter removed \
+         it; the user must end this turn holding it, under a label saying where it came \
+         from. Answer channel was:\n{text:?}"
     );
 }
 

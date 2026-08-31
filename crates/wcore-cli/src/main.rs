@@ -34,7 +34,6 @@ use wcore_agent::mcp_lifecycle::{
     McpReservationOutcome,
 };
 use wcore_agent::output::OutputSink;
-use wcore_agent::output::protocol_sink::ProtocolSink;
 use wcore_agent::output::terminal::TerminalSink;
 use wcore_agent::session;
 use wcore_agent::slash::{Dispatcher as SlashDispatcher, SlashError, SlashOutcome};
@@ -45,8 +44,8 @@ use wcore_protocol::commands::{
     MCP_LIFECYCLE_VERSION, ProtocolCommand, RemoveMcpServerCommand, ResumeTurnAction,
 };
 use wcore_protocol::events::{
-    BudgetGrantRefusalReason, FinishReason, McpRemovalOutcome, ProtocolEvent, RecoveryLifecycle,
-    RecoveryReconcileReason, RecoveryUnavailableReason,
+    BudgetGrantRefusalReason, FinishReason, GrantRefusalReason, GrantSurface, McpRemovalOutcome,
+    ProtocolEvent, RecoveryLifecycle, RecoveryReconcileReason, RecoveryUnavailableReason,
 };
 use wcore_protocol::execution_policy::{
     ExecutionPolicyChangeReason, ExecutionPolicySequence, ExecutionPolicySequenceError,
@@ -144,7 +143,11 @@ async fn handle_slash_or_run(
                 // Not a registered slash command — fall through to engine.
             }
             Err(SlashError::Bad(reason)) => {
-                output.emit_error(&format!("bad slash invocation: {reason}"), false);
+                output.emit_error(
+                    &format!("bad slash invocation: {reason}"),
+                    false,
+                    wcore_protocol::events::FailureCategory::LocalWayland,
+                );
                 return SlashOrRun::Slash;
             }
         }
@@ -2165,6 +2168,10 @@ async fn run() -> anyhow::Result<ExitCode> {
                         code: "init_failed".to_string(),
                         message: init_failure_message(&e, &provider_label_for_error),
                         retryable: false,
+                        // A startup failure is this process refusing to
+                        // proceed on its own account -- FailureCategory's
+                        // LocalWayland names "a startup failure" outright.
+                        category: wcore_protocol::events::FailureCategory::LocalWayland,
                     },
                 });
             }
@@ -2363,6 +2370,7 @@ async fn run() -> anyhow::Result<ExitCode> {
                         "the interrupted turn from the previous run could not be settled: {error}"
                     ),
                     false,
+                    wcore_protocol::events::FailureCategory::LocalWayland,
                 );
                 None
             }
@@ -2470,7 +2478,11 @@ async fn run() -> anyhow::Result<ExitCode> {
                         }
                     }
                     Err(error) => {
-                        output.emit_error(&format!("{error:#}"), false);
+                        output.emit_error(
+                            &format!("{error:#}"),
+                            false,
+                            wcore_protocol::events::FailureCategory::Unknown,
+                        );
                         exit_sink.store(
                             wcore_cli::exit_code::FAILURE,
                             std::sync::atomic::Ordering::SeqCst,
@@ -2541,7 +2553,11 @@ async fn run() -> anyhow::Result<ExitCode> {
             SlashOrRun::Engine(Err(e)) => {
                 // Render the full anyhow chain (`{e:#}` flattens causes onto
                 // `\nCaused by: …` lines which the formatter recognises).
-                output.emit_error(&format!("{e:#}"), false);
+                output.emit_error(
+                    &format!("{e:#}"),
+                    false,
+                    wcore_protocol::events::FailureCategory::Unknown,
+                );
                 ExitCode::from(wcore_cli::exit_code::FAILURE)
             }
         }
@@ -2642,7 +2658,11 @@ async fn repl_loop(
                 );
             }
             SlashOrRun::Engine(Err(e)) => {
-                output.emit_error(&format!("{e:#}"), false);
+                output.emit_error(
+                    &format!("{e:#}"),
+                    false,
+                    wcore_protocol::events::FailureCategory::Unknown,
+                );
             }
         }
     }
@@ -3633,6 +3653,33 @@ fn mcp_removal_cleanup_outcome(cleanup_failures: &[String]) -> McpRemovalOutcome
     }
 }
 
+/// Withdraw a runtime-added MCP server from the live catalogue refresh.
+///
+/// FerroxLabs/wayland#1213 c4. `McpCatalogRefresh` is what turns a server's
+/// `notifications/tools/list_changed` back into registered tools, and until
+/// wayland#1175 that machinery was a no-op for SSE and Streamable HTTP because
+/// neither transport reported the notification. Now that both do, an entry the
+/// operator removed but that stayed in the refresh is a resurrection path: the
+/// tools of a server the host explicitly took away get re-registered into the
+/// live registry on its next announcement.
+///
+/// `McpManager::close_server` marks the transport dead, and
+/// `refresh_signalled_tools` skips dead transports, so today the withdrawal is
+/// belt to that braces. It is done anyway because the criterion asks for it and
+/// because the belt is the one that does not depend on cleanup having
+/// succeeded: on the `CleanupUnverified` arm the manager is left in place, and
+/// a transport whose `close()` could not be verified is exactly the one whose
+/// liveness nobody should be trusting. It also stops the refresh accumulating a
+/// dead entry, and its config, per add/remove cycle.
+///
+/// Called from every path that withdraws a runtime declaration; the pairing is
+/// graded by `every_runtime_mcp_withdrawal_leaves_the_catalog_refresh`.
+fn withdraw_runtime_mcp_from_refresh(engine: &wcore_agent::engine::AgentEngine, name: &str) {
+    if let Some(refresh) = engine.mcp_catalog_refresh() {
+        refresh.forget_runtime_server(name);
+    }
+}
+
 /// wayland#1165 — the teardown half of `AddMcpServer { replace: true }`.
 ///
 /// wayland#605 deliberately made a duplicate add of a READY server a no-op:
@@ -3711,11 +3758,26 @@ async fn teardown_runtime_mcp_for_replace(
             cleanup_failures.join("; ")
         );
         let _ = lifecycle.mark_cleanup_unverified(name, reason.clone());
+        // wayland#1234 -- WITHDRAW HERE TOO, on the arm the tree used to skip.
+        //
+        // The old rationale was "on CleanupUnverified the manager is left in
+        // place and the name stays reserved, so nothing is withdrawn either".
+        // It does not survive the state this arm actually leaves: the tools
+        // were ALREADY taken out of the live registry above and are NOT put
+        // back. CleanupUnverified means `close_server` could not be verified,
+        // i.e. the transport may still be ALIVE -- so the manager stays in
+        // McpCatalogRefresh, the server announces `tools/list_changed`, and the
+        // tools the operator just removed are re-registered. That is #1234's
+        // resurrection shape, on the one arm most likely to have a live
+        // transport. Withdrawing here makes the refresh state agree with the
+        // registry state on BOTH arms.
+        withdraw_runtime_mcp_from_refresh(engine, name);
         return Err(reason);
     }
     dynamic_managers
         .retain(|manager| !(manager.hosts_server(name) || manager.health().contains_key(name)));
     runtime_diagnostics.remove_runtime_declaration(name);
+    withdraw_runtime_mcp_from_refresh(engine, name);
     let _ = lifecycle.complete_stopping(name);
     Ok(())
 }
@@ -3805,6 +3867,20 @@ async fn remove_runtime_mcp_server(
             cleanup_failures.join("; ")
         );
         let _ = lifecycle.mark_cleanup_unverified(&command.name, reason);
+        // wayland#1234 -- WITHDRAW HERE TOO, on the arm the tree used to skip.
+        //
+        // The old rationale was "on CleanupUnverified the manager is left in
+        // place and the name stays reserved, so nothing is withdrawn either".
+        // It does not survive the state this arm actually leaves: the tools
+        // were ALREADY taken out of the live registry above and are NOT put
+        // back. CleanupUnverified means `close_server` could not be verified,
+        // i.e. the transport may still be ALIVE -- so the manager stays in
+        // McpCatalogRefresh, the server announces `tools/list_changed`, and the
+        // tools the operator just removed are re-registered. That is #1234's
+        // resurrection shape, on the one arm most likely to have a live
+        // transport. Withdrawing here makes the refresh state agree with the
+        // registry state on BOTH arms.
+        withdraw_runtime_mcp_from_refresh(engine, &command.name);
         emit_mcp_removal_receipt(
             &command,
             cleanup_outcome,
@@ -3818,6 +3894,7 @@ async fn remove_runtime_mcp_server(
         !(manager.hosts_server(&command.name) || manager.health().contains_key(&command.name))
     });
     runtime_diagnostics.remove_runtime_declaration(&command.name);
+    withdraw_runtime_mcp_from_refresh(engine, &command.name);
     let _ = lifecycle.complete_stopping(&command.name);
 
     emit_mcp_removal_receipt(
@@ -3897,7 +3974,11 @@ async fn note_deferred_mcp_connect(
             for (_, reservation) in reservations {
                 reservation.complete_failed(reason.clone());
             }
-            output.emit_error(&reason, false);
+            output.emit_error(
+                &reason,
+                false,
+                wcore_protocol::events::FailureCategory::LocalWayland,
+            );
             None
         }
     }
@@ -4230,11 +4311,28 @@ impl ProtocolEmitter for GatingProtocolWriter {
             // Only synthesize the gate when the tool will actually be parked.
             // Under Force (or an auto-approved tool/grant) the engine auto-runs
             // the tool, so a gate frame here would be a false gate.
-            if !self.approval.is_auto_approved_tool_cmd(
-                reason,
-                Some(&tool.name),
-                tool.args.get("command").and_then(|value| value.as_str()),
-            ) {
+            //
+            // wayland#1195: the posture check alone is NOT the parked-ness
+            // predicate. `execute_tool_calls_with_approval` parks on two
+            // further grounds that no approval posture can lift — an
+            // `AskUserQuestion` (which needs an answer, not a permission) and
+            // a call the path-boundary classifier escalated (#1099) — and it
+            // emits `ToolRequest` for both. Suppressing the gate frame there
+            // left the engine parked on a request the host was never shown:
+            // measured under `force`, an `AskUserQuestion` produced a
+            // `tool_request` and then silence for the life of the turn. So the
+            // suppression is skipped for exactly the reasons the engine parks
+            // on regardless of posture. The TUI's `ChannelEmitter` never had
+            // this hole; it synthesizes unconditionally.
+            let parks_regardless_of_posture =
+                tool.name == "AskUserQuestion" || tool.escalation.is_some();
+            if parks_regardless_of_posture
+                || !self.approval.is_auto_approved_tool_cmd(
+                    reason,
+                    Some(&tool.name),
+                    tool.args.get("command").and_then(|value| value.as_str()),
+                )
+            {
                 if let Ok(mut seen) = self.synthesized.lock() {
                     seen.insert(call_id.clone());
                 }
@@ -4289,28 +4387,31 @@ fn emit_path_grant(
         access,
         expires_at_ms,
     } = request;
-    if !launch_authorized {
-        // #314 D-1. The receipt is documented as unconditional after a
-        // `grant_path` (json-stream-protocol.md 2.3.3) and `emit_path_revoke`
-        // already emits it in BOTH its arms. Skipping it here made ABSENCE the
-        // only refusal signal a host had, and an absent frame is
-        // indistinguishable from a slow or dropped one -- so the host cannot
-        // tell "refused" from "not yet". Emitting an unchanged receipt costs
-        // one frame and makes the documented invariant true: after any
-        // grant/revoke, `workspace_policy` is the authoritative answer to
-        // "what can this chat reach".
-        emit_workspace_policy_receipt(policy, receipt, writer);
-        let _ = writer.emit(&ProtocolEvent::Info {
-            msg_id: String::new(),
-            message: "path grant refused: the local launcher did not opt in with --allow-host-path-grants".to_string(),
-        });
-        return;
-    }
+    // #314 c5. This handler has exactly ONE refusal exit. Both causes -- the
+    // launcher opt-in and the policy's own rejection -- are folded into the
+    // `Err` of a single `Result` that only `emit_grant_refusal` consumes, so a
+    // third cause added later cannot reach the wire as prose without going
+    // through the typed frame. This replaced two hand-written `Info` refusals
+    // that a host could only branch on by matching our English.
     let write = matches!(access, wcore_protocol::commands::PathGrantAccess::Write);
     let expires_at =
         expires_at_ms.map(|ms| std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms));
-    match policy.grant_session_read_root_full(&root, write, Some(grant_id), expires_at) {
+    let correlation = grant_id.clone();
+    let outcome: Result<std::path::PathBuf, (GrantRefusalReason, String)> = if !launch_authorized {
+        Err((
+            GrantRefusalReason::LocalOptInRequired,
+            "the local launcher did not opt in with --allow-host-path-grants".to_string(),
+        ))
+    } else {
+        policy
+            .grant_session_read_root_full(&root, write, Some(grant_id), expires_at)
+            .map_err(|error| (GrantRefusalReason::PolicyRejected, error.to_string()))
+    };
+    match outcome {
         Ok(granted) => {
+            // #314 D-1. The receipt is documented as unconditional after a
+            // `grant_path` (json-stream-protocol.md 2.3.3) and
+            // `emit_path_revoke` already emits it in BOTH its arms.
             emit_workspace_policy_receipt(policy, receipt, writer);
             // #1104: the parenthetical is the grant's own access, not a fixed
             // string. A write grant announced as "read-only" would be the
@@ -4325,15 +4426,47 @@ fn emit_path_grant(
                 ),
             });
         }
-        Err(error) => {
-            // #314 D-1 -- see the launcher-refusal arm above.
-            emit_workspace_policy_receipt(policy, receipt, writer);
-            let _ = writer.emit(&ProtocolEvent::Info {
-                msg_id: String::new(),
-                message: format!("path grant refused: {error}"),
-            });
-        }
+        Err((reason, detail)) => emit_grant_refusal(
+            GrantSurface::Path,
+            reason,
+            Some(correlation),
+            detail,
+            policy,
+            receipt,
+            writer,
+        ),
     }
+}
+
+/// #314 c5. The ONE place a host grant refusal reaches the wire.
+///
+/// Order matters and is the same order every other grant/revoke exit uses:
+/// the `workspace_policy` receipt first (#314 c4 -- "what can this chat
+/// reach"), then the typed `grant_refused` frame, then the human line. The
+/// human line is BUILT FROM the typed frame rather than written beside it, so
+/// the refusal prose no longer exists as a literal anywhere in this file and
+/// a new refusal site has nothing to copy: it must construct the `Err` these
+/// handlers return, and this function is its only consumer.
+fn emit_grant_refusal(
+    surface: GrantSurface,
+    reason: GrantRefusalReason,
+    grant_id: Option<String>,
+    detail: String,
+    policy: &wcore_tools::workspace_policy::WorkspacePolicy,
+    receipt: &mut wcore_types::workspace_trust::WorkspacePolicyReceipt,
+    writer: &dyn ProtocolEmitter,
+) {
+    emit_workspace_policy_receipt(policy, receipt, writer);
+    let _ = writer.emit(&ProtocolEvent::GrantRefused {
+        grant_id,
+        surface,
+        reason,
+        detail: detail.clone(),
+    });
+    let _ = writer.emit(&ProtocolEvent::Info {
+        msg_id: String::new(),
+        message: format!("{}: {detail}", surface.refusal_prefix()),
+    });
 }
 
 fn emit_path_revoke(
@@ -4381,16 +4514,18 @@ fn emit_workspace_capability_grant(
     executable: &str,
     writer: &dyn ProtocolEmitter,
 ) {
-    if !launch_authorized {
-        // #314 D-1 -- same reasoning as `emit_path_grant`.
-        emit_workspace_policy_receipt(policy, receipt, writer);
-        let _ = writer.emit(&ProtocolEvent::Info {
-            msg_id: String::new(),
-            message: "workspace capability grant refused: the local launcher did not opt in with --allow-host-workspace-grants".to_string(),
-        });
-        return;
-    }
-    match policy.grant_session_capability(executable) {
+    // #314 c5 -- one refusal exit, as in `emit_path_grant`.
+    let outcome = if !launch_authorized {
+        Err((
+            GrantRefusalReason::LocalOptInRequired,
+            "the local launcher did not opt in with --allow-host-workspace-grants".to_string(),
+        ))
+    } else {
+        policy
+            .grant_session_capability(executable)
+            .map_err(|error| (GrantRefusalReason::PolicyRejected, error.to_string()))
+    };
+    match outcome {
         Ok(capability) => {
             // Same receipt shape as every other grant/revoke exit -- built by
             // one helper so the four paths cannot drift apart.
@@ -4403,14 +4538,15 @@ fn emit_workspace_capability_grant(
                 ),
             });
         }
-        Err(error) => {
-            // #314 D-1 -- see `emit_path_grant`.
-            emit_workspace_policy_receipt(policy, receipt, writer);
-            let _ = writer.emit(&ProtocolEvent::Info {
-                msg_id: String::new(),
-                message: format!("workspace capability grant refused: {error}"),
-            });
-        }
+        Err((reason, detail)) => emit_grant_refusal(
+            GrantSurface::WorkspaceCapability,
+            reason,
+            None,
+            detail,
+            policy,
+            receipt,
+            writer,
+        ),
     }
 }
 
@@ -4664,6 +4800,9 @@ where
                             code: "recovery_busy".to_string(),
                             message: "resolve_unknown_tool_effect refused while another recovery action is active; resync and retry".to_string(),
                             retryable: true,
+                            // A refused host command. Nothing upstream is
+                            // implicated: this process declined it.
+                            category: wcore_protocol::events::FailureCategory::LocalWayland,
                         },
                     });
                 }
@@ -4789,7 +4928,11 @@ async fn handle_resume_turn<C>(
                             RecoveryLifecycle::Cancelled
                         }
                         Err(error) => {
-                            output.emit_error(&format!("resume_turn refused: {error}"), false);
+                            output.emit_error(
+                                &format!("resume_turn refused: {error}"),
+                                false,
+                                error.failure_category(),
+                            );
                             emit_recovered_terminal(output, &request_id, FinishReason::Error);
                             emit_recovery_unavailable(
                                 writer,
@@ -4876,7 +5019,11 @@ async fn handle_resume_turn<C>(
             });
         }
         Err(error) => {
-            output.emit_error(&format!("resume_turn refused: {error}"), false);
+            output.emit_error(
+                &format!("resume_turn refused: {error}"),
+                false,
+                error.failure_category(),
+            );
             let finish_reason = if matches!(error, wcore_agent::engine::AgentError::UserAborted) {
                 FinishReason::Stop
             } else {
@@ -5022,6 +5169,7 @@ async fn handle_recovered_approval<C>(
                     output.emit_error(
                         &format!("resolve_interrupted_approval refused: {error}"),
                         false,
+                        error.failure_category(),
                     );
                     emit_recovered_terminal(output, &request_id, FinishReason::Error);
                     emit_recovery_unavailable(
@@ -5109,6 +5257,7 @@ async fn handle_recovered_approval<C>(
             output.emit_error(
                 &format!("resolve_interrupted_approval refused: {error}"),
                 false,
+                error.failure_category(),
             );
             let finish_reason = if matches!(error, wcore_agent::engine::AgentError::UserAborted) {
                 FinishReason::Stop
@@ -5136,6 +5285,7 @@ fn handle_operator_tool_effect_resolution(
         output.emit_error(
             "resolve_unknown_tool_effect refused: wrong command at dispatcher boundary",
             false,
+            wcore_protocol::events::FailureCategory::LocalWayland,
         );
         return;
     };
@@ -5147,6 +5297,7 @@ fn handle_operator_tool_effect_resolution(
         output.emit_error(
             &format!("resolve_unknown_tool_effect refused: {error}"),
             false,
+            error.failure_category(),
         );
         return;
     }
@@ -5199,20 +5350,11 @@ async fn run_json_stream_mode(
     // W1 Task 10: opt-in trace_event emission via [observability]
     // structured_traces. Default off so hosts that haven't learned about
     // the variant remain undisturbed (W0 host decoder contract).
-    let protocol_sink = Arc::new(
-        ProtocolSink::new(writer.clone())
-            .with_structured_traces(config.observability.structured_traces)
-            .with_advertised_capabilities(advertised_for_sink)
-            // v0.9.4 W1.2 (F2): enable sub-agent event relay to the Desktop
-            // host. Harmless when no sub-agents spawn (no-op emission path).
-            .with_sub_agent_traces(true)
-            // The host reads the first stdout line as the handshake, so
-            // `ready` must be the first frame on every platform. Bootstrap
-            // emits diagnostics before `ready` exists (on Windows the
-            // `windows_job_object` local-shell notice does so on EVERY
-            // session); hold them until the handshake is out.
-            .deferring_info_until_ready(),
-    );
+    let protocol_sink = Arc::new(wcore_cli::json_stream_sink::build_json_stream_sink(
+        writer.clone(),
+        config.observability.structured_traces,
+        advertised_for_sink,
+    ));
     let approval_manager = Arc::new(ToolApprovalManager::new());
     // GHSA-8r7g: a protocol peer may escalate to Force only when this local
     // operator opted in at launch (--force or WAYLAND_ALLOW_WIRE_FORCE).
@@ -5300,7 +5442,11 @@ async fn run_json_stream_mode(
             // The claim keeps this specific message and stands the process-exit
             // chokepoint down, so the host receives exactly one error frame.
             if wcore_cli::startup_error::claim_startup_error_emission() {
-                output.emit_error(&init_failure_message(&e, &provider_name), false);
+                output.emit_error(
+                    &init_failure_message(&e, &provider_name),
+                    false,
+                    wcore_protocol::events::FailureCategory::LocalWayland,
+                );
             }
             return Err(e);
         }
@@ -5581,6 +5727,7 @@ async fn run_json_stream_mode(
                     output.emit_error(
                         &format!("AddMcpServer rejected: invalid request ({reason})"),
                         false,
+                        wcore_protocol::events::FailureCategory::LocalWayland,
                     );
                     let safe_name = if name.len() <= MAX_MCP_SERVER_NAME_LEN {
                         name
@@ -5609,14 +5756,22 @@ async fn run_json_stream_mode(
                 ) {
                     Ok(c) => c,
                     Err(e) => {
-                        output.emit_error(&format!("AddMcpServer '{name}': {e}"), false);
+                        output.emit_error(
+                            &format!("AddMcpServer '{name}': {e}"),
+                            false,
+                            wcore_protocol::events::FailureCategory::LocalWayland,
+                        );
                         continue;
                     }
                 };
                 config = match scope_host_runtime_mcp(config, assistant.as_deref()) {
                     Ok(config) => config,
                     Err(reason) => {
-                        output.emit_error(&format!("AddMcpServer '{name}': {reason}"), false);
+                        output.emit_error(
+                            &format!("AddMcpServer '{name}': {reason}"),
+                            false,
+                            wcore_protocol::events::FailureCategory::LocalWayland,
+                        );
                         let _ = writer.emit(&ProtocolEvent::McpFailed {
                             name: name.clone(),
                             reason: reason.to_string(),
@@ -5626,7 +5781,11 @@ async fn run_json_stream_mode(
                 };
                 if let Err(error) = resolve_live_mcp_credential_references(&mut config) {
                     let reason = format!("credential resolution failed: {error}");
-                    output.emit_error(&format!("AddMcpServer '{name}': {reason}"), false);
+                    output.emit_error(
+                        &format!("AddMcpServer '{name}': {reason}"),
+                        false,
+                        wcore_protocol::events::FailureCategory::LocalWayland,
+                    );
                     let _ = writer.emit(&ProtocolEvent::McpFailed {
                         name: name.clone(),
                         reason,
@@ -5639,7 +5798,7 @@ async fn run_json_stream_mode(
                             "AddMcpServer '{name}': name collides with an effective config declaration"
                         ),
                         false,
-                    );
+                    wcore_protocol::events::FailureCategory::LocalWayland);
                     let _ = writer.emit(&ProtocolEvent::McpFailed {
                         name,
                         reason: "name collides with an effective config declaration".to_string(),
@@ -5671,6 +5830,7 @@ async fn run_json_stream_mode(
                             output.emit_error(
                                 &format!("AddMcpServer '{name}' (replace): {reason}"),
                                 false,
+                                wcore_protocol::events::FailureCategory::LocalWayland,
                             );
                             let _ = writer.emit(&ProtocolEvent::McpFailed { name, reason });
                             continue;
@@ -5684,7 +5844,11 @@ async fn run_json_stream_mode(
                     McpReservationOutcome::Existing(snapshot) => {
                         if snapshot.config_identity != config_identity {
                             let reason = "same-name MCP server is already owned by a different configuration; remove it before re-adding".to_string();
-                            output.emit_error(&format!("AddMcpServer '{name}': {reason}"), false);
+                            output.emit_error(
+                                &format!("AddMcpServer '{name}': {reason}"),
+                                false,
+                                wcore_protocol::events::FailureCategory::LocalWayland,
+                            );
                             let _ = writer.emit(&ProtocolEvent::McpFailed { name, reason });
                             continue;
                         }
@@ -5708,6 +5872,7 @@ async fn run_json_stream_mode(
                                 output.emit_error(
                                     &format!("AddMcpServer '{name}': server is stopping"),
                                     true,
+                                    wcore_protocol::events::FailureCategory::LocalWayland,
                                 );
                             }
                             McpLifecycleState::CleanupUnverified { .. } => {
@@ -5716,7 +5881,7 @@ async fn run_json_stream_mode(
                                         "AddMcpServer '{name}': prior transport cleanup is unverified; retry remove first"
                                     ),
                                     false,
-                                );
+                                wcore_protocol::events::FailureCategory::LocalWayland);
                             }
                             McpLifecycleState::Failed { .. } => {
                                 unreachable!("failed lifecycle entries are retryable")
@@ -5728,6 +5893,7 @@ async fn run_json_stream_mode(
                         output.emit_error(
                             "AddMcpServer refused: session MCP lifecycle capacity exceeded",
                             false,
+                            wcore_protocol::events::FailureCategory::LocalWayland,
                         );
                         continue;
                     }
@@ -5769,6 +5935,7 @@ async fn run_json_stream_mode(
                             output.emit_error(
                                 &format!("AddMcpServer '{name}' failed: {reason}"),
                                 false,
+                                wcore_protocol::events::FailureCategory::ToolRuntime,
                             );
                             let _ = writer.emit(&ProtocolEvent::McpFailed {
                                 name: name.clone(),
@@ -5808,6 +5975,7 @@ async fn run_json_stream_mode(
                                 output.emit_error(
                                     &format!("AddMcpServer '{name}': registry busy"),
                                     true,
+                                    wcore_protocol::events::FailureCategory::LocalWayland,
                                 );
                                 continue;
                             }
@@ -5832,8 +6000,11 @@ async fn run_json_stream_mode(
                         eprintln!("[mcp] connect_one failed for '{name}': {e:#}");
                         let reason = format!("{e:#}");
                         reservation.complete_failed(reason.clone());
-                        output
-                            .emit_error(&format!("AddMcpServer '{name}' failed: {reason}"), false);
+                        output.emit_error(
+                            &format!("AddMcpServer '{name}' failed: {reason}"),
+                            false,
+                            wcore_protocol::events::FailureCategory::ToolRuntime,
+                        );
                         // Companion to the McpReady success emit: tell the host /
                         // TUI *why* this server's tools never appeared so /doctor
                         // can surface it, instead of the failure only hitting stderr.
@@ -6045,7 +6216,11 @@ async fn run_json_stream_mode(
                             // to the normal engine path below.
                         }
                         Err(SlashError::Bad(reason)) => {
-                            output.emit_error(&format!("bad slash invocation: {reason}"), false);
+                            output.emit_error(
+                                &format!("bad slash invocation: {reason}"),
+                                false,
+                                wcore_protocol::events::FailureCategory::LocalWayland,
+                            );
                             output.emit_stream_end(&msg_id, 0, 0, 0, 0, 0, FinishReason::Error);
                             continue;
                         }
@@ -6060,6 +6235,7 @@ async fn run_json_stream_mode(
                             &msg_id,
                             &format!("composer attachment rejected: {error}"),
                             false,
+                            wcore_protocol::events::FailureCategory::LocalWayland,
                         );
                         output.emit_stream_end(&msg_id, 0, 0, 0, 0, 0, FinishReason::Error);
                         continue;
@@ -6101,7 +6277,7 @@ async fn run_json_stream_mode(
                                                  The provider likely returned an empty response or an unrecognized completion status. \
                                                  Check the engine log for an 'unrecognized finish_reason' warning, and verify the model name and provider.",
                                                 false,
-                                            );
+                                            wcore_protocol::events::FailureCategory::Unknown);
                                         }
                                         output.emit_stream_end_full(
                                             &msg_id,
@@ -6117,7 +6293,7 @@ async fn run_json_stream_mode(
                                         );
                                     }
                                     Err(e) => {
-                                        output.emit_error(&format!("{e:#}"), false);
+                                        output.emit_error(&format!("{e:#}"), false, wcore_protocol::events::FailureCategory::Unknown);
                                         // stream_end deferred (see run_failed
                                         // above): emitted after this block with
                                         // the engine's usage snapshot.
@@ -6317,7 +6493,7 @@ async fn run_json_stream_mode(
                                         output.emit_error(
                                             "resolve_unknown_tool_effect refused during active turn; resync and retry after the turn stops",
                                             false,
-                                        );
+                                        wcore_protocol::events::FailureCategory::LocalWayland);
                                     }
                                     ProtocolCommand::RemoveMcpServer(command) => {
                                         if mcp_removal_request_id_invalid(&command) {
@@ -6744,6 +6920,7 @@ async fn run_json_stream_mode(
                 output.emit_error(
                     &format!("AddMcpServer '{name}': rejected — only allowed before first Message"),
                     false,
+                    wcore_protocol::events::FailureCategory::LocalWayland,
                 );
             }
             ProtocolCommand::RemoveMcpServer(command) => {
@@ -7621,6 +7798,176 @@ mod tests {
         assert_eq!(receipt_count(&writer), 1);
     }
 
+    /// Every `grant_refused` frame this writer saw, as
+    /// `(grant_id, surface, reason)`. #314 c5.
+    fn refusals(
+        writer: &CapturingProtocolEmitter,
+    ) -> Vec<(Option<String>, GrantSurface, GrantRefusalReason)> {
+        writer
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|event| match event {
+                ProtocolEvent::GrantRefused {
+                    grant_id,
+                    surface,
+                    reason,
+                    ..
+                } => Some((grant_id.clone(), *surface, *reason)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// #314 c5. All FOUR refusal exits, in ONE test, each asserted on the
+    /// TYPED frame rather than on prose.
+    ///
+    /// The observable is deliberately NOT the `info` line the old tests above
+    /// grade: those pass unchanged while a host still has nothing to branch on,
+    /// which is exactly why c5 outlived c4. What is graded here is that a host
+    /// which never reads English can tell WHICH surface refused and WHY.
+    ///
+    /// The two causes are distinguished, not merged: `LocalOptInRequired` never
+    /// reached the policy, `PolicyRejected` did. A fix that reported one reason
+    /// for both would satisfy "a typed frame exists" and still leave the host
+    /// unable to tell "turn on the flag" from "pick a different folder".
+    #[test]
+    fn every_grant_refusal_exit_is_machine_readable_not_prose() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let policy = wcore_tools::workspace_policy::WorkspacePolicy::trusted_local(dir.path())
+            .with_local_operator_principal();
+        let missing = dir.path().join("no-such-folder");
+
+        let path_request = |grant_id: &str, root: &std::path::Path| PathGrantRequest {
+            grant_id: grant_id.to_string(),
+            root: root.to_string_lossy().into_owned(),
+            access: wcore_protocol::commands::PathGrantAccess::Read,
+            expires_at_ms: None,
+        };
+
+        // Exit 1 of 4 -- grant_path, launcher never opted in.
+        let w = CapturingProtocolEmitter::default();
+        let mut receipt = grant_test_receipt();
+        emit_path_grant(
+            false,
+            &policy,
+            &mut receipt,
+            path_request("g-launcher", &missing),
+            &w,
+        );
+        assert_eq!(
+            refusals(&w),
+            vec![(
+                Some("g-launcher".to_string()),
+                GrantSurface::Path,
+                GrantRefusalReason::LocalOptInRequired
+            )],
+            "grant_path refused by the launcher must publish a typed frame \
+             carrying the host's own grant_id"
+        );
+
+        // Exit 2 of 4 -- grant_path, launcher opted in, POLICY refused.
+        let w = CapturingProtocolEmitter::default();
+        let mut receipt = grant_test_receipt();
+        emit_path_grant(
+            true,
+            &policy,
+            &mut receipt,
+            path_request("g-policy", &missing),
+            &w,
+        );
+        assert_eq!(
+            refusals(&w),
+            vec![(
+                Some("g-policy".to_string()),
+                GrantSurface::Path,
+                GrantRefusalReason::PolicyRejected
+            )],
+            "a POLICY refusal must be a different reason from a LAUNCHER \
+             refusal, or the host cannot tell the two remedies apart"
+        );
+
+        // Exit 3 of 4 -- capability, launcher never opted in. No grant_id
+        // exists on this command, so the correlation key is null rather than
+        // an invented value.
+        let w = CapturingProtocolEmitter::default();
+        let mut receipt = grant_test_receipt();
+        emit_workspace_capability_grant(false, &policy, &mut receipt, "cargo", &w);
+        assert_eq!(
+            refusals(&w),
+            vec![(
+                None,
+                GrantSurface::WorkspaceCapability,
+                GrantRefusalReason::LocalOptInRequired
+            )]
+        );
+
+        // Exit 4 of 4 -- capability, launcher opted in, POLICY refused.
+        let w = CapturingProtocolEmitter::default();
+        let mut receipt = grant_test_receipt();
+        emit_workspace_capability_grant(
+            true,
+            &policy,
+            &mut receipt,
+            "wayland-core-no-such-executable",
+            &w,
+        );
+        assert_eq!(
+            refusals(&w),
+            vec![(
+                None,
+                GrantSurface::WorkspaceCapability,
+                GrantRefusalReason::PolicyRejected
+            )]
+        );
+    }
+
+    /// NEGATIVE CONTROL for #314 c5 -- blocks an always-fires fix.
+    ///
+    /// A refusal event emitted on the SUCCESS path would satisfy the test
+    /// above (which only ever inspects refusal runs) while telling every host
+    /// that a granted folder was denied. The receipt and the human line must
+    /// still be there, so this also proves the restructure did not drop the
+    /// success path on the floor.
+    #[test]
+    fn a_granted_path_emits_no_refusal_frame() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let grantable = dir.path().join("shared");
+        std::fs::create_dir_all(&grantable).expect("mkdir");
+        let policy = wcore_tools::workspace_policy::WorkspacePolicy::trusted_local(dir.path())
+            .with_local_operator_principal();
+        let mut receipt = grant_test_receipt();
+        let writer = CapturingProtocolEmitter::default();
+
+        emit_path_grant(
+            true,
+            &policy,
+            &mut receipt,
+            PathGrantRequest {
+                grant_id: "g-ok".to_string(),
+                root: grantable.to_string_lossy().into_owned(),
+                access: wcore_protocol::commands::PathGrantAccess::Read,
+                expires_at_ms: None,
+            },
+            &writer,
+        );
+
+        assert_eq!(
+            refusals(&writer),
+            vec![],
+            "a GRANTED folder must not publish a refusal"
+        );
+        assert_eq!(receipt_count(&writer), 1);
+        assert!(
+            info_messages(&writer)
+                .iter()
+                .any(|m| m.starts_with("folder granted for this session:")),
+            "the success line must survive the c5 restructure: {:?}",
+            info_messages(&writer)
+        );
+    }
+
     /// NEGATIVE CONTROL -- passes in BOTH arms. A GRANTED path still emits
     /// exactly one receipt: the fix must not double-publish on success.
     #[test]
@@ -7715,7 +8062,12 @@ mod tests {
                 .unwrap()
                 .push((msg_id.to_owned(), finish_reason));
         }
-        fn emit_error(&self, msg: &str, _retryable: bool) {
+        fn emit_error(
+            &self,
+            msg: &str,
+            _retryable: bool,
+            _category: wcore_protocol::events::FailureCategory,
+        ) {
             self.errors.lock().unwrap().push(msg.to_owned());
         }
         fn emit_info(&self, _msg: &str) {}
@@ -8613,7 +8965,9 @@ mod tests {
         // nothing and would pass vacuously. Both sites exist today.
         assert!(
             eof_sites.len() >= 2,
-            "expected at least the 2 known host-EOF sites, found {} -- the              marker this scan looks for must have been renamed, and the check              below is now vacuous",
+            "expected at least the 2 known host-EOF sites, found {} -- the \
+                marker this scan looks for must have been renamed, and the check \
+                below is now vacuous",
             eof_sites.len()
         );
 
@@ -8621,7 +8975,11 @@ mod tests {
             let window = code[site..code.len().min(site + 8)].join(" ");
             assert!(
                 window.contains("deny_pending_approvals_on_host_eof("),
-                "the host-EOF site at code line {site} (of comment-stripped                  source) does not drain the approval stores. Every                  `commands_open = false` site must call                  deny_pending_approvals_on_host_eof, or a bridge approval                  parked there waits out CRUCIBLE_APPROVAL_TTL (86,400s).                  Context: {window}"
+                "the host-EOF site at code line {site} (of comment-stripped \
+                    source) does not drain the approval stores. Every \
+                    `commands_open = false` site must call \
+                    deny_pending_approvals_on_host_eof, or a bridge approval \
+                    parked there waits out CRUCIBLE_APPROVAL_TTL (86,400s). Context: {window}"
             );
         }
     }
@@ -9227,6 +9585,10 @@ mod tests {
     struct GrowingTestTransport {
         tools: std::sync::Mutex<Vec<String>>,
         tools_changed: std::sync::atomic::AtomicBool,
+        /// wayland#1234 — model the `CleanupUnverified` arm: `close()` fails,
+        /// so the removal path cannot prove the transport dead, and the
+        /// transport goes on answering `tools/list` and announcing changes.
+        close_fails: bool,
     }
 
     impl GrowingTestTransport {
@@ -9234,6 +9596,16 @@ mod tests {
             Self {
                 tools: std::sync::Mutex::new(initial.iter().map(|n| n.to_string()).collect()),
                 tools_changed: std::sync::atomic::AtomicBool::new(false),
+                close_fails: false,
+            }
+        }
+
+        /// A transport whose close cannot be verified — the arm on which a
+        /// live server is MOST likely, and the one the withdrawal used to skip.
+        fn new_refusing_close(initial: &[&str]) -> Self {
+            Self {
+                close_fails: true,
+                ..Self::new(initial)
             }
         }
 
@@ -9265,6 +9637,11 @@ mod tests {
             Ok(())
         }
         async fn close(&self) -> Result<(), McpError> {
+            if self.close_fails {
+                return Err(McpError::Transport(
+                    "transport refused to close (test fixture)".to_string(),
+                ));
+            }
             Ok(())
         }
         fn take_tools_changed(&self) -> bool {
@@ -11045,6 +11422,278 @@ mod tests {
         );
     }
 
+    /// FerroxLabs/wayland#1234 c1/c2 — the SAME resurrection, on the
+    /// `CleanupUnverified` arm, which is the arm this tree used to skip.
+    ///
+    /// WHY THIS IS A SEPARATE TEST AND NOT A VARIANT SPELLING. The sibling
+    /// below drives the `Removed` arm, where `close_server` succeeded and the
+    /// withdrawal has landed since #1213 c4. This drives the arm where
+    /// `close_server` FAILS. Until wayland#1234 the handler returned early on
+    /// that arm — after it had already taken the tools out of the live
+    /// registry — so the manager stayed in `McpCatalogRefresh` while its
+    /// transport was, by the definition of the arm, NOT proven dead. The next
+    /// `notifications/tools/list_changed` re-registered the tools the operator
+    /// had just removed.
+    ///
+    /// The criterion says "regardless of what its transport reports about
+    /// liveness", so the fixture is alive in both directions: it refuses to
+    /// close AND it goes on serving `tools/list`. Nothing here is carried by
+    /// a dead-transport skip in `refresh_signalled_tools`.
+    ///
+    /// RED ARM (recorded, re-runnable): delete the
+    /// `withdraw_runtime_mcp_from_refresh(engine, &command.name);` line on the
+    /// cleanup-unverified arm of `remove_runtime_mcp_server`, `touch`
+    /// `main.rs`, rebuild — this test fails on the resurrection assertion
+    /// while the `Removed`-arm sibling stays green.
+    #[tokio::test]
+    async fn an_unverified_removal_still_withdraws_so_the_server_cannot_resurrect() {
+        let config = wcore_config::config::Config::default();
+        let defer_cold = config.builtin_tools.defer_cold.clone();
+        let (mut engine, _sink) =
+            wcore_agent::bootstrap::AgentBootstrap::build_for_test(config, vec![]);
+        engine.set_mcp_catalog_refresh(Arc::new(wcore_mcp::tool_proxy::McpCatalogRefresh::new(
+            Vec::new(),
+            engine.tool_names(),
+            HashMap::new(),
+        )));
+
+        let fixture = Arc::new(GrowingTestTransport::new_refusing_close(&[
+            "warehouse_reserve",
+        ]));
+        let manager = Arc::new(McpManager::new_for_test_with_tools(vec![(
+            "warehouse",
+            false,
+            Box::new(SharedTransport(fixture.clone())) as Box<dyn McpTransport>,
+            vec![tool("warehouse_reserve")],
+        )]));
+        let server_config = to_mcp_server_config(
+            "stdio",
+            Some("unused-test-command".to_string()),
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+        )
+        .expect("valid test server config");
+        let resolved = HashMap::from([("warehouse".to_string(), server_config.clone())]);
+        let writer = ProtocolWriter::new();
+        let mut dynamic_managers = Vec::new();
+        let mut reservations = lifecycle_reservations(&resolved);
+        assert!(integrate_deferred_mcp(
+            &mut engine,
+            manager.clone(),
+            &resolved,
+            &mut reservations,
+            &writer,
+            &mut dynamic_managers,
+            &mut inert_late_binder(),
+            &mut Vec::new(),
+        ));
+        assert!(
+            engine.tools().get("warehouse_reserve").is_some(),
+            "precondition: the runtime-added server's tool is live"
+        );
+
+        let mut diagnostics = RuntimeDiagnosticsState::from_launch(
+            &wcore_config::config::Config::default(),
+            &wcore_config::resolution_provenance::ConfigResolutionProvenance::default(),
+            None,
+            wcore_protocol::diagnostics::RuntimeEngineMode::Unknown,
+            wcore_protocol::diagnostics::RuntimeWorkspaceKind::Unknown,
+        );
+        assert!(diagnostics.record_runtime_declaration("warehouse", &server_config));
+        let lifecycle = McpLifecycleCatalog::new();
+        // Seed the name READY so the removal has a lifecycle entry to move.
+        // Without this mark_stopping is a no-op, mark_cleanup_unverified
+        // records nothing, and the arm control below cannot observe which arm
+        // ran -- which is exactly what it caught on the first attempt.
+        assert!(lifecycle.seed_ready(
+            "warehouse",
+            wcore_agent::mcp_lifecycle::McpConfigIdentity::for_server(&server_config),
+        ));
+        let mut removal_ledger = McpRemovalLedger::default();
+        remove_runtime_mcp_server(
+            RemoveMcpServerCommand {
+                lifecycle_version: MCP_LIFECYCLE_VERSION,
+                request_id: "removal-unverified-1".to_string(),
+                name: "warehouse".to_string(),
+            },
+            &mut removal_ledger,
+            &mut diagnostics,
+            &lifecycle,
+            &mut engine,
+            &mut dynamic_managers,
+            &writer,
+        )
+        .await;
+
+        // CONTROL ON THE ARM. Without this the test could be driving the
+        // ordinary `Removed` path and grading nothing new: the whole point is
+        // that cleanup was NOT verified here.
+        assert!(
+            matches!(
+                lifecycle.snapshot("warehouse").map(|s| s.state),
+                Some(McpLifecycleState::CleanupUnverified { .. })
+            ),
+            "control: this test must exercise the CleanupUnverified arm, and \
+             the lifecycle says it took a different one: {:?}",
+            lifecycle.snapshot("warehouse").map(|s| s.state)
+        );
+        // The tools are gone from the live registry on this arm too — which is
+        // exactly why leaving the manager in the refresh is a resurrection and
+        // not a harmless no-op.
+        assert!(
+            engine.tools().get("warehouse_reserve").is_none(),
+            "precondition: an unverified removal still drops the server's \
+             tools from the live registry"
+        );
+
+        // The server the operator detached goes on talking.
+        fixture.register_and_announce("warehouse_audit_export");
+        let refresh = engine
+            .mcp_catalog_refresh()
+            .expect("the refresh outlives the removal");
+        let registry = engine
+            .registry_mut()
+            .expect("idle fixture registry must be mutable");
+        let refreshed = refresh.apply(registry, &defer_cold).await;
+        assert!(
+            refreshed.is_empty(),
+            "wayland#1234: a server removed on the CleanupUnverified arm was \
+             still polled by McpCatalogRefresh. Refreshed: {refreshed:?}"
+        );
+        assert!(
+            engine.tools().get("warehouse_audit_export").is_none(),
+            "wayland#1234: the removed server's NEW tool was re-registered \
+             into the live registry after an unverified removal — the operator \
+             took the server away and it came back"
+        );
+    }
+
+    /// FerroxLabs/wayland#1213 c4 — the resurrection the ticket names.
+    ///
+    /// #1213 fixed `take_tools_changed` for SSE and Streamable HTTP, which is
+    /// what made this reachable: before it, `refresh_signalled_tools` could
+    /// never fire for a URL transport, so a stale entry in
+    /// `McpCatalogRefresh` was inert. c4 says the withdrawal must land in the
+    /// SAME change, and this is the observable it names — an operator removed
+    /// the server, the server announces a tool anyway, and NOTHING is
+    /// re-registered.
+    ///
+    /// The fixture transport deliberately does not go dead on `close()`.
+    /// `McpManager::close_server` marks the three real transports dead and
+    /// `refresh_signalled_tools` skips dead transports, so a fixture that
+    /// died on close would test that second mechanism instead of this one and
+    /// would pass with the withdrawal removed. Holding it alive isolates the
+    /// withdrawal, and it is the honest model of the arm where cleanup could
+    /// not be verified: there, the manager is left in place and nobody has
+    /// proved the transport dead.
+    #[tokio::test]
+    async fn a_removed_runtime_server_is_not_resurrected_by_a_later_list_changed() {
+        let config = wcore_config::config::Config::default();
+        let defer_cold = config.builtin_tools.defer_cold.clone();
+        let (mut engine, _sink) =
+            wcore_agent::bootstrap::AgentBootstrap::build_for_test(config, vec![]);
+        engine.set_mcp_catalog_refresh(Arc::new(wcore_mcp::tool_proxy::McpCatalogRefresh::new(
+            Vec::new(),
+            engine.tool_names(),
+            HashMap::new(),
+        )));
+
+        let fixture = Arc::new(GrowingTestTransport::new(&["warehouse_reserve"]));
+        let manager = Arc::new(McpManager::new_for_test_with_tools(vec![(
+            "warehouse",
+            false,
+            Box::new(SharedTransport(fixture.clone())) as Box<dyn McpTransport>,
+            vec![tool("warehouse_reserve")],
+        )]));
+        let server_config = to_mcp_server_config(
+            "stdio",
+            Some("unused-test-command".to_string()),
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+        )
+        .expect("valid test server config");
+        let resolved = HashMap::from([("warehouse".to_string(), server_config.clone())]);
+        let writer = ProtocolWriter::new();
+        let mut dynamic_managers = Vec::new();
+        let mut reservations = lifecycle_reservations(&resolved);
+        assert!(integrate_deferred_mcp(
+            &mut engine,
+            manager.clone(),
+            &resolved,
+            &mut reservations,
+            &writer,
+            &mut dynamic_managers,
+            &mut inert_late_binder(),
+            &mut Vec::new(),
+        ));
+        assert!(
+            engine.tools().get("warehouse_reserve").is_some(),
+            "precondition: the runtime-added server's tool is live"
+        );
+
+        // The operator removes it through the host command.
+        let mut diagnostics = RuntimeDiagnosticsState::from_launch(
+            &wcore_config::config::Config::default(),
+            &wcore_config::resolution_provenance::ConfigResolutionProvenance::default(),
+            None,
+            wcore_protocol::diagnostics::RuntimeEngineMode::Unknown,
+            wcore_protocol::diagnostics::RuntimeWorkspaceKind::Unknown,
+        );
+        assert!(diagnostics.record_runtime_declaration("warehouse", &server_config));
+        let lifecycle = McpLifecycleCatalog::new();
+        let mut removal_ledger = McpRemovalLedger::default();
+        remove_runtime_mcp_server(
+            RemoveMcpServerCommand {
+                lifecycle_version: MCP_LIFECYCLE_VERSION,
+                request_id: "removal-1".to_string(),
+                name: "warehouse".to_string(),
+            },
+            &mut removal_ledger,
+            &mut diagnostics,
+            &lifecycle,
+            &mut engine,
+            &mut dynamic_managers,
+            &writer,
+        )
+        .await;
+        assert!(
+            engine.tools().get("warehouse_reserve").is_none(),
+            "precondition: removal drops the server's tools from the live registry"
+        );
+        assert!(!diagnostics.has_runtime_declaration("warehouse"));
+
+        // The removed server announces a tool anyway — a hosted server the
+        // operator detached does not stop talking on request.
+        fixture.register_and_announce("warehouse_audit_export");
+        let refresh = engine
+            .mcp_catalog_refresh()
+            .expect("the refresh outlives the removal");
+        let registry = engine
+            .registry_mut()
+            .expect("idle fixture registry must be mutable");
+        let refreshed = refresh.apply(registry, &defer_cold).await;
+        assert!(
+            refreshed.is_empty(),
+            "a removed server must not be refreshed at all; refreshed {refreshed:?}"
+        );
+        assert!(
+            engine.tools().get("warehouse_audit_export").is_none(),
+            "the removed server's NEW tool was registered into the live registry"
+        );
+        assert!(
+            engine.tools().get("warehouse_reserve").is_none(),
+            "the removed server's OLD tools came back with the refresh"
+        );
+    }
+
     /// Negative control for the test above, and the #998 guard on the new
     /// door: an operator allowlist of `Some([])` means "disable every tool on
     /// this server" — and must still mean that after a `list_changed` on the
@@ -11115,35 +11764,94 @@ mod tests {
         assert!(engine.tools().get("locked_tool").is_none());
     }
 
-    /// The wiring, counted. A helper nothing calls is not a fix, and the
-    /// failure this guards is specifically a runtime-add site left bare —
-    /// which is what #1175 reports for all three of them.
+    /// The wiring, as a CLASS rather than a census.
+    ///
+    /// A helper nothing calls is not a fix, and the failure this guards is
+    /// specifically a runtime-add site left bare — which is what #1175
+    /// reports for all three of the sites that existed when it was written.
+    ///
+    /// ROUND 1 counted `register_runtime_server(` and compared it to a
+    /// HARDCODED 2. The 0.13.12 close-sweep refuted that in its own words: "a
+    /// FOURTH bare runtime-add path in main.rs would leave the count at 2 and
+    /// pass". It would — the needle it counts is the FIX, so a path that
+    /// never applies the fix subtracts nothing from the total.
+    ///
+    /// The count is now DERIVED from the DEFECT instead: every file under
+    /// `wcore-cli/src` that CONSTRUCTS an `McpManager` must carry at least as
+    /// many refresh registrations as constructions. A fourth bare path adds a
+    /// construction and no registration, and the file goes red. Registration
+    /// is allowed to happen in a different function from the construction —
+    /// the #551 deferred path genuinely does that — so this is a per-FILE
+    /// pairing, not a per-function one.
     #[test]
     fn every_runtime_mcp_add_joins_the_catalog_refresh() {
-        let main_src = include_str!("main.rs");
-        let tui_src = include_str!("tui/engine_bridge.rs");
+        // Needles are assembled at compile time from fragments so that this
+        // test's own source, which `include_str!`/the walk below both read,
+        // never matches itself. (The round-1 lint got its count of 3 from its
+        // own assertion strings.)
+        let constructs = concat!("McpManager::", "connect");
+        let registers = concat!("register_runtime_", "server(");
+
+        // The one construction that legitimately never registers, named with
+        // its reason. This is an ALLOWLIST and is stated as one: `wayland
+        // doctor` dials the config-declared servers to print a health table
+        // and drops the manager at the end of the match arm. There is no
+        // engine and no live session for it to register into. Anything else
+        // that wants an exemption has to be added here, in the open.
+        const EXEMPT: &[(&str, &str)] = &[(
+            "doctor/mod.rs",
+            "throwaway health probe; no engine, manager dropped at the arm",
+        )];
+
+        let mut constructing: Vec<(String, usize, usize)> = Vec::new();
+        for (path, source) in wcore_cli_production_sources() {
+            let built = source.matches(constructs).count();
+            if built == 0 {
+                continue;
+            }
+            constructing.push((path, built, source.matches(registers).count()));
+        }
+
+        // POSITIVE CONTROL on the walk. If it silently found nothing — wrong
+        // root, renamed constructor, a `use` alias — every assertion below
+        // would vacuously pass and this would grade an empty set.
+        for known in ["src/main.rs", "tui/engine_bridge.rs", "doctor/mod.rs"] {
+            assert!(
+                constructing
+                    .iter()
+                    .any(|(path, _, _)| path.ends_with(known)),
+                "the McpManager construction walk did not find {known} — \
+                 discovery is broken and this lint grades an empty set. \
+                 Found: {constructing:?}"
+            );
+        }
+
+        for (path, built, registered) in &constructing {
+            if let Some((_, why)) = EXEMPT.iter().find(|(file, _)| path.ends_with(file)) {
+                // A stale exemption is worse than none: it silently covers
+                // whatever the file grows into next.
+                assert!(
+                    *registered == 0,
+                    "{path} is exempted ({why}) but now registers with the \
+                     catalog refresh — drop the exemption"
+                );
+                continue;
+            }
+            assert!(
+                registered >= built,
+                "{path} constructs {built} McpManager(s) but joins the catalog \
+                 refresh {registered} time(s). A runtime-add path that never \
+                 reaches McpCatalogRefresh has its tools/list_changed ignored \
+                 for the life of the session (FerroxLabs/wayland#1175). Add the \
+                 registration, or add the file to EXEMPT with the reason."
+            );
+        }
+
+        // #1174 — unchanged, and unrelated to the count above.
         let engine_src = include_str!("../../wcore-agent/src/engine.rs");
-
-        // Known-positive control: the strings this test searches for exist.
-        assert!(main_src.contains("fn integrate_deferred_mcp"));
-        assert!(tui_src.contains("register_single_server_tools"));
-
-        // Built from fragments so this file does not match its own needle.
-        let needle = concat!("refresh.register_runtime_", "server(");
-        assert_eq!(
-            main_src.matches(needle).count(),
-            2,
-            "main.rs has exactly two runtime-add paths (AddMcpServer and the \
-             #551 deferred config connect); both must join the refresh"
-        );
-        assert_eq!(
-            tui_src.matches("register_runtime_server(").count(),
-            1,
-            "the TUI `/mcp add` path must join the refresh"
-        );
         assert!(
-            tui_src.contains("forget_runtime_server("),
-            "a rolled-back /mcp add must leave nothing in the refresh"
+            engine_src.contains("fn set_mcp_catalog_refresh"),
+            "known-positive control: the setter this asserts about still exists"
         );
         assert!(
             !engine_src.contains("if refresh.is_empty() {"),
@@ -11151,5 +11859,790 @@ mod tests {
              empty is the state defer_config_mcp produces, and the deferred connect \
              fills it afterwards"
         );
+    }
+
+    /// The withdrawal half, FerroxLabs/wayland#1213 c4.
+    ///
+    /// #1213 c4 is explicit that implementing `take_tools_changed` for the URL
+    /// transports without this is a live resurrection bug. The add side is
+    /// counted per file above because construction and registration can sit in
+    /// different functions; withdrawal cannot — the function that takes a
+    /// runtime server away is the function that owns the name at that instant.
+    /// So this is graded per FUNCTION, which catches a fifth withdrawal path in
+    /// a brand-new function that a count over the whole file would not.
+    ///
+    /// THE FILE SET WAS THE HOLE, and it is the reason this reads the tree
+    /// instead of one file. Round 1 graded `include_str!("main.rs")` and
+    /// nothing else. Two consequences, both measured on 2026-08-30: the TUI's
+    /// `/mcp add` rollback was ungraded, and — the part that was not a guard
+    /// regression but a live defect — `TuiEngine::remove_tui_runtime_mcp`, the
+    /// function behind the documented interactive `/mcp remove`, dropped the
+    /// registry entry and left the `McpCatalogRefresh` entry behind. A guard
+    /// scoped to one file cannot fail on a second file, ever, so the set now
+    /// comes from `wcore_cli_production_sources()` — the same set the add side
+    /// walks — and a withdrawal path in a brand-new file is graded the day it
+    /// is written.
+    ///
+    /// GAP, recorded rather than implied away: the DEFECT needles below are
+    /// still a spelling set (`.remove_runtime_declaration(` and
+    /// `.remove_mcp_server(`, receiver-agnostic but method-named). A removal
+    /// spelled some third way is invisible to them. That is why the control at
+    /// the end pins the exact `(file, fn)` set rather than a count: a rename
+    /// that hides a site drops a pair and reddens here instead of passing
+    /// quietly.
+    #[test]
+    fn every_runtime_mcp_withdrawal_leaves_the_catalog_refresh() {
+        // Fragment-assembled for the same reason as the add side: this test's
+        // own source is inside the tree the walk reads.
+        let drops = [
+            concat!(".remove_runtime_", "declaration("),
+            concat!(".remove_mcp_", "server("),
+        ];
+        let withdraws = [
+            concat!("withdraw_runtime_mcp_from_", "refresh("),
+            concat!("forget_runtime_", "server("),
+        ];
+
+        // The one removal-shaped call that is a DISPATCH rather than a
+        // removal, named with its reason. `/mcp remove` in the surface layer
+        // hands the name to `TuiEngine::remove_mcp_server`, which spawns
+        // `remove_tui_runtime_mcp` — the function that really takes the server
+        // away, and which IS graded below. Anything else wanting an exemption
+        // has to be added here, in the open.
+        const EXEMPT: &[(&str, &str, &str)] = &[(
+            "tui/surfaces/mod.rs",
+            "dispatch_command",
+            "dispatches to TuiEngine::remove_mcp_server; the real removal is \
+             remove_tui_runtime_mcp, graded below",
+        )];
+
+        let mut graded: Vec<(String, String)> = Vec::new();
+        let mut exercised_exemptions = 0usize;
+        for (path, source) in wcore_cli_production_sources() {
+            for (name, body) in fn_blocks(&source) {
+                if !drops.iter().any(|needle| body.contains(needle)) {
+                    continue;
+                }
+                if EXEMPT
+                    .iter()
+                    .any(|(file, func, _)| path.ends_with(file) && *func == name)
+                {
+                    exercised_exemptions += 1;
+                    continue;
+                }
+                assert!(
+                    withdraws.iter().any(|needle| body.contains(needle)),
+                    "fn {name} ({path}) takes a runtime MCP server away but \
+                     leaves it in McpCatalogRefresh. Its tools are re-registered \
+                     into the live registry on the next \
+                     notifications/tools/list_changed — an operator-removed \
+                     server resurrected (FerroxLabs/wayland#1213 c4)"
+                );
+                graded.push((path.clone(), name));
+            }
+        }
+
+        // POSITIVE CONTROL, on the SET rather than a count. A walk that found
+        // nothing, a splitter that returned nothing, or a renamed receiver that
+        // hid one site would all pass the loop above vacuously.
+        let mut found: Vec<String> = graded
+            .iter()
+            .map(|(path, name)| {
+                let file = path.rsplit_once("/src/").map_or(path.as_str(), |(_, r)| r);
+                format!("{file}::{name}")
+            })
+            .collect();
+        found.sort();
+        assert_eq!(
+            found,
+            vec![
+                "main.rs::remove_runtime_mcp_server".to_string(),
+                "main.rs::teardown_runtime_mcp_for_replace".to_string(),
+                "tui/engine_bridge.rs::connect_and_register_mcp".to_string(),
+                "tui/engine_bridge.rs::remove_tui_runtime_mcp".to_string(),
+            ],
+            "the withdrawal walk graded a different set of functions than the \
+             four known runtime-MCP removal paths. A new one is fine — grade it \
+             and add it here. One GOING MISSING is the failure this control \
+             exists for: the needle no longer matches that site and it is now \
+             ungraded."
+        );
+
+        // A stale exemption silently covers whatever the file grows into next,
+        // so the exemption must still be exercised by something.
+        assert_eq!(
+            exercised_exemptions,
+            EXEMPT.len(),
+            "an EXEMPT entry matched nothing — drop it rather than leave a \
+             blanket over {} file(s)",
+            EXEMPT.len()
+        );
+    }
+
+    /// Every `.rs` file under `wcore-cli/src`, as `(display path, production
+    /// source)` — inline `#[cfg(test)]` items and `//` comments removed.
+    ///
+    /// THE FILE SET IS THE CLASS, and it is decided here, once, for both
+    /// pairing guards in this module. A pairing lint is only ever as complete
+    /// as the set of files it reads, and a set written down by hand cannot
+    /// fail on a file that is not in it. The withdrawal guard's set was
+    /// literally `include_str!("main.rs")`; `tui/engine_bridge.rs` was
+    /// therefore ungraded, and a live #1213 c4 defect sat in it. Deriving the
+    /// set from the tree at test time is what makes "a new file escapes"
+    /// impossible.
+    ///
+    /// A TEST FIXTURE IS NOT A CALL SITE. `a_comment_is_not_a_registration`
+    /// holds the string "refresh.register_runtime_server(&mgr, &configs);" as
+    /// a fixture, twice, in this very file. Counting raw text scored those as
+    /// two production registrations and gave main.rs two registrations of
+    /// SLACK — enough that deleting the real AddMcpServer registration left
+    /// the count passing. MEASURED: with the AddMcpServer call replaced by
+    /// `let _unused = refresh;`, the add-side guard was still green. That is
+    /// the #1175 residual verbatim ("a FOURTH bare runtime-add path would
+    /// leave the count at 2 and pass"), reintroduced by the guard's own
+    /// fixtures. Production code is what ships, so inline test modules are
+    /// removed before anything is counted — on BOTH sides, since a
+    /// construction in a test is not a runtime-add path either.
+    ///
+    /// A COMMENT IS NOT A CALL. Counting raw text let the add-side negative
+    /// control be satisfied by `// refresh.register_runtime_server(...)`,
+    /// which is the same trap the #1175 transport guard closed on its own
+    /// side.
+    fn wcore_cli_production_sources() -> Vec<(String, String)> {
+        let src_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut stack = vec![src_dir];
+        let mut sources = Vec::new();
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir)
+                .expect("read wcore-cli/src")
+                .flatten()
+            {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                let source = std::fs::read_to_string(&path).expect("read rust source");
+                let source = strip_cfg_test_modules(&source);
+                let source = strip_line_comments(&source);
+                sources.push((path.display().to_string(), source));
+            }
+        }
+        sources
+    }
+
+    /// One line with its `//`-to-end-of-line comment removed.
+    fn code_before_comment(line: &str) -> &str {
+        match line.find("//") {
+            Some(at) => &line[..at],
+            None => line,
+        }
+    }
+
+    /// `source` with every `//`-to-end-of-line comment removed.
+    ///
+    /// Both guards in this module count CALLS, and a comment naming a call is
+    /// not a call — the trap that made the #1175 transport guard accept
+    /// `// we do not need fn take_tools_changed here`. Naive on purpose: a
+    /// `//` inside a string literal (a URL) truncates that line early, which
+    /// can only ever HIDE a needle, never invent one, so the guard's error is
+    /// toward a false red on the add side. Block comments are not stripped;
+    /// that gap is recorded in the #1175 ledger rather than implied away.
+    fn strip_line_comments(source: &str) -> String {
+        source
+            .lines()
+            .map(code_before_comment)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// `source` with every column-zero `#[cfg(test)]` item removed.
+    ///
+    /// Brace-counted from the item's own opening brace, so a nested `mod` or a
+    /// braced string inside the test module cannot end the strip early. An
+    /// UNBALANCED brace would run the strip to end-of-file, which deletes more
+    /// than it should and can only ever make the add-side guard MORE likely to
+    /// go red — the safe direction for a lint.
+    ///
+    /// Column zero is the discriminator, matching the rest of this module: an
+    /// inline unit-test module in this tree is written at the top level of its
+    /// file. A `#[cfg(test)]` on an indented item is left in place, which is a
+    /// named gap rather than a claim.
+    fn strip_cfg_test_modules(source: &str) -> String {
+        let lines: Vec<&str> = source.lines().collect();
+        let mut kept: Vec<&str> = Vec::new();
+        let mut i = 0;
+        while i < lines.len() {
+            if lines[i].trim_end() != "#[cfg(test)]" {
+                kept.push(lines[i]);
+                i += 1;
+                continue;
+            }
+            // Skip forward to the item's body and then past its close.
+            let mut depth = 0i32;
+            let mut opened = false;
+            let mut j = i;
+            while j < lines.len() {
+                let code = match lines[j].find("//") {
+                    Some(at) => &lines[j][..at],
+                    None => lines[j],
+                };
+                depth += code.matches('{').count() as i32;
+                depth -= code.matches('}').count() as i32;
+                if code.contains('{') {
+                    opened = true;
+                }
+                if opened && depth <= 0 {
+                    break;
+                }
+                // A `#[cfg(test)] use ...;` has no body at all.
+                if !opened && code.trim_end().ends_with(';') && j > i {
+                    break;
+                }
+                j += 1;
+            }
+            i = j + 1;
+        }
+        kept.join("\n")
+    }
+
+    /// The stripper decides what the add-side guard is allowed to see, so it
+    /// is graded directly rather than trusted.
+    #[test]
+    fn a_test_fixture_is_not_a_production_call_site() {
+        let needle = concat!("register_runtime_", "server(");
+        let source = "\
+fn production() {
+    refresh.register_runtime_server(&mgr, &configs);
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn fixture() {
+        let real = \"    refresh.register_runtime_server(&mgr, &configs);\";
+        assert!(real.contains(\"x\"));
+    }
+}
+";
+        let stripped = strip_cfg_test_modules(source);
+        assert_eq!(
+            stripped.matches(needle).count(),
+            1,
+            "the test module's fixture was counted as a production call site, \
+             which is the slack that let a deleted registration pass: {stripped}"
+        );
+        // POSITIVE CONTROL: the production call must SURVIVE, or the stripper
+        // satisfies the count above by deleting everything.
+        assert!(
+            stripped.contains("fn production"),
+            "the stripper ate production code: {stripped}"
+        );
+        // NEGATIVE CONTROL: a file with no test module is returned intact.
+        let plain = "fn only() {\n    refresh.register_runtime_server(&m, &c);\n}\n";
+        assert_eq!(strip_cfg_test_modules(plain).matches(needle).count(), 1);
+        // A `#[cfg(test)]` on a non-module item must not swallow the rest of
+        // the file.
+        let attr_use = "#[cfg(test)]\nuse std::io;\n\nfn after() {\n    refresh.register_runtime_server(&m, &c);\n}\n";
+        assert_eq!(
+            strip_cfg_test_modules(attr_use).matches(needle).count(),
+            1,
+            "a `#[cfg(test)] use` swallowed the production code after it"
+        );
+    }
+
+    #[test]
+    fn a_comment_is_not_a_registration() {
+        let needle = concat!("register_runtime_", "server(");
+        let commented = "    // refresh.register_runtime_server(&mgr, &configs);\n";
+        assert!(
+            !strip_line_comments(commented).contains(needle),
+            "a commented-out registration satisfies the add-side guard"
+        );
+        // POSITIVE CONTROL: the real call still counts, or the check above is
+        // satisfied by a stripper that deletes everything.
+        let real = "    refresh.register_runtime_server(&mgr, &configs);\n";
+        assert!(
+            strip_line_comments(real).contains(needle),
+            "a real registration is not recognised"
+        );
+        // And a trailing comment must not eat the call on the same line.
+        let both = "    refresh.register_runtime_server(&mgr, &configs); // wayland#1175\n";
+        assert!(strip_line_comments(both).contains(needle));
+    }
+
+    /// Every `fn` in `source`, at ANY indentation, as `(name, body)`.
+    ///
+    /// Indentation used to be the discriminator — column zero only — and that
+    /// was a second file-set hole wearing a different hat: every runtime-MCP
+    /// path in `tui/engine_bridge.rs` is an inherent method on `TuiEngine`, so
+    /// a column-zero splitter returns NOTHING for that file and every
+    /// assertion over it passes vacuously. Free functions and methods are
+    /// graded alike now.
+    ///
+    /// Blocks do not overlap: the scan resumes after a function's closing
+    /// brace, so a `fn` nested inside another is absorbed into its parent's
+    /// body rather than graded separately. That is a stated gap — a nested
+    /// helper that removed a server while its parent withdrew would pass — and
+    /// there is no such nesting on these paths today.
+    /// A BODYLESS `fn` — a trait method declaration, which ends in `;` before
+    /// any `{` — is skipped rather than brace-counted. `tui/surfaces/mod.rs`
+    /// has one (`fn render(..);`), and brace-counting from it ran to the end
+    /// of the enclosing trait and past it, swallowing the real functions that
+    /// followed. That is the exact shape of a silently-vacuous guard, so it is
+    /// its own case with its own test.
+    fn fn_blocks(source: &str) -> Vec<(String, String)> {
+        let lines: Vec<&str> = source.lines().collect();
+        let mut blocks = Vec::new();
+        let mut i = 0;
+        while i < lines.len() {
+            let Some(name) = associated_fn_name(code_before_comment(lines[i])) else {
+                i += 1;
+                continue;
+            };
+            // Walk to whichever comes first: the `{` that opens the body, or
+            // the `;` that ends a declaration. A rustfmt-wrapped signature puts
+            // either of them several lines down.
+            let mut k = i;
+            let mut opens_a_body = false;
+            while k < lines.len() {
+                let code = code_before_comment(lines[k]);
+                let brace = code.find('{');
+                let semi = code.find(';');
+                match (brace, semi) {
+                    (Some(b), Some(s)) if s < b => break,
+                    (Some(_), _) => {
+                        opens_a_body = true;
+                        break;
+                    }
+                    (None, Some(_)) => break,
+                    (None, None) => k += 1,
+                }
+            }
+            if !opens_a_body {
+                i = k + 1;
+                continue;
+            }
+            // Brace-count to the end of the body. Line comments are stripped
+            // first so a `//` mentioning a brace cannot skew the depth.
+            let mut depth = 0i32;
+            let mut body = String::new();
+            let mut k = i;
+            let mut opened = false;
+            while k < lines.len() {
+                let code = code_before_comment(lines[k]);
+                depth += code.matches('{').count() as i32;
+                depth -= code.matches('}').count() as i32;
+                if code.contains('{') {
+                    opened = true;
+                }
+                body.push_str(code);
+                body.push('\n');
+                if opened && depth <= 0 {
+                    break;
+                }
+                k += 1;
+            }
+            blocks.push((name, body));
+            i = k + 1;
+        }
+        blocks
+    }
+
+    /// The splitter is the thing that can silently stop finding functions, so
+    /// it is graded directly rather than trusted.
+    #[test]
+    fn the_fn_splitter_scopes_a_body_to_its_own_function() {
+        let source = "fn good() {\n    withdraw();\n}\n\nasync fn bad(x: u8) -> u8 {\n    0\n}\n\nimpl T for U {\n    pub(crate) async fn method(\n        &self,\n    ) -> u8 {\n        withdraw();\n        0\n    }\n}\n";
+        let blocks = fn_blocks(source);
+        assert_eq!(
+            blocks.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+            vec!["good", "bad", "method"],
+            "an indented method IS a withdrawal path — every runtime-MCP path \
+             in tui/engine_bridge.rs is one, and a column-zero-only splitter \
+             grades that whole file vacuously: {blocks:?}"
+        );
+        assert!(blocks[0].1.contains("withdraw();"));
+        assert!(
+            blocks[2].1.contains("withdraw();"),
+            "a rustfmt-wrapped method signature must not lose its body"
+        );
+        // NEGATIVE CONTROL: the second body must NOT borrow the first's call,
+        // or a file with one compliant fn grades every other fn green.
+        assert!(
+            !blocks[1].1.contains("withdraw();"),
+            "the second fn body swallowed the first one's call"
+        );
+
+        // A BODYLESS trait method must not be brace-counted: doing so runs to
+        // the end of the enclosing trait and swallows the functions after it.
+        let with_declaration = "trait S {\n    fn render(&mut self, f: &mut F);\n}\n\nfn after() {\n    withdraw();\n}\n";
+        let blocks = fn_blocks(with_declaration);
+        assert_eq!(
+            blocks.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+            vec!["after"],
+            "a `fn ...;` declaration has no body to grade, and must not eat the \
+             functions that follow it: {blocks:?}"
+        );
+        assert!(blocks[0].1.contains("withdraw();"));
+    }
+
+    /// The add-side needle's SPELLING SET, closed against `wcore-mcp`.
+    ///
+    /// `every_runtime_mcp_add_joins_the_catalog_refresh` finds construction
+    /// sites by the text `McpManager::connect`. Deriving the count from the
+    /// defect closed the "a fourth bare path leaves the count at 2" hole, but
+    /// it left a second one of exactly the same shape one level down: the
+    /// needle is an ALLOWLIST OF SPELLINGS. A fifth constructor called
+    /// `McpManager::from_configs` would be matched by nothing, every file that
+    /// used it would count zero constructions, `built == 0` would `continue`,
+    /// and the lint would stay green while the path it added had its
+    /// tools/list_changed ignored for the life of the session — the original
+    /// defect, reached through a rename.
+    ///
+    /// So the needle is not ASSERTED complete, it is CHECKED against the type
+    /// it searches for: every associated function of `McpManager` that can
+    /// hand a caller a new one must either be matched by the needle or be a
+    /// `new_for_test*` fixture constructor. Adding a production constructor
+    /// under any other name reddens this test, which is the point — the
+    /// author is then made to extend the needle rather than silently escape
+    /// it.
+    ///
+    /// THE PREDICATE IS INVERTED, and that is the whole point of round 4.
+    /// Round 3 collected constructors by asking "does this signature RETURN a
+    /// new one?", implemented as "is there a `Self` token right of the `->`".
+    /// That question is not decidable over a closed alphabet: `-> McpManager`,
+    /// `-> Result<McpManager, McpError>`, `-> Arc<Self>`, a type alias, are
+    /// all ordinary Rust spellings of the same thing, and the first of them
+    /// already occurs in this tree (`fn make_manager_with_servers(...) ->
+    /// McpManager`). A verifier measured the escape directly: the round-3
+    /// parser returned `[]` for an impl block whose two constructors named
+    /// their own return type. So a fifth constructor spelled that way was
+    /// invisible, every file using it counted zero constructions, `built == 0`
+    /// would `continue`, and the add-side lint stayed green — the original
+    /// defect reached through a rename, one level down from the last one.
+    ///
+    /// The question asked now is "does this associated fn take a `self`
+    /// RECEIVER?", which is decidable and total: the receiver grammar is
+    /// closed by the Rust language itself (`self`, `&self`, `&'a self`,
+    /// `&mut self`, `mut self`, `self: Arc<Self>`), and it is written at the
+    /// call site of the definition, not inferred from a type name. Everything
+    /// in `impl McpManager` without one is an associated function, and every
+    /// associated function must be matched by the needle, be a
+    /// `new_for_test*` fixture, or be named here with its reason. Return
+    /// types no longer enter into it, so no spelling of one can escape.
+    ///
+    /// GAP, recorded rather than implied away: this closes constructors on
+    /// `McpManager` itself. It does not see a helper in another crate that
+    /// builds a manager and hands it to `wcore-cli` already made, because the
+    /// needle would then live in that crate's file and the walk is scoped to
+    /// `wcore-cli/src`. That is residual, and it is stated in the #1175
+    /// ledger.
+    #[test]
+    fn the_construction_needle_matches_every_way_to_get_an_mcp_manager() {
+        let manager_src = include_str!("../../wcore-mcp/src/manager.rs");
+        // Same fragment assembly as the walk, and the same reason.
+        let needle_suffix = concat!("conn", "ect");
+
+        let associated = receiverless_associated_fns(manager_src, "McpManager");
+
+        // POSITIVE CONTROL on the parse. If the block finder or the receiver
+        // detection silently stopped matching, `associated` would be empty and
+        // the loop below would grade nothing.
+        for known in ["connect_all", "connect_all_with_policy", "new_for_test"] {
+            assert!(
+                associated.iter().any(|name| name == known),
+                "the McpManager associated-fn parse did not find {known} — it is \
+                 grading an empty or truncated set. Found: {associated:?}"
+            );
+        }
+        // NEGATIVE CONTROL on the same parse: a `&self` method must NOT be
+        // collected, or "every associated fn is a constructor" is trivially
+        // true of the whole impl and the assertion below means nothing.
+        assert!(
+            !associated.iter().any(|name| name == "server_names"),
+            "server_names(&self) is a method, not an associated fn — the \
+             receiver test is not discriminating. Found: {associated:?}"
+        );
+
+        for name in &associated {
+            assert!(
+                name.starts_with(needle_suffix) || name.starts_with("new_for_test"),
+                "McpManager::{name} takes no self receiver, so it is a way to \
+                 GET a manager, and it is not matched by the \
+                 `McpManager::{needle_suffix}` needle that \
+                 every_runtime_mcp_add_joins_the_catalog_refresh counts \
+                 constructions with. A runtime-add path using it would count \
+                 zero constructions and the lint would pass while its \
+                 tools/list_changed was ignored for the life of the session \
+                 (FerroxLabs/wayland#1175). Rename it, or widen the needle in \
+                 both places."
+            );
+        }
+    }
+
+    /// Every associated fn of `impl <type>` in `source` that takes no `self`
+    /// receiver, by name.
+    ///
+    /// Scoped to the inherent `impl <type> {` blocks at column zero — all of
+    /// them, not just the first — so a trait impl or a different type's
+    /// functions cannot be mistaken for this type's, and an inline
+    /// `#[cfg(test)] mod tests` (indented) is invisible.
+    fn receiverless_associated_fns(source: &str, type_name: &str) -> Vec<String> {
+        let header = format!("impl {type_name} {{");
+        let lines: Vec<&str> = source.lines().collect();
+        let mut names = Vec::new();
+        let mut index = 0;
+        while index < lines.len() {
+            if lines[index].trim_end() != header {
+                index += 1;
+                continue;
+            }
+            let mut depth = 0i32;
+            // The fn signature may wrap across lines, so the parameter list is
+            // read from the header joined up to the line that opens the body.
+            let mut pending: Option<(String, String)> = None;
+            let mut cursor = index;
+            while cursor < lines.len() {
+                let line = lines[cursor];
+                let code = code_before_comment(line);
+                depth += code.matches('{').count() as i32;
+                depth -= code.matches('}').count() as i32;
+
+                if let Some((name, mut header)) = pending.take() {
+                    header.push(' ');
+                    header.push_str(code.trim());
+                    if code.contains('{') || code.trim_end().ends_with(';') {
+                        if !takes_self_receiver(&header) {
+                            names.push(name);
+                        }
+                    } else {
+                        pending = Some((name, header));
+                    }
+                } else if let Some(name) = associated_fn_name(code) {
+                    let header = code.trim().to_string();
+                    if code.contains('{') || code.trim_end().ends_with(';') {
+                        if !takes_self_receiver(&header) {
+                            names.push(name);
+                        }
+                    } else {
+                        pending = Some((name, header));
+                    }
+                }
+
+                if depth <= 0 && code.contains('}') {
+                    break;
+                }
+                cursor += 1;
+            }
+            index = cursor + 1;
+        }
+        names
+    }
+
+    /// True when a joined fn signature declares a `self` receiver.
+    ///
+    /// Every `(` in the signature is tried rather than only the parameter
+    /// list's, so a generic bound spelled `<F: Fn(u8)>` cannot shift the
+    /// parameter list out from under this — no bound is followed by `self`.
+    /// The receiver grammar itself is closed by the language, so this is
+    /// total: `self`, `&self`, `&'a self`, `&mut self`, `&'a mut self`,
+    /// `mut self`, `self: Arc<Self>`.
+    fn takes_self_receiver(header: &str) -> bool {
+        header.match_indices('(').any(|(at, _)| {
+            let mut rest = header[at + 1..].trim_start();
+            if let Some(stripped) = rest.strip_prefix('&') {
+                rest = stripped.trim_start();
+                if let Some(after_tick) = rest.strip_prefix('\'') {
+                    rest = after_tick
+                        .trim_start_matches(|ch: char| ch.is_alphanumeric() || ch == '_')
+                        .trim_start();
+                }
+            }
+            if let Some(stripped) = rest.strip_prefix("mut ") {
+                rest = stripped.trim_start();
+            }
+            let token: String = rest
+                .chars()
+                .take_while(|ch| ch.is_alphanumeric() || *ch == '_')
+                .collect();
+            token == "self"
+        })
+    }
+
+    /// The fn name on a `fn` item line, whatever visibility/asyncness it
+    /// carries. `None` for anything that is not an fn item.
+    fn associated_fn_name(line: &str) -> Option<String> {
+        let mut rest = line.trim_start();
+        loop {
+            let mut advanced = false;
+            for modifier in [
+                "pub(crate)",
+                "pub(super)",
+                "pub",
+                "async",
+                "unsafe",
+                "const",
+            ] {
+                if let Some(stripped) = rest.strip_prefix(modifier)
+                    && stripped.starts_with(char::is_whitespace)
+                {
+                    rest = stripped.trim_start();
+                    advanced = true;
+                }
+            }
+            if !advanced {
+                break;
+            }
+        }
+        let rest = rest.strip_prefix("fn ")?;
+        let name: String = rest
+            .chars()
+            .take_while(|ch| ch.is_alphanumeric() || *ch == '_')
+            .collect();
+        (!name.is_empty()).then_some(name)
+    }
+
+    /// The parser is the thing that can silently stop finding constructors,
+    /// so it is graded directly rather than trusted.
+    ///
+    /// The two `McpManager`-returning spellings in this fixture are the
+    /// verifier's measured escape from round 3: against them, the old
+    /// `-> Self` parse returned `[]`. They are kept as the first two
+    /// constructors here so a reversion to a return-type test reddens.
+    #[test]
+    fn the_constructor_parse_sees_a_renamed_constructor() {
+        let source = "\
+impl McpManager {
+    pub async fn from_parts(c: &C) -> Result<McpManager, McpError> {
+        todo!()
+    }
+
+    pub fn build_it(c: &C) -> McpManager {
+        todo!()
+    }
+
+    pub async fn connect_all(configs: &C) -> Result<Self, McpError> {
+        todo!()
+    }
+
+    pub async fn from_configs(
+        configs: &C,
+        policy: P,
+    ) -> Result<Self, McpError> {
+        todo!()
+    }
+
+    pub fn new_for_test(entries: Vec<E>) -> Self {
+        todo!()
+    }
+
+    pub fn server_names(&self) -> Vec<String> {
+        todo!()
+    }
+
+    pub async fn call_tool<F: Fn(u8) -> u8>(&self, f: F) -> u8 {
+        todo!()
+    }
+
+    pub fn take(mut self) -> Vec<E> {
+        todo!()
+    }
+}
+";
+        let found = receiverless_associated_fns(source, "McpManager");
+        assert_eq!(
+            found,
+            vec![
+                "from_parts",
+                "build_it",
+                "connect_all",
+                "from_configs",
+                "new_for_test"
+            ],
+            "the parse must find a rustfmt-WRAPPED signature and EVERY return \
+             spelling — `-> McpManager` and `-> Result<McpManager, _>` are the \
+             two the `-> Self` parse it replaced returned nothing for — and \
+             must not mistake a receiver-taking method for a constructor"
+        );
+        // The fixture must actually EXERCISE the failing branch, or the
+        // guard above is graded against a source that could never redden it.
+        assert!(
+            !found
+                .iter()
+                .all(|name| name.starts_with("connect") || name.starts_with("new_for_test")),
+            "control: the synthetic source must contain a constructor the \
+             needle misses, or this proves nothing about the real check"
+        );
+
+        // NEGATIVE CONTROL on the block scoping: another type's constructors
+        // must not be collected as McpManager's, or the guard grades the
+        // wrong impl and a renamed McpManager constructor slips through.
+        let other = "\
+impl SomethingElse {
+    pub fn build() -> Self {
+        todo!()
+    }
+}
+";
+        assert!(
+            receiverless_associated_fns(other, "McpManager").is_empty(),
+            "a different type's impl block was collected"
+        );
+
+        // A SECOND inherent impl block of the same type must also be read —
+        // splitting an impl in two is a refactor, not an escape hatch.
+        let split = "\
+impl McpManager {
+    pub fn first() -> Self {
+        todo!()
+    }
+}
+
+impl McpManager {
+    pub fn second() -> Self {
+        todo!()
+    }
+}
+";
+        assert_eq!(
+            receiverless_associated_fns(split, "McpManager"),
+            vec!["first", "second"],
+            "only the first `impl McpManager` block was read"
+        );
+
+        // NEGATIVE CONTROL on `takes_self_receiver`: every spelling of the
+        // receiver grammar, and a bound whose parentheses come first.
+        for method in [
+            "pub fn health(&self) -> &HashMap<String, H> {",
+            "pub fn take(self) -> Vec<E> {",
+            "pub fn take(mut self) -> Vec<E> {",
+            "pub fn edit(&mut self) {",
+            "pub fn borrow<'a>(&'a self) -> &'a E {",
+            "pub fn borrow_mut<'a>(&'a mut self) -> &'a mut E {",
+            "pub fn shared(self: Arc<Self>) {",
+            "pub async fn call<F: Fn(u8) -> u8>(&self, f: F) -> u8 {",
+        ] {
+            assert!(
+                takes_self_receiver(method),
+                "a receiver was missed, so this method would be graded as a \
+                 constructor: {method}"
+            );
+        }
+        for constructor in [
+            "pub fn new_for_test(e: Vec<E>) -> Self {",
+            "pub async fn connect_all(c: &C) -> Result<Self, McpError> {",
+            "pub fn build_it(c: &C) -> McpManager {",
+            "pub fn from_selfish(selfish: Selfish) -> McpManager {",
+        ] {
+            assert!(
+                !takes_self_receiver(constructor),
+                "a constructor was read as taking a receiver, so it would be \
+                 invisible to the guard: {constructor}"
+            );
+        }
     }
 }

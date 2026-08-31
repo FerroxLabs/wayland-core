@@ -3,7 +3,7 @@ issue: 1178
 repo: FerroxLabs/wayland
 kind: defect
 title: "A base_url with the conventional /v1 suffix builds /v1/v1/chat/completions and 404s"
-status: open
+status: closed
 last_verified_commit: 43848f75
 criteria:
   - id: c1

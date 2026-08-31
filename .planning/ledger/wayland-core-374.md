@@ -3,7 +3,7 @@ issue: 374
 repo: FerroxLabs/wayland-core
 kind: defect
 title: "core#238 c6's evidence test cannot establish its premise on Windows: ENOTDIR provocation maps to NotFound, and it hard-fails the nightly soak"
-status: open
+status: closed
 last_verified_commit: b52fb934
 criteria:
   - id: c1
@@ -43,4 +43,3 @@ run 33258858506 PHASE G, the only hard failure in 3060 tests.
 The fix is a Windows arm, chosen by measurement rather than from the issue's
 suggested list -- two of the three suggestions do not work on Windows 11 build
 26200, including the one the issue named first.
-||||||| merged common ancestors

@@ -247,7 +247,7 @@ if [ "$FAIL_COUNT" -gt 0 ]; then
     else
       UNEXPECTED=$((UNEXPECTED + 1))
       printf "  UNEXPECTED  %s\n" "$key"
-      echo "::error title=Unexpected failing test (wayland-core#367)::${key} FAILED and is NOT on ${ALLOWLIST}. Do not read this run's failure count and stop: this is a DIFFERENT test from the known ones, and that difference is invisible to a count - it is how a never-merge red-arm instrument reached integ/f13 and shipped a leaking process tree. Reproduce with: cargo nextest run --retries 0 -E 'test(=${key##*::})'. Fix it, or - only if it is genuinely known and owned - add a dated, owned, justified line to ${ALLOWLIST}."
+      echo "::error title=Unexpected failing test (wayland-core#367)::${key} FAILED and is NOT on ${ALLOWLIST}. Do not read this run's failure count and stop: this is a DIFFERENT test from the known ones, and that difference is invisible to a count - it is how a never-merge red-arm instrument reached integ/f13 and shipped a leaking process tree. Reproduce with: cargo nextest run --retries 0 -E 'test(${key##*::})'. Fix it, or - only if it is genuinely known and owned - add a dated, owned, justified line to ${ALLOWLIST}."
     fi
   done <<< "$FAILING"
 fi

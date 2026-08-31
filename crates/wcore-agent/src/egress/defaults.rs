@@ -169,8 +169,14 @@ fn host_of(base_url: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::egress::classify::{EgressVerdict, classify};
+    use crate::egress::classify::{EgressOrigin, EgressVerdict};
     use reqwest::Method;
+
+    /// These arms grade the shipped DEFAULT allowlist against provider traffic
+    /// the product itself builds, so they are PRODUCT origin (wayland#1264).
+    fn classify(method: &Method, url: &url::Url, allow: &AllowList) -> EgressVerdict {
+        crate::egress::classify::classify(method, url, allow, EgressOrigin::Product)
+    }
 
     fn cfg(base_url: &str, allow: &[&str]) -> Config {
         let mut c = Config {

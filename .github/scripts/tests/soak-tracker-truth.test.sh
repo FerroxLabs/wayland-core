@@ -141,9 +141,41 @@ want_grep "the tracker runs whatever the siblings did" "$WF" \
 want_grep "the tracker calls the shared decision script" "$WF" \
   "run: bash .github/scripts/soak-tracker-decision.sh"
 want_grep "the close step is gated on the whole-run decision" "$WF" \
-  "if: \${{ steps.decide.outputs.action == 'close' }}"
+  "\${{ steps.decide.outputs.action == 'close'"
 want_grep "the report step is gated on the whole-run decision" "$WF" \
-  "if: \${{ steps.decide.outputs.action == 'report' }}"
+  "\${{ steps.decide.outputs.action == 'report'"
+
+# ── The c2 rehearsal (core#325) ────────────────────────────────────────────
+#
+# c2's close condition is "a RUN where one job is green and the other red must
+# be shown to not close the tracker issue", and until 2026-08-29 no run had
+# ever executed this code: every scheduled tick is on main, and dispatching the
+# real workflow writes to a real tracker issue, so nobody fired one. The
+# `tracker_rehearsal` input makes that dispatch harmless AND self-grading. What
+# is linted here is the harmlessness, because a rehearsal that could touch an
+# issue is worse than no rehearsal at all.
+want_grep "a rehearsal input exists" "$WF" "      tracker_rehearsal:"
+want_grep "the rehearsal's red sibling is rehearsal-only" "$WF" \
+  "if: \${{ github.event.inputs.tracker_rehearsal == 'true' }}"
+want_grep "the rehearsal asserts the decision instead of demonstrating it" "$WF" \
+  "not 'report'. That is the laundering this issue was opened about."
+# BOTH issue-writing steps must carry the guard -- one guarded out of two is a
+# leak, and it is the CLOSE direction that would launder. Checked positionally
+# (the guard must sit within two lines of the decision test) rather than by a
+# whole-file count, so an unrelated guard elsewhere cannot satisfy it.
+guarded=$(awk '
+  /\$\{\{ steps\.decide\.outputs\.action == .(close|report)./ { pending = 2; next }
+  pending > 0 {
+    if (index($0, "github.event.inputs.tracker_rehearsal != \x27true\x27")) { n++; pending = 0; next }
+    pending--
+  }
+  END { print n + 0 }
+' "$WF")
+if [ "$guarded" -eq 2 ]; then
+  ok "both issue-writing steps are inert during a rehearsal"
+else
+  bad "both issue-writing steps are inert during a rehearsal (guarded $guarded of 2)"
+fi
 
 # Least privilege: the soak job no longer writes issues, the tracker does.
 if awk '/^  windows-soak:/{inj=1} /^  [a-z0-9_-]+:$/ && !/^  windows-soak:/{inj=0} inj && /issues: write/{found=1} END{exit !found}' "$WF"; then

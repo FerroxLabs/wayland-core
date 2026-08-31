@@ -3,7 +3,7 @@ issue: 1212
 repo: FerroxLabs/wayland
 kind: defect
 title: "The #1173 keyless self-hosted exemption is applied at one credential gate and not at resolve_council_provider"
-status: open
+status: closed
 last_verified_commit: 65b95a87
 criteria:
   - id: c1

@@ -354,6 +354,33 @@ implement its own `<think>` stripper; if a reasoning tag ever reaches
 `text_delta`, that is an agent defect, and the client rendering it verbatim is
 the correct behaviour for surfacing it.
 
+#### End-of-stream `text_delta` (wayland#1242)
+
+The reasoning splitter is a state machine over a stream, so at any instant it
+may be WITHHOLDING text it cannot classify yet: an undecided `<`-prefix (an
+answer that ends `the answer is 5 <`), or everything after an opening reasoning
+tag that has not closed. While the stream is running that is correct — the next
+chunk may complete a tag. When the stream ends it is not: nothing further is
+coming, so the withheld text was never reasoning and is part of the answer.
+
+The agent therefore emits it as **one last `text_delta` on the same `msg_id`,
+immediately before `stream_end`**, after the last `thinking` event of the turn.
+It is an ordinary `text_delta` in every respect — same shape, same field, same
+message, which is still open at that point — so a client that appends deltas in
+arrival order needs no change whatsoever and simply receives the complete
+answer.
+
+A client that ignores it renders exactly what it rendered before: the same
+turn, truncated at the point the splitter stopped being sure. That is the
+failure mode this replaces, so nothing regresses; what a client must NOT do is
+treat a `text_delta` arriving after the last `thinking` as a new message, or
+assume `stream_end` is the only frame that may follow a `thinking`.
+
+This is why the recovered text is a `text_delta` and not a new event type or a
+correction to the `thinking` already sent: both of those would be a frame no
+existing host knows, arriving on a message some hosts consider closed. Getting
+that wrong is worse for a host than the truncation was.
+
 ### 1.4 `thinking`
 
 The model's private reasoning. Two producers land on this one event:
@@ -380,7 +407,19 @@ them inside the assistant bubble.
 Tag bodies may straddle chunk boundaries, so a single inline block can arrive as
 several `thinking` events; concatenating the `text` of every `thinking` event on
 one `msg_id` reconstructs the block. Two blocks in one turn are separated by a
-newline. An unclosed block is flushed immediately before `stream_end`.
+newline. An unclosed block is flushed immediately before `stream_end` — and
+because an unclosed block was never really a block, wayland#1242 also puts its
+raw text back on the wire as the end-of-stream `text_delta` described above.
+
+**An unclosed block therefore reaches the client TWICE**: once as the
+`thinking` events streamed while it was still open, and once as raw text in the
+end-of-stream `text_delta`. That is deliberate. Reasoning is streamed live, so
+those `thinking` events are already sent by the time the stream ends and the
+block is known never to have closed, and the protocol has no retraction. The
+alternative is to withhold the tail of the answer, which is what wayland#1242
+exists to stop. A client that wants to suppress the duplicate can drop a
+`thinking` run that is a suffix of the final `text_delta`; nothing requires it
+to. A CLOSED block is unaffected and arrives exactly once, as `thinking`.
 
 The event carries no obligation to display. A client may render it collapsed
 (the Wayland CLI TUI shows a one-line `▶ Thought: …` the user can expand), or
@@ -594,10 +633,31 @@ An error occurred. The agent may or may not continue depending on severity.
   "error": {
     "code": "provider_error",
     "message": "Rate limit exceeded",
-    "retryable": true
+    "retryable": true,
+    "category": "unknown"
   }
 }
 ```
+
+`category` (contract 1.23, FerroxLabs/wayland#1237) is the machine-readable
+answer to "why did this run die". It is additive: a host that does not know the
+key ignores it, and a frame written by a Core older than 1.23 simply does not
+carry it.
+
+| `category` | Meaning |
+|------------|---------|
+| `context_limit` | The context window or an output-token ceiling was reached and could not be reduced. |
+| `tool_runtime` | A tool, a sub-agent, or the engine task itself failed or died. |
+| `local_wayland` | The local process refused, aborted or could not proceed: a session-persistence authority fault, a refused or malformed host command, a startup failure, an operator abort. Nothing upstream is implicated. |
+| `unknown` | Core cannot decide, and says so instead of choosing. |
+
+`unknown` is a claim, not an absence. Every provider non-2xx lands here on
+purpose: whether a 429 or a 503 came from the model provider or from the router
+in front of it is not decidable inside core — both are the same status from the
+same host — and that half of wayland#388 belongs to the router
+(FerroxLabs/wayland#1184). There is deliberately no `rate_limit` or
+`router_failure` value for core to emit, so a host reading `unknown` learns it
+must ask the router rather than that core silently picked a side.
 
 | Error Code | Description |
 |------------|-------------|

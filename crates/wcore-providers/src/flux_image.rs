@@ -24,6 +24,8 @@
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
+use wcore_config::compat::join_endpoint;
+
 use crate::ProviderError;
 
 /// Default image arm. Used when the caller does not name a `model`.
@@ -219,7 +221,6 @@ impl FluxImageClient {
     /// `/images/generations` path is appended. A trailing slash on `base_url`
     /// is tolerated.
     pub fn new(api_key: &str, base_url: &str) -> Self {
-        let base = base_url.trim_end_matches('/');
         Self {
             // Tool client: connect + read timeouts PLUS a request-level
             // wall-clock cap. Image generation is a single finite response,
@@ -227,7 +228,7 @@ impl FluxImageClient {
             // client's lack of a request cap would be wrong).
             client: crate::http_client::build_tool_client(),
             api_key: api_key.to_string(),
-            endpoint: format!("{base}/images/generations"),
+            endpoint: join_endpoint(base_url, "/images/generations"),
         }
     }
 

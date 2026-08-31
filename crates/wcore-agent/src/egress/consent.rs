@@ -24,6 +24,30 @@ pub enum ConsentDecision {
     Always,
     /// Deny this request.
     No,
+    /// wayland#1219: the prompt could not be shown at all — this session has
+    /// a doorbell but no surface able to render an `ApprovalRequired` the
+    /// operator can answer.
+    ///
+    /// Distinct from [`No`](Self::No) on purpose. `No` means a human saw the
+    /// prompt and said no; this means nobody was ever asked. Collapsing the
+    /// two is exactly the defect wayland#1219 reports — the request stalled
+    /// for the full approval TTL and the user was then told they had
+    /// "declined at the consent prompt".
+    ///
+    /// Resolves fail-CLOSED (the caller denies), because a doorbell being
+    /// installed means an interactive answer was expected; but the message
+    /// the user gets must say what actually happened.
+    Unavailable,
+    /// wayland#1219: the prompt WAS shown, but no answer ever came back — the
+    /// approval TTL reaped it, or the host's command stream closed with it
+    /// still parked.
+    ///
+    /// Also distinct from [`No`](Self::No), for the same reason
+    /// [`ApprovalCancelCause`](crate::approval::ApprovalCancelCause) exists:
+    /// #1083 already established that a bridge self-resolution must stay
+    /// distinguishable from a decision a human made. Silence is not a
+    /// decline. Fails closed all the same.
+    Unanswered,
 }
 
 /// The consent surface the egress policy rings on an `Ask` verdict.

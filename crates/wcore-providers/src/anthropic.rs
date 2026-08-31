@@ -14,7 +14,7 @@ use crate::retry::builder_send_with_retry;
 use crate::{
     LlmProvider, ModelInfo, ProviderError, alias_models, dump_request_body, reset_response_dump,
 };
-use wcore_config::compat::ProviderCompat;
+use wcore_config::compat::{ProviderCompat, join_endpoint};
 use wcore_config::debug::DebugConfig;
 
 pub struct AnthropicProvider {
@@ -140,6 +140,29 @@ impl AnthropicProvider {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(url.to_string());
     }
 
+    /// The Messages endpoint for a given base: `<base>/v1/messages`, with the
+    /// `/v1` counted exactly once however the base was spelled.
+    ///
+    /// FerroxLabs/wayland#1217. This used to be a bare
+    /// `format!("{base_url}/v1/messages")` — not even a `trim_end_matches('/')`
+    /// — so the two spellings a user copies straight out of Anthropic's own
+    /// docs both 404: `https://api.anthropic.com/v1` built
+    /// `/v1/v1/messages` and `https://api.anthropic.com/` built `//v1/messages`.
+    /// Measured live: the working spelling routes (401), both of those return
+    /// 404 with nothing in the error naming the doubled path. It is the same
+    /// defect #1178 closed on the OpenAI wire, so it takes the SAME joiner
+    /// rather than a second bespoke trim.
+    fn messages_url(base_url: &str) -> String {
+        join_endpoint(base_url, "/v1/messages")
+    }
+
+    /// The model-discovery endpoint: `<base>/v1/models`, same joiner, same
+    /// reason (#1217 c3). `trim_end_matches('/')` alone closed the `//` half
+    /// and left the `/v1/v1` half open.
+    fn models_url(base_url: &str) -> String {
+        join_endpoint(base_url, "/v1/models")
+    }
+
     /// Send one streaming request to a specific `base_url`. Returns the event
     /// receiver on 2xx, or the mapped [`ProviderError`] on any failure. Region
     /// failover (retrying an alternate host) is the caller's concern — this
@@ -151,7 +174,7 @@ impl AnthropicProvider {
         body: &Value,
         request: &LlmRequest,
     ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
-        let url = format!("{}/v1/messages", base_url);
+        let url = Self::messages_url(base_url);
         // #863 F2 — loop-ownership marking on the Anthropic Messages
         // translation. HEADER ONLY, deliberately: the Anthropic `metadata`
         // object accepts `user_id` and rejects arbitrary keys, so the
@@ -673,7 +696,7 @@ impl LlmProvider for AnthropicProvider {
     /// HTTP/parse failure we fall back to the static alias catalog — `/model`
     /// must never hard-fail.
     async fn list_models(&self) -> anyhow::Result<Vec<ModelInfo>> {
-        let url = format!("{}/v1/models", self.base_url.trim_end_matches('/'));
+        let url = Self::models_url(&self.base_url);
         let headers = match self.select_key().and_then(|key| self.build_headers(&key)) {
             Ok(h) => h,
             Err(_) => return Ok(alias_models(self.alias_key())),

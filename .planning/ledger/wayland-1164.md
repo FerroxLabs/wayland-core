@@ -3,7 +3,7 @@ issue: 1164
 repo: FerroxLabs/wayland
 kind: defect
 title: "Windows: use a real bash when one is present, resolved explicitly (never System32 bash.exe)"
-status: open
+status: closed
 last_verified_commit: 43848f75
 criteria:
   - id: c1

@@ -149,7 +149,8 @@ OWNERS = ("core", "desktop", "flux", "maintainer", "reporter")
 STATUSES = ("open", "closed")
 
 TOP_KEYS = {"issue", "repo", "title", "status", "last_verified_commit", "criteria"}
-CRIT_KEYS = {"id", "text", "state", "evidence", "owner", "note", "handoff"}
+CRIT_KEYS = {"id", "text", "state", "evidence", "owner", "note", "handoff",
+             "successor"}
 # Keys this schema ALLOWS but does not require, and does not itself judge.
 # `kind: defect|feature` and a criterion's `handoff:` belong to
 # scripts/check-release-readiness.py, which decides whether an issue is
@@ -160,7 +161,19 @@ CRIT_KEYS = {"id", "text", "state", "evidence", "owner", "note", "handoff"}
 # that drift. Nothing this gate fails on changes: `kind` is required by the
 # release gate, not by this one, and `handoff` is judged there too.
 TOP_OPTIONAL = {"kind"}
-SUCCESSOR = re.compile(r"#(\d+)")
+# A superseded criterion names its successor in a FIELD, never in prose.
+# `SUCCESSOR` used to be `re.compile(r"#(\d+)")` applied to the note with
+# `.search`, so the first issue number anywhere in the sentence decided
+# where a residual was tracked. Measured over the 16 superseded criteria
+# in this tree, that mis-resolved three of them -- two to their OWN issue,
+# which every check passed because the issue exists and is open.
+#
+# The repo is REQUIRED, not defaulted to the ledger's own. #370, #368,
+# #373 and #389 all exist in both trackers; wayland-1155 c2 supersedes
+# into wayland-core#370 while wayland#370 is a merged PR, and only the
+# prose distinguished them.
+SUCCESSOR = re.compile(
+    r"^(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#(?P<num>\d+)$")
 CRIT_REQUIRED = {"id", "text", "state", "owner"}
 
 
@@ -195,6 +208,45 @@ def _scalar(raw, where, errs):
     return v
 
 
+# A ledger entry IS the evidence for a criterion, so a conflict marker committed
+# into one means a reader cannot tell which of two claims is authoritative --
+# and the gate that exists to keep the ledger trustworthy passed two such files
+# in silence (wayland-core-368.md and wayland-core-374.md, each carrying a lone
+# trailing `||||||| merged common ancestors` left behind by a diff3 resolution
+# that deleted the other sections and forgot this line).
+#
+# Matched at LINE START, as a run of at least the seven characters git writes,
+# followed by a space-and-label or by end of line. `{7,}` rather than exactly
+# seven so a repo-local `conflict-marker-size` cannot walk past the check; the
+# required space-or-end-of-line keeps `<<<<<<<x` from matching.
+#
+# `=======` is the awkward one and is handled separately, by CONTEXT rather
+# than by shape. A bare row of seven equals is also a setext heading underline
+# and an ordinary prose divider, so matching it on shape alone would red this
+# gate on legitimate markdown. It is reported only once an unambiguous marker
+# has already been found in the SAME file.
+# RESIDUAL, stated rather than papered over: a file whose ONLY surviving marker
+# is a bare `=======` is NOT caught by this check.
+CONFLICT_MARK = re.compile(r"^(?:<{7,}|\|{7,}|>{7,})(?: .*)?$")
+CONFLICT_MID = re.compile(r"^={7,}$")
+
+
+def conflict_markers(path, text):
+    """-> [errors]. Git conflict markers committed into a ledger file."""
+    lines = text.split("\n")
+    hits = [(n, ln) for n, ln in enumerate(lines, 1) if CONFLICT_MARK.match(ln)]
+    if not hits:
+        return []
+    hits += [(n, ln) for n, ln in enumerate(lines, 1) if CONFLICT_MID.match(ln)]
+    return [
+        "%s:%d: git conflict marker %r committed into a ledger file. A ledger "
+        "entry is the evidence for a criterion; with a marker in it a reader "
+        "cannot tell which of two claims is authoritative. Resolve the merge "
+        "properly -- do not just delete a side." % (path, n, ln[:48])
+        for n, ln in sorted(hits)
+    ]
+
+
 def parse_ledger(path):
     """-> (record, [errors]). Never raises: a broken file is a FINDING."""
     errs = []
@@ -203,13 +255,18 @@ def parse_ledger(path):
     except OSError as e:
         return None, ["%s: unreadable (%s)" % (path, e)]
 
+    # Before any structural parse, and carried through the early returns below:
+    # a marker can sit in the prose body, which the frontmatter grammar never
+    # looks at, and that is exactly where both real instances were.
+    errs += conflict_markers(path, text)
+
     lines = text.split("\n")
     if not lines or lines[0].strip() != "---":
-        return None, ["%s: does not open with a `---` frontmatter fence" % path]
+        return None, errs + ["%s: does not open with a `---` frontmatter fence" % path]
     try:
         end = next(i for i in range(1, len(lines)) if lines[i].strip() == "---")
     except StopIteration:
-        return None, ["%s: frontmatter is never closed by a second `---`" % path]
+        return None, errs + ["%s: frontmatter is never closed by a second `---`" % path]
 
     body = "\n".join(lines[end + 1 :]).strip()
     rec = {"path": path, "criteria": [], "prose": body}
@@ -579,12 +636,30 @@ def validate_record(root, rec, git, shallow=False):
                            "blocked criterion without a `note` saying what is "
                            "being waited on is a suppression." % (w, cid))
         if st == "superseded":
-            if not SUCCESSOR.search(c.get("note", "")):
+            suc = (c.get("successor") or "").strip()
+            if not suc:
                 bad.append(
-                    "%s: %s is `superseded` but its note names no successor "
-                    "issue. A residual nobody can find is a residual nobody "
-                    "will fix -- put the `#<number>` that carries it in the "
-                    "note." % (w, cid))
+                    "%s: %s is `superseded` and declares no `successor:` "
+                    "field. A residual nobody can find is a residual nobody "
+                    "will fix. Name it as `<owner>/<repo>#<number>` -- NOT in "
+                    "the note: the successor used to be read as the first "
+                    "`#<number>` in that prose, which sent three of this "
+                    "tree's sixteen residuals to the wrong issue." % (w, cid))
+            else:
+                m = SUCCESSOR.match(suc)
+                if not m:
+                    bad.append(
+                        "%s: %s has `successor: %s`, which is not "
+                        "`<owner>/<repo>#<number>`. The repo is required: the "
+                        "same issue number exists on both trackers, so a bare "
+                        "number names two different tickets." % (w, cid, suc))
+                elif (m.group("repo") == rec.get("repo")
+                      and m.group("num") == str(rec.get("issue"))):
+                    bad.append(
+                        "%s: %s is `superseded` into its OWN issue (%s). That "
+                        "is not decomposition, it is a residual handed to "
+                        "nobody -- and it passed every check this gate had, "
+                        "because the issue exists and is open." % (w, cid, suc))
         if ev:
             why = resolve_evidence(root, ev, git, shallow)
             if why:
@@ -607,9 +682,10 @@ class TrackerError(Exception):
 GH_LIMIT = 4000
 
 
-def gh_issues(repo, label, state):
+def gh_issues(repo, label, state, with_body=False):
+    fields = "number,title,state,body" if with_body else "number,title,state"
     args = ["gh", "issue", "list", "-R", repo, "--state", state,
-            "--limit", str(GH_LIMIT), "--json", "number,title,state"]
+            "--limit", str(GH_LIMIT), "--json", fields]
     if label:
         args += ["--label", label]
     try:
@@ -635,18 +711,54 @@ def gh_issues(repo, label, state):
     return rows
 
 
+# A criterion id as an issue body DECLARES one: at the head of a list item or a
+# heading, optionally bold/code-quoted, followed by a separator. Deliberately
+# NOT a bare `c3` anywhere in prose -- "see c3 above" is a reference, not a
+# declaration, and a detector that counted it would redden a ledger for a
+# criterion its issue never defined.
+_DECLARED_ID = re.compile(
+    r"^[ \t]*(?:[-*+]|#{1,6})[ \t]*(?:\*\*|`|__)?[ \t]*(c[0-9]{1,2})"
+    r"(?:\*\*|`|__)?[ \t]*(?=[-\u2014:.)\s])", re.M)
+
+
+def declared_criterion_ids(body):
+    """-> sorted [id] the issue body DECLARES, or [] if it declares no list.
+
+    Returns a list only when the detected ids are exactly `c1..cN` for some
+    N >= 2. That contiguity requirement is the false-positive guard: a real
+    acceptance list is complete and starts at c1, whereas an incidental `- c3`
+    in prose is not, and this gate reddening somebody else's ledger over a
+    stray bullet is worse than it declining to judge that issue. An issue this
+    returns [] for is COUNTED as unjudgeable and reported as such, never
+    silently treated as covered.
+    """
+    ids = {m.lower() for m in _DECLARED_ID.findall(body or "")}
+    if len(ids) < 2:
+        return []
+    ordered = sorted(ids, key=lambda t: int(t[1:]))
+    if ordered != ["c%d" % i for i in range(1, len(ordered) + 1)]:
+        return []
+    return ordered
+
+
 def load_trackers(injected):
-    """-> ({repo: {num: state}}, {repo: set(open in-scope nums)}, [notes]).
+    """-> (state, scoped, notes, bodies).
+
+    state   {repo: {num: state}}
+    scoped  {repo: set(open in-scope nums)}
+    bodies  {repo: {num: body text}} -- the input to `declared_criterion_ids`.
 
     `injected` short-circuits the network for --self-test's fixtures. It has
     no command-line switch on purpose -- see main().
     """
     if injected is not None:
-        return injected["all"], {k: set(v) for k, v in injected["scoped"].items()}, []
-    allstate, scoped, notes = {}, {}, []
+        return (injected["all"],
+                {k: set(v) for k, v in injected["scoped"].items()}, [],
+                injected.get("bodies", {}))
+    allstate, scoped, notes, bodies = {}, {}, [], {}
     for repo, label in TRACKERS:
         op = gh_issues(repo, label, "open")
-        every = gh_issues(repo, None, "all")
+        every = gh_issues(repo, None, "all", with_body=True)
         if not every:
             raise TrackerError(
                 "%s: the tracker query reached ZERO issues in any state. That is "
@@ -658,12 +770,13 @@ def load_trackers(injected):
                          "(%d issues in all states), so this is a real zero."
                          % (repo, len(every)))
         allstate[repo] = {int(i["number"]): i["state"].lower() for i in every}
+        bodies[repo] = {int(i["number"]): (i.get("body") or "") for i in every}
         scoped[repo] = {int(i["number"]) for i in op}
         # Belt and braces against the same class: whatever the all-states query
         # says, an issue the OPEN query just returned is open and exists.
         for i in op:
             allstate[repo][int(i["number"])] = "open"
-    return allstate, scoped, notes
+    return allstate, scoped, notes, bodies
 
 
 # ── the gate ─────────────────────────────────────────────────────────────────
@@ -753,7 +866,7 @@ def run(root, offline=False, injected=None, quiet=False):
             "--offline before believing the ledger is complete.")
     else:
         try:
-            allstate, scoped, notes = load_trackers(injected)
+            allstate, scoped, notes, bodies = load_trackers(injected)
         except TrackerError as e:
             say()
             say("FAIL: %s" % e)
@@ -781,10 +894,40 @@ def run(root, offline=False, injected=None, quiet=False):
                         "caught an entire tracker going invisible."
                         % (repo, n, LEDGER_DIR, repo.split("/")[-1], n))
 
+        # CRITERION COVERAGE. The check above is FILE-level: it asks whether an
+        # open issue has a ledger file at all. It cannot see a ledger that has
+        # a file and drops one of the issue's own criteria -- and that is not
+        # hypothetical. FerroxLabs/wayland-core#389 declares c1..c4; its ledger
+        # carried c1..c3, so c4 ("the residual pin is inverted rather than
+        # deleted") was outstanding work that NO gate could count, in the one
+        # gate whose purpose is that nothing outstanding goes uncounted.
+        #
+        # The shape, not the instance: a dropped criterion is invisible
+        # wherever coverage is measured per FILE. So coverage is measured per
+        # CRITERION wherever the issue declares them, and the count of issues
+        # where it could not is printed -- a zero here must never be readable
+        # as "everything was checked".
+        judged, unjudgeable = 0, 0
         for rec in records:
             repo, num = rec.get("repo"), rec.get("issue")
             if repo not in allstate or not str(num).isdigit():
                 continue
+            declared = declared_criterion_ids(
+                bodies.get(repo, {}).get(int(num), ""))
+            if declared:
+                judged += 1
+                have = {str(c.get("id", "")).lower() for c in rec["criteria"]}
+                gap = [d for d in declared if d not in have]
+                if gap:
+                    problems.append(
+                        "CRITERION COVERAGE: %s#%s declares %s and %s has no "
+                        "row for %s. A criterion the ledger drops is work "
+                        "nothing can count -- the file-level coverage check "
+                        "above passes on it, because the file exists."
+                        % (repo, num, ", ".join(declared), rec["path"],
+                           ", ".join(gap)))
+            else:
+                unjudgeable += 1
             gh_state = allstate[repo].get(int(num))
             if gh_state is None:
                 problems.append(
@@ -798,21 +941,26 @@ def run(root, offline=False, injected=None, quiet=False):
             for c in rec["criteria"]:
                 if c.get("state") != "superseded":
                     continue
-                m2 = SUCCESSOR.search(c.get("note", ""))
+                m2 = SUCCESSOR.match((c.get("successor") or "").strip())
                 if not m2:
-                    continue
-                n2 = int(m2.group(1))
-                where = [(rp, st) for rp, m3 in allstate.items()
-                         for nn, st in m3.items() if nn == n2]
-                if not where:
+                    continue          # validate_record already complained
+                rp2, n2 = m2.group("repo"), int(m2.group("num"))
+                # Addressed by repo AND number. The old code scanned every
+                # tracker for the bare number and accepted a hit anywhere,
+                # so a residual could be certified against a same-numbered
+                # ticket in the other repo -- #370, #368, #373 and #389 all
+                # exist on both.
+                st2 = allstate.get(rp2, {}).get(n2)
+                if st2 is None:
                     problems.append(
-                        "%s: %s is superseded into #%d, which exists in "
-                        "neither tracker." % (rec["path"], c.get("id"), n2))
-                elif all(st == "closed" for _, st in where):
+                        "%s: %s is superseded into %s#%d, which does not exist "
+                        "on THAT tracker. The repo is part of the address."
+                        % (rec["path"], c.get("id"), rp2, n2))
+                elif st2 == "closed":
                     problems.append(
-                        "%s: %s is superseded into #%d, which is CLOSED. A "
+                        "%s: %s is superseded into %s#%d, which is CLOSED. A "
                         "residual handed to a closed issue is not tracked; it "
-                        "is lost." % (rec["path"], c.get("id"), n2))
+                        "is lost." % (rec["path"], c.get("id"), rp2, n2))
             states = [c.get("state") for c in rec["criteria"]]
             if (states and all(s in ("met", "superseded") for s in states)
                     and gh_state == "open"):
@@ -825,6 +973,13 @@ def run(root, offline=False, injected=None, quiet=False):
                     "DIVERGENCE: %s carries an unmet criterion, but %s#%s is "
                     "CLOSED. That is the failure this ledger exists to catch: "
                     "22 closed, 9 met." % (rec["path"], repo, num))
+
+        # Said out loud, because the alternative reading of a silent zero is
+        # "every criterion is covered", and that is false for most issues here.
+        say("criterion coverage: %d ledger(s) graded against their issue's own "
+            "declared c-ids; %d issue(s) declare no id list and CANNOT be "
+            "graded that way -- a dropped criterion is still invisible on "
+            "those." % (judged, unjudgeable))
 
     if problems:
         say()
@@ -919,6 +1074,38 @@ _INJ_CLEAN = {
             "FerroxLabs/wayland-core": {9: "open"}},
     "scoped": {"FerroxLabs/wayland": [7], "FerroxLabs/wayland-core": [9]},
 }
+
+# #7's body, declaring c1..c3 the way a real acceptance list does. `_CLEAN`
+# carries exactly c1, c2, c3, so this is the GREEN side of the criterion
+# coverage pair. The trailing prose mentions `c2` mid-sentence and `- see c9`
+# as a reference rather than a declaration: if either were counted the clean
+# control would go red, so the control is also the false-positive arm.
+_BODY_7 = """## Acceptance
+
+- **c1** - the boundary is probed rather than asserted against itself
+- **c2** - the second half is not built yet
+- **c3** - the credentialled probe cannot run here
+
+Note that c2 is the expensive one, and - see c9 in the sibling issue for the
+transport question.
+"""
+
+_INJ_BODIES = dict(_INJ_CLEAN, bodies={
+    "FerroxLabs/wayland": {7: _BODY_7},
+    "FerroxLabs/wayland-core": {9: ""},
+})
+
+# The same issue with a FOURTH criterion declared. `_CLEAN` still carries only
+# c1..c3, so this injection is the RED side: the ledger file exists, the
+# file-level coverage check is satisfied by it, and c4 is uncounted work.
+_INJ_BODIES_C4 = dict(_INJ_CLEAN, bodies={
+    "FerroxLabs/wayland": {
+        7: _BODY_7.replace(
+            "\nNote that c2",
+            "- **c4** - the residual pin is inverted rather than deleted\n"
+            "\nNote that c2")},
+    "FerroxLabs/wayland-core": {9: ""},
+})
 _CORE_9 = """---
 issue: 9
 repo: FerroxLabs/wayland-core
@@ -944,15 +1131,35 @@ def _ident(b):
 def self_test():
     cases = []
 
-    def case(label, mutate, must_fire, offline=False, inj=_INJ_CLEAN, expect=None):
+    def case(label, mutate, must_fire, offline=False, inj=_INJ_CLEAN,
+             expect=None, says=None):
         # `expect` is not decoration. A red arm that fires for the WRONG reason
         # proves nothing about the check it was written for, and a mutation
         # that silently stops applying (one did, on the first run of this
         # file) reads as a passing gate. Every RED arm names its own message.
-        cases.append((label, mutate, must_fire, offline, inj, expect))
+        cases.append((label, mutate, must_fire, offline, inj, expect, says))
 
     case("clean control, both trackers covered", _ident, False)
     case("control again, offline", _ident, False, offline=True)
+
+    # ── criterion coverage, both directions (wayland-core#389 c4) ────────────
+    # The GREEN arm is also the false-positive arm: #7's body declares c1..c3
+    # in list position AND mentions `c2` and `- see c9` in prose, so a detector
+    # that counted a reference as a declaration would redden here. The RED arm
+    # differs by exactly one declared criterion.
+    case("criterion coverage: ledger carries every declared c-id",
+         _ident, False, inj=_INJ_BODIES)
+    case("criterion coverage: issue declares c4 and the ledger drops it",
+         _ident, True, inj=_INJ_BODIES_C4,
+         expect="CRITERION COVERAGE: FerroxLabs/wayland#7 declares c1, c2, "
+                "c3, c4 and")
+    # A criterion coverage check that could only ever be satisfied by an issue
+    # with no parseable list would be the vacuous version of itself. This
+    # asserts the gate SAYS how many it could not judge, so a silent zero is
+    # never readable as full coverage.
+    case("criterion coverage: the unjudgeable count is reported",
+         _ident, False, inj=_INJ_BODIES,
+         says="1 issue(s) declare no id list")
     case("met criterion cites a test that does not exist",
          lambda b: b.replace("::the_boundary_is_probed\"",
                              "::a_test_that_was_deleted\"", 1), True,
@@ -1045,6 +1252,30 @@ def self_test():
          lambda b: b.replace(
              '    note: "needs a Slack workspace credential the core lane does not hold"\n',
              ""), True, expect="is a suppression")
+    # ── committed git conflict markers, both directions ─────────────────────
+    # Three RED arms, one per unambiguous marker form, because a check that
+    # only ever fires on the form the two real files happened to carry would
+    # be graded by its own instance rather than by its rule. Two GREEN arms,
+    # because `=======` on its own is legitimate markdown and a check that
+    # reds on it would be traded away the first time it fired on real prose.
+    def trailer(extra):
+        return lambda b: b.rstrip("\n") + "\n" + extra + "\n"
+
+    case("conflict marker: the lone trailing `|||||||` both real files carried",
+         trailer("||||||| merged common ancestors"), True,
+         expect="git conflict marker")
+    case("conflict marker: a full three-section conflict in the prose",
+         trailer("<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> other"), True,
+         expect="git conflict marker")
+    case("conflict marker: a lone `>>>>>>>` closer with no opener above it",
+         trailer(">>>>>>> lane/some-branch"), True,
+         expect="git conflict marker")
+    case("a setext heading underlined with seven equals stays GREEN",
+         trailer("Summary\n=======\n\nSeven equals under a heading is markdown, "
+                 "not a merge."), False)
+    case("a run of marker characters SHORTER than seven stays GREEN",
+         trailer("Ordered by severity: <<<< worst, >>>> least."), False)
+
     case("frontmatter never closed",
          lambda b: b.replace("---\n\nProse", "\nProse"), True,
          expect="frontmatter is never closed")
@@ -1064,28 +1295,65 @@ def self_test():
              '    state: met\n    owner: maintainer\n'
              '    note: "needs a Slack workspace credential the core lane does not hold"\n',
              ''), True, expect="marks every criterion met, but")
-    case("superseded with no successor named in its note",
+    # A superseded criterion's successor is a FIELD. It used to be the
+    # first `#<number>` in the note, resolved against every tracker at
+    # once -- which sent 3 of this tree's 16 residuals to the wrong issue,
+    # two of them to their own.
+    case("superseded with no `successor:` field",
          lambda b: b.replace("    state: not-met\n    owner: core",
                              "    state: superseded\n    owner: core\n"
-                             "    note: \"the rest of this moved somewhere, trust me\""),
-         True, expect="names no successor issue")
+                             "    note: \"the residual moved on\""),
+         True,
+         expect="declares no `successor:` field")
     case("superseded into an issue that is CLOSED",
          lambda b: b.replace("    state: not-met\n    owner: core",
-                             "    state: superseded\n    owner: core\n"
-                             "    note: \"the residual is carried by #11 on the core tracker\""),
+                             "    state: superseded\n    successor: FerroxLabs/wayland#11\n    owner: core\n"
+                             "    note: \"the residual moved on\""),
          True,
          inj={"all": {"FerroxLabs/wayland": {7: "open", 11: "closed"},
                       "FerroxLabs/wayland-core": {9: "open"}},
-              "scoped": {"FerroxLabs/wayland": [7], "FerroxLabs/wayland-core": [9]}},
+              "scoped": {"FerroxLabs/wayland": [7],
+                         "FerroxLabs/wayland-core": [9]}},
          expect="which is CLOSED")
     case("superseded into an issue that is OPEN",
          lambda b: b.replace("    state: not-met\n    owner: core",
-                             "    state: superseded\n    owner: core\n"
-                             "    note: \"the residual is carried by #11 on the core tracker\""),
+                             "    state: superseded\n    successor: FerroxLabs/wayland#11\n    owner: core\n"
+                             "    note: \"the residual moved on\""),
          False,
          inj={"all": {"FerroxLabs/wayland": {7: "open", 11: "open"},
                       "FerroxLabs/wayland-core": {9: "open"}},
-              "scoped": {"FerroxLabs/wayland": [7], "FerroxLabs/wayland-core": [9]}})
+              "scoped": {"FerroxLabs/wayland": [7],
+                         "FerroxLabs/wayland-core": [9]}})
+    case("superseded into its OWN issue",
+         lambda b: b.replace("    state: not-met\n    owner: core",
+                             "    state: superseded\n    successor: FerroxLabs/wayland#7\n    owner: core\n"
+                             "    note: \"the residual moved on\""),
+         True,
+         inj={"all": {"FerroxLabs/wayland": {7: "open", 11: "open"},
+                      "FerroxLabs/wayland-core": {9: "open"}},
+              "scoped": {"FerroxLabs/wayland": [7],
+                         "FerroxLabs/wayland-core": [9]}},
+         expect="into its OWN issue")
+    case("successor names a tracker the number is not on",
+         lambda b: b.replace("    state: not-met\n    owner: core",
+                             "    state: superseded\n    successor: FerroxLabs/wayland-core#11\n    owner: core\n"
+                             "    note: \"the residual moved on\""),
+         True,
+         inj={"all": {"FerroxLabs/wayland": {7: "open", 11: "open"},
+                      "FerroxLabs/wayland-core": {9: "open"}},
+              "scoped": {"FerroxLabs/wayland": [7],
+                         "FerroxLabs/wayland-core": [9]}},
+         expect="does not exist on THAT tracker")
+    case("a bare `#11` is refused: the repo is half the address",
+         lambda b: b.replace("    state: not-met\n    owner: core",
+                             "    state: superseded\n    successor: #11\n    owner: core\n"
+                             "    note: \"the residual moved on\""),
+         True,
+         inj={"all": {"FerroxLabs/wayland": {7: "open", 11: "open"},
+                      "FerroxLabs/wayland-core": {9: "open"}},
+              "scoped": {"FerroxLabs/wayland": [7],
+                         "FerroxLabs/wayland-core": [9]}},
+         expect="is not `<owner>/<repo>#<number>`")
     case("an unmet criterion on an issue GitHub says is CLOSED",
          _ident, True,
          inj={"all": {"FerroxLabs/wayland": {7: "closed"},
@@ -1100,10 +1368,12 @@ def self_test():
 
     ok = True
     results = []
-    for label, mutate, must_fire, offline, inj, expect in cases:
+    for label, mutate, must_fire, offline, inj, expect, says in cases:
         body = mutate(_CLEAN)
-        # Four arms deliberately leave the file alone -- two controls and two
-        # that vary the TRACKER state instead -- and say so by passing _ident.
+        # Several arms deliberately leave the file alone -- the two controls,
+        # the two that vary the TRACKER state, and the three criterion-coverage
+        # arms that vary the injected issue BODY -- and say so by passing
+        # _ident.
         # For every other arm, RED OR GREEN, an unchanged body means the
         # mutation stopped applying and the arm proves nothing. Restricting
         # this to red arms (as it did until #1198) leaves every green arm able
@@ -1123,6 +1393,13 @@ def self_test():
             good = False
             print("  %-56s fired, but not for its own reason (%r absent)"
                   % (label[:56], expect))
+        # `says` is for a GREEN arm that must still have PRINTED something --
+        # a check whose whole value is the number it reports can pass by not
+        # reporting it, and that is the vacuity one rung below "did it fire".
+        if good and says and says not in "\n".join(out):
+            good = False
+            print("  %-56s passed without printing %r"
+                  % (label[:56], says))
         ok &= good
         results.append((label, must_fire, fired, good))
 
@@ -1158,6 +1435,99 @@ def self_test():
     results.append(("control after the vacuity arms (still green)",
                     False, code != 0, code == 0))
     ok &= code == 0
+
+    # ── A RESURRECTION INTRODUCED BY A MERGE (FerroxLabs/wayland#1220 c3) ──
+    #
+    # `absent:` exists because a deletion graded off a COMMIT HASH proves the
+    # deletion happened once and never re-checks. The event it was written for
+    # was not an ordinary edit: merge 9c9f27b0 restored the line from the other
+    # side of a resolution, and `git log -S` — the instrument the lane graded
+    # itself with — SKIPS MERGES BY DEFAULT, so it reported nothing and the
+    # criterion went on reading met over a file that still had the entry in it.
+    #
+    # The arms below build that exact history rather than describing it: a
+    # branch cut BEFORE the deletion, editing the same lines, merged back with
+    # each of the two resolutions. `-X theirs` resurrects, `-X ours` does not,
+    # and the two differ in NOTHING else.
+    def _merge_resurrection(resolution):
+        needle = "contained_construction_does_not_walk_the_workspace"
+        body = _CLEAN.replace(
+            '"test:src/t.rs::the_boundary_is_probed"',
+            '"absent:.config/flaky-allowlist.txt::%s"' % needle)
+        assert body != _CLEAN, "the merge arm's own mutation stopped applying"
+        with tempfile.TemporaryDirectory() as td:
+            def g(*a):
+                return subprocess.run(
+                    ["git", "-C", td, "-c", "user.email=t@t",
+                     "-c", "user.name=t"] + list(a),
+                    capture_output=True, text=True)
+
+            allow = os.path.join(td, ".config", "flaky-allowlist.txt")
+            os.makedirs(os.path.dirname(allow), exist_ok=True)
+            # The merge BASE: the entry is present, with a neighbour that is
+            # never touched, so a wholesale revert and a partial resolution are
+            # distinguishable.
+            open(allow, "w").write(
+                "2026-10-15  wcore-tools::%s  gh#1182  the base\n"
+                "2026-10-15  other::test  gh#1  the untouched neighbour\n" % needle)
+            _fixture(td, body, extra={"wayland-core-9.md": _CORE_9})
+            main = g("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+
+            g("branch", "lane")
+            # The deletion (c461293f's shape).
+            open(allow, "w").write(
+                "2026-10-15  other::test  gh#1  the untouched neighbour\n")
+            g("add", "-A")
+            g("commit", "-qm", "clear the fixed flaky-allowlist entry")
+            deleted_at = g("rev-parse", "--short", "HEAD").stdout.strip()
+
+            # The lane, cut BEFORE the deletion, rewording the same line. The
+            # hunks overlap, so the merge has to be resolved rather than
+            # auto-combined -- which is where the line came back.
+            g("checkout", "-q", "lane")
+            open(allow, "w").write(
+                "2026-10-15  wcore-tools::%s  gh#1182  reworded on the lane\n"
+                "2026-10-15  other::test  gh#1  the untouched neighbour\n" % needle)
+            g("add", "-A")
+            g("commit", "-qm", "reword the entry on the lane")
+            g("checkout", "-q", main)
+            merged = g("merge", "--no-edit", "-q", "-X", resolution, "lane")
+            merge_sha = g("rev-parse", "--short", "HEAD").stdout.strip()
+
+            # THE CONTROL, and the reason this arm exists. `git log -S` is run
+            # exactly as the lane ran it, on the merged tree.
+            log_s = g("log", "--oneline", "-S", needle).stdout
+            code, out = run(td, injected=_INJ_CLEAN)
+            present = needle in open(allow, encoding="utf-8").read()
+            return {
+                "merge_ok": merged.returncode == 0,
+                "present": present,
+                "log_s_sees_merge": merge_sha in log_s,
+                "log_s_sees_anything": deleted_at in log_s,
+                "fired": code != 0,
+                "out": "\n".join(out),
+            }
+
+    r = _merge_resurrection("theirs")
+    good = (r["merge_ok"] and r["present"] and r["fired"]
+            and "still contains" in r["out"])
+    results.append(("MERGE resurrected the entry -- the gate reds", True,
+                    r["fired"], good))
+    ok &= good
+    # The instrument that let this through, measured on the same tree rather
+    # than asserted: `-S` must find the ordinary commits and must NOT report
+    # the merge. If it ever does see the merge, this arm has stopped being a
+    # reproduction and the pair below is grading something else.
+    control = r["log_s_sees_anything"] and not r["log_s_sees_merge"]
+    results.append(("control: `git log -S` is blind to that merge", False,
+                    not control, control))
+    ok &= control
+
+    r = _merge_resurrection("ours")
+    good = (r["merge_ok"] and not r["present"] and not r["fired"])
+    results.append(("the SAME merge resolved the other way -- green", False,
+                    r["fired"], good))
+    ok &= good
 
     # The window pair is calibrated by hand (see _WINDOW_EDGE). If someone
     # retunes ANCHOR_WINDOW without moving them, the "far edge" arm stops

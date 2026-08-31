@@ -3,7 +3,7 @@ issue: 1202
 repo: FerroxLabs/wayland
 kind: defect
 title: "atomic_write_checked treats a restore that exchanged nothing as a successful rollback, then deletes the user's only copy"
-status: open
+status: closed
 last_verified_commit: a268075fe
 criteria:
   - id: c1

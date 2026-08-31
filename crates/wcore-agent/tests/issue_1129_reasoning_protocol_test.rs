@@ -151,12 +151,40 @@ fn two_reasoning_blocks_are_separated_on_the_wire() {
 }
 
 /// An unclosed tag eats to end of stream in the filter. The content must still
-/// reach the host as `thinking` rather than vanishing.
+/// reach the host rather than vanishing — and since wayland#1242 it reaches it
+/// on the TEXT lane, not the thinking one.
+///
+/// The lane changed, the "must not vanish" property did not. wayland#1222
+/// recorded the decision for the DURABLE record: a block that never closed was
+/// never a reasoning block, it was prose containing a tag-shaped word, so it is
+/// recovered verbatim at end of stream and the same span is retracted from the
+/// capture buffer. Until wayland#1242 the engine did that and the host did not,
+/// so the same turn was stored one way and shown another — the answer's tail
+/// arrived at the host as a collapsed Thought while history had it as the
+/// answer. The two lanes now agree.
+///
+/// The body ALSO still arrives as `thinking`, and that is not an oversight: a
+/// display consumer drains its capture buffer after every chunk so reasoning
+/// streams live (#1129), so by the time the stream ends and the block is known
+/// never to have closed, those bytes are already on the wire. `finish`'s
+/// retraction can only reach what is still in the buffer, and the wire has no
+/// unsend. Duplicated is the honest end state here; TRUNCATED was the one that
+/// cost the user their answer.
+///
+/// A CLOSED block is untouched by this and is still stripped to `thinking`;
+/// `stripped_reasoning_is_re_emitted_as_a_typed_thinking_event` above is that
+/// case, and it is what wayland#908 c1 is about.
 #[test]
 fn unclosed_reasoning_block_is_flushed_at_stream_end() {
     let rec = drive(&["visible <think>runaway tail"]);
     rec.dump("unclosed");
-    assert_eq!(rec.visible_text(), "visible ");
+    assert_eq!(
+        rec.visible_text(),
+        "visible <think>runaway tail",
+        "the tail of the answer was withheld from the host"
+    );
+    // Already streamed before the block could be known to be unclosed. See
+    // the note above: it cannot be unsent.
     assert_eq!(rec.thinking_text(), "runaway tail");
 }
 

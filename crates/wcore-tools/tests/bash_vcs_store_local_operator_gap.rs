@@ -46,13 +46,31 @@ const ROOT_OBJECT: &str = "ROOT-OBJECT-BYTES-244";
 const PLAIN: &str = "ordinary-working-tree-contents";
 const REFUSAL: &str = "Refused: shell is unavailable because the active sandbox";
 
-/// `cat` on unix, `type` on `cmd` — the one external difference this file has,
-/// branched rather than scattered, per the cross-platform rule.
+/// `cat` where the resolved interpreter is a POSIX shell, `type` where it is
+/// `cmd` or PowerShell — the one external difference this file has, branched
+/// rather than scattered, per the cross-platform rule.
+///
+/// The dialect is read from `bash_shell_argv_prefix()`, the SAME function
+/// BashTool calls to build the argv it runs, so this fixture and its subject
+/// cannot disagree about which interpreter was picked. The `cfg!(windows)`
+/// form it replaces is the defect class FerroxLabs/wayland-core#387 swept:
+/// since FerroxLabs/wayland#1164, "Windows" no longer implies `cmd` — the tool
+/// resolves a real `bash.exe` at a known install location when the host has
+/// one, which Git for Windows on the `ferrox-win-msvc` runner does. This file
+/// was added after that sweep and reintroduced the class.
+///
+/// MEASURED WRONG, CI run 33291781675, `CI (Array)`: the payload reached
+/// Git-for-Windows bash, which ate the backslashes, so
+/// `.git\objects\ab\cdef` arrived as `.gitobjectsabcdef` and the store read
+/// this file exists to pin never happened. The positive control failed the
+/// same way for a different reason — bash's `type` builtin searches `PATH`,
+/// not the working tree, so `type readme.txt` "succeeded" against
+/// `/c/Program Files/PuTTY/readme.txt` and never opened the planted file.
 fn read_cmd(rel_unix: &str) -> String {
-    if cfg!(windows) {
-        format!("type {}", rel_unix.replace('/', "\\"))
-    } else {
+    if wcore_config::shell::shell_prefix_is_posix(&wcore_config::shell::bash_shell_argv_prefix()) {
         format!("cat {rel_unix}")
+    } else {
+        format!("type {}", rel_unix.replace('/', "\\"))
     }
 }
 

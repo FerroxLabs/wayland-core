@@ -70,17 +70,44 @@
 //! 61 hosts), `deepseek-v4-flash-0731` (5.1x/35), `deepseek-v4-pro` (8.2x/64),
 //! `minimax-m2` (5.1x/19), `minimax-m2.1` (5.1x/24), `minimax-m2.5`
 //! (65,536-228,700, 3.5x/44) and `minimax-m3` (4.0x/43). The other five have
-//! hosts that agree and are not violations. Removing an arm changes product
-//! behaviour -- an arm revokes `should_omit_max_tokens` -- so the removals are
-//! graded on FerroxLabs/wayland#1232, not here. Do not read them as precedent.
+//! hosts that agree and are not violations.
+//!
+//! THE DECISION, RECORDED (FerroxLabs/wayland#1232). All twelve rows STAY.
+//! The seven violating ids are now PROVIDER-SCOPED rather than removed --
+//! `OPEN_WEIGHTS_HOST_SPREAD` in `limits.rs` gates them to the vendor that
+//! operates each, so `model_output_ceiling` answers with the verified figures
+//! on `deepseek` / `minimax` (and their tenant spellings) and with `None`
+//! everywhere else. The five agreeing ids are NOT gated and keep their global
+//! arm.
+//!
+//! Removal was the obvious reading of rule 3 and it is the wrong one here, for
+//! a reason that is easy to miss: an arm revokes `should_omit_max_tokens`, but
+//! that omission only exists on an OMIT-SAFE preset (`gemini`, `openrouter`,
+//! `flux-router`). DeepSeek's and MiniMax's own endpoints are plain
+//! `openai_compat_provider` presets, which are not omit-safe -- so on the
+//! vendor's own API a deleted arm restores no natural ceiling at all. It drops
+//! output to `UNKNOWN_CAP` (8,192) and the window to
+//! `UNVERIFIED_CONTEXT_WINDOW` (32,768): the 47x cut #1157 was filed to fix.
+//! Scoping gets rule 3's intended outcome on every OTHER route -- `None` on an
+//! omit-safe reseller restores the host's natural ceiling, and `None` anywhere
+//! else errs LOW (32,768 / 8,192, which IS the measured host floor for both
+//! families) instead of the ceiling-death direction of #165.
+//!
+//! Enforced by a test, not by this paragraph:
+//! `host_variable_open_weights_arms_are_provider_scoped` fails if a later
+//! change re-globalises one of the seven OR deletes it outright, and
+//! `open_weights_rows_are_longest_fragment_first` pins the substring ordering
+//! that keeps the five agreeing rows out of the gate.
 //!
 //! Both directions ARE enforced by `check-model-limits-freshness.py`:
 //! `scan_passthrough` will not DEMAND an arm for a new open-weights id whose
 //! hosts disagree by 2x or more, and `scan_open_weights_arms` reads this
 //! table's own contents on every run, so a new host-variable open-weights arm
-//! that is ADDED here FAILS the release. The seven above are listed, dated and
-//! owned in `OPEN_WEIGHTS_ARM_DEBT`, keyed on the exact model id so that
-//! listing one cannot excuse the next.
+//! that is ADDED here FAILS the release. The seven above are no longer debt:
+//! `provider_scoped_arms` parses `OPEN_WEIGHTS_HOST_SPREAD` out of the Rust
+//! source on every run, so un-scoping an arm makes rule 3 fail it again with
+//! no edit to the script. `OPEN_WEIGHTS_ARM_DEBT` is now empty and kept, keyed
+//! on the exact model id so that listing one could never excuse the next.
 //!
 //! Ids are recorded in their CANONICAL vendor spelling. The lookup is a
 //! substring match, so the provider-specific dressings -- `anthropic.`,

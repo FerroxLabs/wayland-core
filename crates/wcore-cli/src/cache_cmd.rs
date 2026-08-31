@@ -209,22 +209,28 @@ pub fn run(args: CacheArgs) -> anyhow::Result<ExitCode> {
             let truth = s.cost_truth();
             // wayland#1205 c3 — a ledger an older build wrote is not
             // certifiable, however good its BILLED figure is. v1 had no way to
-            // say "nothing could price this": it wrote a bare `0.0`, which this
-            // build has to demote on load because it cannot tell that apart
-            // from a genuine priced zero. `verify` is the certification
-            // surface, and certifying a file whose field meanings we had to
-            // guess at is the one place that must not happen. Narrow on
-            // purpose: it keys on rows actually demoted, so a v2 session on an
-            // unlisted model — merely unpriced, not laundered — still verifies.
+            // record where its uncached-equivalent baseline came from: a bare
+            // number there may be a catalog price or a provider-family
+            // CEILING, and `0.0` meant "nothing could price this" — three
+            // facts this build cannot tell apart, so `load` drops all of them.
+            // `verify` is the certification surface, and certifying a file
+            // whose field meanings we had to guess at is the one place that
+            // must not happen.
+            //
+            // The refusal keys on the SCHEMA (`is_migrated`), and the demoted
+            // row count is printed beside it so an operator can tell this
+            // refusal from an unpriced-model one. Narrow where it matters: a
+            // CURRENT-schema session on an unlisted model is merely unpriced,
+            // not laundered, and still verifies.
             let laundered = s.laundered_counterfactual_round_trips;
-            let trustworthy = truth.is_trustworthy() && laundered == 0;
+            let certified = truth.is_trustworthy() && !ledger.is_migrated();
             println!(
                 "F23_CACHE=verify trustworthy={} cost_truth={} saving_truth={} \
-                 laundered_counterfactual_round_trips={} \
+                 laundered_counterfactual_round_trips={} legacy_schema={} \
                  provider_reported_round_trips={} catalog_priced_round_trips={} \
                  estimated_round_trips={} unpriced_round_trips={} cost_usd={} \
                  session_complete={} session={} path={}",
-                trustworthy,
+                certified,
                 truth.as_str(),
                 // Reported, not enforced: `verify`'s documented contract and
                 // exit code 7 are about whether the BILLED figure is spend. A
@@ -233,6 +239,10 @@ pub fn run(args: CacheArgs) -> anyhow::Result<ExitCode> {
                 // for every session on an unlisted model.
                 s.saving_truth().as_str(),
                 laundered,
+                match ledger.migrated_from_schema {
+                    Some(v) => v.to_string(),
+                    None => "none".to_string(),
+                },
                 s.provider_reported_round_trips,
                 s.catalog_priced_round_trips,
                 s.estimated_round_trips,
@@ -242,16 +252,20 @@ pub fn run(args: CacheArgs) -> anyhow::Result<ExitCode> {
                 s.session_id,
                 path.display(),
             );
-            if trustworthy {
+            if certified {
                 Ok(ExitCode::SUCCESS)
-            } else if laundered > 0 && truth.is_trustworthy() {
+            } else if let Some(found) = ledger.migrated_from_schema {
                 eprintln!(
-                    "wayland-core cache verify: {laundered} of {} round-trips were written by a \
-                     build older than ledger schema {} — their uncached-equivalent baseline was a \
-                     bare 0.0, which meant \"nothing could price this\" and cannot be told apart \
-                     from a real zero. The billed figure is {}, but this file is not certifiable.",
+                    "wayland-core cache verify: the ledger at {} was written at schema {} and \
+                     migrated on read — v1 stored no provenance for its uncached-equivalent \
+                     baseline, so a bare figure there may be a catalog price or a \
+                     provider-family ceiling and a 0.0 meant \"nothing could price this\". \
+                     {laundered} of {} round-trips lost that figure on load. The billed cost is \
+                     {}, but the saving this file recorded cannot be recovered and this session \
+                     must not be certified.",
+                    path.display(),
+                    found,
                     s.round_trips,
-                    wcore_agent::cache_ledger::LEDGER_SCHEMA,
                     truth.as_str(),
                 );
                 Ok(ExitCode::from(EXIT_LEGACY_SCHEMA))
@@ -504,7 +518,8 @@ fn resolve(
             Ok(ledger) => return Ok((path, ledger)),
             Err(e) => {
                 anyhow::bail!(
-                    "session '{id}' recorded conversation id '{conversation_id}', but its ledger                      could not be read: {e}"
+                    "session '{id}' recorded conversation id '{conversation_id}', but its ledger \
+                        could not be read: {e}"
                 );
             }
         }
@@ -514,7 +529,10 @@ fn resolve(
     // the keys. The old message named a path that had never existed and said
     // nothing else.
     anyhow::bail!(
-        "no cache ledger for '{id}' in {}. Ledgers are keyed by the engine's internal          conversation id, not by the session id you set with --session-id; session '{id}' is          either unknown to the session store at {} or was recorded by a build that did not          persist its conversation id. Run `wayland-core cache list` to see the ids that exist.",
+        "no cache ledger for '{id}' in {}. Ledgers are keyed by the engine's internal \
+            conversation id, not by the session id you set with --session-id; session '{id}' is \
+            either unknown to the session store at {} or was recorded by a build that did not \
+            persist its conversation id. Run `wayland-core cache list` to see the ids that exist.",
         dir.display(),
         manager.directory().display(),
     )

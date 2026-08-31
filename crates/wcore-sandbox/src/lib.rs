@@ -395,6 +395,14 @@ impl SandboxRegistry {
     pub fn owns_descendants_hard(&self) -> bool {
         self.backend.owns_descendants_hard()
     }
+    /// See [`backends::SandboxBackend::unavailable_reason`] (#369 c2).
+    pub fn unavailable_reason(&self) -> Option<String> {
+        self.backend.unavailable_reason()
+    }
+    /// See [`backends::SandboxBackend::known_limitations`] (#368, #369).
+    pub fn known_limitations(&self) -> Vec<&'static str> {
+        self.backend.known_limitations()
+    }
     pub fn binds_cwd_authority(&self) -> bool {
         self.backend.binds_cwd_authority()
     }

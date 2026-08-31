@@ -696,6 +696,10 @@ pub struct SessionView {
     /// boundaries) from `TextDelta` text before it reaches `streaming`.
     /// Reset on each `StreamStart` so a runaway unclosed block from one
     /// turn cannot bleed into the next (W2 C4).
+    ///
+    /// #1242 — drained at `StreamEnd` in `protocol_bridge`, before the
+    /// captured reasoning is taken, so what the user is SHOWN matches the
+    /// turn the engine stored.
     pub reasoning_filter: ReasoningFilter,
     /// W3 D3: Current streaming phase — drives the animated status widget
     /// that replaced the static "working" line. The phase is derived from

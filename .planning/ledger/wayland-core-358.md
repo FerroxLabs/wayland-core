@@ -3,7 +3,7 @@ issue: 358
 repo: FerroxLabs/wayland-core
 kind: defect
 title: "OwnedTree owns only the LEAF on Windows: the grandchild case #1156 was filed about is still open on all 49 swept sites"
-status: open
+status: closed
 last_verified_commit: f92d5007
 criteria:
   - id: c1

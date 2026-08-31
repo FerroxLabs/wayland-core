@@ -182,14 +182,14 @@ fn no_reasoning_tag_reaches_sub_agent_text_delta() {
             "bye",
             "secret",
         ),
-        // Unclosed block: the filter eats to end of stream; the body must be
-        // FLUSHED as thinking, not silently deleted.
-        (
-            "unclosed",
-            &["visible<think>dangling"],
-            "visible",
-            "dangling",
-        ),
+        // Unclosed block: the filter eats to end of stream. wayland#1242
+        // moved this case to the TEXT lane — a block that never closed was
+        // never a block, so it is recovered verbatim and NOT reported as
+        // reasoning, which is what the engine already stored for it
+        // (wayland#1222). Covered by
+        // `an_unclosed_block_is_relayed_as_text_not_as_thinking` below, which
+        // is the only case where a tag legitimately appears in the relayed
+        // text, so it cannot live in this table's leak check.
         // The ticket asked for every spelling, `thought` included.
         (
             "thought",
@@ -223,6 +223,35 @@ fn no_reasoning_tag_reaches_sub_agent_text_delta() {
         }
     }
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+/// wayland#1242 — the one case where a reasoning tag legitimately reaches the
+/// relayed text, and why.
+///
+/// An unclosed `<think>` is not a reasoning block; it is prose that contains a
+/// tag-shaped word and a stream that ended before anything could close it.
+/// wayland#1222 settled that for the durable record — recover it verbatim,
+/// retract it from the capture — and wayland#1242 makes the relay agree, so a
+/// parent host is shown the same answer the child stored. The alternative,
+/// keeping the strip on the relay only, leaves the two disagreeing about the
+/// same turn with no way for either side to tell.
+///
+/// The body ALSO still arrives as `thinking`. A relay drains its capture
+/// buffer after every chunk so a child's reasoning streams live (#1129), so
+/// those bytes are on the wire long before the stream ends and the block is
+/// known never to have closed; `finish`'s retraction reaches only what is
+/// still buffered. Duplicated is the honest end state; truncated was the one
+/// that cost the user the answer.
+#[test]
+fn an_unclosed_block_is_relayed_as_text() {
+    let rec = drive(&["visible<think>dangling"], &[]);
+    rec.dump("unclosed");
+    assert_eq!(
+        rec.relayed_visible(),
+        "visible<think>dangling",
+        "the tail of the answer was withheld from the host"
+    );
+    assert_eq!(rec.relayed_thinking(), "dangling");
 }
 
 /// The second relay producer: streaming tool output, which `ChannelSink`
@@ -277,8 +306,19 @@ fn lanes_do_not_contaminate_each_other() {
         visible.starts_with("answer"),
         "model answer lost: {visible:?}"
     );
-    assert!(
-        tag_leak(&visible).is_none(),
-        "reasoning tag leaked: {visible:?}"
+    // The tool lane's `<think>` never closes, so wayland#1242 recovers it onto
+    // that lane's own text — verbatim, and only there. The property under test
+    // is that the two state machines stay separate: the model lane's answer is
+    // whole, and the tool lane's tail is whole, with neither having eaten the
+    // other.
+    assert_eq!(
+        visible, "answerfile contains <think>literal",
+        "one lane's state machine consumed the other's text: {visible:?}"
+    );
+    assert_eq!(
+        rec.relayed_thinking(),
+        "literal",
+        "the tool lane's own open block, streamed live before it could be \
+         known never to close"
     );
 }

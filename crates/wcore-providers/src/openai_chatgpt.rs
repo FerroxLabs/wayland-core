@@ -30,7 +30,7 @@ use async_trait::async_trait;
 use serde_json::json;
 use tokio::sync::mpsc;
 
-use wcore_config::compat::ProviderCompat;
+use wcore_config::compat::{ProviderCompat, join_endpoint};
 use wcore_config::debug::DebugConfig;
 use wcore_types::llm::{LlmEvent, LlmRequest};
 
@@ -105,7 +105,7 @@ impl OpenAIChatGptProvider {
 
     /// The Codex `responses` endpoint: `<base>/responses`.
     pub(crate) fn responses_url(&self) -> String {
-        format!("{}/responses", self.base_url.trim_end_matches('/'))
+        join_endpoint(&self.base_url, "/responses")
     }
 
     /// Build the Codex request headers from the OAuth credentials.

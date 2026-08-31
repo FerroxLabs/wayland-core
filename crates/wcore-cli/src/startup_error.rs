@@ -136,6 +136,8 @@ pub fn report_startup_refusal(err: &anyhow::Error) {
             // context line. This is the same rendering the #186 sites use.
             message: format!("Engine failed to start: {err:#}"),
             retryable: false,
+            // wayland#1237: the local process failed to start.
+            category: wcore_protocol::events::FailureCategory::LocalWayland,
         },
     });
     let _ = writer.flush_bounded();

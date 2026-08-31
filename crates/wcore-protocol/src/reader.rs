@@ -221,6 +221,10 @@ fn reject(errors: &dyn ProtocolEmitter, message: String) {
             code: "engine_error".to_string(),
             message,
             retryable: false,
+            // wayland#1237: the LOCAL reader refused a malformed line. The
+            // vocabulary of `code` deliberately does not widen (above); the
+            // category is where the machine-readable answer goes.
+            category: crate::events::FailureCategory::LocalWayland,
         },
     });
 }

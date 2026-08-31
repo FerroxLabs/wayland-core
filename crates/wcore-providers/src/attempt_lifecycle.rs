@@ -372,7 +372,11 @@ mod tests {
 
     #[async_trait]
     impl wcore_egress::EgressPolicy for DenyPolicy {
-        async fn check(&self, _: &reqwest::Request) -> wcore_egress::EgressDecision {
+        async fn check(
+            &self,
+            _: &reqwest::Request,
+            _: wcore_egress::EgressOrigin,
+        ) -> wcore_egress::EgressDecision {
             wcore_egress::EgressDecision::Deny {
                 reason: "fixture denial".into(),
             }

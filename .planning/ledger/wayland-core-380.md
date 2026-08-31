@@ -3,7 +3,7 @@ issue: 380
 repo: FerroxLabs/wayland-core
 kind: defect
 title: "On Windows the #338 credential-prompt elimination is bypassable: DETACHED_PROCESS is not setsid"
-status: open
+status: closed
 last_verified_commit: a278f8c3
 criteria:
   - id: c1

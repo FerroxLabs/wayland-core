@@ -3,7 +3,7 @@ issue: 381
 repo: FerroxLabs/wayland-core
 kind: defect
 title: "The @dir walk blocks forever on a FIFO in the workspace, wedging the turn with no cancellation path"
-status: open
+status: closed
 last_verified_commit: b437de07
 criteria:
   - id: c1

@@ -27,7 +27,13 @@ impl OutputSink for NullSink {
         _finish_reason: FinishReason,
     ) {
     }
-    fn emit_error(&self, _msg: &str, _retryable: bool) {}
+    fn emit_error(
+        &self,
+        _msg: &str,
+        _retryable: bool,
+        _category: wcore_protocol::events::FailureCategory,
+    ) {
+    }
     fn emit_info(&self, _msg: &str) {}
 }
 
@@ -44,7 +50,11 @@ mod tests {
         sink.emit_tool_result("Read", false, "ok");
         sink.emit_stream_start("msg1");
         sink.emit_stream_end("msg1", 1, 100, 50, 0, 0, FinishReason::Stop);
-        sink.emit_error("err", false);
+        sink.emit_error(
+            "err",
+            false,
+            wcore_protocol::events::FailureCategory::Unknown,
+        );
         sink.emit_info("info");
     }
 }

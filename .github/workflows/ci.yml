@@ -1505,6 +1505,30 @@ jobs:
           python3 scripts/check-test-env-globals.py --self-test
           python3 scripts/check-test-env-globals.py
 
+      # ── message-whitespace gate (FerroxLabs/wayland#1162, defect D22) ──
+      # A multi-line message written with `\`-newline continuations gets
+      # collapsed onto one source line by a tooling pass, and the SOURCE
+      # indentation that used to follow the continuation survives inside the
+      # string. The operator then reads "keyed by the engine's internal
+      #           conversation id" on the terminal. Nothing else in the
+      # toolchain can see it: rustfmt does not format string contents, and the
+      # assertions written over these messages are `contains("cache list")`
+      # shaped, which the mangled text satisfies. 23 messages were shipped this
+      # way, including the one #1162 was opened to improve.
+      #
+      # It fails only on a run of 4+ spaces BETWEEN TWO WORDS OF PROSE, at
+      # least three words into the literal, in a literal carrying no explicit
+      # `\n`/`\t`. That triple is what keeps deliberate column padding
+      # ("bundle        intact", "health:        UNAVAILABLE"), key hints
+      # ("↑↓ move   i details") and embedded code fixtures out of it. The
+      # `--self-test` drives both directions -- 12 cases, 3 that must fire and
+      # 9 that must stay silent -- so a scanner that has stopped matching fails
+      # loudly rather than passing everything.
+      - name: No collapsed continuation whitespace in messages
+        run: |
+          python3 scripts/check-message-whitespace.py --self-test
+          python3 scripts/check-message-whitespace.py crates
+
       # ── criteria-ledger gate ──────────────────────────────────────────
       # `.planning/ledger/<repo>-<number>.md` says what must be TRUE for an
       # issue to close and anchors every `met` claim to something a machine
@@ -1549,10 +1573,47 @@ jobs:
           python3 .planning/evidence/ci-macos-budget/gate.py --self-test .github/workflows/ci.yml
           python3 .planning/evidence/ci-macos-budget/gate.py .github/workflows/ci.yml
 
+      # ── Criteria ledger: STRUCTURE here, COVERAGE at release ───────────
+      # `--offline` is deliberate and it is not free, so the cost is written
+      # down rather than left for the next reader to discover.
+      #
+      # Two arms exist. The STRUCTURAL arm parses every ledger and resolves
+      # every `met` criterion's evidence anchor; it needs nothing but the
+      # checkout and runs here, on every push. The COVERAGE arm asks the one
+      # question this repo cannot answer from its own files -- is there an OPEN
+      # in-scope issue with NO ledger at all -- and to ask it, it queries BOTH
+      # FerroxLabs/wayland and FerroxLabs/wayland-core. The repo-scoped
+      # GITHUB_TOKEN cannot see the second tracker, so the arm cannot run on a
+      # PR from a fork or on any leg without `LEDGER_ISSUES_TOKEN`.
+      #
+      # It DOES run, and can fail, at release.yml:104 -- with that token, on the
+      # release path, which is the moment coverage decides something.
+      #
+      # What that costs: between releases a missing ledger is invisible here. It
+      # is not hypothetical. On 2026-08-31 the live arm was run by hand for the
+      # first time in this cycle and reported 29 open in-scope issues with no
+      # ledger file, filed over the preceding two days, none of which any green
+      # run on this leg could have seen. If you are widening this step, the
+      # question to ask is whether it should also run on a schedule.
       - name: Criteria ledger is anchored and parseable
         run: |
+          set -euo pipefail
           python3 scripts/check-criteria-ledger.py --self-test
-          python3 scripts/check-criteria-ledger.py --offline
+          python3 scripts/check-criteria-ledger.py --offline | tee /tmp/ledger-offline.log
+          # The gate prints "THIS IS NOT A PASS for coverage" and, inside a
+          # green step, that sentence reaches nobody. Project it where a reader
+          # of the run actually looks. A disclosure nothing surfaces is the
+          # defect wayland-core#400 is about, one layer up in our own tooling.
+          {
+            echo "### Criteria ledger (structural arm only)"
+            echo
+            echo "\`--offline\`: tracker COVERAGE was **not** checked on this run."
+            echo "An open in-scope issue with no ledger file would not be seen here."
+            echo "The coverage arm runs on the release path (\`release.yml\`), which"
+            echo "is the moment it decides something."
+            echo
+            grep -E "^(OK|OFFLINE)" /tmp/ledger-offline.log || true
+          } >> "$GITHUB_STEP_SUMMARY"
       # ── Release-readiness gate: SELF-TEST ONLY ─────────────────────────
       # The gate itself is NOT run here, and that is the whole design. It
       # refuses a release while any in-scope defect still owes core work, so
@@ -2815,15 +2876,42 @@ jobs:
       # shared with e2e.yml's report job. It was inline here and simply ABSENT
       # there, which is how e2e.yml's identically named `report` check went
       # green on a suite that never ran (wayland#1115). One implementation, two
-      # callers, no room to diverge again. EXPECTED_MIN stays at 1 — the same
-      # "zero reports is a failure" rule this step has always enforced; the ci
-      # matrix legs are conditioned per platform, so a per-leg count would be a
-      # different (and riskier) gate than the one being preserved here.
+      # callers, no room to diverge again.
+      #
+      # EXPECTED_MIN stays at 1 and is NO LONGER THE ONLY FLOOR (wayland#1216).
+      # An aggregate count cannot say WHICH leg reported: every leg's artifact
+      # lands in one directory, so `EXPECTED_MIN: 1` is satisfied the moment any
+      # one of them uploads a junit.xml — including runs where `ci-linux`, the
+      # leg that runs the WHOLE WORKSPACE SUITE, contributed nothing at all.
+      # `if-no-files-found: ignore` on its upload makes that silent. Raising the
+      # number does not fix it, because the `ci` matrix legs are conditioned per
+      # platform and any fixed count is either unreachable on a lane push or met
+      # by the wrong legs.
+      #
+      # REQUIRED_LEGS names the leg instead of counting, one line of
+      # `<artifact-subdirectory> <job> <job-result>`. `ci-linux` is listed
+      # because it is UNCONDITIONAL (no job-level `if:`) and because its
+      # coverage — the workspace nextest run, both shared-process suites, the
+      # corpus drift check, the audit, the signed-manifest drill — exists on no
+      # other leg. The `ci` matrix legs are deliberately NOT listed: their
+      # artifact name renders from `matrix.os`, which is the literal string
+      # `Array` for the label-array Windows entry, and the whole job is skipped
+      # on a `lane/**` push that opted into no platform. A leg whose job was
+      # cancelled or skipped is not required to report, so this cannot turn a
+      # conditioned platform into a permanent red.
+      #
+      # The `if:` now also fires when `ci` was skipped but `ci-linux` produced a
+      # verdict. Without that widening, the per-leg floor would be unreachable
+      # on exactly the lane pushes where `ci-linux` is the only leg that ran.
       - name: Assert test evidence exists (a skipped test step is not a pass)
-        if: ${{ needs.ci.result != 'cancelled' && needs.ci.result != 'skipped' }}
+        if: >-
+          ${{ (needs.ci.result != 'cancelled' && needs.ci.result != 'skipped')
+              || (needs.ci-linux.result != 'cancelled' && needs.ci-linux.result != 'skipped') }}
         env:
           EVIDENCE_DIR: junit-reports
           EXPECTED_MIN: 1
+          REQUIRED_LEGS: |
+            nextest-junit-linux-containerized ci-linux ${{ needs.ci-linux.result }}
           LABEL: ci matrix (unit + integration)
           UPSTREAM_RESULT: ${{ needs.ci.result }}
           HINT: >-

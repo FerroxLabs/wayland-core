@@ -3,7 +3,7 @@ issue: 335
 repo: FerroxLabs/wayland-core
 kind: defect
 title: "@-ref: absolute paths escape the workspace root and skip the gitignore check"
-status: open
+status: closed
 last_verified_commit: 52b7bc5b
 criteria:
   - id: c1

@@ -4,7 +4,9 @@
 //! Exfil go to the consent bridge; Allow / Deny are terminal).
 //!
 //! Layered model (SPEC Layer 1 + 2):
-//! - **Allowlisted** registrable domain (or exact host) → `Allow`.
+//! - **Allowlisted** registrable domain (or exact host) → `Allow` — unless the
+//!   request is [`EgressOrigin::ModelDirected`] AND carries data, in which case
+//!   the shape checks below still run (wayland#1264).
 //! - **Shared-platform** host (gist / raw / S3 / workers.dev / request-bins …)
 //!   → never apex-allowlistable; anything but an exact-host allow is `Exfil`
 //!   (C2 — allowlisting `amazonaws.com` would open every tenant's bucket).
@@ -21,6 +23,7 @@
 use std::collections::HashSet;
 
 use reqwest::Method;
+pub use wcore_egress::EgressOrigin;
 
 /// Suffixes of "shared-platform" hosts where many mutually-untrusted tenants
 /// live under one registrable domain. Allowlisting the registrable apex would
@@ -97,6 +100,13 @@ pub enum EgressVerdict {
         registrable: String,
         /// Short human reason for the prompt.
         reason: String,
+        /// What this `Ask` means when the session has no consent surface at all
+        /// (headless, one-shot, a sink with no approval channel). wayland#1264:
+        /// a data-less read to a new destination may proceed unattended —
+        /// nothing sensitive leaves — but a model-chosen URL carrying data to an
+        /// allowlisted host is exactly the unattended exfil path, so that one
+        /// must refuse rather than fall through.
+        unattended: UnattendedFallback,
     },
     /// Exfil-class — must be gated even in YOLO. The operator still decides, but
     /// this never silently auto-allows and never persists an apex allow.
@@ -109,6 +119,20 @@ pub enum EgressVerdict {
         /// Short human reason.
         reason: String,
     },
+}
+
+/// What an [`EgressVerdict::Ask`] resolves to when nothing can ask.
+///
+/// The consent doorbell is absent in headless runs, one-shot invocations, and
+/// on any sink with no approval surface. Before wayland#1264 that state had one
+/// meaning for every `Ask` — allow — which is safe for a data-less read and is
+/// the whole exfil path for a model-chosen URL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnattendedFallback {
+    /// Proceed. Nothing sensitive leaves on a data-less GET/HEAD.
+    Allow,
+    /// Refuse. Reached only for data-bearing, model-directed requests.
+    Deny,
 }
 
 /// The set of destinations the operator has allowed. Two tiers: registrable
@@ -205,7 +229,12 @@ pub fn is_shared_platform(host: &str) -> bool {
 }
 
 /// Classify an outbound request against the current allow state.
-pub fn classify(method: &Method, url: &url::Url, allow: &AllowList) -> EgressVerdict {
+pub fn classify(
+    method: &Method,
+    url: &url::Url,
+    allow: &AllowList,
+    origin: EgressOrigin,
+) -> EgressVerdict {
     let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
 
     // Local destinations are not exfiltration — loopback, RFC1918, link-local,
@@ -229,6 +258,33 @@ pub fn classify(method: &Method, url: &url::Url, allow: &AllowList) -> EgressVer
         allow.domain_allowed(&registrable) || allow.host_allowed(&host)
     };
     if allowed {
+        // wayland#1264. Until now this returned unconditionally, ABOVE the
+        // method check and the path/query check, so `get_carries_data` had one
+        // call site that a request to an allowlisted host could never reach.
+        // `WebFetch https://github.com/?leak=<secret>` was therefore admitted
+        // with no approval in any mode: `github.com` ships on the 38-entry
+        // default allowlist and WebFetch takes the whole URL from tool input.
+        //
+        // Product traffic keeps that unconditional grant — the allowlist is how
+        // an operator authorises their own provider, channel and API-tool
+        // destinations, and shape-checking those would refuse the agent's own
+        // LLM POSTs. Only a destination the MODEL chose falls through.
+        if origin == EgressOrigin::Product {
+            return EgressVerdict::Allow;
+        }
+        if let Some(shape) = data_bearing_shape(method, url) {
+            return EgressVerdict::Ask {
+                host: host.clone(),
+                registrable,
+                reason: format!(
+                    "{shape} to `{host}` — the host is allowlisted but this URL \
+                     was chosen by the model, not by the product"
+                ),
+                // No consent surface must not mean "allow" here: an unattended
+                // run is precisely where this leaves without anyone seeing it.
+                unattended: UnattendedFallback::Deny,
+            };
+        }
         return EgressVerdict::Allow;
     }
 
@@ -259,12 +315,30 @@ pub fn classify(method: &Method, url: &url::Url, allow: &AllowList) -> EgressVer
         };
     }
 
-    // Otherwise a plain new destination → ask.
+    // Otherwise a plain new destination → ask. A data-less read: unattended
+    // runs may proceed, which is the behaviour that predates wayland#1264.
     EgressVerdict::Ask {
         host,
         registrable,
         reason: "first request to a new destination".into(),
+        unattended: UnattendedFallback::Allow,
     }
+}
+
+/// The exfil-shape of a request, or `None` if it carries no data.
+///
+/// Reads exactly the two properties the non-allowlisted branch already tests —
+/// a body-bearing method, or a GET/HEAD whose path/query is long or high-entropy
+/// — so the allowlisted model-directed branch and the non-allowlisted branch
+/// cannot drift into two different definitions of "carries data".
+fn data_bearing_shape(method: &Method, url: &url::Url) -> Option<String> {
+    if matches!(*method, Method::POST | Method::PUT | Method::PATCH) {
+        return Some(format!("{method} with a body"));
+    }
+    if get_carries_data(url) {
+        return Some("GET with a long or high-entropy path/query".to_string());
+    }
+    None
 }
 
 /// Heuristic: does this GET/HEAD URL carry data in its path or query? True when
@@ -299,6 +373,15 @@ fn longest_token_run(s: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
+    /// Every pre-wayland#1264 arm below grades PRODUCT-origin traffic — a URL
+    /// the product built. That is the half of the boundary the change
+    /// deliberately leaves untouched, so these read unchanged and their
+    /// continued green IS the wrong-refusal control. Model-directed arms call
+    /// `super::classify` with the origin spelled out.
+    fn classify(method: &Method, url: &url::Url, allow: &AllowList) -> EgressVerdict {
+        super::classify(method, url, allow, EgressOrigin::Product)
+    }
+
     use super::*;
 
     fn url(s: &str) -> url::Url {

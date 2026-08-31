@@ -913,7 +913,7 @@ mod resilience_wrap {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
         fn emit_provider_circuit_event(
             &self,

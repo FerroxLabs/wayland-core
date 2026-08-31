@@ -3,7 +3,7 @@ issue: 1181
 repo: FerroxLabs/wayland
 kind: defect
 title: "Four orphaned lane branches carry unmerged fixes, two of them in the 'a check that ran nothing' class"
-status: open
+status: closed
 last_verified_commit: 43848f75
 criteria:
   - id: c1

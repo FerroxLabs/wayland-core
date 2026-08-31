@@ -20,9 +20,10 @@ criteria:
     note: "The ratchet reads the crate's own test sources and refuses any spawn expression not handed to OwnedTree. blank_noncode blanks comments and string literals first, so the spellings quoted in the module's own prose are invisible to it - the mutation-hits-a-comment trap. Its own both-directions case is the cited test."
   - id: c3
     text: "Windows: the guard owns the tree, not just the leaf, and a test grades the grandchild case"
-    state: superseded
+    state: met
+    evidence: "test:crates/wcore-cli/tests/harness_owns_spawned_trees_windows.rs::dropping_the_guard_kills_a_detached_grandchild_on_windows"
     owner: core
-    note: "Deliberately split out to wayland-core#358, which is open and carries the full Windows contract. child_pids under cfg(windows) still returns Vec::new() (owned_tree.rs:97-100) even after the sweep merged, so reap() snapshots an empty descendant set on all 40-plus swept sites at once."
+    note: "RETIRED FROM superseded TO met 2026-08-31. The successor wayland-core#358 is now CLOSED (completed) with all 6 of its own criteria met. The anchor is the grandchild test this criterion asked for by name. NOTE the class is not closed: wayland-core#393 carries the quarantine-git-abort site of the same kill-the-leaf shape and is OPEN. This criterion's specific ask is met; the family is tracked there. -- Deliberately split out to wayland-core#358, which is open and carries the full Windows contract. child_pids under cfg(windows) still returns Vec::new() (owned_tree.rs:97-100) even after the sweep merged, so reap() snapshots an empty descendant set on all 40-plus swept sites at once."
   - id: c4
     text: "macOS: the pgrep arm is EXECUTED in CI at least once with the run cited, or deleted as unreachable"
     state: met

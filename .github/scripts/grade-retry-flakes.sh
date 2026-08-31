@@ -271,7 +271,7 @@ if [ -n "$FLAKES" ]; then
     else
       UNLISTED=$((UNLISTED + 1))
       printf "  RED      %-3s failed attempt(s)  %s\n" "$attempts" "$key"
-      echo "::error title=Retried failure (wayland#1169)::${key} FAILED ${attempts} time(s) and was retried into a pass, so the run conclusion would have said SUCCESS. Reproduce with: cargo nextest run --retries 0 -E 'test(=${key##*::})' - repeated, because an intermittent failure needs n runs and not one. If it is a real defect, fix it or give it a scoped 'retries = 0' override in .config/nextest.toml so the failure reaches the conclusion. If it is genuinely infrastructure noise, add a dated, owned, justified line to ${ALLOWLIST}."
+      echo "::error title=Retried failure (wayland#1169)::${key} FAILED ${attempts} time(s) and was retried into a pass, so the run conclusion would have said SUCCESS. Reproduce with: cargo nextest run --retries 0 -E 'test(${key##*::})' - repeated, because an intermittent failure needs n runs and not one. If it is a real defect, fix it or give it a scoped 'retries = 0' override in .config/nextest.toml so the failure reaches the conclusion. If it is genuinely infrastructure noise, add a dated, owned, justified line to ${ALLOWLIST}."
     fi
   done <<< "$FLAKES"
 else
@@ -297,7 +297,7 @@ if [ -n "$OUTER" ]; then
     else
       OUTER_UNLISTED=$((OUTER_UNLISTED + 1))
       printf "  RED      %-3s failed attempt(s)  %s\n" "$attempts" "$key"
-      echo "::error title=Failure erased by an outer retry (wayland#1177)::${key} FAILED on an outer-retry attempt whose JUnit the next attempt overwrites, and the step then passed - so the run conclusion says SUCCESS and nothing else in this run records it. Reproduce with: cargo nextest run --retries 0 -E 'test(=${key##*::})' - repeated, because an intermittent failure needs n runs and not one. If it is a real defect, fix it. If it is genuinely infrastructure noise, add a dated, owned, justified line to ${ALLOWLIST}."
+      echo "::error title=Failure erased by an outer retry (wayland#1177)::${key} FAILED on an outer-retry attempt whose JUnit the next attempt overwrites, and the step then passed - so the run conclusion says SUCCESS and nothing else in this run records it. Reproduce with: cargo nextest run --retries 0 -E 'test(${key##*::})' - repeated, because an intermittent failure needs n runs and not one. If it is a real defect, fix it. If it is genuinely infrastructure noise, add a dated, owned, justified line to ${ALLOWLIST}."
     fi
   done <<< "$OUTER"
 fi

@@ -94,6 +94,38 @@ fn shares_console_with_driver() -> bool {
     n > 0 && n <= pids.len() && pids[..n].contains(&driver)
 }
 
+/// Does THIS process have a console AT ALL — window or not?
+///
+/// The gate above used `GetConsoleWindow()`, which is the oracle
+/// `shares_console_with_driver` one screen up already documents as the wrong
+/// one, applied to the driver instead of to the probe. A console created
+/// without a window — `CREATE_NO_WINDOW`, a ConPTY, a process spawned by a
+/// service — is still a console, and `AllocConsole` then FAILS with
+/// `ERROR_ACCESS_DENIED` precisely because one is already attached. The gate
+/// therefore read "no window" as "no console", could not fix it, and refused
+/// the run.
+///
+/// MEASURED on SeanDesktop, Windows 11 build 26200, by running the identical
+/// probe in both contexts:
+///
+/// ```text
+/// ssh session (console has a window)   GetConsoleWindow=0x265d688  ProcessList=2  AllocConsole=false err=5
+/// CreateNoWindow child (no window)     GetConsoleWindow=0          ProcessList=1  AllocConsole=false err=5
+/// ```
+///
+/// The second row is the `ferrox-win-msvc` runner's condition and is what
+/// failed CI run 33291781675: a real console, one process attached, no window
+/// handle. `GetConsoleProcessList` sees it; `GetConsoleWindow` cannot. The
+/// window-handle reading is kept for the REPORT (`console_window()` below),
+/// where it is a measurement rather than a gate.
+fn driver_has_console() -> bool {
+    let mut pids = [0u32; 64];
+    // SAFETY: `pids` is a live, correctly sized buffer and its length is passed
+    // as the count. A process with no console returns 0 and writes nothing.
+    let attached = unsafe { GetConsoleProcessList(pids.as_mut_ptr(), pids.len() as u32) };
+    attached > 0
+}
+
 fn console_window() -> &'static str {
     // SAFETY: no arguments, no state; returns NULL when this process has no
     // console WINDOW — which, per `shares_console_with_driver`, is not the same
@@ -117,6 +149,14 @@ fn conout() -> String {
 
 /// The half that runs in the spawned child.
 fn run_as_probe() {
+    // #389 c2 wiring. Built and dropped, never spawned: what is under test is
+    // that the PRODUCTION builder announces itself, and this runs inside a
+    // child whose stderr the parent captures, which an in-process assertion
+    // cannot do (libtest owns this process's stderr).
+    drop(wcore_cli::plugin::quarantine::build_git_command(
+        &["fetch", "--depth", "1"],
+        None,
+    ));
     println!("CONSOLE_WINDOW_AT_CREATION={}", console_window());
     println!("CONOUT_BEFORE={}", conout());
     println!(
@@ -234,6 +274,60 @@ fn probe_through_production_git() -> String {
     }
 }
 
+/// The probe's STDERR, which is where the `#389` c2 attribution notice goes.
+///
+/// A second spawn rather than a parameter on [`probe`] so the existing arms
+/// keep `Stdio::null()` and cannot be perturbed by this one.
+fn probe_stderr() -> String {
+    let exe = std::env::current_exe().expect("current test binary");
+    let mut cmd = Command::new(exe);
+    cmd.arg(TEST_NAME)
+        .arg("--exact")
+        .arg("--nocapture")
+        .arg("--test-threads=1")
+        .env(PROBE_ENV, "1")
+        .env(PARENT_PID_ENV, std::process::id().to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    match cmd.output() {
+        Ok(out) => String::from_utf8_lossy(&out.stderr).into_owned(),
+        Err(e) => format!("SPAWN_FAILED={e}\n"),
+    }
+}
+
+/// The same probe reached through the PRODUCTION SPAWN, `run_hardened` --
+/// which is what `run_git` calls and is the only place the creation flags are
+/// composed.
+///
+/// `#393` c3. `harden_against_credential_prompt` sets `DETACHED_PROCESS` and
+/// the Job Object that owns the process tree needs `CREATE_SUSPENDED`, and
+/// `CommandExt::creation_flags` is a SETTER, not an OR: calling both drops
+/// one, and the one it drops when the job wins is `DETACHED_PROCESS` -- which
+/// would reopen #338 as a side effect of fixing #393. So the OR lives at the
+/// single spawn site, and this arm grades it THERE.
+/// `probe_through_production_git` above cannot: it calls `Command::output`
+/// itself and never reaches the flags `run_hardened` applies.
+fn probe_through_production_spawn() -> String {
+    let exe = std::env::current_exe().expect("current test binary");
+    let alias = format!(
+        "alias.consoleprobe=!\"{}\" {TEST_NAME} --exact --nocapture --test-threads=1",
+        exe.display().to_string().replace('\\', "/")
+    );
+    let mut cmd = wcore_cli::plugin::quarantine::build_git_command(
+        &["-c", alias.as_str(), "consoleprobe"],
+        None,
+    );
+    cmd.env(PROBE_ENV, "1")
+        .env(PARENT_PID_ENV, std::process::id().to_string());
+    wcore_cli::plugin::quarantine::run_hardened(
+        cmd,
+        "git [consoleprobe]",
+        std::time::Duration::from_secs(120),
+    )
+    .unwrap_or_else(|e| format!("RUN_HARDENED_FAILED={e}\n"))
+}
+
 /// Pull one `KEY=value` field out of a probe report.
 ///
 /// Searched ANYWHERE in the line, not anchored at its start: libtest writes
@@ -250,6 +344,130 @@ fn field<'a>(report: &'a str, key: &str) -> Option<&'a str> {
     })
 }
 
+/// `#389` c2, the branch actually taken: a quarantine-originated prompt is
+/// LABELLED, so the operator can attribute it.
+///
+/// # What this asserts, and what it deliberately does not
+///
+/// It does NOT assert that a prompt cannot reach the operator's console —
+/// `quarantine_child_has_no_console_at_creation_on_windows` measures that it
+/// can, and that pin stays. It asserts the property c2 asks for instead: that
+/// before any quarantine `git` is spawned, the operator has been told that
+/// what follows is git's and not wayland-core's.
+///
+/// # What THIS arm grades, stated exactly
+///
+/// The CONTENT of the notice, and the WIRING — that `build_git_command` emits
+/// one at all — observed through a PIPE, because libtest owns this process's
+/// stderr and a child's is the only stderr this test can read.
+///
+/// A pipe is NOT the sink the credential prompt reaches. `build_git_command`
+/// gives git `Stdio::piped()`, so the prompt goes to `CONOUT$`; this arm
+/// therefore observes the notice in precisely the configuration where an
+/// operator could not. That gap is real and is graded by its own arm,
+/// `the_notice_reaches_the_console_the_prompt_reaches`, which asserts the
+/// `CONOUT$` leg against an independent console oracle. Neither arm is
+/// sufficient alone: this one proves the builder announces, that one proves
+/// the announcement lands where the prompt does.
+#[test]
+fn a_quarantine_git_announces_itself_on_the_operators_console() {
+    if std::env::var_os(PROBE_ENV).is_some() {
+        run_as_probe();
+        return;
+    }
+
+    // Content, from the pure function: the notice must name the tool, deny
+    // authorship of any prompt, and say wayland-core never asks here.
+    let notice =
+        wcore_cli::plugin::quarantine::console_attribution_notice(&["fetch", "--depth", "1"]);
+    for needle in [
+        "wayland-core:",
+        "git fetch --depth 1",
+        "NOT from wayland-core",
+        "never ask for a password",
+    ] {
+        assert!(
+            notice.contains(needle),
+            "the attribution notice must contain {needle:?}; it is {notice:?}"
+        );
+    }
+
+    // Wiring, from a real child of the real builder.
+    let err = probe_stderr();
+    assert!(
+        !err.contains("SPAWN_FAILED"),
+        "fixture: the probe child did not run, so nothing below was \
+         measured:\n{err}"
+    );
+    assert!(
+        err.contains("wayland-core: plugin quarantine is now running `git fetch --depth 1`"),
+        "`build_git_command` built a quarantine git command without announcing \
+         it on the operator's console, so a prompt raised inside that command \
+         is unattributable again (core#389 c2). child stderr:\n{err}"
+    );
+}
+
+/// `#389` c2, the half a pipe cannot see: the notice must land on the sink the
+/// PROMPT lands on.
+///
+/// # The defect this closes
+///
+/// The notice was an `eprintln!` — wayland-core's stderr. The prompt reaches
+/// the operator on `CONOUT$`, because `build_git_command` pipes git's own two
+/// streams. Those sinks coincide only when wayland-core's stderr happens to BE
+/// that console; under the TUI, under the JSON stream protocol, and under any
+/// host integration that pipes us, they do not, and the operator got the
+/// prompt with no notice attached. A notice absent exactly when the thing it
+/// attributes is visible is worse than none, because it is believed.
+///
+/// # Why this is not vacuous on a console-less host
+///
+/// Console presence is measured INDEPENDENTLY, by `GetConsoleProcessList`,
+/// rather than inferred from the delivery result — asking the delivery whether
+/// delivery worked would be the tautology this file exists to avoid. Both legs
+/// then assert something: with a console the notice MUST reach it; without one
+/// the delivery MUST report the failure, and that leg is honest rather than a
+/// skip, because a host with no console has no console for a prompt to reach
+/// either.
+///
+/// Deleting the `CONOUT$` write does not make this green — `NoticeDelivery`
+/// has one field per sink, so removing the sink removes the field and the
+/// deletion is a compile error rather than a silent pass.
+#[test]
+fn the_notice_reaches_the_console_the_prompt_reaches() {
+    if std::env::var_os(PROBE_ENV).is_some() {
+        run_as_probe();
+        return;
+    }
+    let notice = wcore_cli::plugin::quarantine::console_attribution_notice(&["--version"]);
+    let delivered = wcore_cli::plugin::quarantine::announce_on_every_operator_sink(&notice);
+    assert!(
+        delivered.stderr,
+        "stderr is the sink a host integration reads and must never be dropped"
+    );
+
+    // The INDEPENDENT oracle. Not the delivery's own opinion of itself.
+    let mut pids = [0u32; 64];
+    let attached = unsafe { GetConsoleProcessList(pids.as_mut_ptr(), pids.len() as u32) } != 0;
+
+    if attached {
+        assert!(
+            delivered.operator_console.is_ok(),
+            "a console IS attached to this process, so a quarantine child can \
+             AttachConsole to it and prompt there — and the notice that \
+             attributes that prompt did not reach it: {:?}",
+            delivered.operator_console
+        );
+    } else {
+        assert!(
+            delivered.operator_console.is_err(),
+            "no console is attached, so `CONOUT$` cannot open; a delivery \
+             reporting success here would be reporting a sink that does not \
+             exist, which is the reassurance this whole ticket is about"
+        );
+    }
+}
+
 #[test]
 fn quarantine_child_has_no_console_at_creation_on_windows() {
     if std::env::var_os(PROBE_ENV).is_some() {
@@ -261,14 +479,13 @@ fn quarantine_child_has_no_console_at_creation_on_windows() {
     // binary run as a service or over a pipe may have none, so allocate one —
     // the console the children then contend for is a real one, exactly as the
     // unix sibling opens a real PTY.
-    // SAFETY: argument-free; fails harmlessly when a console already exists,
-    // which the branch guard has already excluded.
-    if unsafe { GetConsoleWindow() }.is_null() {
+    if !driver_has_console() {
+        // SAFETY: argument-free; fails harmlessly when a console already
+        // exists, which the branch guard has already excluded.
         unsafe { AllocConsole() };
     }
     assert!(
-        // SAFETY: as above.
-        !unsafe { GetConsoleWindow() }.is_null(),
+        driver_has_console(),
         "this driver has no console and could not allocate one, so #338's \
          Windows property is unobservable here — the run proves nothing and \
          must not be read as a pass"
@@ -277,6 +494,7 @@ fn quarantine_child_has_no_console_at_creation_on_windows() {
     let plain = probe(false);
     let hardened = probe(true);
     let production = probe_through_production_git();
+    let production_spawn = probe_through_production_spawn();
 
     // Emit the measurements, not only the verdict. #338's Windows arm is a
     // claim about what a Win32 flag delivers, and a bare `ok` from a CI job on
@@ -286,6 +504,7 @@ fn quarantine_child_has_no_console_at_creation_on_windows() {
         ("plain", &plain),
         ("hardened", &hardened),
         ("production_git", &production),
+        ("production_spawn", &production_spawn),
     ] {
         for line in report.lines().filter(|l| l.contains('=')) {
             println!("[{arm}] {}", line.trim());
@@ -335,6 +554,22 @@ fn quarantine_child_has_no_console_at_creation_on_windows() {
         "#338: `build_git_command` must apply the hardening — an assertion on \
          `harden_against_credential_prompt` alone stays green when `run_git` \
          stops calling it. production report:\n{production}"
+    );
+
+    // ---- #393 c3: the composed creation flags -----------------------------
+    // The console flag and the containment flag COEXIST rather than
+    // overwriting each other. Graded on the real spawn -- `run_hardened` --
+    // because that is the only place the OR is applied, and a naive
+    // composition would silently drop `DETACHED_PROCESS` there and nowhere
+    // else, so no arm above would notice. If this ever reports `true`, #393's
+    // Job Object has reopened #338.
+    assert_eq!(
+        field(&production_spawn, "SHARES_USER_CONSOLE_BEFORE"),
+        Some("false"),
+        "#393 c3: a child spawned through `run_hardened` -- with the Job Object's \
+         CREATE_SUSPENDED OR-ed into the creation flags -- is on the operator's console, \
+         so the composition dropped DETACHED_PROCESS and reopened #338. production_spawn \
+         report:\n{production_spawn}"
     );
 
     // ---- liveness ---------------------------------------------------------

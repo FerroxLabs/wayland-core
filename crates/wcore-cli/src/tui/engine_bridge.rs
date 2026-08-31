@@ -389,13 +389,21 @@ impl OutputSink for ChannelSink {
         });
     }
 
-    fn emit_error(&self, msg: &str, retryable: bool) {
+    fn emit_error(
+        &self,
+        msg: &str,
+        retryable: bool,
+        category: wcore_protocol::events::FailureCategory,
+    ) {
         self.send(ProtocolEvent::Error {
             msg_id: None,
             error: ErrorInfo {
                 code: "engine_error".to_string(),
                 message: msg.to_string(),
                 retryable,
+                // wayland#1266 c1: the engine classified this; the TUI bridge
+                // relays that classification rather than re-deciding it.
+                category,
             },
         });
     }
@@ -563,6 +571,13 @@ impl OutputSink for ChannelSink {
         });
     }
 
+    /// wayland#1219: the TUI renders every `ApprovalRequired` it is sent
+    /// (`emit_approval_required` below is unconditional), so a blocking
+    /// approval caller has a real human on the other end here.
+    fn approval_surface_available(&self) -> bool {
+        true
+    }
+
     fn emit_approval_required(
         &self,
         call_id: &str,
@@ -696,6 +711,7 @@ impl Drop for TerminalGuard {
                           Please try again."
                     .to_string(),
                 retryable: true,
+                category: wcore_protocol::events::FailureCategory::ToolRuntime,
             },
         });
         let _ = self.tx.send(ProtocolEvent::StreamEnd {
@@ -1243,6 +1259,7 @@ fn emit_recovery_error(
             code: "recovery_refused".to_string(),
             message: error.to_string(),
             retryable: false,
+            category: error.failure_category(),
         },
     });
     let _ = tx.send(ProtocolEvent::StreamEnd {
@@ -1760,6 +1777,7 @@ impl TuiEngine {
                             code: "engine_error".to_string(),
                             message: e.to_string(),
                             retryable: false,
+                            category: e.failure_category(),
                         },
                     });
                     let _ = tx.send(ProtocolEvent::StreamEnd {
@@ -2602,6 +2620,7 @@ impl TuiEngine {
                         code: "mcp_add".to_string(),
                         message: format!("Can't replace MCP server '{name}': {e}"),
                         retryable: false,
+                        category: wcore_protocol::events::FailureCategory::LocalWayland,
                     },
                 });
                 return;
@@ -2640,6 +2659,7 @@ impl TuiEngine {
                         code: "mcp_add".to_string(),
                         message: format!("Can't add MCP server '{name}': {e}"),
                         retryable: false,
+                        category: wcore_protocol::events::FailureCategory::LocalWayland,
                     },
                 });
                 return;
@@ -2685,6 +2705,7 @@ impl TuiEngine {
                         code: "mcp_connect".to_string(),
                         message: e,
                         retryable: false,
+                        category: wcore_protocol::events::FailureCategory::ToolRuntime,
                     },
                 });
             }
@@ -2744,6 +2765,7 @@ impl TuiEngine {
                         code: "mcp_connect".to_string(),
                         message: msg,
                         retryable: false,
+                        category: wcore_protocol::events::FailureCategory::ToolRuntime,
                     },
                 });
             };
@@ -2923,6 +2945,7 @@ impl TuiEngine {
                             code: "mcp_config_conflict".to_string(),
                             message: format!("Can't add MCP server '{name}': {reason}"),
                             retryable: false,
+                            category: wcore_protocol::events::FailureCategory::LocalWayland,
                         },
                     });
                     let _ = tx.send(ProtocolEvent::McpFailed {
@@ -2955,6 +2978,7 @@ impl TuiEngine {
                         code: "mcp_capacity".to_string(),
                         message: "MCP lifecycle capacity exceeded for this session".to_string(),
                         retryable: false,
+                        category: wcore_protocol::events::FailureCategory::LocalWayland,
                     },
                 });
                 return;
@@ -2979,6 +3003,7 @@ impl TuiEngine {
                         "Can't add MCP server '{name}': an existing connection has no matching configuration identity"
                     ),
                     retryable: false,
+                    category: wcore_protocol::events::FailureCategory::LocalWayland,
                 },
             });
             return;
@@ -3021,6 +3046,7 @@ impl TuiEngine {
                         code: "mcp_add".to_string(),
                         message: format!("Couldn't connect MCP server '{name}': {reason}"),
                         retryable: false,
+                        category: wcore_protocol::events::FailureCategory::ToolRuntime,
                     },
                 });
                 return;
@@ -3054,6 +3080,7 @@ impl TuiEngine {
                             code: "mcp_add".to_string(),
                             message: format!("Couldn't connect MCP server '{name}': {reason}"),
                             retryable: false,
+                            category: wcore_protocol::events::FailureCategory::ToolRuntime,
                         },
                     });
                     return;
@@ -3106,6 +3133,7 @@ impl TuiEngine {
                         code: "mcp_add".to_string(),
                         message: format!("MCP server '{name}' failed to connect: {reason}"),
                         retryable: false,
+                        category: wcore_protocol::events::FailureCategory::ToolRuntime,
                     },
                 });
                 return;
@@ -3183,6 +3211,7 @@ impl TuiEngine {
                              once it's idle."
                         ),
                         retryable: true,
+                        category: wcore_protocol::events::FailureCategory::ToolRuntime,
                     },
                 });
                 return;
@@ -3387,6 +3416,14 @@ impl TuiEngine {
         drop(runtimes);
         let mut guard = engine.lock().await;
         let defer_cold = guard.defer_cold_config();
+        // wayland#1213 c4 — taken before `registry_mut` borrows the engine and
+        // used once the transport is closed. `/mcp remove` in the TUI dropped
+        // the registry entry and left the McpCatalogRefresh entry, and its
+        // config, behind: the next `notifications/tools/list_changed` from that
+        // server re-registered the tools the operator had just taken away. The
+        // headless `RemoveMcpServer` path has withdrawn since #1213 c4; this
+        // one, on the documented interactive route, never did.
+        let catalog_refresh = guard.mcp_catalog_refresh();
         let Some(registry) = guard.registry_mut() else {
             runtime_mcp.lock().await.insert(name.clone(), runtime);
             let _ = lifecycle.cancel_stopping(&name);
@@ -3409,6 +3446,22 @@ impl TuiEngine {
                 generation,
                 format!("MCP transport cleanup could not be verified: {error}"),
             );
+            // wayland#1234 -- WITHDRAW HERE TOO, on the arm the tree used to skip.
+            //
+            // The old rationale was "on CleanupUnverified the manager is left in
+            // place and the name stays reserved, so nothing is withdrawn either".
+            // It does not survive the state this arm actually leaves: the tools
+            // were ALREADY taken out of the live registry above and are NOT put
+            // back. CleanupUnverified means `close_server` could not be verified,
+            // i.e. the transport may still be ALIVE -- so the manager stays in
+            // McpCatalogRefresh, the server announces `tools/list_changed`, and the
+            // tools the operator just removed are re-registered. That is #1234's
+            // resurrection shape, on the one arm most likely to have a live
+            // transport. Withdrawing here makes the refresh state agree with the
+            // registry state on BOTH arms.
+            if let Some(refresh) = catalog_refresh.as_ref() {
+                refresh.forget_runtime_server(&name);
+            }
             let _ = tx.send(ProtocolEvent::McpRemovalResult {
                 lifecycle_version: wcore_protocol::commands::MCP_LIFECYCLE_VERSION,
                 request_id,
@@ -3417,6 +3470,12 @@ impl TuiEngine {
                 removed_tools,
             });
             return None;
+        }
+        // Both arms withdraw since wayland#1234: the tools are out of the
+        // registry either way, so leaving the manager in McpCatalogRefresh on
+        // the unverified arm is what let a removed server resurrect them.
+        if let Some(refresh) = catalog_refresh.as_ref() {
+            refresh.forget_runtime_server(&name);
         }
         let _ = lifecycle.complete_stopping_generation(&name, generation);
         let config = runtime.config;
@@ -5050,7 +5109,11 @@ mod tests {
         let sink = ChannelSink::new(tx);
         // retryable=true asserts the flag is threaded through, not hardcoded
         // false (audit finding: the TUI bridge ChannelSink used to discard it).
-        sink.emit_error("boom", true);
+        sink.emit_error(
+            "boom",
+            true,
+            wcore_protocol::events::FailureCategory::Unknown,
+        );
         match rx.try_recv().expect("event forwarded") {
             ProtocolEvent::Error { error, .. } => {
                 assert_eq!(error.message, "boom");

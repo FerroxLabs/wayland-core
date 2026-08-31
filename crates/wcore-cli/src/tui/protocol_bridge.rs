@@ -302,6 +302,20 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
             // falling back to the cumulative usage for old producers;
             // default 0 when both are None — the projection gates the
             // `· N tok` meta on `tokens > 0` so a 0 reads cleanly).
+            // #1242 — drain whatever the filter is still withholding into
+            // the visible buffer BEFORE the reasoning capture is taken.
+            // `process` holds back an undecided `<`-prefix and everything
+            // after an unclosed reasoning tag; the engine's history-side
+            // filter has recovered both since #1222, so without this the
+            // screen and the stored turn disagree about the same answer.
+            // Before `take_captured` because `finish` retracts the unclosed
+            // block's span from the capture buffer — otherwise the same bytes
+            // would appear once as the answer and once as a Thought.
+            let recovered = app.session.reasoning_filter.finish();
+            if !recovered.is_empty() {
+                app.session.run_showed_answer = true;
+                app.session.streaming.push_str(&recovered);
+            }
             let captured = app.session.reasoning_filter.take_captured();
             let thinking_to_push: Option<TurnElement> = if captured.is_empty() {
                 None
@@ -1127,6 +1141,12 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
         // in-process TUI sets its mode through the local /mode path, which is
         // not gated on the wire opt-in, so there is nothing here to render.
         | ProtocolEvent::SetModeRefused { .. }
+        // #314 c5: a host grant refusal. `grant_path` /
+        // `grant_workspace_capability` are JSON-stream host commands the
+        // in-process TUI cannot originate, so there is no refusal here to
+        // render; the derived `info` line that follows it still reaches a TUI
+        // user, so nothing is lost by ignoring the typed frame.
+        | ProtocolEvent::GrantRefused { .. }
         // Budget grant commands are accepted only by the JSON-stream host
         // loop; the in-process TUI cannot originate one. Keep the event
         // exhaustively accepted without synthesizing local grant authority.
@@ -1922,8 +1942,13 @@ pub fn hydrate_history(messages: &[Message]) -> (Vec<TurnView>, Vec<ToolCardMode
                             // every resume. Same treatment the live stream
                             // gets at the `TextDelta` arm above: the body
                             // becomes a collapsed thought, not prose.
+                            // #1242 — one complete string rather than a
+                            // stream, so the drain is unconditional: anything
+                            // `process` withheld is by definition never going
+                            // to be decided by more input.
                             let mut filter = ReasoningFilter::new();
-                            let visible = filter.process(text);
+                            let mut visible = filter.process(text);
+                            visible.push_str(&filter.finish());
                             let captured = filter.take_captured();
                             if !captured.is_empty() {
                                 turn.elements.push(TurnElement::Thinking {
@@ -2495,6 +2520,7 @@ mod tests {
                     code: "engine_error".into(),
                     message: "upstream refused the request".into(),
                     retryable: false,
+                    category: wcore_protocol::events::FailureCategory::Unknown,
                 },
             },
         );
@@ -2860,6 +2886,7 @@ mod tests {
                     code: "engine_error".into(),
                     message: message.into(),
                     retryable: false,
+                    category: wcore_protocol::events::FailureCategory::Unknown,
                 },
             },
         );
@@ -3737,7 +3764,8 @@ mod tests {
         let mut app = App::new();
         // This is the exact JSON shape that ChannelSink::emit_error now produces
         // via ProtocolEvent::Error { msg_id: None, error: ErrorInfo { code:
-        // "sub_agent_error", message: "...", retryable: false } }.
+        // "sub_agent_error", message: "...", retryable: false,
+        // category: tool_runtime } } (wayland#1237).
         apply_event(
             &mut app,
             ProtocolEvent::SubAgentEvent {
@@ -3880,6 +3908,7 @@ mod tests {
                     code: "rate_limit".into(),
                     message: "slow down".into(),
                     retryable: true,
+                    category: wcore_protocol::events::FailureCategory::Unknown,
                 },
             },
         );
@@ -3927,6 +3956,7 @@ mod tests {
                     code: "engine_error".into(),
                     message: "API 400: invalid_request_error tool_use…".into(),
                     retryable: false,
+                    category: wcore_protocol::events::FailureCategory::Unknown,
                 },
             },
         );
@@ -3948,6 +3978,7 @@ mod tests {
                     code: "engine_panic".into(),
                     message: "The turn ended unexpectedly".into(),
                     retryable: true,
+                    category: wcore_protocol::events::FailureCategory::Unknown,
                 },
             },
         );
@@ -3977,6 +4008,7 @@ mod tests {
                     code: "novel_class_not_yet_mapped".into(),
                     message: "experimental failure mode".into(),
                     retryable: false,
+                    category: wcore_protocol::events::FailureCategory::Unknown,
                 },
             },
         );
@@ -4224,6 +4256,7 @@ mod tests {
                     code: "engine_error".into(),
                     message: "boom".into(),
                     retryable: false,
+                    category: wcore_protocol::events::FailureCategory::Unknown,
                 },
             },
         );
@@ -4538,6 +4571,7 @@ mod tests {
                     code: "engine_error".into(),
                     message: "boom".into(),
                     retryable: false,
+                    category: wcore_protocol::events::FailureCategory::Unknown,
                 },
             },
         );
@@ -4574,6 +4608,7 @@ mod tests {
                     code: "engine_error".into(),
                     message: "boom".into(),
                     retryable: false,
+                    category: wcore_protocol::events::FailureCategory::Unknown,
                 },
             },
         );

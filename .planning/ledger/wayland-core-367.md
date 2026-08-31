@@ -3,7 +3,7 @@ issue: 367
 repo: FerroxLabs/wayland-core
 kind: defect
 title: "A never-merge red-arm instrument reached integ/f13: OwnedTree owns the leaf only again on Unix"
-status: open
+status: closed
 last_verified_commit: 1798076f
 criteria:
   - id: c1

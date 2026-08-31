@@ -780,6 +780,55 @@ pub enum SetModeRefusalReason {
     LocalOptInRequired,
 }
 
+/// Which host grant surface refused. #314 c5.
+///
+/// The surface is part of the machine signal because `grant_path` and
+/// `grant_workspace_capability` are answered by different host UI: one is a
+/// folder in the workspace list, the other an executable in the capability
+/// list. A host that had to read English to tell them apart was pinning our
+/// wording, which is the thing this variant exists to stop.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GrantSurface {
+    /// The `grant_path` command.
+    Path,
+    /// The `grant_workspace_capability` command.
+    WorkspaceCapability,
+}
+
+impl GrantSurface {
+    /// The human prefix for this surface's refusal line.
+    ///
+    /// This is the ONLY place the refusal prose is built. It is derived from
+    /// the typed frame rather than written beside it, so a refusal cannot be
+    /// announced to a human without the machine-readable frame existing: there
+    /// is no literal left to copy.
+    pub fn refusal_prefix(self) -> &'static str {
+        match self {
+            GrantSurface::Path => "path grant refused",
+            GrantSurface::WorkspaceCapability => "workspace capability grant refused",
+        }
+    }
+}
+
+/// Why a host grant was refused. #314 c5.
+///
+/// Deliberately NOT a free-form string: the refusal used to reach the host as
+/// an untyped `info` frame, so the only way to branch on it was to match our
+/// English. Additive per the W0 host decoder contract -- a host that does not
+/// know `grant_refused` drops the line, and the `workspace_policy` receipt
+/// that precedes every refusal (#314 c4) is unchanged.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GrantRefusalReason {
+    /// The local launcher did not opt in (`--allow-host-path-grants` /
+    /// `--allow-host-workspace-grants`). The request never reached the policy.
+    LocalOptInRequired,
+    /// The launcher opted in and the workspace policy itself rejected the
+    /// request. `detail` carries the policy's own message.
+    PolicyRejected,
+}
+
 /// Events emitted by the agent to the client (Agent -> Client)
 ///
 /// `Clone` is derived (Wave 2) so the in-process TUI bridge can fan an
@@ -1339,6 +1388,23 @@ pub enum ProtocolEvent {
         /// The mode still in force — the refusal changes nothing.
         effective: crate::commands::SessionMode,
         reason: SetModeRefusalReason,
+    },
+    /// A host grant (`grant_path` / `grant_workspace_capability`) was refused.
+    /// #314 c5.
+    ///
+    /// Always preceded by the `workspace_policy` receipt (#314 c4), so the
+    /// pair is "here is what you can reach" followed by "and here is why the
+    /// thing you asked for is not in it". The `info` line that follows carries
+    /// the same content for a human and is derived from these fields.
+    GrantRefused {
+        /// The `grant_id` the host correlated the request with. `None` for
+        /// `grant_workspace_capability`, which carries no id on the wire.
+        grant_id: Option<String>,
+        surface: GrantSurface,
+        reason: GrantRefusalReason,
+        /// Human detail -- the policy's own message, or the missing flag.
+        /// NOT the machine signal; branch on `reason`.
+        detail: String,
     },
     /// W8a A.7: ExecutionBudget cap exceeded — singular event per
     /// session, fires once when the first cap trips. Always-emitted +
@@ -1942,9 +2008,16 @@ impl RouteInfo {
     }
 }
 
-/// Split a URL into `(scheme_with_separator, authority, path)`, dropping the
-/// query and the fragment. Deliberately hand-rolled: this crate carries no URL
-/// parser, and the shapes a provider `base_url` can take are narrow.
+/// Split a string that is NOT a URL into `(scheme_with_separator, authority,
+/// path)`, dropping the query and the fragment.
+///
+/// REDACTION ONLY, and only on the fallback path of [`scrub_base_url`]. This
+/// is NOT an authority oracle and nothing may ask it which host a request
+/// reaches — `wcore_types::url_authority` answers that, for every caller in
+/// the repo (FerroxLabs/wayland#1211, #1243). It survives here because when a
+/// configured `base_url` does not parse as a URL at all there is no dialed
+/// host to be wrong about, and over-redacting an unusable string is still
+/// better than publishing a key out of its userinfo.
 fn split_endpoint(raw: &str) -> (&str, &str, &str) {
     let (scheme, rest) = match raw.find("://") {
         Some(idx) => raw.split_at(idx + 3),
@@ -1962,7 +2035,19 @@ fn split_endpoint(raw: &str) -> (&str, &str, &str) {
 
 /// Remove userinfo, query string and fragment from an endpoint so it can be
 /// published. Both positions can carry an API key.
+///
+/// Built from the URL parse, so the host published is the host the request
+/// reached. The hand cut this used to be republished
+/// `https://evil.example\\@127.0.0.1/v1` as `https://127.0.0.1/v1` — the wrong
+/// host, in the field a user reads to see where their prompt went
+/// (FerroxLabs/wayland#1243).
+///
+/// The fallback runs only for a string that is not a URL at all, which reqwest
+/// could not have dialed either. It redacts; it does not claim a host.
 fn scrub_base_url(raw: &str) -> String {
+    if let Some(published) = wcore_types::url_authority::publishable_endpoint(raw) {
+        return published;
+    }
     let (scheme, authority, path) = split_endpoint(raw);
     // `rsplit_once` so a password containing `@` cannot smuggle the rest back.
     let host = authority
@@ -1971,49 +2056,44 @@ fn scrub_base_url(raw: &str) -> String {
     format!("{scheme}{host}{path}")
 }
 
-/// The bare host of an endpoint: userinfo, port and IPv6 brackets removed.
-fn host_of(raw: &str) -> String {
-    let (_, authority, _) = split_endpoint(raw);
-    let host = authority
-        .rsplit_once('@')
-        .map_or(authority, |(_userinfo, host)| host);
-    let host = if let Some(rest) = host.strip_prefix('[') {
-        // Bracketed IPv6 literal, e.g. `[::1]:11434`.
-        rest.split_once(']').map_or(rest, |(ip, _port)| ip)
-    } else if host.matches(':').count() > 1 {
-        // Bare IPv6 literal — a port cannot be expressed without brackets, so
-        // the last colon is part of the address, not a port separator.
-        host
-    } else {
-        host.split_once(':').map_or(host, |(host, _port)| host)
-    };
-    host.trim().to_ascii_lowercase()
-}
-
 /// Whether an endpoint points at a loopback, link-local or private-range host.
 ///
-/// The address checks run ONLY against a parsed IP literal. A prefix match on
-/// the raw string would call `https://127.0.0.1.evil.example.com/v1` local —
-/// a registrable public name that anyone can point anywhere — and this flag is
-/// exactly what a user would trust to decide their prompt never left the box.
+/// The host comes from `wcore_types::url_authority` — the one authority parser
+/// — and the address checks then run ONLY against a parsed IP literal. Two
+/// separate traps live here and BOTH are closed by that:
+///
+/// - a prefix match on the raw string would call
+///   `https://127.0.0.1.evil.example.com/v1` local, a registrable public name
+///   anyone can point anywhere;
+/// - a hand-cut authority called `https://evil.example\\@127.0.0.1/v1` local,
+///   because a special scheme reads `\\` as a path separator and the cut did
+///   not (FerroxLabs/wayland#1243). That is the more dangerous direction: a
+///   PUBLIC endpoint reporting `local: true`.
+///
+/// `docs/json-stream-protocol.md` promises this flag is what a user trusts to
+/// conclude their prompt never left the machine, so a string with no host we
+/// can vouch for is NOT local.
 fn is_local_endpoint(raw: &str) -> bool {
-    let host = host_of(raw);
-    if let Ok(addr) = host.parse::<std::net::Ipv4Addr>() {
-        return addr.is_loopback()
-            || addr.is_private()
-            || addr.is_link_local()
-            || addr.is_unspecified();
+    use wcore_types::url_authority::{Host, dialed_host};
+    match dialed_host(raw) {
+        Some(Host::Ipv4(addr)) => {
+            addr.is_loopback() || addr.is_private() || addr.is_link_local() || addr.is_unspecified()
+        }
+        Some(Host::Ipv6(addr)) => {
+            let head = addr.segments()[0];
+            // fc00::/7 unique-local, fe80::/10 link-local. Both stdlib
+            // predicates are still unstable, so the prefixes are checked
+            // directly.
+            addr.is_loopback()
+                || addr.is_unspecified()
+                || head & 0xfe00 == 0xfc00
+                || head & 0xffc0 == 0xfe80
+        }
+        Some(Host::Domain(host)) => {
+            host == "localhost" || host.ends_with(".localhost") || host.ends_with(".local")
+        }
+        None => false,
     }
-    if let Ok(addr) = host.parse::<std::net::Ipv6Addr>() {
-        let head = addr.segments()[0];
-        // fc00::/7 unique-local, fe80::/10 link-local. Both stdlib predicates
-        // are still unstable, so the prefixes are checked directly.
-        return addr.is_loopback()
-            || addr.is_unspecified()
-            || head & 0xfe00 == 0xfc00
-            || head & 0xffc0 == 0xfe80;
-    }
-    host == "localhost" || host.ends_with(".localhost") || host.ends_with(".local")
 }
 
 /// W6 F7 per-turn cost row carried by [`ProtocolEvent::SessionCost`].
@@ -2286,11 +2366,69 @@ pub struct Usage {
     pub active_window_percent: Option<u32>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+/// FerroxLabs/wayland#1237, decomposed from wayland#388 c7 — the TYPED half of
+/// a host-facing error frame.
+///
+/// #388 asks the product to expose which of five things went wrong: context or
+/// token limit, provider rate limit, router failure, tool or runtime failure,
+/// local Wayland error. Two of those five — rate limit and router failure —
+/// arrive as the same non-2xx from the same host and cannot be told apart from
+/// outside the router; that half is wayland#1184 and stays with flux.
+///
+/// This enum therefore has NO variant for either of them, and that absence is
+/// the design rather than an omission: "core guessed which side of the router
+/// it was" is not a state the type can represent. An upstream failure core
+/// cannot classify is [`FailureCategory::Unknown`], and a host reading
+/// `unknown` learns it must ask the router — not that core silently picked.
+///
+/// The other three ARE decidable inside core: each has its own exit out of the
+/// run loop, and [`crate::events::ErrorInfo::category`] is where the exit says
+/// so. Before this, every one of them reached the host as English prose in
+/// `message`, and a Desktop app, a JSON-stream consumer or a CI wrapper had to
+/// pattern-match it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureCategory {
+    /// #388's "context/token limit". The turn could not proceed because the
+    /// context window or an output-token ceiling was reached and could not be
+    /// reduced — `AgentError::ContextTooLong`.
+    ContextLimit,
+    /// #388's "tool/runtime failure". A tool, a sub-agent, or the engine task
+    /// itself failed or died: the engine-panic guard, an unrecovered tool
+    /// breaker, a child that ended without a result.
+    ToolRuntime,
+    /// #388's "local Wayland error". The local process refused, aborted, or
+    /// could not proceed on its own account: a session-persistence authority
+    /// fault, a refused or malformed host command, a startup failure, an
+    /// operator abort. Nothing upstream is implicated.
+    LocalWayland,
+    /// Core cannot decide, and says so instead of choosing.
+    ///
+    /// This is the honest answer for anything that arrives as an opaque
+    /// upstream response — every provider non-2xx included, because the
+    /// rate-limit-versus-router split (#1184) is not decidable from inside
+    /// this repo: both are the same status from the same host.
+    ///
+    /// It is `Default` only so a frame written before this field existed still
+    /// DECODES (see `ErrorInfo`'s `serde(default)`). It is never a default
+    /// anyone can fall into while WRITING one: `ErrorInfo` has no `Default`,
+    /// so every construction site in the workspace names a category or fails
+    /// to compile.
+    #[default]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorInfo {
     pub code: String,
     pub message: String,
     pub retryable: bool,
+    /// wayland#1237. Additive: `serde(default)` means a payload written before
+    /// this field existed still decodes, as `Unknown`; a host that has never
+    /// heard of the key ignores it, exactly as the `error` event's published
+    /// `additionalProperties: true` promises.
+    #[serde(default)]
+    pub category: FailureCategory,
 }
 
 #[cfg(test)]
@@ -2847,6 +2985,7 @@ mod tests {
                 code: "rate_limit".to_string(),
                 message: "Too many requests".to_string(),
                 retryable: true,
+                category: FailureCategory::Unknown,
             },
         };
         let json = serde_json::to_value(&event).unwrap();
@@ -3374,6 +3513,59 @@ mod tests {
         for raw in cloud {
             let route = RouteInfo::from_endpoint(0, "openai", "gpt-5", Some(raw));
             assert!(!route.local, "{raw} must NOT be reported as a local route");
+        }
+    }
+
+    /// #1243 c3. `provider_info.local` is what
+    /// `docs/json-stream-protocol.md` promises a user can trust to conclude
+    /// their prompt never left the machine. The host used to come from a hand
+    /// cut that stopped at `/`, `?` and `#` but not at `\`, so a PUBLIC
+    /// endpoint spelled `https://evil.example\@127.0.0.1/v1` reported
+    /// `local: true` — and the scrubbed `base_url` published alongside it
+    /// named `127.0.0.1`, the host the request never reached.
+    #[test]
+    fn route_info_is_not_local_for_an_authority_smuggled_loopback() {
+        for raw in [
+            r"https://evil.example\@127.0.0.1/v1",
+            r"https://evil.example\@localhost/v1",
+            r"https://evil.example\@[::1]/v1",
+            r"http://evil.example\@192.168.1.50/v1",
+            "https://evil.example?z=@127.0.0.1",
+            "https://evil.example#@127.0.0.1",
+            "https://127.0.0.1@evil.example/v1",
+        ] {
+            let route = RouteInfo::from_endpoint(0, "openai", "gpt-5", Some(raw));
+            assert!(!route.local, "public endpoint reported local: {raw}");
+            let published = route.base_url.as_deref().unwrap_or_default();
+            assert!(
+                published.contains("evil.example"),
+                "published base_url must name the dialed host for {raw}: {published}"
+            );
+            assert!(
+                !published.starts_with("https://127.0.0.1")
+                    && !published.starts_with("http://192.168")
+                    && !published.starts_with("https://localhost"),
+                "published base_url named the smuggled host for {raw}: {published}"
+            );
+        }
+    }
+
+    /// The wrong-refusal control for the row above: a genuine loopback or LAN
+    /// endpoint must still read `local: true`. A predicate that answered
+    /// `false` for everything would pass that test and silently break the
+    /// whole point of the flag.
+    #[test]
+    fn route_info_is_still_local_for_a_genuine_loopback_endpoint() {
+        for raw in [
+            "http://127.0.0.1:11434/v1",
+            "http://localhost:11434",
+            "http://[::1]:11434/v1",
+            "http://192.168.1.50:11434/v1",
+            "http://10.0.0.7:11434",
+            "http://ollama.local:11434",
+        ] {
+            let route = RouteInfo::from_endpoint(0, "openai", "qwen3:8b", Some(raw));
+            assert!(route.local, "genuine local endpoint refused: {raw}");
         }
     }
 

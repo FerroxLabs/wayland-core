@@ -146,6 +146,15 @@ impl TestSinkHandle {
 }
 
 impl OutputSink for TestSink {
+    /// wayland#1219: this sink DOES render the approval (below,
+    /// unconditionally), so it must say so — a blocking approval caller now
+    /// refuses to park on a sink that reports no surface. Keeping this in
+    /// sync with `emit_approval_required` is the whole contract of the
+    /// predicate.
+    fn approval_surface_available(&self) -> bool {
+        true
+    }
+
     /// Mirrors `ProtocolSink`'s mapping so a test can read the
     /// `resume_token` the way a HOST reads it — off the wire.
     ///
@@ -312,13 +321,19 @@ impl OutputSink for TestSink {
             agent_run_id: agent_run_id.map(str::to_string),
         });
     }
-    fn emit_error(&self, msg: &str, retryable: bool) {
+    fn emit_error(
+        &self,
+        msg: &str,
+        retryable: bool,
+        _category: wcore_protocol::events::FailureCategory,
+    ) {
         self.record(&ProtocolEvent::Error {
             msg_id: None,
             error: ErrorInfo {
                 code: "test_sink_error".to_string(),
                 message: msg.to_string(),
                 retryable,
+                category: wcore_protocol::events::FailureCategory::Unknown,
             },
         });
     }

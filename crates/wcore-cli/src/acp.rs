@@ -263,7 +263,9 @@ fn parse_mcp_tool_selections(
         .map(|entry| {
             let (server, tools) = entry.split_once('=').ok_or_else(|| {
                 anyhow::anyhow!(
-                    "--mcp-tools expects <server>=<tool,tool>; got {entry:?}. Use                      `<server>=` to disable every tool on that server, and omit the                      flag entirely to leave a server's tools as configured."
+                    "--mcp-tools expects <server>=<tool,tool>; got {entry:?}. Use \
+                        `<server>=` to disable every tool on that server, and omit the \
+                        flag entirely to leave a server's tools as configured."
                 )
             })?;
             let server = server.trim();

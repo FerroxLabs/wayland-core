@@ -24,6 +24,8 @@
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
+use wcore_types::url_authority::{dialed_host_str, dialed_scheme_host};
+
 use crate::tui::permission::{PermissionComponent, PermissionContext};
 
 /// Permission projection for the `WebFetch` tool.
@@ -52,25 +54,22 @@ const ALLOWLIST: &[&str] = &[
 /// allowlist, NO live network. An https URL whose host exactly matches (or is
 /// a subdomain of) an [`ALLOWLIST`] entry is [`Risk::Trusted`]; an http URL,
 /// or any host off the allowlist, is [`Risk::External`].
+///
+/// The scheme and the host both come from
+/// [`wcore_types::url_authority::dialed_scheme_host`] — one parse, the one
+/// authority parser. This used to cut the authority out of the string by hand,
+/// stopping at `/`, `?` and `#` but not at `\\`, so
+/// `https://evil.example\\@github.com/x` read as `github.com` and was badged
+/// `trusted`: for a special scheme the WHATWG parser maps `\\` to a path
+/// separator, and the fetch goes to `evil.example` (FerroxLabs/wayland#1243).
+/// A URL with no host we can vouch for is [`Risk::External`].
 pub fn web_fetch_risk(url: &str) -> Risk {
-    let url = url.trim();
     // Require an explicit https scheme — plain http or a scheme-less string is
     // never trusted.
-    let Some(rest) = url.strip_prefix("https://") else {
+    let Some((scheme, host)) = dialed_scheme_host(url) else {
         return Risk::External;
     };
-    // Host = up to the first `/`, `?`, or `#`, with any `user@` and `:port`
-    // stripped, lowercased.
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
-    let host = authority
-        .rsplit('@')
-        .next()
-        .unwrap_or(authority)
-        .split(':')
-        .next()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if host.is_empty() {
+    if scheme != "https" || host.is_empty() {
         return Risk::External;
     }
     let trusted = ALLOWLIST
@@ -147,29 +146,20 @@ fn fetch_url(ctx: &PermissionContext) -> String {
     ctx.card.summary.trim().to_string()
 }
 
-/// The display host for the title: the authority of an `http(s)://` URL,
-/// lowercased with any `user@`/`:port` stripped. Falls back to the whole
-/// string when it does not parse as a URL, and to `a URL` when empty.
+/// The display host for the title: the host the request is actually dialed
+/// against, from the one authority parser. Falls back to the whole string when
+/// it does not parse as a URL, and to `a URL` when empty.
+///
+/// This is the string the user reads before approving, so it must name the
+/// host the bytes go to. The hand cut it replaces rendered
+/// `Fetch github.com` for `https://evil.example\\@github.com/x`, approving a
+/// host the user was never shown (FerroxLabs/wayland#1243).
 fn host_of(url: &str) -> String {
     let url = url.trim();
     if url.is_empty() {
         return "a URL".to_string();
     }
-    let rest = url.split_once("://").map(|(_, after)| after).unwrap_or(url);
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
-    let host = authority
-        .rsplit('@')
-        .next()
-        .unwrap_or(authority)
-        .split(':')
-        .next()
-        .unwrap_or(authority)
-        .to_ascii_lowercase();
-    if host.is_empty() {
-        url.to_string()
-    } else {
-        host
-    }
+    dialed_host_str(url).unwrap_or_else(|| url.to_string())
 }
 
 /// Pull a top-level string field out of the pretty-printed args JSON. Returns
@@ -269,6 +259,89 @@ mod tests {
         assert_eq!(web_fetch_risk("github.com"), Risk::External);
         assert_eq!(web_fetch_risk("ftp://github.com"), Risk::External);
         assert_eq!(web_fetch_risk("https://"), Risk::External);
+    }
+
+    // --- #1243 Site A: the authority-smuggling spellings ---------------------
+
+    /// #1243 c1. `https://evil.example\@github.com/x` is a request to
+    /// `evil.example` — for a special scheme the WHATWG parser maps `\` to a
+    /// path separator, so the path is `/@github.com/x`. The hand cut stopped
+    /// at `/`, `?` and `#` but not at `\`, read the authority as
+    /// `evil.example\@github.com`, took the last `@`-separated part, and
+    /// badged the card `trusted`.
+    ///
+    /// The set covered here is closed by construction rather than by
+    /// enumeration: the risk verdict now comes from the URL parser's own
+    /// authority state machine, so every separator that machine honours ends
+    /// the authority. The rows are the spellings that have actually been seen
+    /// to defeat a hand cut, kept as regressions.
+    #[test]
+    fn risk_external_for_every_authority_smuggling_spelling() {
+        for url in [
+            // #1243: the backslash spelling, the one that was open.
+            r"https://evil.example\@github.com/x",
+            r"https://evil.example\@github.com",
+            r"https://evil.example\@docs.rs/x",
+            r"https://evil.example\@github.com:443/x",
+            // #1211's query spelling, and the fragment sibling.
+            "https://evil.example?z=@github.com",
+            "https://evil.example#@github.com",
+            // Honest userinfo: the host is still not the allowlisted name.
+            "https://github.com@evil.example/x",
+            "https://user:p@ss@evil.example/x",
+            // A tab inside the authority is stripped by the parser, not a
+            // separator a hand cut would have had to learn about separately.
+            "https://evil.example\t\\@github.com/x",
+        ] {
+            assert_eq!(
+                web_fetch_risk(url),
+                Risk::External,
+                "smuggled authority classified as trusted: {url}"
+            );
+        }
+    }
+
+    /// The wrong-refusal control for the row above. A classifier that simply
+    /// returned `External` for everything would pass that test; these are the
+    /// genuinely safe URLs that must still read `Trusted`, so the two together
+    /// pin both directions.
+    #[test]
+    fn risk_still_trusted_for_genuinely_allowlisted_urls() {
+        for url in [
+            "https://github.com/rust-lang/rust",
+            "https://api.github.com/repos/o/r",
+            "https://docs.rs/serde/latest/serde/",
+            "https://crates.io/crates/tokio",
+            "https://raw.githubusercontent.com/o/r/main/x.rs",
+            // Userinfo pointing AT an allowlisted host is still that host.
+            "https://user@github.com/x",
+            // Uppercase scheme and host normalise, they do not de-trust.
+            "HTTPS://GitHub.COM/x",
+        ] {
+            assert_eq!(
+                web_fetch_risk(url),
+                Risk::Trusted,
+                "a genuinely safe URL was refused: {url}"
+            );
+        }
+    }
+
+    /// #1243 c2. The prompt TITLE is what the user reads before approving, so
+    /// it must name the host the bytes reach. The hand cut rendered
+    /// `Fetch github.com` for a fetch to `evil.example`.
+    #[test]
+    fn title_names_the_host_actually_dialed_not_the_smuggled_one() {
+        let t = Theme::hearth();
+        let c = card(r#"{"url":"https://evil.example\\@github.com/x"}"#, "");
+        let title = line_text(&WebFetchComponent.title(&ctx(&c, &t)));
+        assert_eq!(title, "Fetch evil.example", "title: {title}");
+        assert_ne!(title, "Fetch github.com", "title: {title}");
+
+        // And the badge on the same card is `external`, not `trusted`.
+        let body = WebFetchComponent.body(&ctx(&c, &t));
+        let joined = body.iter().map(line_text).collect::<Vec<_>>().join("\n");
+        assert!(joined.contains("external"), "badge: {joined}");
+        assert!(!joined.contains("trusted"), "badge: {joined}");
     }
 
     // --- title: carries the host --------------------------------------------

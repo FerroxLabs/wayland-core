@@ -27,12 +27,13 @@ criteria:
   - id: c4
     text: "The replacement treats output equal to context as models.dev saying unknown, never as a ceiling"
     state: met
-    evidence: "file:scripts/check-model-limits-freshness.py:988:PASS when the vendor's output == context (UNKNOWN, not a ceiling)"
+    evidence: "file:scripts/check-model-limits-freshness.py:1150:PASS when the vendor's output == context (UNKNOWN, not a ceiling)"
     owner: core
-    note: "RE-ANCHORED 2026-08-30 for wayland#1198: was :781, a `}}` closing an unrelated bedrock fixture block. It now cites the negative control that asserts the treatment, which is what reds if `output == context` is ever read as a ceiling again. Enforcement at scan_passthrough:288 treats output == context as models.dev saying UNKNOWN; the control at :781-787 requires the grok-4.6 degenerate row to PASS rather than be graded."
+    note: "RE-ANCHORED 2026-08-30 for wayland#1198: was :781, a `}}` closing an unrelated bedrock fixture block. It now cites the negative control that asserts the treatment, which is what reds if `output == context` is ever read as a ceiling again. Enforcement at scan_passthrough:288 treats output == context as models.dev saying UNKNOWN; the control at :781-787 requires the grok-4.6 degenerate row to PASS rather than be graded. RE-ANCHORED 2026-08-30 by lane w3-cache-spend, position only: the SAME control line moved 988 -> 1046 when wayland#1232 inserted provider_scoped_arms and three self-test cases above it. Content unchanged and unique in the file; no re-grade, and the claim was not re-opened."
   - id: c5
     text: "The third preserved rule holds: no static arm is added for an open-weights family served at wildly different limits by different hosts"
     state: superseded
+    successor: FerroxLabs/wayland#1232
     evidence: "symbol:scripts/check-model-limits-freshness.py::scan_open_weights_arms"
     owner: core
     handoff: "FerroxLabs/wayland#1232"

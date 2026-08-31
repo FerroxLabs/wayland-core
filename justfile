@@ -138,6 +138,80 @@ test-acceptance-compact:
 lint:
     vx cargo clippy --workspace --all-targets -- -D warnings
 
+# Type-check the Windows-only code, and the Windows-only TESTS, from Linux.
+#
+# # The hole this closes
+#
+# `#![cfg(windows)]` test files compile to NOTHING on the hosts our gates
+# actually execute on. `crates/wcore-cli/tests/quarantine_process_tree_windows.rs`
+# and `quarantine_console_authority_windows.rs` (FerroxLabs/wayland-core#393),
+# `harness_owns_spawned_trees_windows.rs` (#358) and
+# `quarantine_terminal_authority_windows.rs` (#338) are all in that state: on
+# Linux and macOS `cargo test` reports them as zero tests and exits 0, so they
+# can be broken -- or deleted -- with every green staying green until a Windows
+# runner picks it up, hours later and on a different leg.
+#
+# MEASURED, hetzner, 2026-08-31, on the tree this recipe was added to, with a
+# deliberate type error appended to `quarantine_process_tree_windows.rs` and
+# then reverted. Both polarities of THIS recipe's own command, so it is on
+# record that the gate can fail as well as pass:
+#
+#   cargo check -p wcore-cli --tests                    -> RC=0    (the hole)
+#   cargo test  -p wcore-cli --test issue_393_...guard  -> RC=0    (the hole)
+#   just check-windows-compile, error present           -> RC=101
+#     error[E0308]: mismatched types
+#     error: could not compile `wcore-cli` (test "quarantine_process_tree_windows")
+#   just check-windows-compile, error reverted          -> RC=0
+#
+# So this is not a redundant re-run of the Linux check: it is the only
+# Linux-side instrument that can see those files at all. ~1m04s cold against a
+# warm dep graph, 1-3s warm, and 668 MB of `target/x86_64-pc-windows-gnu`.
+#
+# # Why this ONE recipe does not use `vx cargo`
+#
+# Everything else here routes through `vx` for a pinned toolchain. This recipe
+# must not, and the reason is measured rather than assumed: `vx` keeps its own
+# rustup store at `~/.vx/store/rust/<ver>/rustup`, whose only installed target
+# is `x86_64-unknown-linux-gnu`. `rustup target add` -- with or without a `vx`
+# prefix -- resolves to the SYSTEM rustup (`vx sh -c "command -v rustup"` ->
+# `/root/.cargo/bin/rustup`, because the vx store ships `rustup-init` and no
+# `rustup`), so it installs into `~/.rustup` where `vx cargo` will never look.
+# The result is a gate that cannot pass on any box:
+#
+#   vx just check-windows-compile  -> RC=101
+#     error[E0463]: can't find crate for `std`
+#     = note: the `x86_64-pc-windows-gnu` target may not be installed
+#
+# A gate that cannot PASS is worth no more than one that cannot fail, so the
+# recipe calls `cargo` directly. That is not a loss of determinism: bare
+# `cargo` is the rustup shim, which honours this repo's `rust-toolchain.toml`
+# (`channel = "1.95.0"`) and resolves to cargo 1.95.0 -- the version `vx.toml`
+# pins -- whereas `vx cargo` resolved to 1.97.0 out of the vx store. Measured
+# side by side in the same directory:
+#
+#   vx sh -c "cargo --version"  -> cargo 1.95.0, sysroot ~/.rustup/toolchains/1.95.0-...
+#   vx cargo --version          -> cargo 1.97.0, sysroot ~/.vx/store/rust/1.95.0/rustup/...
+#
+# # gnu is NOT msvc, and this does not pretend otherwise
+#
+# We ship `x86_64-pc-windows-msvc`. This uses the `gnu` target because that is
+# what cross-compiles from Linux without the MSVC toolchain. It shares the
+# `cfg(windows)` / `cfg(target_os = "windows")` arms -- which is the whole
+# point -- but NOT the ABI, the linker, or the C runtime. It therefore catches
+# a type error, a moved API, a missing import or a stale call in Windows-gated
+# code, and it does NOT substitute for the msvc legs in `ci.yml`, which stay
+# the release-blocking arm. A green here is "the Windows source still compiles
+# as source", never "Windows works".
+#
+# `rustup target add` is idempotent and runs first so the recipe is
+# self-sufficient on a fresh box rather than a gate that reds for a missing
+# target.
+#
+# Run: `just check-windows-compile`
+check-windows-compile:
+    rustup target add x86_64-pc-windows-gnu
+    cargo check --workspace --all-targets --target x86_64-pc-windows-gnu
+
 lint-fix:
     vx cargo fix --allow-dirty --allow-staged
     vx cargo clippy --fix --workspace --all-targets --allow-dirty --allow-staged -- -D warnings
@@ -261,7 +335,7 @@ _auto-commit-fixes:
 # runs on the release path (`release-readiness-live`, and the
 # `prepare-release` job in release.yml). This arm only proves the gate can
 # still fail — which is the half that rots silently between releases.
-check-all: check-no-personal-identifiers check-model-limits check-windows-attribution ledger-check release-readiness-selftest fmt-check lint test-ci hakari-verify audit deny verify-suppressions
+check-all: check-no-personal-identifiers check-model-limits check-windows-attribution ledger-check release-readiness-selftest fmt-check lint check-windows-compile test-ci hakari-verify audit deny verify-suppressions
 
 # ── User-flow harness (CLI + TUI + failure injection) ────────────────────
 # Drives the COMPILED wayland-core binary the way a user does:

@@ -3,7 +3,7 @@ issue: 337
 repo: FerroxLabs/wayland-core
 kind: defect
 title: "Fragile 4s wall-clock bound: dangerous_expiry_cancels_production_streaming_bash_process_tree"
-status: open
+status: closed
 last_verified_commit: 43848f75
 criteria:
   - id: c1
