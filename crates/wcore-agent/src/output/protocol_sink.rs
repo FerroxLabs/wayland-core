@@ -529,7 +529,13 @@ impl ProtocolSink {
 
     /// Emit a turn-scoped error when the caller still owns the protocol
     /// command's correlation id (for example, before the engine starts).
-    pub fn emit_correlated_error(&self, msg_id: &str, msg: &str, retryable: bool) {
+    pub fn emit_correlated_error(
+        &self,
+        msg_id: &str,
+        msg: &str,
+        retryable: bool,
+        category: wcore_protocol::events::FailureCategory,
+    ) {
         let code = auth_error_code(msg).unwrap_or("engine_error");
         let _ = self.writer.emit(&ProtocolEvent::Error {
             msg_id: Some(msg_id.to_string()),
@@ -537,12 +543,14 @@ impl ProtocolSink {
                 code: code.to_string(),
                 message: msg.to_string(),
                 retryable,
-                // wayland#1237. This seam receives PROSE, and deciding a
-                // category from prose is the defect the ticket reports, so it
-                // does not try: `unknown` is the honest answer here and the
-                // typed answer arrives through `emit_run_failure`, which still
-                // holds the `AgentError`.
-                category: wcore_protocol::events::FailureCategory::Unknown,
+                // wayland#1266 c1. This used to hardcode `Unknown` and point at
+                // `emit_run_failure` for the typed answer -- a method #1266
+                // DELETED, so the pointer went nowhere and every frame from
+                // this seam reached the host as `unknown`. It is the same
+                // `ProtocolEvent::Error` frame `OutputSink::emit_error`
+                // builds, so it takes the category the same way: from the
+                // caller, which is the only place that knows.
+                category,
             },
         });
     }

@@ -2478,11 +2478,11 @@ async fn run() -> anyhow::Result<ExitCode> {
                         }
                     }
                     Err(error) => {
-                        output.emit_error(
-                            &format!("{error:#}"),
-                            false,
-                            wcore_protocol::events::FailureCategory::Unknown,
-                        );
+                        // wayland#1266 c2: this arm HOLDS the `AgentError`, so
+                        // it is not one of the sites that only has someone
+                        // else's prose -- `{error:#}` is rendered FROM the very
+                        // value that can name its own category. Ask it.
+                        output.emit_error(&format!("{error:#}"), false, error.failure_category());
                         exit_sink.store(
                             wcore_cli::exit_code::FAILURE,
                             std::sync::atomic::Ordering::SeqCst,
@@ -2553,11 +2553,9 @@ async fn run() -> anyhow::Result<ExitCode> {
             SlashOrRun::Engine(Err(e)) => {
                 // Render the full anyhow chain (`{e:#}` flattens causes onto
                 // `\nCaused by: …` lines which the formatter recognises).
-                output.emit_error(
-                    &format!("{e:#}"),
-                    false,
-                    wcore_protocol::events::FailureCategory::Unknown,
-                );
+                // wayland#1266 c2: `e` is the run's own `AgentError`, so the
+                // category comes from it rather than from a guess.
+                output.emit_error(&format!("{e:#}"), false, e.failure_category());
                 ExitCode::from(wcore_cli::exit_code::FAILURE)
             }
         }
@@ -2658,11 +2656,10 @@ async fn repl_loop(
                 );
             }
             SlashOrRun::Engine(Err(e)) => {
-                output.emit_error(
-                    &format!("{e:#}"),
-                    false,
-                    wcore_protocol::events::FailureCategory::Unknown,
-                );
+                // wayland#1266 c2: the interactive loop's terminal error is the
+                // same `AgentError` the headless path classifies; it says so
+                // here too rather than reporting `unknown`.
+                output.emit_error(&format!("{e:#}"), false, e.failure_category());
             }
         }
     }
@@ -6235,6 +6232,11 @@ async fn run_json_stream_mode(
                             &msg_id,
                             &format!("composer attachment rejected: {error}"),
                             false,
+                            // wayland#1266 c1: WE refused the host's
+                            // attachment. Nothing upstream is implicated, so
+                            // this is #388's "local Wayland error" and the
+                            // seam has no reason to say `unknown`.
+                            wcore_protocol::events::FailureCategory::LocalWayland,
                         );
                         output.emit_stream_end(&msg_id, 0, 0, 0, 0, 0, FinishReason::Error);
                         continue;
@@ -6292,7 +6294,11 @@ async fn run_json_stream_mode(
                                         );
                                     }
                                     Err(e) => {
-                                        output.emit_error(&format!("{e:#}"), false, wcore_protocol::events::FailureCategory::Unknown);
+                                        // wayland#1266 c2: the host-protocol
+                                        // run loop's terminal error. `e` is the
+                                        // `AgentError` itself, so its own
+                                        // classification travels to the host.
+                                        output.emit_error(&format!("{e:#}"), false, e.failure_category());
                                         // stream_end deferred (see run_failed
                                         // above): emitted after this block with
                                         // the engine's usage snapshot.
@@ -11792,6 +11798,92 @@ mod tests {
     /// is allowed to happen in a different function from the construction —
     /// the #551 deferred path genuinely does that — so this is a per-FILE
     /// pairing, not a per-function one.
+    /// FerroxLabs/wayland#1266 c1/c2 — a CLI site that HOLDS the run's
+    /// `AgentError` must report that error's own category, not `unknown`.
+    ///
+    /// c2's ledger note draws the line in the right place — the sites that
+    /// know say so, the ones holding only someone else's prose say `Unknown`
+    /// — but four sites in this file were on the wrong side of it. Each
+    /// rendered the error value straight into the frame's message
+    /// (`emit_error(&format!("{e:#}"), …)`), i.e. formatted the prose OUT OF
+    /// the very `AgentError` that has `failure_category()`, and then passed
+    /// `FailureCategory::Unknown` beside it. Two are the headless and
+    /// interactive terminal exits and one is the host-protocol run loop's, so
+    /// the most common way for a run to die reached the host as `unknown`
+    /// while this process had already classified it.
+    ///
+    /// Graded PER CALL, not per function. A per-function "does the body
+    /// mention failure_category anywhere" would pass `run`, which holds two
+    /// of these sites and would go on passing with a third written bare. The
+    /// walk strips whitespace and then requires the category to appear inside
+    /// the call it belongs to.
+    ///
+    /// The needle is deliberately narrow — an `emit_error` whose message is a
+    /// `format!` opening on an interpolation — because that is the defect's
+    /// shape: prose rendered FROM a value that could have been asked. An
+    /// `emit_error` with a written-out message is a site that may genuinely
+    /// hold nothing but someone else's words, and c2 says those must keep
+    /// saying `Unknown`.
+    ///
+    /// RED ARM (re-runnable): swap any one of the four back to
+    /// `wcore_protocol::events::FailureCategory::Unknown`, `touch` main.rs,
+    /// rebuild — this test fails naming that function.
+    #[test]
+    fn every_cli_site_holding_an_agent_error_reports_its_category() {
+        // Needles are assembled from fragments for the same reason as the two
+        // MCP lints below: this file is one of the files the walk reads, so a
+        // literal here could match itself.
+        let call = concat!("emit_", "error(&format!(\"{");
+        let ask = concat!("failure_", "category()");
+
+        let mut graded: Vec<String> = Vec::new();
+        for (path, source) in wcore_cli_production_sources() {
+            let squeezed: String = source.chars().filter(|c| !c.is_whitespace()).collect();
+            if !squeezed.contains(call) {
+                continue;
+            }
+            for (name, body) in fn_blocks(&source) {
+                let squeezed: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+                let mut sites = 0usize;
+                for (idx, _) in squeezed.match_indices(call) {
+                    sites += 1;
+                    let end = (idx + 200).min(squeezed.len());
+                    assert!(
+                        squeezed[idx..end].contains(ask),
+                        "fn {name} ({path}), site {sites}: an error frame whose \
+                         message is rendered from a value does not carry that \
+                         value's category. If it is an AgentError the host is \
+                         told `unknown` about a failure this process had \
+                         already classified (FerroxLabs/wayland#1266 c2). \
+                         Call: {}",
+                        &squeezed[idx..end]
+                    );
+                }
+                if sites > 0 {
+                    let file = path.rsplit_once("/src/").map_or(path.as_str(), |(_, r)| r);
+                    graded.push(format!("{file}::{name}:{sites}"));
+                }
+            }
+        }
+
+        // POSITIVE CONTROL on the SET AND THE COUNT. A walk that found
+        // nothing, a splitter that returned nothing, or a rename that hid a
+        // site would all pass the loop above vacuously. `run` legitimately
+        // holds two. A new site is fine — grade it and update this. One GOING
+        // MISSING is the failure this control exists for.
+        graded.sort();
+        assert_eq!(
+            graded,
+            vec![
+                "main.rs::repl_loop:1".to_string(),
+                "main.rs::run:2".to_string(),
+                "main.rs::run_json_stream_mode:1".to_string(),
+            ],
+            "the walk graded a different set of AgentError-rendering error \
+             sites than the four known ones"
+        );
+    }
+
     #[test]
     fn every_runtime_mcp_add_joins_the_catalog_refresh() {
         // Needles are assembled at compile time from fragments so that this
