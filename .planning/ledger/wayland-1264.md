@@ -8,27 +8,34 @@ last_verified_commit: 4a738f2e
 criteria:
   - id: c1
     text: "A decision is recorded in `.planning/DECISIONS.md` with its reasoning: either the allowlist grant is split by traffic origin (provider vs tool-driven), or the current posture is affirmed as intended and the reason is written down where an operator reading the egress policy can see it."
-    state: not-met
+    state: met
+    evidence: "file:.planning/DECISIONS.md"
     owner: core
-    note: "Transcribed from the issue body verbatim on 2026-08-31. This ledger did not exist until now: the issue was filed 2026-08-29/30 by this cycle's own verification and never entered the release gate, which counts only issues holding a ledger file. State is not-met because no lane has claimed it and nothing in the tree has been graded against this text. kind is defect, not task, because the gate reserves task for a credential, an account or a platform a human must obtain and there is code behind this one."
+    note: "MET. The decision is SPLIT, recorded in .planning/DECISIONS.md under 'Egress: split the allowlist grant by traffic origin (FerroxLabs/wayland#1264)' with the measurement, both refuted alternatives (a per-client policy is a bypass factory; excluding '-' from the token run blinds the check to base64url secrets), why ToolData is not Ask (resolve_ask fails OPEN with no doorbell, so a shape check resolved through it would be theatre), the redirect gap, and the cooperative-label bound stated rather than implied. Operator-visible half: classify()'s own doc comment carries the reasoning and points at the decision, and the refusal text says plainly that allowlisting permits the agent to REACH a host and not a tool to choose what to send it."
   - id: c2
     text: "If the split is taken: tool-driven egress to an allowlisted host is shape-checked (method, path, query), and a test drives the real `WebFetch` surface against an allowlisted apex carrying a query payload, shown RED against today's `classify.rs:229` early return."
-    state: not-met
+    state: met
+    evidence: "test:crates/wcore-agent/tests/egress_tool_origin_test.rs::webfetch_of_an_allowlisted_apex_with_a_query_payload_is_refused"
     owner: core
-    note: "Transcribed from the issue body verbatim on 2026-08-31. This ledger did not exist until now: the issue was filed 2026-08-29/30 by this cycle's own verification and never entered the release gate, which counts only issues holding a ledger file. State is not-met because no lane has claimed it and nothing in the tree has been graded against this text. kind is defect, not task, because the gate reserves task for a credential, an account or a platform a human must obtain and there is code behind this one."
+    note: "MET AS WRITTEN. The split is taken. Tool-driven egress to an allowlisted host is shape-checked on method, path AND query (request_carries_data = body-bearing method OR get_carries_data, which now has a second call site on the allowlisted branch). The test drives the REAL WebFetch surface -- HttpFetchBackend::new() under the real AgentEgressPolicy via with_default_policy_sync -- against github.com carrying a query payload. RED ARM against today's classify.rs:229 early return, measured LIVE and not modelled: with the early return restored the fetch was not refused at all, it was dispatched and answered -- `got Ok { status: 200, content_type: 'text/html; charset=utf-8' ... }` from github.com, and `got HttpError { status: 404 ... 'documentation_url': 'https://docs.github.com/rest' }` from api.github.com. That closes the ticket's own provenance gap: a process has now issued the request and observed the absence of a prompt. Redirects are validated under the same policy: HttpFetchBackend follows hops itself, re-issuing each through EgressRequestBuilder::send, because reqwest follows a hop inside Client::execute where no policy runs."
   - id: c3
     text: "If the split is taken: provider/LLM traffic to the same apex still receives unconditional `Allow`, with a test that fails if the new check is applied to it — the wrong-refusal control."
-    state: not-met
+    state: met
+    evidence: "test:crates/wcore-agent/src/egress/classify.rs::provider_traffic_to_the_same_apex_is_still_unconditionally_allowed"
     owner: core
-    note: "Transcribed from the issue body verbatim on 2026-08-31. This ledger did not exist until now: the issue was filed 2026-08-29/30 by this cycle's own verification and never entered the release gate, which counts only issues holding a ledger file. State is not-met because no lane has claimed it and nothing in the tree has been graded against this text. kind is defect, not task, because the gate reserves task for a credential, an account or a platform a human must obtain and there is code behind this one."
+    note: "MET AS WRITTEN. Provider/LLM traffic to the same apex still receives unconditional Allow, and the test fails if the new check is applied to it -- it asserts EgressVerdict::Allow for a provider POST with a body, for a provider GET with a long high-entropy path, and for a provider POST carrying the exact query payload the tool arm is refused for. Both pre-existing pinning tests (classify::post_to_allowlisted_host_is_allowed, policy::allowlisted_post_is_allowed) stay green unchanged. Further wrong-refusal controls: a data-less TOOL read of an allowlisted host is still allowed silently, a data-less GET to a NEW host still fails open exactly as before, and the non-allowlisted branch is unchanged for both origins."
   - id: c4
     text: "If the current posture is affirmed instead: the two pinning tests gain a comment naming this decision, and `wayland#1195` c8 is closed against the recorded decision rather than left blocked."
-    state: not-met
+    state: met
+    evidence: "test:crates/wcore-agent/src/egress/policy.rs::allowlisted_post_is_allowed"
     owner: core
-    note: "Transcribed from the issue body verbatim on 2026-08-31. This ledger did not exist until now: the issue was filed 2026-08-29/30 by this cycle's own verification and never entered the release gate, which counts only issues holding a ledger file. State is not-met because no lane has claimed it and nothing in the tree has been graded against this text. kind is defect, not task, because the gate reserves task for a credential, an account or a platform a human must obtain and there is code behind this one."
+    note: "MET, AND THE ANTECEDENT IS FALSE -- recorded plainly rather than quietly. c4 is the ALTERNATIVE branch of c1 ('if the current posture is affirmed instead'); the posture was NOT affirmed, the split was taken, so c2/c3 are the operative pair. Both concrete obligations c4 names were delivered anyway, so nothing it protects is outstanding: (1) the two pinning tests each gained a doc comment naming this decision and pointing at .planning/DECISIONS.md; (2) wayland#1195 c8 is re-graded from `blocked` to `met` against the delivered fix rather than left blocked -- see .planning/ledger/wayland-1195.md."
+
 ---
 
-Created 2026-08-31 to close a COVERAGE gap. It records no work as done.
+Created 2026-08-31 to close a COVERAGE gap; GRADED 2026-08-31 by lane
+f13-authority, which took the work and the decision. The decision is SPLIT and
+it is recorded in `.planning/DECISIONS.md`.
 
 `scripts/check-criteria-ledger.py` scopes every open `area:core` issue on
 wayland and EVERY open issue on wayland-core. This issue was in scope from

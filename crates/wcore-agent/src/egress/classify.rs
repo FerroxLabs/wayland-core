@@ -434,6 +434,16 @@ mod tests {
         }
     }
 
+    /// PINNED BEHAVIOUR, and wayland#1264 c3's wrong-refusal control.
+    ///
+    /// This test and its sibling `policy::tests::allowlisted_post_is_allowed`
+    /// are why narrowing the allowlist was never an available fix for #1264:
+    /// they pin the agent's own LLM POST to an allowlisted apex as an
+    /// unconditional `Allow`, and a change that broke them would deny every
+    /// provider call. The recorded decision (`.planning/DECISIONS.md`,
+    /// "Egress: split the allowlist grant by traffic origin") splits the grant
+    /// by ORIGIN instead, which is why this call -- through the
+    /// provider-origin shim -- still passes unchanged.
     #[test]
     fn post_to_allowlisted_host_is_allowed() {
         let mut allow = AllowList::default();
