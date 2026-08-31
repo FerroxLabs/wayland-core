@@ -783,3 +783,35 @@ retries = 0
 [[profile.ci.overrides]]
 filter = 'binary(=harness_guard_kills_only_its_own_tree) + binary(=harness_owns_spawned_trees) + binary(=harness_owns_spawned_trees_windows)'
 retries = 0
+
+# ── #362 c4: a containment test that never ran its probe must not be retried ─
+#
+# MECHANISM, not instance. Every test in these two binaries grades a CONTAINMENT
+# property by running a probe INSIDE the sandbox — `run_contained_probe` in
+# `crates/wcore-sandbox/src/test_support.rs`. That helper panics, deliberately
+# and loudly, when the backend refuses to spawn at all:
+#
+#   the sandbox backend refused to run the containment probe, so no containment
+#   property was tested
+#
+# It is the right panic and it was laundered anyway. MEASURED, CI run
+# 33240249894 (linux-containerized): `bwrap_confines_filesystem_writes_outside_
+# allowlist` failed with exactly that message out of the sandbox's own
+# process-tree ownership path, was RETRIED under `[profile.ci] retries = 2`,
+# passed on a later attempt, and the run conclusion said SUCCESS. A containment
+# test that could not start its probe proved NOTHING, and the number release
+# gates and humans read reported it as a containment property held.
+#
+# That is strictly worse than an ordinary flake. A retried assertion failure at
+# least means the assertion ran; a retried probe refusal means the run reported
+# a security property it never measured.
+#
+# Scoped to the two binaries that call the helper, same discipline as the five
+# blocks above: every other test in the suite keeps `retries = 2`. The
+# membership is not maintained by hand — `wcore-sandbox`'s
+# `containment_probes_are_not_retryable` scans this file against the crate's own
+# test sources, so a new binary that calls `run_contained_probe` and is not
+# listed here reddens before it can be retried into a pass.
+[[profile.ci.overrides]]
+filter = 'binary(=backend_integration) + binary(=secret_read_deny)'
+retries = 0

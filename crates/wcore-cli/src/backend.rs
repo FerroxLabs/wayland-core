@@ -61,10 +61,21 @@ pub enum BackendCmd {
         #[arg(long)]
         backend: Option<String>,
     },
-    /// Enumerate surfaces still carrying a task nonce, per backend.
+    /// Enumerate leftover surfaces, per backend.
+    ///
+    /// WITHOUT `--nonce` this is the UNSCOPED scan (#366): every surface this
+    /// product created, whichever run created it, with the ones this process
+    /// has no live record of called out. That is the only form that can see a
+    /// leftover from an EARLIER run — a scan for a nonce this process is
+    /// already holding is structurally incapable of returning one.
+    ///
+    /// WITH `--nonce` it is the scoped scan, unchanged.
     Orphans {
+        /// Restrict the scan to one nonce. Omit it to ask the question an
+        /// operator actually has: "are there wayland surfaces left over from
+        /// ANY run".
         #[arg(long)]
-        nonce: String,
+        nonce: Option<String>,
     },
     /// F25-05: scan every backend for orphaned execution left behind by a
     /// task, printing the RAW enumeration alongside the count and naming the
@@ -224,7 +235,7 @@ pub async fn run(args: BackendArgs) -> Result<()> {
             receipt_out,
         } => execute(&backend, task.as_deref(), &receipt_out).await,
         BackendCmd::Cancel { task_id, backend } => cancel(&task_id, backend.as_deref()).await,
-        BackendCmd::Orphans { nonce } => orphans(&nonce).await,
+        BackendCmd::Orphans { nonce } => orphans(nonce.as_deref()).await,
         BackendCmd::Scan {
             task_id,
             nonce,
@@ -420,7 +431,66 @@ async fn cancel(task_id: &str, backend: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-async fn orphans(nonce: &str) -> Result<()> {
+async fn orphans(nonce: Option<&str>) -> Result<()> {
+    match nonce {
+        Some(nonce) => orphans_scoped(nonce).await,
+        None => orphans_unscoped().await,
+    }
+}
+
+/// The UNSCOPED scan (#366 d1/d3). Reports; never reclaims (#366 d6).
+async fn orphans_unscoped() -> Result<()> {
+    let backends = reference_backends(reference_budget())?;
+    let mut indeterminate = 0usize;
+    let mut leftovers = 0usize;
+    for reference in &backends {
+        let scan = reference.backend.scan_all_orphans().await?;
+        if let Some(why) = &scan.unsupported_reason {
+            println!("{:<10} NO UNSCOPED SCAN — {why}", scan.backend_id);
+            indeterminate += 1;
+            continue;
+        }
+        if !scan.enumerated {
+            println!(
+                "{:<10} COULD NOT ENUMERATE via {} — this is NOT zero orphans",
+                scan.backend_id, scan.method
+            );
+            indeterminate += 1;
+            continue;
+        }
+        println!(
+            "{:<10} enumerated={:<5} found={} via {}",
+            scan.backend_id,
+            scan.enumerated,
+            scan.found.len(),
+            scan.method
+        );
+        for item in &scan.found {
+            // The distinction is the whole point: a surface this process
+            // created is bookkeeping, one it did not is a LEFTOVER.
+            let tag = if item.known_to_this_process {
+                "live in this process"
+            } else {
+                "LEFTOVER — no live record in this process"
+            };
+            println!(
+                "           - {} (nonce {}) [{tag}]",
+                item.handle, item.nonce
+            );
+        }
+        leftovers += scan.leftovers().count();
+    }
+    println!(
+        "\n{leftovers} leftover surface(s) with no live record in this process; \
+         {indeterminate} surface(s) could NOT be scanned without a nonce. An un-enumerated \
+         surface is not a clean surface. Nothing here was removed: an unscoped scan holds no \
+         claim on what it finds, and a leftover may be a live task in another process on the \
+         same daemon."
+    );
+    Ok(())
+}
+
+async fn orphans_scoped(nonce: &str) -> Result<()> {
     let backends = reference_backends(reference_budget())?;
     let mut unscannable = 0usize;
     let mut found = 0usize;

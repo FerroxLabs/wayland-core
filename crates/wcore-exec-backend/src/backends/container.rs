@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use crate::contract::{
     Availability, BackendCapabilities, BackendKind, CleanupObservation, ExecutionBackend,
     ExecutionTask, Health, HibernationObservation, OrphanScan, ProbeBasis, ResourceBudget,
-    SecretChannel, validate_identifier,
+    SecretChannel, UnscopedOrphan, UnscopedOrphanScan, validate_identifier,
 };
 use crate::error::{ExecError, Result};
 use crate::policy::{EffectivePolicy, declared_secret_exposure};
@@ -837,6 +837,88 @@ impl ExecutionBackend for ContainerBackend {
             }),
         }
     }
+
+    /// The query that answers "are there wayland containers left over from ANY
+    /// run" — `--filter label=wayland.task.nonce`, matching on the label KEY
+    /// rather than on its value.
+    ///
+    /// It is one character shorter than the scoped one and, until #366, nothing
+    /// in the product issued it. Labels are applied at CREATE time, so a
+    /// container that never started still carries one; that was MEASURED
+    /// against a real wedged container while closing #365 c6, and it is why the
+    /// scoped scan's blindness is a blindness of the QUESTION and not of the
+    /// filter.
+    ///
+    /// REPORTS ONLY — see [`UnscopedOrphanScan`]. `known_to_this_process` is
+    /// computed against the live registry, so a leftover from an earlier run
+    /// (whose own run already called `registry::forget`) comes back `false`,
+    /// which is the value #366 d3 is about.
+    async fn scan_all_orphans(&self) -> Result<UnscopedOrphanScan> {
+        let live: Vec<String> = registry::list()
+            .into_iter()
+            .filter(|t| t.backend_id == BACKEND_ID)
+            .map(|t| t.nonce)
+            .collect();
+        match list_all_labelled_containers().await {
+            Ok(rows) => Ok(UnscopedOrphanScan {
+                backend_id: BACKEND_ID.into(),
+                kind: BackendKind::Container,
+                method: format!("docker ps -a --filter label={NONCE_LABEL} (key presence)"),
+                found: rows
+                    .into_iter()
+                    .map(|(handle, nonce)| UnscopedOrphan {
+                        known_to_this_process: live.contains(&nonce),
+                        handle,
+                        nonce,
+                    })
+                    .collect(),
+                enumerated: true,
+                unsupported_reason: None,
+            }),
+            Err(detail) => Ok(UnscopedOrphanScan {
+                backend_id: BACKEND_ID.into(),
+                kind: BackendKind::Container,
+                method: format!("docker ps failed: {detail}"),
+                found: Vec::new(),
+                // Same rule as the scoped scan: a surface that could not be
+                // enumerated is never reported as a clean surface.
+                enumerated: false,
+                unsupported_reason: None,
+            }),
+        }
+    }
+}
+
+/// Every container carrying the nonce LABEL KEY, with the nonce it carries.
+///
+/// Separator is `|`, which docker's own name grammar
+/// (`[a-zA-Z0-9][a-zA-Z0-9_.-]*`) cannot produce, so a name can never split a
+/// row. A row that does not split is dropped rather than guessed at.
+async fn list_all_labelled_containers() -> std::result::Result<Vec<(String, String)>, String> {
+    let filter = format!("label={NONCE_LABEL}");
+    let format = format!("{{{{.Names}}}}|{{{{.Label \"{NONCE_LABEL}\"}}}}");
+    let mut command = wcore_config::shell::shell_command_argv(
+        "docker",
+        &["ps", "-a", "--filter", &filter, "--format", &format],
+    );
+    command.stdout(std::process::Stdio::piped());
+    command.stderr(std::process::Stdio::piped());
+    let output = tokio::time::timeout(std::time::Duration::from_secs(10), command.output())
+        .await
+        .map_err(|_| "docker ps did not answer within 10s".to_string())?
+        .map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter_map(|line| {
+            line.split_once('|')
+                .map(|(name, nonce)| (name.trim().to_string(), nonce.trim().to_string()))
+        })
+        .collect())
 }
 
 async fn list_containers_with_nonce(nonce: &str) -> std::result::Result<Vec<String>, String> {
