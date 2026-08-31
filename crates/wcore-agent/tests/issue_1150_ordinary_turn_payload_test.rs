@@ -133,12 +133,34 @@ fn plant_skills(root: &std::path::Path, n: usize) {
 
 /// Drive `prompts` user turns on ONE engine and return every `LlmRequest` the
 /// provider was handed.
+/// Point user-level skill discovery at an empty directory.
+///
+/// The assertions below are about the skills THIS test plants. On a machine
+/// with skills actually installed (85 of them on the host this was fixed on)
+/// the host's own skills are discovered too, sort ahead of anything planted in
+/// a tempdir, and — now that FerroxLabs/wayland#1280 c1 gives the listing a
+/// real ceiling — crowd the fixtures out of it. That made this file's result a
+/// function of whose machine it ran on. Every test in this binary is
+/// `#[serial]` because this is process-global state.
+fn isolate_user_skill_dirs() {
+    static ISOLATED: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    let dir = ISOLATED.get_or_init(|| tempdir().expect("isolated home"));
+    // SAFETY: every test in this binary is #[serial], and these three are set
+    // once to a path that outlives the process's use of them.
+    unsafe {
+        std::env::set_var("HOME", dir.path());
+        std::env::set_var("XDG_CONFIG_HOME", dir.path().join("config"));
+        std::env::set_var("WAYLAND_HOME", dir.path().join("wayland-home"));
+    }
+}
+
 async fn session(
     skill_count: usize,
     cfg: Config,
     scripts: Vec<Vec<LlmEvent>>,
     prompts: &[&str],
 ) -> Vec<LlmRequest> {
+    isolate_user_skill_dirs();
     let tmp = tempdir().expect("tempdir");
     let root = std::fs::canonicalize(tmp.path()).expect("canonicalize");
     plant_skills(&root, skill_count);
@@ -206,6 +228,7 @@ fn skills_block(system: &str) -> Option<&str> {
 /// 8,902, with the other 40 folded out of `tools[]` entirely and named in a
 /// 566-byte catalog line inside ToolSearch's description.
 #[tokio::test]
+#[serial_test::serial]
 async fn most_tool_schemas_are_not_shipped_on_an_ordinary_turn() {
     let on = ordinary_turn(10, config()).await;
 
@@ -280,6 +303,7 @@ async fn most_tool_schemas_are_not_shipped_on_an_ordinary_turn() {
 /// where the model DOES need a folded-out tool: it asks ToolSearch for it, and
 /// the next dispatch must carry that tool's real schema.
 #[tokio::test]
+#[serial_test::serial]
 async fn a_folded_out_tool_becomes_callable_on_explicit_activation() {
     const WANTED: &str = "WebFetch";
 
@@ -368,22 +392,21 @@ async fn a_folded_out_tool_becomes_callable_on_explicit_activation() {
 /// which on the reporter's own implicit-cache endpoint re-bills every request
 /// in full. That is a structural change, not a bounded one.
 ///
-/// This test deliberately does NOT assert that the listing fits the 1%-of-window
-/// character budget in `wcore_skills::prompt`. An earlier cut of it did, on the
-/// assumption that made the skills half look like a small lever, and the
-/// assertion FAILED the first time it ran on a host with skills installed:
-/// 2,359 bytes against a 1,310-char budget. The budget is not a ceiling —
-/// `format_skills_within_budget` subtracts the bundled entries from it
-/// (`remaining_budget = budget.saturating_sub(bundled_chars)`) and never caps
-/// them, and its minimal mode still emits every non-bundled NAME. Both terms
-/// grow linearly with the skill count and neither is bounded by the window.
-/// Measured: 100 bundled + 10 project skills render 22,399 chars, 17.1x the
-/// budget, about 5,600 tokens of a 32,768-token window, on every ordinary turn.
-/// That is FerroxLabs/wayland#1280, filed rather than fixed here, and it is why
-/// this file asserts only what is true today.
+/// This test does NOT assert the listing's size. It used to say it could not,
+/// because the budget was not a ceiling: `format_skills_within_budget`
+/// subtracted the bundled entries from it and never capped them, and its
+/// minimal mode still emitted every non-bundled NAME — 100 bundled + 10 project
+/// skills rendered 22,399 chars against a 1,310-char budget, 17.1x. That was
+/// FerroxLabs/wayland#1280 c1 and it is now FIXED; the ceiling and its
+/// wrong-refusal control are graded by
+/// `issue_1280_skills_ceiling_test.rs`. Size is that file's subject, and
+/// duplicating the assertion here would give two places to update and one of
+/// them would rot. What is left for THIS test is the other half: the listing is
+/// still UNCONDITIONAL.
 ///
 /// When a gate is built, the first assertion below is the one that must go red.
 #[tokio::test]
+#[serial_test::serial]
 async fn the_skills_listing_is_unconditional_on_an_ordinary_turn() {
     let reqs = session(
         10,

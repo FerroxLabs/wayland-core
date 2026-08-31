@@ -34,6 +34,20 @@ pub const MAX_LISTING_DESC_CHARS: usize = 250;
 
 const MIN_DESC_LENGTH: usize = 20;
 
+/// The reachability half of FerroxLabs/wayland#1280 (c2), in one fixed line.
+///
+/// The ceiling below TRIMS skills out of the listing. A listing bounded by
+/// silently dropping skills the model then cannot reach is a wrong refusal and
+/// worse than the bytes it saves, so a trimmed listing always ends with this
+/// line: it names the escape hatch (`Skill { query }`, see
+/// `wcore_agent::skill_tool`) and the count of what was withheld. It is a
+/// constant plus the decimal digits of one number, so it is bounded in the
+/// skill count exactly like the rest of the listing.
+pub const SKILL_OVERFLOW_HINT: &str = "more installed skills are not listed here. \
+     Call the Skill tool with {\"query\": \"<what you need to do>\"} to search \
+     every installed skill by name and description, then invoke the one you \
+     want by its exact name.";
+
 /// Calculate character budget from context window size.
 pub fn get_char_budget(context_window_tokens: Option<usize>) -> usize {
     match context_window_tokens {
@@ -53,21 +67,29 @@ pub fn format_skill_description(skill: &SkillRef) -> String {
     };
 
     if UnicodeWidthStr::width(desc.as_str()) > MAX_LISTING_DESC_CHARS {
-        let mut truncated = String::new();
-        let mut width = 0usize;
-        for ch in desc.chars() {
-            let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-            if width + cw >= MAX_LISTING_DESC_CHARS {
-                break;
-            }
-            truncated.push(ch);
-            width += cw;
-        }
-        truncated.push('\u{2026}');
-        truncated
+        truncate_to_width(&desc, MAX_LISTING_DESC_CHARS)
     } else {
         desc
     }
+}
+
+/// Cut `text` to at most `limit` display columns, ending in an ellipsis.
+///
+/// Extracted so the description cap and the search-result cap cannot drift
+/// into two different notions of "truncate".
+fn truncate_to_width(text: &str, limit: usize) -> String {
+    let mut out = String::new();
+    let mut width = 0usize;
+    for ch in text.chars() {
+        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + cw >= limit {
+            break;
+        }
+        out.push(ch);
+        width += cw;
+    }
+    out.push('\u{2026}');
+    out
 }
 
 /// Format a single skill entry for the listing: `- name: description`.
@@ -75,12 +97,83 @@ pub fn format_skill_entry(skill: &SkillRef) -> String {
     format!("- {}: {}", skill.name, format_skill_description(skill))
 }
 
-/// Format all skills within budget, applying three-level degradation.
+/// Width of a rendered listing: every entry plus the newlines that join them.
+fn listing_width(entries: &[String]) -> usize {
+    entries
+        .iter()
+        .map(|e| UnicodeWidthStr::width(e.as_str()))
+        .sum::<usize>()
+        + entries.len().saturating_sub(1)
+}
+
+/// The trailing line a trimmed listing always carries. See
+/// [`SKILL_OVERFLOW_HINT`].
+fn overflow_line(omitted: usize) -> String {
+    format!("- (+{omitted} {SKILL_OVERFLOW_HINT})")
+}
+
+/// The hard ceiling — FerroxLabs/wayland#1280 c1.
+///
+/// Keeps entries in order until the next one would not leave room for the
+/// overflow line, then stops and states how many were withheld. The result is
+/// at most `budget` columns wide, except in the degenerate case where the
+/// budget is smaller than a single overflow line (a 100-token context window
+/// gives a 4-char budget), where it is the overflow line alone. That residual
+/// is a CONSTANT — it does not grow with the skill count, which is the property
+/// c1 asks for — and dropping it instead would leave the model with neither the
+/// skills nor the means to find them.
+fn clamp_to_budget(entries: Vec<String>, budget: usize) -> String {
+    if listing_width(&entries) <= budget {
+        return entries.join("\n");
+    }
+
+    let total = entries.len();
+    let mut kept: Vec<String> = Vec::new();
+    let mut used = 0usize;
+    for (i, entry) in entries.iter().enumerate() {
+        let sep = usize::from(!kept.is_empty());
+        let after = used + sep + UnicodeWidthStr::width(entry.as_str());
+        let still_omitted = total - i - 1;
+        let tail = if still_omitted == 0 {
+            0
+        } else {
+            1 + UnicodeWidthStr::width(overflow_line(still_omitted).as_str())
+        };
+        if after + tail > budget {
+            break;
+        }
+        kept.push(entry.clone());
+        used = after;
+    }
+
+    let omitted = total - kept.len();
+    if omitted == 0 {
+        return kept.join("\n");
+    }
+    kept.push(overflow_line(omitted));
+    kept.join("\n")
+}
+
+/// Format all skills within budget, applying four-level degradation and a
+/// hard ceiling.
 ///
 /// Levels:
 /// 1. Full mode: all skills with full descriptions
 /// 2. Truncated mode: bundled skills full, non-bundled descriptions trimmed
 /// 3. Minimal mode: bundled skills full, non-bundled names only
+/// 4. Names mode: every skill, bundled included, as a bare name
+///
+/// Every level is CHECKED against the budget rather than assumed to fit, and
+/// whatever survives is clamped by [`clamp_to_budget`]. Before
+/// FerroxLabs/wayland#1280 the bundled entries were SUBTRACTED from the budget
+/// (`remaining_budget = budget.saturating_sub(bundled_chars)`) and never
+/// capped, level 3 emitted every bundled skill at full description plus every
+/// non-bundled name, and a listing with no non-bundled skill at all returned
+/// unconditionally. All three terms grew linearly in the skill count and none
+/// was bounded by the window: measured against the 1,310-char budget a 32,768
+/// -token window implies, 1,000 project skills rendered 19,999 chars (15.3x)
+/// and 100 bundled skills rendered 22,399 (17.1x, about 5,600 tokens of the
+/// window, on every ordinary turn).
 pub fn format_skills_within_budget(
     skills: &[SkillRef],
     context_window_tokens: Option<usize>,
@@ -94,15 +187,8 @@ pub fn format_skills_within_budget(
     // Build full entries for all skills
     let full_entries: Vec<String> = skills.iter().map(format_skill_entry).collect();
 
-    // join('\n') produces N-1 newlines for N entries
-    let full_total: usize = full_entries
-        .iter()
-        .map(|e| UnicodeWidthStr::width(e.as_str()))
-        .sum::<usize>()
-        + full_entries.len().saturating_sub(1);
-
     // Level 1: full mode
-    if full_total <= budget {
+    if listing_width(&full_entries) <= budget {
         return full_entries.join("\n");
     }
 
@@ -117,35 +203,55 @@ pub fn format_skills_within_budget(
         }
     }
 
-    // C-5: if no non-bundled skills, return all bundled full entries
-    if rest_indices.is_empty() {
-        return full_entries.join("\n");
-    }
-
-    // Compute space used by bundled skills (full descriptions, always preserved)
+    // Space the bundled block would take at full description. #1280: this is
+    // charged AGAINST the budget, not subtracted from it — if it does not fit,
+    // levels 2 and 3 are skipped outright instead of overrunning.
     // +1 per bundled entry accounts for the trailing newline separator
     let bundled_chars: usize = bundled_indices
         .iter()
         .map(|&i| UnicodeWidthStr::width(full_entries[i].as_str()) + 1)
         .sum();
 
-    let remaining_budget = budget.saturating_sub(bundled_chars);
+    if !rest_indices.is_empty() && bundled_chars < budget {
+        let remaining_budget = budget - bundled_chars;
 
-    // name_overhead = Σ (name.len() + 4) for each non-bundled skill
-    // where 4 = "- " (2) + ": " (2) prefix/suffix
-    // plus (rest_count - 1) newline separators between non-bundled entries
-    let rest_name_overhead: usize = rest_indices
-        .iter()
-        .map(|&i| UnicodeWidthStr::width(skills[i].name.as_str()) + 4)
-        .sum::<usize>()
-        + rest_indices.len().saturating_sub(1);
+        // name_overhead = Σ (name.len() + 4) for each non-bundled skill
+        // where 4 = "- " (2) + ": " (2) prefix/suffix
+        // plus (rest_count - 1) newline separators between non-bundled entries
+        let rest_name_overhead: usize = rest_indices
+            .iter()
+            .map(|&i| UnicodeWidthStr::width(skills[i].name.as_str()) + 4)
+            .sum::<usize>()
+            + rest_indices.len().saturating_sub(1);
 
-    let available_for_descs = remaining_budget.saturating_sub(rest_name_overhead);
-    let per_desc_budget = available_for_descs / rest_indices.len();
+        let available_for_descs = remaining_budget.saturating_sub(rest_name_overhead);
+        let per_desc_budget = available_for_descs / rest_indices.len();
 
-    // Level 3: minimal mode — non-bundled show names only
-    if per_desc_budget < MIN_DESC_LENGTH {
-        return skills
+        // Level 2: truncated mode — non-bundled descriptions trimmed
+        if per_desc_budget >= MIN_DESC_LENGTH {
+            let entries: Vec<String> = skills
+                .iter()
+                .enumerate()
+                .map(|(i, skill)| {
+                    if skill.source == SkillSource::Bundled {
+                        return full_entries[i].clone();
+                    }
+                    let desc = format_skill_description(skill);
+                    let trimmed = if UnicodeWidthStr::width(desc.as_str()) > per_desc_budget {
+                        truncate_to_width(&desc, per_desc_budget.saturating_sub(1))
+                    } else {
+                        desc
+                    };
+                    format!("- {}: {}", skill.name, trimmed)
+                })
+                .collect();
+            if listing_width(&entries) <= budget {
+                return entries.join("\n");
+            }
+        }
+
+        // Level 3: minimal mode — non-bundled show names only
+        let entries: Vec<String> = skills
             .iter()
             .enumerate()
             .map(|(i, skill)| {
@@ -155,40 +261,102 @@ pub fn format_skills_within_budget(
                     format!("- {}", skill.name)
                 }
             })
-            .collect::<Vec<_>>()
-            .join("\n");
+            .collect();
+        if listing_width(&entries) <= budget {
+            return entries.join("\n");
+        }
     }
 
-    // Level 2: truncated mode — non-bundled descriptions trimmed to per_desc_budget
-    skills
+    // Level 4: names only, bundled included, then the hard ceiling. This is
+    // the arm that used to not exist: level 3 returned unconditionally, and a
+    // set with no non-bundled skill at all returned every bundled entry at
+    // full description however far over budget that put it.
+    let names: Vec<String> = skills.iter().map(|s| format!("- {}", s.name)).collect();
+    clamp_to_budget(names, budget)
+}
+
+/// How many results a skill search may return.
+///
+/// The point of the search is to be the bounded escape hatch from a bounded
+/// listing; an unbounded result would reintroduce the term the ceiling exists
+/// to remove, on the tool-result path instead of the prompt.
+pub const SKILL_SEARCH_MAX_RESULTS: usize = 10;
+
+/// Columns of description each search hit may carry.
+pub const SKILL_SEARCH_DESC_CHARS: usize = 120;
+
+/// Rank `skills` against `query`, best first, at most `limit` hits.
+///
+/// FerroxLabs/wayland#1280 c2: this is how a skill the ceiling trimmed out of
+/// the listing is found again. Scoring is deliberately dumb — a name hit is
+/// worth more than a description hit, and a skill matching no query token at
+/// all is not a hit — because the caller is the model, which will refine the
+/// query itself if the first answer is wrong.
+pub fn search_skills<'a>(skills: &'a [SkillRef], query: &str, limit: usize) -> Vec<&'a SkillRef> {
+    let tokens: Vec<String> = query
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .map(|t| t.to_lowercase())
+        .collect();
+    if tokens.is_empty() {
+        return Vec::new();
+    }
+
+    let mut scored: Vec<(usize, &SkillRef)> = skills
         .iter()
-        .enumerate()
-        .map(|(i, skill)| {
-            if skill.source == SkillSource::Bundled {
-                return full_entries[i].clone();
-            }
-            let desc = format_skill_description(skill);
-            let trimmed = if UnicodeWidthStr::width(desc.as_str()) > per_desc_budget {
-                let mut s = String::new();
-                let mut width = 0usize;
-                let limit = per_desc_budget.saturating_sub(1);
-                for ch in desc.chars() {
-                    let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-                    if width + cw >= limit {
-                        break;
-                    }
-                    s.push(ch);
-                    width += cw;
-                }
-                s.push('\u{2026}');
-                s
-            } else {
-                desc
-            };
-            format!("- {}: {}", skill.name, trimmed)
+        .filter_map(|skill| {
+            let name = skill.name.to_lowercase();
+            let haystack = format!(
+                "{} {}",
+                skill.description,
+                skill.when_to_use.as_deref().unwrap_or("")
+            )
+            .to_lowercase();
+            let score: usize = tokens
+                .iter()
+                .map(|t| {
+                    usize::from(name.contains(t.as_str())) * 3
+                        + usize::from(haystack.contains(t.as_str()))
+                })
+                .sum();
+            (score > 0).then_some((score, skill))
         })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect();
+
+    // Stable, name-ordered tie-break so the same query returns the same answer
+    // twice — a search that reshuffles is a search the model cannot re-issue.
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.cmp(&b.1.name)));
+    scored.truncate(limit);
+    scored.into_iter().map(|(_, s)| s).collect()
+}
+
+/// Render [`search_skills`] hits as the body of a `Skill { query }` result.
+///
+/// Bounded by construction: at most `limit` lines, each at most a name plus
+/// [`SKILL_SEARCH_DESC_CHARS`] columns of description.
+pub fn format_skill_search_results(hits: &[&SkillRef], total_installed: usize) -> String {
+    if hits.is_empty() {
+        return format!(
+            "No skill matched that query. {total_installed} skill(s) are installed; \
+             try fewer or different keywords, or invoke a skill directly by its \
+             exact name."
+        );
+    }
+    let mut out = format!(
+        "{} of {total_installed} installed skill(s) matched. Invoke one by its \
+         exact name with {{\"skill\": \"<name>\"}}.\n",
+        hits.len()
+    );
+    for hit in hits {
+        let desc = format_skill_description(hit);
+        let desc = if UnicodeWidthStr::width(desc.as_str()) > SKILL_SEARCH_DESC_CHARS {
+            truncate_to_width(&desc, SKILL_SEARCH_DESC_CHARS)
+        } else {
+            desc
+        };
+        out.push_str(&format!("\n- {}: {}", hit.name, desc));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -458,10 +626,14 @@ mod tests {
         );
     }
 
+    /// Minimal mode (level 3) is reached when the per-description budget falls
+    /// under `MIN_DESC_LENGTH` but the resulting listing still FITS. That
+    /// distinction is the #1280 fix: this case used to be tested at a 2-char
+    /// budget and asserted that the bundled entry stayed full anyway, which is
+    /// the unbounded behaviour the ceiling removes. Level 3 is exercised here
+    /// at a budget that can actually hold it.
     #[test]
     fn test_format_skills_within_budget_minimal_mode() {
-        // budget = 50 * 4 * 0.01 = 2 chars — far below MIN_DESC_LENGTH=20
-        // non-bundled should show names only
         let bundled = make_skill("bundled", "Bundled full desc", None, true, false);
         let nb_skills: Vec<SkillRef> = vec![
             make_skill("nb-alpha", &"x".repeat(100), None, false, false),
@@ -471,25 +643,34 @@ mod tests {
         let mut skills = vec![bundled];
         skills.extend(nb_skills);
 
-        let result = format_skills_within_budget(&skills, Some(50));
+        // 1,500 tokens -> 60 chars. Full mode needs ~240, and 60 chars over two
+        // non-bundled skills leaves under MIN_DESC_LENGTH each, so level 3 is
+        // selected — and it fits, so no clamp.
+        let result = format_skills_within_budget(&skills, Some(1_500));
 
-        // bundled still full
         assert!(
             result.contains("Bundled full desc"),
-            "bundled skill should remain full in minimal mode"
+            "bundled skill should remain full in minimal mode: {result}"
         );
-        // non-bundled: names only, no ': '
         assert!(
             result.contains("- nb-alpha\n") || result.ends_with("- nb-alpha"),
-            "nb-alpha should appear as name only"
+            "nb-alpha should appear as name only: {result}"
         );
         assert!(
             result.contains("- nb-beta\n") || result.ends_with("- nb-beta"),
-            "nb-beta should appear as name only"
+            "nb-beta should appear as name only: {result}"
         );
         assert!(
             !result.contains("- nb-alpha: "),
             "non-bundled should not have description in minimal mode"
+        );
+        assert!(
+            !result.contains(SKILL_OVERFLOW_HINT),
+            "level 3 fit this budget, so nothing should have been trimmed"
+        );
+        assert!(
+            UnicodeWidthStr::width(result.as_str()) <= get_char_budget(Some(1_500)),
+            "minimal mode overran its budget: {result}"
         );
     }
 
@@ -517,9 +698,13 @@ mod tests {
         assert!(desc_part.ends_with('\u{2026}'));
     }
 
+    /// An all-bundled set is charged against the budget like any other.
+    ///
+    /// This test previously asserted the opposite — "even if over budget, all
+    /// are shown full" — which is the `rest_indices.is_empty()` early return
+    /// FerroxLabs/wayland#1280 c1 names as unbounded in the skill count.
     #[test]
     fn test_format_skills_within_budget_only_bundled_skills() {
-        // All bundled: even if over budget, all are shown full (no non-bundled to degrade)
         let skills: Vec<SkillRef> = (0..3)
             .map(|i| {
                 make_skill(
@@ -531,13 +716,28 @@ mod tests {
                 )
             })
             .collect();
-        let result = format_skills_within_budget(&skills, Some(1)); // tiny budget
+
+        // Roomy: nothing is trimmed, so the clamp is not an unconditional cut.
+        let roomy = format_skills_within_budget(&skills, None);
         for i in 0..3 {
             assert!(
-                result.contains(&format!("- bundled-{i}: Desc {i}")),
-                "bundled skill {i} should be intact"
+                roomy.contains(&format!("- bundled-{i}: Desc {i}")),
+                "bundled skill {i} should be intact when it fits"
             );
         }
+        assert!(!roomy.contains(SKILL_OVERFLOW_HINT));
+
+        // Zero budget: bounded, and what it drops it names.
+        let result = format_skills_within_budget(&skills, Some(1));
+        assert!(
+            result.contains(SKILL_OVERFLOW_HINT),
+            "an all-bundled set was trimmed with no route back: {result}"
+        );
+        assert!(
+            UnicodeWidthStr::width(result.as_str())
+                <= UnicodeWidthStr::width(format!("- (+3 {SKILL_OVERFLOW_HINT})").as_str()),
+            "an all-bundled listing overran a zero budget: {result}"
+        );
     }
 
     // --- CJK / multi-byte UTF-8 boundary tests ---

@@ -178,9 +178,29 @@ impl SkillTool {
         self.permission_for(skill) == SkillPermission::Allow
     }
 
-    /// Build a comma-separated list of available skill names for error messages.
+    /// Available skill names for a not-found message, bounded in the skill
+    /// count.
+    ///
+    /// FerroxLabs/wayland#1280: this used to join EVERY visible name, so on a
+    /// machine with a thousand skills installed one mistyped name answered with
+    /// a thousand names in the tool result — the same unbounded-in-the-skill-
+    /// count term the prompt listing carried, relocated to the message stream.
+    /// It now names at most [`wcore_skills::prompt::SKILL_SEARCH_MAX_RESULTS`]
+    /// and points at the search for the rest.
     fn available_names(&self) -> String {
-        self.catalog.visible_names().join(", ")
+        let names = self.catalog.visible_names();
+        let total = names.len();
+        let shown = total.min(wcore_skills::prompt::SKILL_SEARCH_MAX_RESULTS);
+        let head = names[..shown].join(", ");
+        if total > shown {
+            format!(
+                "{head} (+{} more — call Skill with {{\"query\": \"<what you \
+                 need>\"}} to search all {total})",
+                total - shown
+            )
+        } else {
+            head
+        }
     }
 
     /// One telemetry event per call, whatever early-return path fires, with
@@ -244,10 +264,41 @@ impl SkillTool {
         vfs: &Arc<dyn VirtualFs>,
     ) -> (Option<String>, ToolResult) {
         let Some(skill_name) = input["skill"].as_str() else {
+            // FerroxLabs/wayland#1280 c2 — the reachability half of the skills
+            // ceiling. The system-prompt listing is capped at 1% of the resolved
+            // context window, so on a machine with many skills installed most of
+            // them are named nowhere the model can see. `{"query": ...}` ranks
+            // EVERY installed skill against the query and returns a bounded
+            // shortlist; the model then invokes one by exact name through the
+            // resolution below, which never consulted the listing in the first
+            // place. Without this branch the ceiling would silently refuse
+            // skills the session genuinely has, which is a worse defect than the
+            // prompt bytes it saves.
+            if let Some(query) = input["query"].as_str() {
+                let visible = self.catalog.visible();
+                let hits = wcore_skills::prompt::search_skills(
+                    &visible,
+                    query,
+                    wcore_skills::prompt::SKILL_SEARCH_MAX_RESULTS,
+                );
+                return (
+                    None,
+                    ToolResult {
+                        content: wcore_skills::prompt::format_skill_search_results(
+                            &hits,
+                            visible.len(),
+                        ),
+                        is_error: false,
+                    },
+                );
+            }
             return (
                 None,
                 ToolResult {
-                    content: "Missing required parameter: skill".to_string(),
+                    content: "Missing parameter: pass `skill` with a skill's exact \
+                              name to run it, or `query` to search the installed \
+                              skills for one."
+                        .to_string(),
                     is_error: true,
                 },
             );
@@ -468,9 +519,12 @@ impl Tool for SkillTool {
     }
 
     fn description(&self) -> &str {
-        "Invoke a named skill by name. \
-         Use the skill name exactly as listed in the system prompt. \
-         Optionally pass arguments as a single string."
+        "Invoke a named skill, or search for one. Pass `skill` with the exact \
+         name to run it. The system prompt lists only as many skills as fit its \
+         budget, so when what you need is not listed there, pass `query` instead \
+         to search EVERY installed skill by name and description, then invoke the \
+         one you want by its exact name. Optionally pass arguments as a single \
+         string."
     }
 
     fn input_schema(&self) -> JsonSchema {
@@ -484,9 +538,15 @@ impl Tool for SkillTool {
                 "args": {
                     "type": "string",
                     "description": "Optional arguments for the skill"
+                },
+                "query": {
+                    "type": "string",
+                    "description": "Search every installed skill by name and \
+        description instead of invoking one. Use this when the skill you need is not in \
+        the system prompt's listing, which is capped at a fraction of the context window."
                 }
             },
-            "required": ["skill"]
+            "required": []
         })
     }
 
