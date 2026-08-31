@@ -1150,7 +1150,7 @@ fn a_lease_that_cannot_be_recovered_is_quarantined_instead_of_wedging_the_backen
 /// be recorded.
 ///
 /// FOUND, not modelled. The quarantined lease preserved from SEANDESKTOP has
-/// as its first intent `path = '\\?\C:\Users\seand'  kind = "allow"
+/// as its first intent `path = '\\?\C:\Users\<user>'  kind = "allow"
 /// mask = 1180095`, and 1180095 is [`ACL_WRITE_MASK`] to the bit — so it came
 /// from `fs_write_allow`, i.e. the workspace root, because wayland-core was
 /// started in the user's profile directory. The other 4366 intents in that

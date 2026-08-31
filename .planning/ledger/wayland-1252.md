@@ -11,7 +11,7 @@ criteria:
     state: met
     evidence: "test:crates/wcore-cli/src/doctor/mod.rs::the_base_url_caveat_is_printed_for_every_host_that_is_not_the_vendor"
     owner: core
-    note: "MET. base_url_caveat now asks wcore_types::url_authority::dialed_host_str for BOTH sides of the comparison; the hand cut host_of is deleted. RED ARM, verbatim, with the cut restored and the fix's test kept: `panicked at crates/wcore-cli/src/doctor/mod.rs:1888:9: a base_url that dials evil.example must still print the caveat`. Fail direction is loud: a base_url whose host the parser cannot name (None) is treated as DIFFERENT from the vendor host, so the caveat is printed. Wrong-refusal control in the same test: api.openai.com, API.OpenAI.COM and user:pw@api.openai.com all still SUPPRESS it."
+    note: "MET. base_url_caveat now asks wcore_types::url_authority::dialed_host_str for BOTH sides of the comparison; the hand cut host_of is deleted. RED ARM, verbatim, with the cut restored and the fix's test kept: `panicked at crates/wcore-cli/src/doctor/mod.rs:1888:9: a base_url that dials evil.example must still print the caveat`. Fail direction is loud: a base_url whose host the parser cannot name (None) is treated as DIFFERENT from the vendor host, so the caveat is printed. Wrong-refusal control in the same test: api.openai.com, API.OpenAI.COM and user:<pw>@api.openai.com all still SUPPRESS it."
   - id: c2
     text: "origin_matches(\"github.com\", r\"https://evil.example\\@github.com\") is false"
     state: met

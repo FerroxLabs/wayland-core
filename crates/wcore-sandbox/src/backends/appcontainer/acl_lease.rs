@@ -669,7 +669,7 @@ fn validate_local_canonical_path(path: &Path) -> Result<()> {
 /// # Found, not modelled
 ///
 /// `#369` reports a lease on SEANDESKTOP whose FIRST intent is
-/// `path = '\\?\C:\Users\seand'  kind = "allow"  mask = 1180095`. That mask
+/// `path = '\\?\C:\Users\<user>'  kind = "allow"  mask = 1180095`. That mask
 /// is [`ACL_WRITE_MASK`] to the bit, so the grant came from
 /// `SandboxManifest::fs_write_allow`, which `wcore-tools`' bash policy fills
 /// from `WorkspacePolicy::writable_roots()` -- i.e. the WORKSPACE root. The
