@@ -20,6 +20,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde_json::json;
 use wcore_tools::Tool;
@@ -27,6 +28,13 @@ use wcore_tools::context::ToolContext;
 use wcore_tools::grep::GrepTool;
 use wcore_tools::vfs::{RealFs, SandboxedFs, SecretDenyFs, VirtualFs};
 use wcore_tools::workspace_policy::WorkspacePolicy;
+
+/// A scan's answer is trusted only once its witnesses' mtimes lag the scan's
+/// own start instant by more than one filesystem tick (#1145), so a fixture
+/// built microseconds ago is deliberately NOT settled and every guard rescans.
+/// Reaching the steady state is part of what the post-walk tests below are
+/// about, not a flake mitigation.
+const SETTLE: Duration = Duration::from_millis(60);
 
 const CANARY: &str = "WLCANARY-NESTED-STORE";
 const CONTROL: &str = "WLCANARY-CONTROL-OK";
@@ -384,14 +392,24 @@ async fn a_bare_repository_created_after_the_first_guard_is_refused_on_the_next(
 /// When that trade is taken, this assertion is INVERTED rather than deleted,
 /// so the gap and its closure are graded by the same test.
 #[tokio::test]
-async fn a_borrow_written_after_the_walk_at_a_non_store_shaped_target_is_still_admitted() {
+async fn a_borrow_written_after_the_walk_at_a_non_store_shaped_target_is_refused() {
     let (_dir, root) = workspace();
     std::fs::create_dir_all(root.join("vendor/pkg/.git/objects/info")).unwrap();
     write(&root.join("vendor/pkg/.git/HEAD"), "ref: refs/heads/main");
 
     let policy = Arc::new(WorkspacePolicy::contained(&root));
     let fs = stack(&policy, &root);
+    tokio::time::sleep(SETTLE).await;
+    // Warm every memo AND run arm 4's walk BEFORE the borrow exists, so this
+    // grades the post-walk state rather than a cold policy that would have
+    // discovered the store anyway.
     assert_control_readable(&fs, &root, "before the borrow").await;
+    assert_eq!(
+        policy.nested_walk_count(),
+        1,
+        "the walk must have run before the borrow is written, or this test \
+         grades a cold policy and proves nothing about staleness"
+    );
 
     let object = root.join("late-odb/ab/cd1234");
     write(&object, CANARY);
@@ -400,11 +418,52 @@ async fn a_borrow_written_after_the_walk_at_a_non_store_shaped_target_is_still_a
         "../../../../late-odb",
     );
 
+    assert_store_refused(&fs, &object, "core#406 c1").await;
+    assert_control_readable(&fs, &root, "after the borrow").await;
+}
+
+/// core#406 c1, the REMAINDER — **stated as a measurement rather than left to
+/// be rediscovered.**
+///
+/// The witness set arm 4 revalidates is the DECLARATION SITES it read, which is
+/// O(nested checkouts) and is what keeps core#398 c1's slope at zero and c2's
+/// three warm probes intact. A control directory that did not exist when the
+/// walk ran therefore has no declaration site in that set, so a borrow it
+/// declares at a target which is neither repository-shaped (arm 3) nor
+/// lexically a store (arm 1) is still admitted.
+///
+/// Seeing this needs a witness per DESCENDED DIRECTORY — one `stat` per
+/// workspace directory on every guard, which is exactly the regression core#398
+/// records and core#398 c1 forbids. The two criteria are in direct tension and
+/// the tension is priced here rather than traded silently.
+///
+/// Strictly smaller than what it replaced: the same fixture with the control
+/// directory PRESENT at walk time is refused by the test above.
+#[tokio::test]
+async fn a_borrow_declared_by_a_control_dir_created_after_the_walk_is_still_admitted() {
+    let (_dir, root) = workspace();
+
+    let policy = Arc::new(WorkspacePolicy::contained(&root));
+    let fs = stack(&policy, &root);
+    tokio::time::sleep(SETTLE).await;
+    assert_control_readable(&fs, &root, "before the checkout").await;
+    assert_eq!(policy.nested_walk_count(), 1, "the walk must have run");
+
+    // The whole checkout appears after the walk.
+    std::fs::create_dir_all(root.join("vendor/late/.git/objects/info")).unwrap();
+    write(&root.join("vendor/late/.git/HEAD"), "ref: refs/heads/main");
+    let object = root.join("late-odb/ab/cd1234");
+    write(&object, CANARY);
+    write(
+        &root.join("vendor/late/.git/objects/info/alternates"),
+        "../../../../late-odb",
+    );
+
     let out = read(&fs, &object).await;
     assert!(
         out.as_deref().is_ok_and(|b| b.contains(CANARY)),
-        "if this now REFUSES, core#406 c1 has been closed for the borrow \
-         shape too: invert this assertion, re-measure the refuse-branch probe \
-         count core#398 pins, and re-grade both tickets. Got: {out:?}"
+        "if this now REFUSES, the remainder of core#406 c1 has been closed \
+         too: invert this assertion, re-measure the refuse-branch probe count \
+         core#398 c1/c2 pin, and re-grade both tickets. Got: {out:?}"
     );
 }

@@ -204,6 +204,108 @@ async fn a_store_named_path_costs_the_same_at_any_workspace_size() {
     );
 }
 
+/// FerroxLabs/wayland-core#406 c2 — **what closing #406 c1 costs, as a number,
+/// counted rather than timed.**
+///
+/// Arm 4's store set is revalidated on the branch that is about to ADMIT, and
+/// the witness set it revalidates is the DECLARATION SITES the walk read — one
+/// gitfile, one `commondir`, one `alternates` and the store leaves, per NESTED
+/// CHECKOUT — never the directories the walk descended. So the closure's price
+/// scales with the number of vendored checkouts and not with the tree, which is
+/// the whole reason #398 c1's slope stays at zero while #406 c1 closes.
+///
+/// Two figures, both stated here:
+///
+/// * **zero** extra probes when the workspace has no nested checkout — the
+///   witness set is empty, and `one_ordinary_path_guard_resolves_once_and_does_not_rescan`
+///   still measures exactly three;
+/// * **`WITNESSES_PER_CHECKOUT`** extra probes per admitted guard for each
+///   nested checkout, INDEPENDENT of the workspace's directory count, which is
+///   what this test measures at two workspace sizes.
+///
+/// **Red arm:** witness the directories `discover_nested_content_stores`
+/// descends instead of the declaration sites it reads (the shape #398 reports),
+/// and the two sizes below diverge by one probe per extra directory.
+#[tokio::test]
+async fn the_post_walk_freshness_check_scales_with_checkouts_not_directories() {
+    /// Declaration sites one vendored `.git` DIRECTORY contributes: its six
+    /// store leaves (`VCS_CONTENT_STORES`) plus its `objects/info/alternates`.
+    const WITNESSES_PER_CHECKOUT: u64 = 7;
+
+    async fn warm_probes_per_guard(checkouts: usize, extra_dirs: usize) -> u64 {
+        let dir = tempfile::tempdir().expect("workspace");
+        let root = std::fs::canonicalize(dir.path()).expect("canonical root");
+        std::fs::create_dir_all(root.join(".git/objects/ab")).unwrap();
+        std::fs::write(root.join(".git/objects/ab/cdef"), b"x").unwrap();
+        std::fs::create_dir_all(root.join("src/deep/deeper")).unwrap();
+        std::fs::write(root.join("src/deep/deeper/main.rs"), b"fn main() {}\n").unwrap();
+        for i in 0..checkouts {
+            let git = root.join(format!("vendor/pkg{i}/.git"));
+            std::fs::create_dir_all(git.join("objects/ab")).unwrap();
+            std::fs::write(git.join("HEAD"), b"ref: refs/heads/main").unwrap();
+        }
+        for i in 0..extra_dirs {
+            std::fs::create_dir_all(root.join(format!("pkg{i}/src"))).unwrap();
+        }
+        let policy = Arc::new(WorkspacePolicy::contained(&root));
+        let fs = stack(&policy, &root);
+        let ordinary = root.join("src/deep/deeper/main.rs");
+        tokio::time::sleep(SETTLE).await;
+
+        fs.exists(&ordinary).await.expect("ordinary path readable");
+        let (_, _, before) = policy.guard_cost();
+        let walks_before = policy.nested_walk_count();
+        const N: u64 = 20;
+        for _ in 0..N {
+            fs.exists(&ordinary).await.expect("ordinary path readable");
+        }
+        let (_, _, after) = policy.guard_cost();
+        assert_eq!(
+            policy.nested_walk_count(),
+            walks_before,
+            "the freshness check must not RE-WALK on an unchanged tree — a \
+             revalidation that rescans every time is not a cache"
+        );
+        (after - before) / N
+    }
+
+    let none_small = warm_probes_per_guard(0, 4).await;
+    let none_large = warm_probes_per_guard(0, 44).await;
+    assert_eq!(
+        (none_small, none_large),
+        (3, 3),
+        "core#406 c2: with no nested checkout the witness set is EMPTY, so \
+         closing core#406 c1 must cost nothing at all and the figure core#398 \
+         c2 pins must be untouched"
+    );
+
+    let one_small = warm_probes_per_guard(1, 4).await;
+    let one_large = warm_probes_per_guard(1, 44).await;
+    assert_eq!(
+        one_large, one_small,
+        "core#398 c1: the post-walk freshness check cost {one_small} probes in \
+         a small workspace and {one_large} in one with 40 more directories — \
+         it is scaling with the tree, which is the regression core#398 exists \
+         to catch"
+    );
+    assert_eq!(
+        one_small,
+        none_small + WITNESSES_PER_CHECKOUT,
+        "core#406 c2 states this as a NUMBER: one vendored checkout adds \
+         exactly {WITNESSES_PER_CHECKOUT} declaration-site probes to an \
+         admitted guard. If this moved, re-measure and re-state it on the \
+         ticket rather than editing it here"
+    );
+
+    let two_small = warm_probes_per_guard(2, 4).await;
+    assert_eq!(
+        two_small,
+        none_small + 2 * WITNESSES_PER_CHECKOUT,
+        "the cost must be LINEAR IN CHECKOUTS and nothing else: one checkout \
+         cost {one_small}, two cost {two_small}"
+    );
+}
+
 /// The guard's two halves must resolve ONE path, not two.
 ///
 /// Graded separately from the scan because the two savings are independent: the

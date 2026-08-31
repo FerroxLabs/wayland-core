@@ -294,7 +294,7 @@ pub struct WorkspacePolicy {
     /// A workspace with no nested checkout therefore has an EMPTY witness set
     /// and pays nothing at all, which is what holds #398 c1's slope at zero and
     /// #398 c2's three warm probes. See
-    /// [`nested_content_stores`](Self::nested_content_stores) and
+    /// [`nested_stores_cover`](Self::nested_stores_cover) and
     /// [`nested_declarations_moved`](Self::nested_declarations_moved).
     nested_stores: Arc<RwLock<Option<NestedStoreCache>>>,
 }
@@ -1088,11 +1088,7 @@ impl WorkspacePolicy {
         }
         // Arm 4 — the nested discovery. Zero syscalls once warm, so it is asked
         // before the two arms that cost probes.
-        if self
-            .nested_content_stores()
-            .iter()
-            .any(|store| canon.starts_with(store))
-        {
+        if self.nested_stores_cover(canon) {
             return true;
         }
         // Arm 3 — repository shape, path-local and always fresh. Zero syscalls
@@ -1117,9 +1113,7 @@ impl WorkspacePolicy {
         if !self.nested_declarations_moved() {
             return false;
         }
-        self.nested_store_walk()
-            .iter()
-            .any(|store| canon.starts_with(store))
+        self.nested_store_walk(canon)
     }
 
     /// Arm 3 — **is some ancestor of `canon` the object database of a
@@ -1227,15 +1221,20 @@ impl WorkspacePolicy {
     /// (FerroxLabs/wayland-core#406). The alternative — stamping every
     /// descended directory and re-`stat`ing them per guard — is the measured
     /// regression #398 was filed about, and it scales with the tree.
-    fn nested_content_stores(&self) -> Vec<PathBuf> {
+    fn nested_stores_cover(&self, canon: &Path) -> bool {
+        // Tested UNDER the read lock rather than through a clone: this runs on
+        // every guard, and handing the caller an owned `Vec<PathBuf>` would put
+        // one allocation per store on the hot path that #376 exists to keep
+        // flat.
         if let Some(cache) = self.nested_stores.read().as_ref() {
-            return cache.stores.clone();
+            return cache.stores.iter().any(|store| canon.starts_with(store));
         }
-        self.nested_store_walk()
+        self.nested_store_walk(canon)
     }
 
-    /// Run arm 4's walk, replace the memo, and return the store set. Counted.
-    fn nested_store_walk(&self) -> Vec<PathBuf> {
+    /// Run arm 4's walk, replace the memo, and report whether the set it
+    /// produced covers `canon`. Counted.
+    fn nested_store_walk(&self, canon: &Path) -> bool {
         let scan = discover_nested_content_stores(&self.root);
         self.guard_counters
             .nested_walks
@@ -1243,13 +1242,13 @@ impl WorkspacePolicy {
         self.guard_counters
             .probes
             .fetch_add(scan.probes, Ordering::Relaxed);
-        let stores = scan.stores.clone();
+        let covered = scan.stores.iter().any(|store| canon.starts_with(store));
         *self.nested_stores.write() = Some(NestedStoreCache {
             stamped_at: scan.stamped_at,
             witnesses: scan.witnesses,
             stores: scan.stores,
         });
-        stores
+        covered
     }
 
     /// FerroxLabs/wayland-core#406 c1 — has any DECLARATION SITE arm 4 read
