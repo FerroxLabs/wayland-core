@@ -47,7 +47,7 @@
 #![cfg(windows)]
 
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -94,7 +94,7 @@ fn run_as_alias() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
 
-    Command::new(exe)
+    let descendant = Command::new(exe)
         .arg(TEST_NAME)
         .arg("--exact")
         .arg("--nocapture")
@@ -103,6 +103,10 @@ fn run_as_alias() {
         .env(PIDFILE_ENV, &pidfile)
         .spawn()
         .expect("spawn descendant");
+    // Deliberately never waited on. The descendant must OUTLIVE this alias --
+    // that is the whole fixture -- so there is nothing to reap here, and
+    // dropping the handle would be the same thing without saying so.
+    std::mem::forget(descendant);
 
     // Do not race the driver: it reads the pid file after the abort, and an
     // alias that exited before the descendant had written it would make the
