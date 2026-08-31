@@ -164,6 +164,35 @@ pub struct SandboxGate {
 
 /// Adapter that lets Anvil's existing gate-closure seam execute through the
 /// immutable sandbox runtime selected for the parent agent session.
+///
+/// # TOTAL OVER THE TRAIT, deliberately (FerroxLabs/wayland-core#400)
+///
+/// A decorator inherits a trait default for every method it does not forward,
+/// and a default is a claim about the WRAPPED backend that the decorator is in
+/// no position to make. Three of `SandboxBackend`'s defaults are wrong in the
+/// NON-CONSERVATIVE direction when they are inherited here:
+///
+/// * `known_limitations` defaults to `vec![]` -- "this backend is known not to
+///   fail at anything". That is the exact reassurance `#368` c6 was filed
+///   about.
+/// * `unavailable_reason` defaults to `None` -- "there is no reason it is
+///   unavailable", read through a decorator wrapping a backend that has one.
+/// * `availability_probe_is_startup_safe` defaults to `true`.
+///   `AppContainerBackend` overrides it to `false` because its probe is a 15s
+///   wall-clock-guarded real spawn, and `select_without_startup_probe` reads it
+///   to keep that spawn off the `--json-stream` readiness path. Answering
+///   `true` for it would put the guarded spawn back on a startup path -- the
+///   `#125` hang class.
+///
+/// The remaining defaults were checked individually rather than assumed:
+/// `execute_with_cwd_authority` and `probe_hard_containment` return
+/// `PolicyNotSupported`; `execute_with_workspace_authority` delegates to the
+/// former; `hard_containment_identity` defaults `None`, which the trait
+/// documents as structurally incapable of minting hard containment;
+/// `confines_filesystem`, `owns_descendants_hard`, `binds_cwd_authority` and
+/// `binds_workspace_authority` default `false`, i.e. they UNDER-claim
+/// containment; and `execute_streaming`'s default drives `self.execute`, which
+/// this decorator forwards. Those are safe to inherit.
 struct SessionSandboxBackend(Arc<SandboxRegistry>);
 
 #[async_trait]
@@ -190,6 +219,18 @@ impl SandboxBackend for SessionSandboxBackend {
 
     fn blocks_powershell(&self) -> bool {
         self.0.blocks_powershell()
+    }
+
+    fn known_limitations(&self) -> Vec<&'static str> {
+        self.0.known_limitations()
+    }
+
+    fn unavailable_reason(&self) -> Option<String> {
+        self.0.unavailable_reason()
+    }
+
+    fn availability_probe_is_startup_safe(&self) -> bool {
+        self.0.availability_probe_is_startup_safe()
     }
 }
 
@@ -1413,6 +1454,86 @@ async fn artifact_content_digest(root: &Path) -> Result<String, ForgeError> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    /// FerroxLabs/wayland-core#400 -- the decorator must not answer for the
+    /// backend it wraps.
+    ///
+    /// `SessionSandboxBackend` forwards a hand-written subset of
+    /// `SandboxBackend`, and every method it does NOT forward silently takes a
+    /// trait default. Three of those defaults are claims about the wrapped
+    /// backend in the non-conservative direction: no known limitations, no
+    /// reason for being unavailable, and a startup-SAFE availability probe.
+    ///
+    /// This grades the PRODUCTION decorator -- the one
+    /// `SandboxGate::from_session_runtime` constructs -- through a real
+    /// `SandboxRegistry`, not a hand-rolled copy of it. Deleting any one of the
+    /// three forwarding methods reddens exactly this test, because each sentinel
+    /// value below differs from the default it would fall back to.
+    #[tokio::test]
+    async fn the_session_decorator_does_not_answer_for_the_backend_it_wraps() {
+        struct Wrapped;
+
+        #[async_trait]
+        impl SandboxBackend for Wrapped {
+            fn name(&self) -> &'static str {
+                "sentinel_wrapped"
+            }
+            fn is_available(&self) -> bool {
+                false
+            }
+            fn known_limitations(&self) -> Vec<&'static str> {
+                vec!["sentinel limitation an operator must still be told about"]
+            }
+            fn unavailable_reason(&self) -> Option<String> {
+                Some("sentinel reason".to_owned())
+            }
+            fn availability_probe_is_startup_safe(&self) -> bool {
+                false
+            }
+            async fn execute(
+                &self,
+                _manifest: &wcore_sandbox::SandboxManifest,
+                _cmd: wcore_sandbox::SandboxCommand,
+            ) -> wcore_sandbox::Result<wcore_sandbox::SandboxOutput> {
+                unreachable!("this test never executes a command")
+            }
+        }
+
+        let registry = Arc::new(SandboxRegistry::new(Arc::new(Wrapped)));
+        let decorated = SessionSandboxBackend(Arc::clone(&registry));
+
+        // CONTROL FIRST: the registry itself answers the sentinel values, so a
+        // failure below is the decorator dropping them and not the fixture.
+        assert_eq!(
+            registry.known_limitations(),
+            vec!["sentinel limitation an operator must still be told about"]
+        );
+        assert_eq!(
+            registry.unavailable_reason().as_deref(),
+            Some("sentinel reason")
+        );
+        assert!(!registry.availability_probe_is_startup_safe());
+
+        assert_eq!(
+            decorated.known_limitations(),
+            vec!["sentinel limitation an operator must still be told about"],
+            "the decorator inherited the trait default `vec![]`, so a status read \
+             through it reports a backend with NO known limitations -- the exact \
+             reassurance #368 c6 was filed about"
+        );
+        assert_eq!(
+            decorated.unavailable_reason().as_deref(),
+            Some("sentinel reason"),
+            "the decorator inherited the trait default `None`, so an unavailable \
+             backend reads as having no reason to be unavailable"
+        );
+        assert!(
+            !decorated.availability_probe_is_startup_safe(),
+            "the decorator inherited the trait default `true`, which would put a \
+             backend's startup-UNSAFE probe back on the `--json-stream` readiness \
+             path (the #125 hang class)"
+        );
+    }
 
     /// A candidate identity backed by a plain path, for unit-testing the gate
     /// wiring without a live isolated checkout. Production uses
