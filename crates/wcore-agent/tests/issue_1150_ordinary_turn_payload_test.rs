@@ -149,21 +149,16 @@ async fn session(
         requests: requests.clone(),
     });
     let sink: Arc<dyn OutputSink> = Arc::new(NullSink);
-    let mut result =
-        AgentBootstrap::new(cfg, root.to_str().expect("utf-8").to_string(), sink)
-            .without_channels(true)
-            .extra_skill_dirs(vec![root.clone()])
-            .provider(provider)
-            .build()
-            .await
-            .expect("bootstrap");
+    let mut result = AgentBootstrap::new(cfg, root.to_str().expect("utf-8").to_string(), sink)
+        .without_channels(true)
+        .extra_skill_dirs(vec![root.clone()])
+        .provider(provider)
+        .build()
+        .await
+        .expect("bootstrap");
 
     for (i, p) in prompts.iter().enumerate() {
-        result
-            .engine
-            .run(p, &format!("m{i}"))
-            .await
-            .expect("turn");
+        result.engine.run(p, &format!("m{i}")).await.expect("turn");
     }
     drop(result);
     let reqs = requests.lock().unwrap().clone();
@@ -355,9 +350,23 @@ async fn a_folded_out_tool_becomes_callable_on_explicit_activation() {
 /// The gap, pinned so it is falsifiable rather than asserted in a ledger note.
 ///
 /// c5 asks for skills "injected only when relevant or explicitly activated".
-/// There is no relevance gate and no activation gate on that path: two turns
-/// whose text has nothing to do with any planted skill get byte-identical
-/// listings naming every one of them.
+/// There is no relevance gate and no activation gate on that path: a turn whose
+/// text has nothing to do with any planted skill still gets a listing naming
+/// every one of them.
+///
+/// This test deliberately does NOT compare the listings of two turns. An
+/// earlier cut did, as a change-detector for a future per-turn gate, and a red
+/// arm proved it could not fail: `context::build_system_prompt` has exactly ONE
+/// call site, `bootstrap.rs:2377`, so the system prompt — skills listing
+/// included — is assembled once at boot and the same String is handed to every
+/// dispatch for the life of the session. Comparing two turns compared a stored
+/// value with itself. That structural fact is the single most important input
+/// to how c5's skills half gets built: a gate that varies per turn cannot live
+/// where the listing is assembled today, and moving the assembly onto the
+/// per-turn path also moves it out of the cached prefix — segment 0 of an
+/// OpenAI-shaped body, ahead of the tool schemas and the whole conversation —
+/// which on the reporter's own implicit-cache endpoint re-bills every request
+/// in full. That is a structural change, not a bounded one.
 ///
 /// This test deliberately does NOT assert that the listing fits the 1%-of-window
 /// character budget in `wcore_skills::prompt`. An earlier cut of it did, on the
@@ -370,7 +379,7 @@ async fn a_folded_out_tool_becomes_callable_on_explicit_activation() {
 /// grow linearly with the skill count and neither is bounded by the window.
 /// Measured: 100 bundled + 10 project skills render 22,399 chars, 17.1x the
 /// budget, about 5,600 tokens of a 32,768-token window, on every ordinary turn.
-/// That is FerroxLabs/wayland#1274, filed rather than fixed here, and it is why
+/// That is FerroxLabs/wayland#1280, filed rather than fixed here, and it is why
 /// this file asserts only what is true today.
 ///
 /// When a gate is built, the first assertion below is the one that must go red.
@@ -385,15 +394,6 @@ async fn the_skills_listing_is_unconditional_on_an_ordinary_turn() {
     .await;
 
     let first = skills_block(&reqs[0].system).expect("a skills listing was rendered");
-    let second = skills_block(&reqs[reqs.len() - 1].system)
-        .expect("a skills listing was rendered on the later turn too");
-
-    assert_eq!(
-        first, second,
-        "the two turns got different skill listings; if that is now a relevance \
-         gate, this test is measuring the OLD contract and must be rewritten \
-         around the new one"
-    );
 
     let named = (0..10)
         .filter(|i| first.contains(&format!("m-skill-{i:03}")))
@@ -412,46 +412,4 @@ async fn the_skills_listing_is_unconditional_on_an_ordinary_turn() {
          with no skills at all, which measures nothing",
         first.len()
     );
-}
-
-/// The constraint any future relevance gate has to satisfy, measured on the
-/// path that actually assembles the listing.
-///
-/// The skills block lives in the system prompt, which is segment 0 of an
-/// OpenAI-shaped body — ahead of the tool schemas and the entire conversation.
-/// On the reporter's own provider shape (LM Studio, implicit prefix cache) a
-/// system prompt that varies per turn is a total loss of reuse at token 0 on
-/// every request. A naive per-turn relevance gate would therefore trade ~330
-/// tokens of listing for re-billing the whole prompt uncached every turn, which
-/// makes #1150's reported symptom WORSE.
-#[tokio::test]
-async fn the_system_prompt_is_byte_identical_across_the_turns_of_a_session() {
-    let reqs = session(
-        10,
-        config(),
-        vec![plain_answer()],
-        &["What is 2 + 2?", "Name a colour.", "And another."],
-    )
-    .await;
-
-    assert!(
-        reqs.len() >= 3,
-        "only {} dispatches; this test needs several turns to measure stability",
-        reqs.len()
-    );
-    // PRECONDITION: there is a skills listing in there at all, or this asserts
-    // that a constant is constant.
-    assert!(
-        skills_block(&reqs[0].system).is_some(),
-        "no skills listing in the system prompt, so its stability is vacuous"
-    );
-
-    for (i, r) in reqs.iter().enumerate().skip(1) {
-        assert_eq!(
-            r.system, reqs[0].system,
-            "dispatch {i} changed the system prompt, so on an implicit-cache \
-             endpoint every dispatch from here on re-bills its entire context at \
-             full price"
-        );
-    }
 }
