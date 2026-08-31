@@ -279,6 +279,19 @@ pub struct WorkspacePolicy {
     /// wall clock cannot tell a skipped scan from a fast one, and this guard
     /// runs on every Read/exists/list/metadata of every sub-agent.
     guard_counters: Arc<GuardCounters>,
+    /// FerroxLabs/wayland-core#390/#394 — arm 4's discovered nested store set,
+    /// computed at most ONCE per policy and then never touched again.
+    ///
+    /// A `OnceLock`, not a stamped memo, and that is the whole point. Which
+    /// directories under the root DECLARE a store is a whole-tree fact, and no
+    /// per-guard freshness check for a whole-tree fact costs zero — the shape
+    /// #398 was filed about is exactly a memo of this fact revalidating one
+    /// witness per descended directory on every guard. So arm 4 pays a single
+    /// walk and then answers by prefix comparison at zero filesystem cost
+    /// forever, and the FRESHNESS this drops is carried by arms 1 and 3, which
+    /// are path-local and read the filesystem now. See
+    /// [`nested_content_stores`](Self::nested_content_stores).
+    nested_stores: Arc<std::sync::OnceLock<Vec<PathBuf>>>,
 }
 
 /// #376 c3 — what one `SecretDenyFs` guard actually costs, counted rather than
@@ -579,6 +592,7 @@ impl WorkspacePolicy {
             deny_walks: Arc::new(AtomicU64::new(0)),
             vcs_store_cache: Arc::new(RwLock::new(None)),
             guard_counters: Arc::new(GuardCounters::default()),
+            nested_stores: Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -634,6 +648,7 @@ impl WorkspacePolicy {
             deny_walks: Arc::new(AtomicU64::new(0)),
             vcs_store_cache: Arc::new(RwLock::new(None)),
             guard_counters: Arc::new(GuardCounters::default()),
+            nested_stores: Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -742,6 +757,7 @@ impl WorkspacePolicy {
             deny_walks: Arc::new(AtomicU64::new(0)),
             vcs_store_cache: Arc::new(RwLock::new(None)),
             guard_counters: Arc::new(GuardCounters::default()),
+            nested_stores: Arc::new(std::sync::OnceLock::new()),
         })
     }
 
@@ -1036,12 +1052,145 @@ impl WorkspacePolicy {
     /// [`is_project_secret_resolved`](Self::is_project_secret_resolved) for why
     /// the split exists.
     fn is_vcs_content_store_resolved(&self, canon: &Path) -> bool {
+        // Arm 1 — lexical, zero syscalls.
         if canon.starts_with(&self.root) && inside_vcs_store(canon) {
             return true;
         }
+        // Arm 4 — the one-shot nested discovery. Zero syscalls once warm, so
+        // it is asked before the two arms that cost probes.
+        if self
+            .nested_content_stores()
+            .iter()
+            .any(|store| canon.starts_with(store))
+        {
+            return true;
+        }
+        // Arm 3 — repository shape, path-local and always fresh. Zero syscalls
+        // for a path with no store-leaf component, which is every ordinary
+        // path.
+        if self.encloses_repository_store(canon) {
+            return true;
+        }
+        // Arm 2 — the stores this root's own `.git` names.
         self.vcs_stores_memoized()
             .iter()
             .any(|store| canon.starts_with(store))
+    }
+
+    /// Arm 3 — **is some ancestor of `canon` the object database of a
+    /// repository that is actually there?**
+    ///
+    /// FerroxLabs/wayland-core#396. Arms 1 and 2 both decide from a NAME: arm 1
+    /// from the query path's spelling, arm 2 from what `<root>/.git` names. A
+    /// BARE repository vendored under the root (`git clone --bare|--mirror`, a
+    /// submodule object cache, a vendored mirror) has no control directory at
+    /// all — `objects/`, `HEAD` and `refs/` sit at its top level — so neither
+    /// name-based arm can see it, and `<root>/vendor/pkg.git/objects/ab/cd`
+    /// was read straight back through the VFS.
+    ///
+    /// This arm asks the filesystem instead, about the ancestors of the path in
+    /// hand and nothing else:
+    ///
+    /// * cost is O(depth), never O(workspace) — the regression
+    ///   FerroxLabs/wayland-core#398 records came from gating a whole-tree walk
+    ///   on a path SPELLING, and there is no whole-tree walk here to gate;
+    /// * an ordinary path pays ZERO probes, because no ancestor of
+    ///   `src/deep/deeper/main.rs` carries a store leaf name;
+    /// * nothing is memoised, so a repository that comes into being mid-session
+    ///   is refused on the very next guard. `WorkspacePolicy` is built once at
+    ///   bootstrap and `Arc`-cloned into `SecretDenyFs` for the whole session,
+    ///   so "the state at construction" is NOT a safe answer to give for the
+    ///   rest of that session.
+    ///
+    /// The confirmation is deliberately a REPOSITORY test and not a leaf-name
+    /// test: `objects/`, `modules/`, `store/` and `lfs/` are ordinary project
+    /// directory names (Terraform modules, a Redux store, an asset pipeline),
+    /// and refusing them on the name alone would be a wrong refusal on real
+    /// user data. Graded against that negative control by
+    /// `tests::an_ordinary_directory_named_objects_is_not_a_repository`.
+    fn encloses_repository_store(&self, canon: &Path) -> bool {
+        if !canon.starts_with(&self.root) {
+            return false;
+        }
+        for ancestor in canon.ancestors() {
+            if ancestor == self.root {
+                break;
+            }
+            let Some(name) = ancestor.file_name() else {
+                break;
+            };
+            if !is_vcs_store_leaf_name(name) {
+                continue;
+            }
+            let Some(parent) = ancestor.parent() else {
+                continue;
+            };
+            if self.is_repository_dir(parent) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// True when `dir` is the top level of a git repository — a BARE repository
+    /// or the gitdir a `.git` file points at, which have the same layout.
+    ///
+    /// `HEAD` plus one of `refs`/`config`, which is what `git` itself requires
+    /// of a directory before it will treat it as a repository, and two `stat`s
+    /// at most. A single marker is not enough: `HEAD` alone is a plausible
+    /// name for an ordinary data file.
+    ///
+    /// Git-shaped only, and that is a scope decision rather than an oversight.
+    /// `.hg`/`.svn`/`.bzr` keep their stores INSIDE the control directory in
+    /// every layout they support, so arm 1 already sees them at any depth;
+    /// git is the only one of the four with a documented bare layout that
+    /// hoists a content store to a directory's top level.
+    fn is_repository_dir(&self, dir: &Path) -> bool {
+        self.probe_exists(&dir.join("HEAD"))
+            && (self.probe_exists(&dir.join("refs")) || self.probe_exists(&dir.join("config")))
+    }
+
+    /// One counted filesystem existence probe. Counted through the same
+    /// [`GuardCounters`] the cost tests read, so an arm that starts probing
+    /// cannot do it invisibly.
+    fn probe_exists(&self, path: &Path) -> bool {
+        self.guard_counters.probes.fetch_add(1, Ordering::Relaxed);
+        std::fs::symlink_metadata(path).is_ok()
+    }
+
+    /// Arm 4 — every content store DECLARED by a control directory nested under
+    /// the root, discovered once and cached for the life of the policy.
+    ///
+    /// FerroxLabs/wayland-core#390 c1/c2 and #394 c1. Arm 2 resolves what
+    /// `<root>/.git` names and nothing else, so a VENDORED checkout fell
+    /// between the arms: `<root>/vendor/pkg/.git` is the file
+    /// `gitdir: ../pkg-git`, its store at `<root>/vendor/pkg-git/objects` is
+    /// not lexically a `(control, store)` pair, and the root's `.git` never
+    /// mentions it. The same hole admits an `objects/info/alternates` borrow
+    /// declared by a nested checkout — and that one is admitted REGARDLESS of
+    /// how the borrow target is spelled, because an alternates entry names an
+    /// arbitrary directory.
+    ///
+    /// The store set is resolved EAGERLY at discovery time and tested by
+    /// prefix, so a store's own directory name never enters the decision. That
+    /// is what makes #394's class (a borrow target called `odb`, a `.git/objects`
+    /// symlink pointing at one) impossible rather than enumerated.
+    ///
+    /// **Once, and never revalidated.** Stated plainly because it is the cost
+    /// this design pays: a store DECLARED after this walk, at a path arms 1 and
+    /// 3 cannot see path-locally, stays admitted for the rest of the session
+    /// (FerroxLabs/wayland-core#406). The alternative — stamping every
+    /// descended directory and re-`stat`ing them per guard — is the measured
+    /// regression #398 was filed about, and it scales with the tree.
+    fn nested_content_stores(&self) -> &[PathBuf] {
+        self.nested_stores.get_or_init(|| {
+            let scan = discover_nested_content_stores(&self.root);
+            self.guard_counters.scans.fetch_add(1, Ordering::Relaxed);
+            self.guard_counters
+                .probes
+                .fetch_add(scan.probes, Ordering::Relaxed);
+            scan.stores
+        })
     }
 
     /// The arm-2 store list, memoised behind a witness stamp
@@ -3317,6 +3466,199 @@ pub fn is_within_vcs_store_or_control_dir(path: &Path) -> bool {
 /// `path` IS a content store or lives inside one.
 fn inside_vcs_store(path: &Path) -> bool {
     path.ancestors().any(is_vcs_store_dir)
+}
+
+/// True when `name` is one of the [`VCS_CONTENT_STORES`] STORE leaves
+/// (`objects`, `modules`, `lfs`, `store`, `pristine`, `repository`),
+/// irrespective of what its parent is called.
+///
+/// Read by arm 3 ([`WorkspacePolicy::encloses_repository_store`]) to decide
+/// which ancestors are worth a repository probe at all. NOT a denial on its
+/// own: every one of these is also an ordinary project directory name.
+fn is_vcs_store_leaf_name(name: &std::ffi::OsStr) -> bool {
+    VCS_CONTENT_STORES
+        .iter()
+        .any(|(_, store)| name == std::ffi::OsStr::new(store))
+}
+
+/// True when `name` is a VCS CONTROL directory name (`.git`, `.hg`, `.svn`,
+/// `.bzr`), read off the same [`VCS_CONTENT_STORES`] table so the walk and the
+/// deny list cannot drift.
+fn is_vcs_control_dir_name(name: &std::ffi::OsStr) -> bool {
+    VCS_CONTENT_STORES
+        .iter()
+        .any(|(control, _)| name == std::ffi::OsStr::new(control))
+}
+
+/// One arm-4 discovery walk: the stores every NESTED control directory (and
+/// every nested bare repository) under `root` names, and what the walk cost.
+struct NestedStoreScan {
+    stores: Vec<PathBuf>,
+    probes: u64,
+}
+
+impl NestedStoreScan {
+    /// Record a discovered store, canonicalized.
+    ///
+    /// Canonicalizing here rather than at query time is what makes the
+    /// borrow-target NAME irrelevant (FerroxLabs/wayland-core#394): the set is
+    /// tested by prefix against an already-resolved query path, so a store
+    /// reached as `<root>/odb` and one reached as `<root>/vendor/pkg/.git/objects`
+    /// through a symlink are the same entry.
+    fn push_store(&mut self, path: PathBuf) {
+        self.probes += 1;
+        let canonical = std::fs::canonicalize(&path).unwrap_or(path);
+        if !self.stores.contains(&canonical) {
+            self.stores.push(canonical);
+        }
+    }
+
+    /// Every store a git control directory or gitdir at `dir` names, plus the
+    /// stores it BORROWS.
+    fn stores_named_by(&mut self, dir: &Path) {
+        for (_, leaf) in VCS_CONTENT_STORES {
+            self.push_store(dir.join(leaf));
+        }
+        self.alternates_of(dir.join("objects"));
+    }
+
+    /// `objects/info/alternates` — one borrowed object database per line,
+    /// absolute or relative to `objects_dir`, `#` comments skipped. Same format
+    /// [`StoreScan::alternate_object_dirs`] reads for the root.
+    fn alternates_of(&mut self, objects_dir: PathBuf) {
+        self.probes += 1;
+        let Ok(text) = std::fs::read_to_string(objects_dir.join("info/alternates")) else {
+            return;
+        };
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let borrowed = resolve_against(&objects_dir, PathBuf::from(line));
+            self.push_store(borrowed);
+        }
+    }
+}
+
+/// Arm 4 (FerroxLabs/wayland-core#390, #394, #396) — walk `root` ONCE and
+/// resolve every content store that a control directory, a gitfile, a bare
+/// repository or an `alternates` borrow nested under it NAMES.
+///
+/// Three things this walk does that the name-based arms could not:
+///
+/// * a VENDORED checkout's gitfile (`<root>/vendor/pkg/.git` = `gitdir: ../pkg-git`)
+///   is read where it lies, so `<root>/vendor/pkg-git/objects` is denied even
+///   though no component of that path is lexically a `(control, store)` pair
+///   (#390 c1);
+/// * borrow targets and symlinked store leaves are CANONICALIZED into the set,
+///   so a store hidden behind a name like `odb` is covered by the same prefix
+///   test as one called `objects` (#390 c2, #394 c1);
+/// * a BARE repository is recognised by its own shape rather than by a control
+///   directory it does not have (#396 c1).
+///
+/// **Fails closed.** A directory the walk cannot enumerate is recorded as a
+/// store, so its contents are refused rather than silently unscanned; a
+/// `continue` there would let an unreadable directory hide a checkout beneath
+/// it. Reads under such a directory would fail at the OS anyway, so the
+/// wrong-refusal cost is nil.
+///
+/// **Does not descend** into control directories (arm 1 already covers their
+/// interiors lexically, at any depth), into content stores, or through
+/// symlinked directories (a symlink is a jump to somewhere the walk either
+/// reaches on its own or that arms 1-3 answer on the resolved path; following
+/// them is how a walk finds a cycle).
+fn discover_nested_content_stores(root: &Path) -> NestedStoreScan {
+    let mut scan = NestedStoreScan {
+        stores: Vec::new(),
+        probes: 0,
+    };
+    let mut queue = vec![root.to_path_buf()];
+    while let Some(dir) = queue.pop() {
+        // A bare repository (`git clone --bare|--mirror`, a submodule object
+        // cache, a vendored mirror) has HEAD/refs/objects at its own top level
+        // and no control directory anywhere. Its store leaves are recorded and
+        // it is not descended into.
+        scan.probes += 2;
+        if std::fs::symlink_metadata(dir.join("HEAD")).is_ok()
+            && (std::fs::symlink_metadata(dir.join("refs")).is_ok()
+                || std::fs::symlink_metadata(dir.join("config")).is_ok())
+        {
+            scan.stores_named_by(&dir);
+            continue;
+        }
+        scan.probes += 1;
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            // Fail CLOSED: what cannot be enumerated cannot be cleared.
+            scan.push_store(dir);
+            continue;
+        };
+        for entry in entries {
+            let Ok(entry) = entry else {
+                scan.push_store(dir.clone());
+                continue;
+            };
+            let path = entry.path();
+            let name = entry.file_name();
+            scan.probes += 1;
+            let Ok(file_type) = entry.file_type() else {
+                scan.push_store(path);
+                continue;
+            };
+            if is_vcs_control_dir_name(&name) {
+                if file_type.is_dir() {
+                    // A store leaf inside it may be a SYMLINK out of the tree;
+                    // `push_store` canonicalizes, so the target is what lands
+                    // in the set.
+                    scan.stores_named_by(&path);
+                } else {
+                    // A `.git` FILE (gitfile) or a `.git` SYMLINK to a real
+                    // directory: both name a gitdir elsewhere. #242's shape,
+                    // read at every depth rather than at the root only.
+                    for gitdir in gitfile_targets(&path, &dir, &mut scan.probes) {
+                        scan.stores_named_by(&gitdir);
+                    }
+                }
+                continue;
+            }
+            if file_type.is_dir() && !is_vcs_store_dir(&path) {
+                queue.push(path);
+            }
+        }
+    }
+    scan
+}
+
+/// The gitdir(s) a `.git` FILE names: its `gitdir:` line and, for a linked
+/// worktree, the `commondir` that gitdir points at in turn.
+///
+/// Split out of [`StoreScan::gitfile_content_stores`]'s root-only form so the
+/// arm-4 walk can read the same shape at any depth without carrying the
+/// witness bookkeeping the memoised arm-2 scan needs.
+fn gitfile_targets(gitfile: &Path, owner: &Path, probes: &mut u64) -> Vec<PathBuf> {
+    *probes += 1;
+    let Ok(text) = std::fs::read_to_string(gitfile) else {
+        return Vec::new();
+    };
+    let Some(named) = text
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("gitdir:"))
+        .map(|rest| PathBuf::from(rest.trim()))
+        .filter(|p| !p.as_os_str().is_empty())
+    else {
+        return Vec::new();
+    };
+    *probes += 1;
+    let gitdir = resolve_against(owner, named);
+    let mut dirs = vec![gitdir.clone()];
+    *probes += 1;
+    if let Ok(common) = std::fs::read_to_string(gitdir.join("commondir")) {
+        let common = PathBuf::from(common.trim());
+        if !common.as_os_str().is_empty() {
+            dirs.push(resolve_against(&gitdir, common));
+        }
+    }
+    dirs
 }
 
 /// #242 — content stores reached through a `.git` FILE rather than a `.git`
