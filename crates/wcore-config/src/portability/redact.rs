@@ -256,6 +256,47 @@ mod tests {
         );
     }
 
+    /// wayland#1252 c5, SITE C. `strip_url_userinfo` cut the authority with
+    /// `find("://")` + `rest.find('/')` + `find('@')`, so a URL that dials
+    /// `evil.example` (path `/@github.com/x`) and a genuinely
+    /// credential-bearing `github.com` URL rendered to the SAME string — a
+    /// reader of the redacted detail could not tell the first one apart from
+    /// the second.
+    #[test]
+    fn a_smuggled_authority_is_not_rendered_as_the_surviving_host() {
+        let smuggled = scrub_detail(r"https://evil.example\@github.com/x");
+        let credentialed = scrub_detail("https://user:pw@github.com/x");
+        assert_ne!(
+            smuggled, credentialed,
+            "a URL that dials evil.example renders identically to a \
+             credential-bearing github.com URL"
+        );
+        assert!(
+            !smuggled.contains("<redacted>@github.com"),
+            "the smuggled URL still names github.com as the surviving host: \
+             {smuggled}"
+        );
+
+        // CONTROL: an ordinary credential-bearing URL is still redacted, so
+        // the fix above is not bought by giving up the redaction.
+        assert_eq!(
+            credentialed, "https://<redacted>@github.com/x",
+            "an ordinary credential-bearing URL stopped being redacted"
+        );
+        for leaked in ["user", "pw@"] {
+            assert!(
+                !credentialed.contains(leaked),
+                "credential material {leaked:?} survived: {credentialed}"
+            );
+        }
+        // CONTROL: a URL with no credential at all is untouched.
+        assert_eq!(
+            scrub_detail("https://github.com/x"),
+            "https://github.com/x",
+            "an ordinary URL was rewritten"
+        );
+    }
+
     #[test]
     fn credential_ref_carries_no_value_through_any_emitter() {
         // The canonical failure this type prevents: a caller holds a real

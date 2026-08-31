@@ -1791,6 +1791,74 @@ mod tests {
         );
     }
 
+    /// wayland#1252 c1 + c4, SITE A. `https://evil.example\@api.openai.com/v1`
+    /// is a request to `evil.example` with the path `/@api.openai.com/v1` — for
+    /// a special scheme the WHATWG parser reads `\` as a path separator. The
+    /// hand cut this replaced stopped only at `/ ? #`, took the last
+    /// `@`-separated part, read `api.openai.com`, found it EQUAL to the vendor
+    /// host, and SUPPRESSED the caveat — voiding #1079's guarantee through a
+    /// spelling rather than through the shape it was filed about.
+    ///
+    /// All three arms live in ONE body so the fix cannot buy the first by
+    /// breaking the other two: a caveat that fires on every run says nothing,
+    /// and one that fires on none is the bug.
+    #[test]
+    fn the_base_url_caveat_reads_the_host_the_request_reaches() {
+        let lines_for = |base_url: &str| {
+            let args = wcore_config::config::CliArgs {
+                provider: Some("openai".to_string()),
+                api_key: Some(PROBE_KEY.to_string()),
+                base_url: Some(base_url.to_string()),
+                ..Default::default()
+            };
+            provider_section_lines(&args, true, &|_, _| KeyVerdict::Accepted)
+        };
+        let caveat = |lines: &[String]| {
+            lines
+                .iter()
+                .any(|l| l.contains("api.openai.com") && l.contains("NOT the base url"))
+        };
+
+        // THE DEFECT. The configured endpoint dials `evil.example`; the probe
+        // authenticated against `api.openai.com`. The caveat must fire.
+        let smuggled = lines_for(r"https://evil.example\@api.openai.com/v1");
+        // Positive control: there really is a verdict here to caveat, so the
+        // assertion below cannot pass over an empty section.
+        assert!(
+            smuggled.iter().any(|l| l.contains("ACCEPTED")),
+            "no verdict at all — the assertion below would be vacuous. \
+             lines:\n{smuggled:#?}"
+        );
+        assert!(
+            caveat(&smuggled),
+            "a base_url that dials evil.example was read as the vendor's own \
+             host, so #1079's caveat was suppressed. lines:\n{smuggled:#?}"
+        );
+
+        // WRONG-REFUSAL CONTROL 1: a genuinely different configured host still
+        // PRINTS the caveat.
+        let proxied = lines_for("https://proxy.issue1252.invalid/v1");
+        assert!(
+            caveat(&proxied),
+            "an ordinary proxy base_url stopped drawing the caveat. \
+             lines:\n{proxied:#?}"
+        );
+
+        // WRONG-REFUSAL CONTROL 2: a base_url that really IS on the vendor's
+        // host still SUPPRESSES it.
+        let vendor = lines_for("https://api.openai.com/v1");
+        assert!(
+            vendor.iter().any(|l| l.contains("ACCEPTED")),
+            "no verdict at all — this control cannot certify anything. \
+             lines:\n{vendor:#?}"
+        );
+        assert!(
+            !caveat(&vendor),
+            "the caveat fired for a base_url on the vendor's own host, so it \
+             fires on every run and means nothing. lines:\n{vendor:#?}"
+        );
+    }
+
     /// Neither the probe path nor the unprobed path may print the key itself.
     #[test]
     fn the_probe_section_never_prints_the_credential() {

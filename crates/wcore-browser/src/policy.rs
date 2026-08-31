@@ -1320,6 +1320,97 @@ mod tests {
         }
     }
 
+    /// wayland#1252 c2 + c4, SITE B. An operator writes
+    /// `https://evil.example\@github.com`; the WHATWG parser reads that as the
+    /// host `evil.example` with the path `/@github.com`. The hand cut in
+    /// `strip_pattern_decorations` stopped at `/ ? #` only and then took the
+    /// last `@`-separated part, normalising the entry to `github.com` — an
+    /// allow entry that admits a host other than the one it names.
+    #[test]
+    fn an_origin_pattern_normalises_to_the_host_it_actually_names() {
+        // THE DEFECT, in c2's own words.
+        assert!(
+            !origin_matches("github.com", r"https://evil.example\@github.com"),
+            "a pattern that dials evil.example matched github.com"
+        );
+        // ...and the host it DOES name still matches, so this is a re-reading
+        // rather than a blanket refusal of the spelling.
+        assert!(
+            origin_matches("evil.example", r"https://evil.example\@github.com"),
+            "the pattern stopped naming any host at all"
+        );
+
+        // WRONG-REFUSAL CONTROLS, in the same body: every ordinary spelling an
+        // operator actually writes must still match.
+        assert!(
+            origin_matches("api.github.com", "*.github.com"),
+            "an ordinary *.github.com pattern stopped matching api.github.com"
+        );
+        assert!(
+            origin_matches("github.com", "*.github.com"),
+            "a wildcard stopped matching its own apex"
+        );
+        assert!(
+            origin_matches("github.com", "https://github.com"),
+            "a scheme-qualified pattern stopped matching"
+        );
+        assert!(
+            origin_matches("github.com", "github.com"),
+            "a bare host pattern stopped matching"
+        );
+        assert!(
+            origin_matches("github.com", "https://github.com:8443/x"),
+            "a port- and path-decorated pattern stopped matching"
+        );
+        assert!(
+            origin_matches("github.com", "https://user:pw@github.com/x"),
+            "honest userinfo stopped being read as userinfo"
+        );
+        assert!(
+            origin_matches("api.github.com", "HTTPS://*.GitHub.COM"),
+            "case folding stopped working"
+        );
+        // ...and a pattern that was never a host still matches nothing.
+        assert!(
+            !origin_matches("github.com", "javascript:alert(1)"),
+            "a non-host pattern was resurrected into a working entry"
+        );
+    }
+
+    /// SITE B on the PRODUCTION path. `origin_matches` is private, so the
+    /// criterion names it directly — but a guard graded only through its own
+    /// helper is how a vacuous fix ships. This drives `check_url`, which is
+    /// what actually gates a navigation.
+    #[test]
+    fn a_smuggled_allow_entry_does_not_admit_the_host_it_spells() {
+        let smuggling = BrowserPolicy::new(
+            PolicyAction::Deny,
+            vec![r"https://evil.example\@github.com".to_string()],
+            Vec::new(),
+        );
+        assert!(
+            smuggling.check_url("https://github.com/x").is_err(),
+            "an allow entry that dials evil.example admitted github.com"
+        );
+        // Positive control for the arm above: the entry is not simply inert —
+        // it still admits the host it really names.
+        assert!(
+            smuggling.check_url("https://evil.example/x").is_ok(),
+            "the entry admits nothing at all, so the assertion above is vacuous"
+        );
+
+        // WRONG-REFUSAL CONTROL on the same production path.
+        let ordinary = BrowserPolicy::new(
+            PolicyAction::Deny,
+            vec!["*.github.com".to_string()],
+            Vec::new(),
+        );
+        assert!(
+            ordinary.check_url("https://api.github.com/x").is_ok(),
+            "an ordinary wildcard allow entry stopped admitting its subdomain"
+        );
+    }
+
     #[test]
     fn allowed_origins_whitelist_overrides() {
         let policy = BrowserPolicy::new(
