@@ -529,7 +529,22 @@ impl ProtocolSink {
 
     /// Emit a turn-scoped error when the caller still owns the protocol
     /// command's correlation id (for example, before the engine starts).
-    pub fn emit_correlated_error(&self, msg_id: &str, msg: &str, retryable: bool) {
+    ///
+    /// wayland#1266 c1. `category` is a REQUIRED argument for the same reason
+    /// it is on `OutputSink::emit_error`: this is the pre-engine sibling of
+    /// that seam, so a hardcoded `Unknown` here would be exactly the default
+    /// c1 asks to be a compile error. The caller holds the failure and names
+    /// its category; a caller that genuinely cannot decide passes `Unknown`
+    /// deliberately rather than by omission. (This previously deferred the
+    /// typed answer to `emit_run_failure`; that method no longer exists —
+    /// #1266 c1 deleted it and widened `emit_error` instead.)
+    pub fn emit_correlated_error(
+        &self,
+        msg_id: &str,
+        msg: &str,
+        retryable: bool,
+        category: wcore_protocol::events::FailureCategory,
+    ) {
         let code = auth_error_code(msg).unwrap_or("engine_error");
         let _ = self.writer.emit(&ProtocolEvent::Error {
             msg_id: Some(msg_id.to_string()),
@@ -537,12 +552,7 @@ impl ProtocolSink {
                 code: code.to_string(),
                 message: msg.to_string(),
                 retryable,
-                // wayland#1237. This seam receives PROSE, and deciding a
-                // category from prose is the defect the ticket reports, so it
-                // does not try: `unknown` is the honest answer here and the
-                // typed answer arrives through `emit_run_failure`, which still
-                // holds the `AgentError`.
-                category: wcore_protocol::events::FailureCategory::Unknown,
+                category,
             },
         });
     }

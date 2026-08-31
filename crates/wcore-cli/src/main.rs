@@ -6207,6 +6207,7 @@ async fn run_json_stream_mode(
                             &msg_id,
                             &format!("composer attachment rejected: {error}"),
                             false,
+                            wcore_protocol::events::FailureCategory::LocalWayland,
                         );
                         output.emit_stream_end(&msg_id, 0, 0, 0, 0, 0, FinishReason::Error);
                         continue;
