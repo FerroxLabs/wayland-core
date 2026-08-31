@@ -284,7 +284,8 @@ pub fn classify(
                 host,
                 registrable,
                 reason: format!(
-                    "{method} to an allowlisted host, carrying data the model                      chose (a body, or a long/high-entropy path or query)"
+                    "{method} to an allowlisted host, carrying data the model \
+                     chose (a body, or a long/high-entropy path or query)"
                 ),
             };
         }
