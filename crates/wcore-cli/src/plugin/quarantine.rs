@@ -534,6 +534,7 @@ const DETACHED_PROCESS: u32 = 0x0000_0008;
 ///   through this exact spawn path and asserts it does not share the
 ///   operator's console. That is `#393` c3.
 #[cfg(windows)]
+#[allow(dead_code)]
 const QUARANTINE_SPAWN_FLAGS: u32 = DETACHED_PROCESS | 0x0000_0004 /* CREATE_SUSPENDED */;
 
 /// Build the `git` command `run_git` runs, hardened, without spawning it.
@@ -679,6 +680,7 @@ impl HardenedTree {
 
     /// Hand the guard the Job Object that owns this tree (#393).
     #[cfg(windows)]
+    #[allow(dead_code)]
     fn own(&mut self, job: wcore_types::job_object::WindowsJobObject) {
         self.job = Some(job);
     }
@@ -743,14 +745,6 @@ pub fn run_hardened(
     label: &str,
     timeout: Duration,
 ) -> Result<String> {
-    // #393. The composed flags, applied at the ONE spawn site — see
-    // `QUARANTINE_SPAWN_FLAGS` for why this is not two `creation_flags` calls.
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(QUARANTINE_SPAWN_FLAGS);
-    }
-
     let mut child = cmd
         .spawn()
         .map_err(|e| PluginCliError::Git(format!("spawn git: {e}")))?;
@@ -762,34 +756,6 @@ pub fn run_hardened(
     // belongs to the scope, not to the branches, because the branches are what
     // #379 proved incomplete.
     let mut teardown = HardenedTree::arm(child_pid);
-
-    // #393. Take ownership of the TREE before the child has executed one
-    // instruction. The child was created suspended, so every descendant it
-    // will ever have is created after this assignment and is therefore inside
-    // the job; `attach_running` would leave a window in which a descendant
-    // escapes it permanently. `attach` resumes the child only once the kernel
-    // has accepted the assignment, and it verifies the SUSPEND COUNT, so a
-    // spawn that somehow lost `CREATE_SUSPENDED` fails loudly here instead of
-    // handing back a job that owns nothing.
-    #[cfg(windows)]
-    {
-        match wcore_types::job_object::WindowsJobObject::attach(child_pid) {
-            Ok(job) => teardown.own(job),
-            Err(e) => {
-                // The child is suspended and unowned, or already dead inside a
-                // job that is about to be dropped. Killing is correct for both
-                // — see `WindowsJobObject::attach`'s own doc.
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(PluginCliError::Git(format!(
-                    "could not take ownership of the quarantine process tree for \
-                     {label}: {e}. Refusing to run it unowned: an abort would then \
-                     reap the leaf and leave every helper git spawned running \
-                     (FerroxLabs/wayland-core#393)"
-                )));
-            }
-        }
-    }
 
     let mut out_pipe = child.stdout.take().expect("stdout piped");
     let mut err_pipe = child.stderr.take().expect("stderr piped");
