@@ -1,0 +1,32 @@
+# Dependabot version updates for wayland-core.
+#
+# Security updates are enabled separately in repo settings and are NOT governed
+# by this file - a vulnerable dependency raises a PR regardless of the schedule
+# below. This file only controls ROUTINE version bumps.
+#
+# Deliberately conservative: monthly, grouped, and capped. A small team drowning
+# in bot PRs stops reading them, which is worse than updating a month later.
+#
+# Mirrors FerroxLabs/wayland/.github/dependabot.yml, with cargo in place of npm.
+# cargo-deny and OSV already gate advisories in CI; this adds routine currency.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+    groups:
+      # One PR for all patch/minor bumps. Majors still come in separately so
+      # they get read.
+      routine:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+    groups:
+      actions:
+        update-types: [minor, patch]
