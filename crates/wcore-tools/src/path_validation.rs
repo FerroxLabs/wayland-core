@@ -49,7 +49,9 @@ pub enum PathValidationError {
     SystemPath(PathBuf),
     #[error("path is a UNC / network path (SMB NTLM-leak risk): {0:?}")]
     UncPath(PathBuf),
-    #[error("path uses a Windows device / verbatim namespace (\\\\.\\ or \\\\?\\): {0:?}")]
+    #[error(
+        "path uses a Windows device namespace (\\\\.\\) or a non-disk \\\\?\\ verbatim root: {0:?}"
+    )]
     DeviceOrVerbatimPath(PathBuf),
     #[error("path is not a regular file: {0:?}")]
     NonRegularFile(PathBuf),
@@ -141,16 +143,17 @@ pub fn validate_user_path(path: &Path) -> Result<PathBuf, PathValidationError> {
         return Err(PathValidationError::UncPath(raw));
     }
 
-    // #644 (CI(Array) fix): reject the Windows device (`\\.\`) and verbatim
-    // (`\\?\...`) namespaces. On Windows a verbatim-disk path (`\\?\C:\...`) is
-    // absolute, so it would sail past the `is_absolute` guard below and be
-    // ACCEPTED — bypassing Win32 path normalization and confinement — while a
-    // device path (`\\.\PhysicalDrive0`) is a raw handle with the same
-    // unbounded-read / non-regular hazard #644 targets. Neither is a legitimate
-    // input to the legacy file tools. Reject both explicitly and portably (they
-    // are NOT UNC — `\\?\UNC\...` is already consumed as UncPath above), so the
-    // guard is enforced and unit-tested on every platform.
-    if looks_like_device_or_verbatim(path, &path_str) {
+    // #644 (CI(Array) fix): reject the Windows device namespace (`\\.\...`,
+    // e.g. `\\.\PhysicalDrive0`) — a raw handle with the same unbounded-read /
+    // non-regular hazard #644 targets — and any NON-DISK verbatim root
+    // (`\\?\GLOBALROOT\Device\...`, `\\?\Volume{...}\...`), which reach the
+    // same devices by the other spelling. Neither is a legitimate input to the
+    // legacy file tools, and neither is UNC (`\\?\UNC\...` is already consumed
+    // as UncPath above), so both are rejected explicitly and portably here.
+    //
+    // core#409 c2: the verbatim DISK form (`\\?\C:\...`) is deliberately NOT
+    // rejected — see `looks_like_device_or_nondisk_verbatim`.
+    if looks_like_device_or_nondisk_verbatim(path, &path_str) {
         return Err(PathValidationError::DeviceOrVerbatimPath(raw));
     }
 
@@ -253,8 +256,10 @@ pub fn validate_user_path(path: &Path) -> Result<PathBuf, PathValidationError> {
 /// search root:
 ///
 ///   1. No null bytes.
-///   2. No UNC / device / verbatim namespace (#644's NetNTLM-leak reasoning
-///      applies unchanged when the path is handed to `rg` instead of `fs`).
+///   2. No UNC, device or non-disk verbatim namespace (#644's NetNTLM-leak
+///      reasoning applies unchanged when the path is handed to `rg` instead of
+///      `fs`). A verbatim DISK root IS accepted — see
+///      `looks_like_device_or_nondisk_verbatim` and core#409 c2.
 ///   3. Resolve relative input against `base` (the sandbox jail root when the
 ///      caller has one, else the process cwd) and lex-normalize, so
 ///      `../../../etc/shadow` is graded as the absolute path it denotes rather
@@ -282,7 +287,7 @@ pub fn validate_search_root(
     if looks_like_unc(path, &path_str) {
         return Err(PathValidationError::UncPath(raw));
     }
-    if looks_like_device_or_verbatim(path, &path_str) {
+    if looks_like_device_or_nondisk_verbatim(path, &path_str) {
         return Err(PathValidationError::DeviceOrVerbatimPath(raw));
     }
 
@@ -346,26 +351,46 @@ fn looks_like_unc(path: &Path, s: &str) -> bool {
     wcore_config::network_path::has_unc_prefix(path)
 }
 
-/// #644: does `path`/`s` name a Windows device (`\\.\`) or verbatim (`\\?\`)
-/// namespace path (other than `\\?\UNC\...`, which `looks_like_unc` already
-/// classifies as UNC)?
+/// #644 / core#409 c2: does `path`/`s` name a Windows path the file tools must
+/// refuse on its NAMESPACE alone — the device namespace (`\\.\PhysicalDrive0`,
+/// a raw device handle) or a NON-DISK verbatim root
+/// (`\\?\GLOBALROOT\Device\...`, `\\?\Volume{...}\...`), which reach the same
+/// devices by the other spelling? Callers invoke this AFTER `looks_like_unc`,
+/// so `\\?\UNC\...` is already classified as UNC.
 ///
-/// These share the `\\` lead-in with UNC but are not remote SMB targets:
-///   * `\\?\C:\...` (verbatim disk) disables Win32 path normalization and is
-///     `is_absolute() == true` on Windows, so without this guard it would be
-///     ACCEPTED by the legacy file tools.
-///   * `\\.\PhysicalDrive0` (device namespace) is a raw device handle.
+/// **`\\?\C:\...` — the verbatim DISK form — is deliberately NOT refused.**
+/// It names an ordinary local file, and it is the form `std::fs::canonicalize`
+/// RETURNS on Windows, so it is the spelling this product's own canonical paths
+/// carry: `WorkspacePolicy::root()` is `canonicalize`d at construction, and
+/// every absolute path built by joining onto it is verbatim. Refusing it
+/// refused the product's own output. MEASURED on Windows three times before the
+/// guard itself was narrowed, each time worked around at a CALLER:
 ///
-/// Callers invoke this AFTER `looks_like_unc`, so verbatim-UNC is already
-/// handled; the `\\?\unc\` guard below is belt-and-suspenders for the standalone
-/// function. Mirrors `looks_like_unc`'s dual strategy: authoritative parsed
-/// prefix on Windows, portable normalized-string match everywhere.
-fn looks_like_device_or_verbatim(path: &Path, s: &str) -> bool {
-    // Consolidated alongside `looks_like_unc` — see the note there. Keeping
-    // the two in one module is what makes "`\\?\UNC\...` is UNC, never
-    // device/verbatim" checkable in one place instead of four.
+///   * `Refused to read \\?\F:\...\.wayland-out\results\toolu_01.txt` on
+///     Windows 11 26200 — `workspace_policy::session_output_root`, worked
+///     around there with `dunce::simplified`;
+///   * all three tests in `wcore-agent/tests/full_posture_secret_jail_test.rs`
+///     on the hosted Windows runner, worked around there with `simplified_root`;
+///   * `Refused to search \\?\C:\...\Temp\.tmpcEhD2n` — the CONTROL arm of
+///     `grep_vcs_content_store_deny`, i.e. an ORDINARY search of the session's
+///     own workspace. That is FerroxLabs/wayland-core#409 c2, and it is a
+///     user-facing wrong refusal, not a test artefact.
+///
+/// Admitting it opens nothing, because nothing downstream keys on the prefix:
+/// the Windows credential deny-list matches with `contains`, so a prefix cannot
+/// evade it; `..` is refused outright (`validate_user_path`) or lex-normalized
+/// away (`validate_search_root`) before any open; and every containment compare
+/// in `workspace_policy` canonicalizes BOTH sides, which on Windows means both
+/// are verbatim. The `\\?\` normalization-bypass hazard #644 named is real for
+/// the DEVICE spellings, which this still refuses.
+///
+/// Mirrors `looks_like_unc`'s dual strategy via the consolidated predicates in
+/// `wcore_config::network_path`: authoritative parsed prefix on Windows,
+/// portable normalized-string match everywhere, same answer on every platform.
+fn looks_like_device_or_nondisk_verbatim(path: &Path, s: &str) -> bool {
     let _ = s;
     wcore_config::network_path::has_device_or_verbatim_prefix(path)
+        && !wcore_config::network_path::has_verbatim_disk_prefix(path)
 }
 
 /// If `path` is a symlink, follow it (up to 8 hops) to an absolute,
@@ -943,20 +968,91 @@ mod tests {
     #[test]
     fn verbatim_disk_and_device_paths_are_not_unc() {
         // These share the `\\` lead-in but are NOT remote SMB targets, so the
-        // UNC guard must not claim them. They ARE rejected (device / verbatim
-        // namespace), just not as UncPath — on Windows `\\?\C:\...` is absolute
-        // and would otherwise be ACCEPTED, so the reject is load-bearing there.
+        // UNC guard must not claim either of them, whatever else happens to
+        // them afterwards.
         for p in [r"\\?\C:\Users\me\notes.txt", r"\\.\PhysicalDrive0"] {
-            let err = validate_user_path(Path::new(p)).unwrap_err();
+            if let Err(err) = validate_user_path(Path::new(p)) {
+                assert!(
+                    !matches!(err, PathValidationError::UncPath(_)),
+                    "{p:?} must not be classified as UNC, got {err:?}"
+                );
+            }
+        }
+        // The DEVICE half is still refused on its namespace, on every platform.
+        let err = validate_user_path(Path::new(r"\\.\PhysicalDrive0")).unwrap_err();
+        assert!(
+            matches!(err, PathValidationError::DeviceOrVerbatimPath(_)),
+            "the device namespace must stay refused, got {err:?}"
+        );
+    }
+
+    /// core#409 c2 — the namespace guard, pinned in BOTH directions.
+    ///
+    /// Graded on the classifier rather than through `validate_user_path`,
+    /// because a `\\?\...` string is not `is_absolute()` on Unix: the admit arm
+    /// would come back `NotAbsolute` there and prove nothing about the guard
+    /// under test. The classifier is pure and answers the same on every
+    /// platform, so both arms are exercised on every host.
+    #[test]
+    fn the_namespace_guard_refuses_devices_and_admits_verbatim_disks() {
+        // REFUSE — raw devices, by either spelling.
+        for refused in [
+            r"\\.\PhysicalDrive0",
+            r"\\.\pipe\wayland",
+            r"\\?\GLOBALROOT\Device\HarddiskVolume1\secret",
+            r"\\?\Volume{00000000-0000-0000-0000-000000000000}\x",
+        ] {
+            let path = Path::new(refused);
             assert!(
-                !matches!(err, PathValidationError::UncPath(_)),
-                "{p:?} must not be classified as UNC, got {err:?}"
-            );
-            assert!(
-                matches!(err, PathValidationError::DeviceOrVerbatimPath(_)),
-                "{p:?} must be rejected as device/verbatim, got {err:?}"
+                looks_like_device_or_nondisk_verbatim(path, &path.to_string_lossy()),
+                "{refused:?} reaches a raw device and must stay refused"
             );
         }
+
+        // ADMIT — ordinary local files. `\\?\C:\...` is what
+        // `std::fs::canonicalize` returns on Windows and what
+        // `WorkspacePolicy::root()` stores, so refusing it refuses the
+        // product's own canonical paths (core#409 c2).
+        for admitted in [
+            r"\\?\C:\Users\me\notes.txt",
+            r"\\?\F:\ws\.wayland-out\results\toolu_01.txt",
+            r"\\?\c:\Windows\ServiceProfiles\NetworkService\AppData\Local\Temp\.tmp",
+        ] {
+            let path = Path::new(admitted);
+            assert!(
+                !looks_like_device_or_nondisk_verbatim(path, &path.to_string_lossy()),
+                "{admitted:?} is an ordinary local file"
+            );
+        }
+    }
+
+    /// core#409 c2, through the production entry point: the search root a
+    /// session actually carries must be a legal search root.
+    ///
+    /// On Windows `std::fs::canonicalize` returns `\\?\C:\...`, which is what
+    /// `WorkspacePolicy::root()` holds and therefore what Grep is handed; the
+    /// guard refused it, and the failure surfaced as the CONTROL arm of
+    /// `grep_vcs_content_store_deny` — an ordinary search of the workspace —
+    /// dying with `path uses a Windows device / verbatim namespace`. On Unix
+    /// `canonicalize` returns the plain form, so this arm is a control there
+    /// and the regression itself is graded on the Windows host.
+    #[test]
+    fn a_canonicalized_workspace_root_is_a_valid_search_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(dir.path()).unwrap();
+        let resolved = validate_search_root(&root, None).unwrap_or_else(|e| {
+            panic!("canonicalize's own output was refused as a search root: {e}")
+        });
+        assert_eq!(resolved, lex_normalize(&root));
+
+        // Both directions in one test: the device namespace is still refused
+        // by the SAME entry point, so this cannot pass by the guard having
+        // been deleted.
+        let err = validate_search_root(Path::new(r"\\.\PhysicalDrive0"), None).unwrap_err();
+        assert!(
+            matches!(err, PathValidationError::DeviceOrVerbatimPath(_)),
+            "the device namespace must stay refused as a search root, got {err:?}"
+        );
     }
 
     // `\\?\UNC\server\share` stays classified as UNC — the device/verbatim
