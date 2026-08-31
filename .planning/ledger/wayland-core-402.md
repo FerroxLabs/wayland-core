@@ -3,7 +3,7 @@ issue: 402
 repo: FerroxLabs/wayland-core
 kind: defect
 title: "core#356 c4's resolver gate is keyed to two literal names, so a third path resolver arrives ungated"
-status: open
+status: closed
 last_verified_commit: 7e159c955
 criteria:
   - id: c1

@@ -3,7 +3,7 @@ issue: 1280
 repo: FerroxLabs/wayland
 kind: defect
 title: "The skills listing is injected on every ordinary turn, and its 1%-of-window budget is not a ceiling (#1150 c5, skills half)"
-status: open
+status: closed
 last_verified_commit: ffaa0d839
 criteria:
   - id: c1

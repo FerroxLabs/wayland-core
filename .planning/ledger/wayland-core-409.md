@@ -3,7 +3,7 @@ issue: 409
 repo: FerroxLabs/wayland-core
 kind: defect
 title: "Five tests are red on real Windows on lane/f13-windows, none of them a regression from main"
-status: open
+status: closed
 last_verified_commit: 2df6a2665
 criteria:
   - id: c1

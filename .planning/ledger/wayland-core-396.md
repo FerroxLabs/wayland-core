@@ -3,7 +3,7 @@ issue: 396
 repo: FerroxLabs/wayland-core
 kind: defect
 title: "A BARE repository vendored under the root has its object store VFS-readable: no arm of is_vcs_content_store sees it (class remainder of #390)"
-status: open
+status: closed
 last_verified_commit: 7e159c955
 criteria:
   - id: c1
