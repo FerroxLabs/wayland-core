@@ -153,7 +153,6 @@ impl ProcessTreeGuard {
                 root: Some(root),
                 linux_group: None,
             })),
-            Err(error) if observed_root_is_gone(&error) => Ok(None),
             Err(error) => Err(error),
         }
     }
