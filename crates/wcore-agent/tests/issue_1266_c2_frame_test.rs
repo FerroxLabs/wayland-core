@@ -40,20 +40,35 @@
 //! hop is covered for real, out of a spawned process's stdout, by
 //! `crates/wcore-cli/tests/issue_1266_c1_host_frame_e2e.rs`.
 //!
-//! # Red arms (recorded, re-runnable)
+//! # Red arms (recorded, re-runnable, and MEASURED)
 //!
-//! Each is a one-line mutation of the production site in
-//! `crates/wcore-agent/src/engine.rs`, `touch`ed and rebuilt after the edit:
+//! Each is a one-line mutation of the exact production site the arm grades,
+//! in `crates/wcore-agent/src/engine.rs`, `touch`ed and rebuilt after the
+//! edit. `cargo check -p wcore-agent --tests` was RC=0 before each run was
+//! believed, so none of these is a mutation that merely failed to compile,
+//! and the mutation was asserted to have LANDED on the line before building.
 //!
-//! * `FailureCategory::ContextLimit` → `Unknown` at the unworkable-window
-//!   refusal reddens [`the_context_ceiling_refusal_reaches_the_host_frame_as_context_limit`].
-//! * `FailureCategory::ToolRuntime` → `Unknown` at the tool-failure breaker
-//!   reddens [`the_tool_breaker_reaches_the_host_frame_as_tool_runtime`].
-//! * `FailureCategory::LocalWayland` → `Unknown` at the budget-reservation
-//!   refusal reddens [`a_budget_refusal_reaches_the_host_frame_as_local_wayland`].
+//! * The unworkable-window refusal (`ContextLimit` -> `Unknown`) reddens
+//!   [`the_context_ceiling_refusal_reaches_the_host_frame_as_context_limit`]
+//!   AND [`the_in_band_frames_carry_more_than_one_category`]: 2 failed, 4
+//!   passed. The frame arrived as `"category":"unknown"` on the message
+//!   beginning `Run stopped: [compact] context_window is set to 1024 tokens`.
+//! * The admission-reservation refusal (`LocalWayland` -> `Unknown`) reddens
+//!   [`a_budget_refusal_reaches_the_host_frame_as_local_wayland`] AND the
+//!   multi-category guard: 2 failed, 4 passed. Frame message: `Provider call
+//!   not started: budget cap per_session_output_tokens would be exceeded
+//!   (limit 1 output tokens, reserved total 4096 output tokens)`.
+//! * The consecutive-tool-failure breaker (`ToolRuntime` -> `Unknown`)
+//!   reddens [`the_tool_breaker_reaches_the_host_frame_as_tool_runtime`]:
+//!   1 failed, 5 passed. Frame message: `Run stopped: tool calls failed 10
+//!   times in a row (most recently no_such_tool)`. The multi-category guard
+//!   stays green under this one BY CONSTRUCTION -- it compares the context,
+//!   budget and opaque exits, not the tool one -- which is why the tool arm
+//!   carries its own assertion instead of leaning on that guard.
 //!
-//! Each mutation also reddens [`the_in_band_frames_carry_more_than_one_category`],
-//! which is the guard against a fix that satisfies one arm with a constant.
+//! Every message quoted above was READ OUT of the failing frame rather than
+//! copied from the source: an arm that reddened for some unrelated reason
+//! would not have produced the site's own text.
 
 mod common;
 
