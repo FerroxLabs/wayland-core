@@ -5989,14 +5989,19 @@ impl AgentEngine {
     /// Every `emit_error` in this file goes through here so the tap cannot be
     /// bypassed by a new call site. Forwards verbatim to the sink; the tap is
     /// a side-channel, not a filter.
-    fn emit_error(&self, msg: &str, retryable: bool) {
+    fn emit_error(
+        &self,
+        msg: &str,
+        retryable: bool,
+        category: wcore_protocol::events::FailureCategory,
+    ) {
         if let Some(tap) = self.error_tap.as_ref() {
             match tap.lock() {
                 Ok(mut slot) => *slot = Some(msg.to_string()),
                 Err(poisoned) => *poisoned.into_inner() = Some(msg.to_string()),
             }
         }
-        self.output.emit_error(msg, retryable);
+        self.output.emit_error(msg, retryable, category);
     }
 
     /// CORE-2 — snapshot of the engine's usage counters:
@@ -12976,8 +12981,11 @@ impl AgentEngine {
                 // later `--resume` has something to restore.
                 session.conversation_id = Some(conversation_id);
                 if let Err(e) = mgr.persist_first_message(session) {
-                    self.output
-                        .emit_error(&format!("Failed to persist first message: {}", e), false);
+                    self.output.emit_error(
+                        &format!("Failed to persist first message: {}", e),
+                        false,
+                        wcore_protocol::events::FailureCategory::LocalWayland,
+                    );
                 }
             } else {
                 let user_message = self.messages.last().ok_or_else(|| {
@@ -12986,8 +12994,11 @@ impl AgentEngine {
                     )
                 })?;
                 if let Err(e) = mgr.append_wal_message(session, user_message) {
-                    self.output
-                        .emit_error(&format!("Failed to append WAL: {}", e), false);
+                    self.output.emit_error(
+                        &format!("Failed to append WAL: {}", e),
+                        false,
+                        wcore_protocol::events::FailureCategory::LocalWayland,
+                    );
                 }
             }
         }
@@ -13306,7 +13317,11 @@ impl AgentEngine {
                     // Resumable: the saved history is fine and reopens cleanly
                     // the moment the window is raised.
                     if let Some(refusal) = self.unworkable_window_refusal() {
-                        self.emit_error(&refusal, false);
+                        self.emit_error(
+                            &refusal,
+                            false,
+                            wcore_protocol::events::FailureCategory::ContextLimit,
+                        );
                         return self
                             .finish_run_terminated_inner(
                                 user_input,
@@ -13918,6 +13933,7 @@ impl AgentEngine {
                                         request.model,
                                     ),
                                     false,
+                                    wcore_protocol::events::FailureCategory::ContextLimit,
                                 );
                                 // Context ceiling: a bigger budget is needed, not more turns.
                                 return self
@@ -14354,6 +14370,7 @@ impl AgentEngine {
                                  the work in smaller pieces."
                             ),
                             false,
+                            wcore_protocol::events::FailureCategory::ContextLimit,
                         );
                         return self.finish_run_output_truncated(user_input, turn).await;
                     }
@@ -14432,6 +14449,7 @@ impl AgentEngine {
                             request.model,
                         ),
                         false,
+                        wcore_protocol::events::FailureCategory::ContextLimit,
                     );
                     return self
                         .finish_run_terminated(user_input, turn, FinishReason::Length)
@@ -14491,6 +14509,7 @@ impl AgentEngine {
                                  remove the explicit max_cost_usd to use token-only governance."
                             ),
                             false,
+                            wcore_protocol::events::FailureCategory::LocalWayland,
                         );
                         return self
                             .finish_run_terminated(user_input, turn, FinishReason::Length)
@@ -14551,7 +14570,7 @@ impl AgentEngine {
                                      additional budget to authorize more work."
                                 ),
                                 false,
-                            );
+                            wcore_protocol::events::FailureCategory::LocalWayland);
                             return self
                                 .finish_run_terminated(user_input, turn, FinishReason::Length)
                                 .await;
@@ -14586,7 +14605,7 @@ impl AgentEngine {
                                      additional budget to authorize more work."
                                 ),
                                 false,
-                            );
+                            wcore_protocol::events::FailureCategory::LocalWayland);
                             return self
                                 .finish_run_terminated(user_input, turn, FinishReason::Length)
                                 .await;
@@ -14936,6 +14955,7 @@ impl AgentEngine {
                                      {observed})."
                                 ),
                                 false,
+                                wcore_protocol::events::FailureCategory::LocalWayland,
                             );
                         }
                         ConfiguredFallbackAdmissionFailure::Budget(
@@ -14956,6 +14976,7 @@ impl AgentEngine {
                                      managed USD cap cannot be enforced."
                                 ),
                                 false,
+                                wcore_protocol::events::FailureCategory::LocalWayland,
                             );
                         }
                         ConfiguredFallbackAdmissionFailure::SpendGuard(refusal) => {
@@ -14964,7 +14985,13 @@ impl AgentEngine {
                                 &format!("{current_attempt_provider}/{current_attempt_model}"),
                                 "a model this session is permitted to use",
                             );
-                            self.emit_error(&refusal.to_string(), false);
+                            // A spend guard is this process refusing to
+                            // spend, on its own account.
+                            self.emit_error(
+                                &refusal.to_string(),
+                                false,
+                                wcore_protocol::events::FailureCategory::LocalWayland,
+                            );
                         }
                     }
                     return self
@@ -15046,7 +15073,7 @@ impl AgentEngine {
                                              budget cap '{kind}' (limit {limit}, observed {observed})."
                                         ),
                                         false,
-                                    );
+                                    wcore_protocol::events::FailureCategory::LocalWayland);
                                     return self
                                         .finish_run_terminated(
                                             user_input,
@@ -15292,7 +15319,11 @@ impl AgentEngine {
                                  not re-sent, because a second send would be identical.",
                             );
                         }
-                        self.emit_error(&surfaced, false);
+                        self.emit_error(
+                            &surfaced,
+                            false,
+                            wcore_protocol::events::FailureCategory::Unknown,
+                        );
                         // #923(2) — fail the TURN, not the session. The dispatch
                         // left this turn's provider attempt nonterminal, and the
                         // reducer will not let a turn holding one take ANY
@@ -15639,7 +15670,7 @@ impl AgentEngine {
                                          cap '{kind}' (limit {limit}, observed {observed})."
                                     ),
                                     false,
-                                );
+                                wcore_protocol::events::FailureCategory::LocalWayland);
                                 return self
                                     .finish_run_terminated(user_input, turn, FinishReason::Length)
                                     .await;
@@ -15806,6 +15837,7 @@ impl AgentEngine {
                                     request.model,
                                 ),
                                 false,
+                                wcore_protocol::events::FailureCategory::ContextLimit,
                             );
                             return self
                                 .finish_run_terminated_inner(
@@ -15928,6 +15960,7 @@ impl AgentEngine {
                                 )
                             },
                             false,
+                            wcore_protocol::events::FailureCategory::ContextLimit,
                         );
                         return self.finish_run_output_truncated(user_input, turn).await;
                     }
@@ -16141,7 +16174,11 @@ impl AgentEngine {
                                 MonitorDirective::Stop,
                                 MonitorReason::OutputStall,
                             );
-                            self.emit_error(&gate_msg, false);
+                            self.emit_error(
+                                &gate_msg,
+                                false,
+                                wcore_protocol::events::FailureCategory::LocalWayland,
+                            );
                             self.emit_midflight_monitor_occurrence();
                             // #388, Expected-Behavior bullet 3 — "clearly mark
                             // the task as failed/incomplete". This is a TERMINAL
@@ -16284,8 +16321,11 @@ impl AgentEngine {
                     permanent_endpoint,
                     is_auth_failure,
                 );
-                self.output
-                    .emit_error(&final_error, !is_client_error && !permanent_endpoint);
+                self.output.emit_error(
+                    &final_error,
+                    !is_client_error && !permanent_endpoint,
+                    wcore_protocol::events::FailureCategory::Unknown,
+                );
                 self.emit_incomplete_run_admission(&format!(
                     "the provider failed every one of {sends} attempts at this turn"
                 ));
@@ -16609,7 +16649,11 @@ impl AgentEngine {
                      The endpoint or model may be incompatible (verify it speaks the OpenAI \
                      chat-completions streaming format and that the model name is valid)."
                 };
-                self.emit_error(message, false);
+                self.emit_error(
+                    message,
+                    false,
+                    wcore_protocol::events::FailureCategory::Unknown,
+                );
             } else if raw_text_chars > filtered_text_chars {
                 // wayland#1221 c3 — the empty-turn notice above is the ONLY
                 // guard that ever announced an over-strip, and it fires only
@@ -16695,6 +16739,7 @@ impl AgentEngine {
                      its configured spend ceiling."
                     ),
                     false,
+                    wcore_protocol::events::FailureCategory::LocalWayland,
                 );
                 return self
                     .finish_run_terminated(user_input, turn + 1, FinishReason::Length)
@@ -17415,6 +17460,7 @@ impl AgentEngine {
                          disable via WAYLAND_MAX_CONSECUTIVE_TOOL_FAILURES.)"
                     ),
                     false,
+                    wcore_protocol::events::FailureCategory::ToolRuntime,
                 );
                 // #475 + #457: the retry-cap is a budget guardrail, not a hard
                 // failure — surface finish_reason=max_turns so the host offers
@@ -17444,6 +17490,7 @@ impl AgentEngine {
                          same call. (Tune or disable via WAYLAND_MAX_REPEATED_TOOL_CALLS.)"
                     ),
                     false,
+                    wcore_protocol::events::FailureCategory::ToolRuntime,
                 );
                 return self
                     .finish_run_terminated(user_input, turn + 1, FinishReason::Length)
@@ -17473,6 +17520,7 @@ impl AgentEngine {
                          mid-flight monitor required a strategy change. Continue with a \
                          materially different approach or explain the blocker.",
                         false,
+                        wcore_protocol::events::FailureCategory::ToolRuntime,
                     );
                     self.emit_midflight_monitor_occurrence();
                     return self
@@ -17498,6 +17546,7 @@ impl AgentEngine {
                          mid-flight monitor required a strategy change. Continue with a \
                          materially different tool sequence or explain the blocker.",
                         false,
+                        wcore_protocol::events::FailureCategory::ToolRuntime,
                     );
                     self.emit_midflight_monitor_occurrence();
                     return self
@@ -17519,6 +17568,7 @@ impl AgentEngine {
                              (limit {limit}, observed {observed})."
                         ),
                         false,
+                        wcore_protocol::events::FailureCategory::LocalWayland,
                     );
                     self.emit_midflight_monitor_occurrence();
                     return self
@@ -19110,8 +19160,11 @@ impl AgentEngine {
                     return Err(AgentError::SessionAuthority(error.to_string()));
                 }
                 Err(e) => {
-                    self.output
-                        .emit_error(&format!("Autocompact failed: {}", e), false);
+                    self.output.emit_error(
+                        &format!("Autocompact failed: {}", e),
+                        false,
+                        wcore_protocol::events::FailureCategory::Unknown,
+                    );
                     // AUDIT A4 — restore the carved-out live user turn
                     // on failure so the next turn still sees the task.
                     if let Some(turn) = live_user_turn {
@@ -21001,12 +21054,18 @@ impl AgentEngine {
             // unrestorable forever.
             session.conversation_id = Some(conversation_id);
             if let Err(e) = mgr.save_and_clear_wal(session) {
-                self.output
-                    .emit_error(&format!("Failed to save session: {}", e), false);
+                self.output.emit_error(
+                    &format!("Failed to save session: {}", e),
+                    false,
+                    wcore_protocol::events::FailureCategory::LocalWayland,
+                );
             }
             if let Err(e) = mgr.update_index_for(session) {
-                self.output
-                    .emit_error(&format!("Failed to update session index: {}", e), false);
+                self.output.emit_error(
+                    &format!("Failed to update session index: {}", e),
+                    false,
+                    wcore_protocol::events::FailureCategory::LocalWayland,
+                );
             }
         }
     }
@@ -21162,7 +21221,7 @@ mod streaming_context_gate_tests {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
         fn streaming_tools_advertised(&self) -> bool {
             self.advertised
@@ -21452,7 +21511,7 @@ mod tier_routing_e2e_tests {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
         fn emit_trace(&self, _: &str, trace_json: &Value) {
             self.traces
@@ -21664,7 +21723,7 @@ mod set_config_tests {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
     }
 
@@ -23757,7 +23816,7 @@ mod phase6_tests {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
     }
 
@@ -24085,7 +24144,7 @@ mod compact_tests {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
     }
 
@@ -26216,7 +26275,7 @@ mod plan_mode_tests {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
     }
 
@@ -26715,7 +26774,7 @@ mod hook_integration_tests {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
     }
 
@@ -27891,7 +27950,7 @@ mod approval_bridge_engine_tests {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
     }
 
@@ -29142,7 +29201,7 @@ mod approval_bridge_engine_tests {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
         fn emit_compaction(&self, _: &str, reason: &str, tokens_freed: u64, _: Option<u32>) {
             self.events
@@ -29347,7 +29406,7 @@ mod user_model_writeback_tests {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
     }
 
@@ -30170,7 +30229,7 @@ mod audit_2026_05_22_tests {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
     }
 
@@ -30201,7 +30260,7 @@ mod audit_2026_05_22_tests {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
     }
 
@@ -30268,7 +30327,7 @@ mod audit_2026_05_22_tests {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
     }
 
@@ -37219,7 +37278,7 @@ mod session_start_apply_tests {
             _: wcore_types::message::FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
     }
 
@@ -37795,7 +37854,7 @@ mod ijfw_session_start_e2e_tests {
             _: wcore_types::message::FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
     }
 
@@ -37993,7 +38052,7 @@ mod overflow_retry_tests {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
     }
 
@@ -38144,7 +38203,7 @@ mod retry_wedge_protection_tests {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
     }
 

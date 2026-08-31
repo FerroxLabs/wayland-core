@@ -321,7 +321,12 @@ impl OutputSink for TestSink {
             agent_run_id: agent_run_id.map(str::to_string),
         });
     }
-    fn emit_error(&self, msg: &str, retryable: bool) {
+    fn emit_error(
+        &self,
+        msg: &str,
+        retryable: bool,
+        _category: wcore_protocol::events::FailureCategory,
+    ) {
         self.record(&ProtocolEvent::Error {
             msg_id: None,
             error: ErrorInfo {

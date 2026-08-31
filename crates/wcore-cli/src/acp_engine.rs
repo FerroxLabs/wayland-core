@@ -171,22 +171,21 @@ impl OutputSink for RelaySink {
             )
         });
     }
-    fn emit_error(&self, msg: &str, retryable: bool) {
-        self.with_sink(|s| s.emit_error(msg, retryable));
-    }
-    /// wayland#1237. This sink DELEGATES, so it has to delegate the typed
-    /// terminal exit too. Taking the trait default here would route back
-    /// through `emit_error` above and flatten the category to `unknown` on
-    /// whatever sink is wrapped -- the one way a wrapper can silently undo the
-    /// classification. `every_delegated_error_has_its_typed_sibling_delegated`
-    /// is the guard.
-    fn emit_run_failure(
+    /// wayland#1266 c1 retired the delegation hazard this used to carry.
+    ///
+    /// Under #1237 this sink had to forward BOTH `emit_error` and
+    /// `emit_run_failure`: forwarding only the first took the trait default
+    /// for the second, which routed the typed exit back through `emit_error`
+    /// and handed the wrapped sink prose. There is now ONE method, so a
+    /// wrapper that forwards it cannot flatten a category, and a wrapper that
+    /// forgets to forward it does not compile.
+    fn emit_error(
         &self,
         msg: &str,
         retryable: bool,
         category: wcore_protocol::events::FailureCategory,
     ) {
-        self.with_sink(|s| s.emit_run_failure(msg, retryable, category));
+        self.with_sink(|s| s.emit_error(msg, retryable, category));
     }
     fn emit_info(&self, msg: &str) {
         self.with_sink(|s| s.emit_info(msg));
@@ -2040,31 +2039,40 @@ mod tests {
         assert!(matches!(out[0], MessageEvent::Error { .. }));
     }
 
-    /// wayland#1237 — a sink that DELEGATES `emit_error` must delegate
-    /// `emit_run_failure` as well.
+    /// wayland#1266 c1 — a sink that DELEGATES must forward the CATEGORY,
+    /// not just the prose.
     ///
-    /// This is the one way a wrapper can silently undo the classification: the
-    /// trait default for `emit_run_failure` calls `emit_error`, so a delegator
-    /// that forwards only `emit_error` sends the wrapped sink prose and drops
-    /// the category on the floor. The property is asserted as a PAIRING over
-    /// this file's own text rather than as a list of sinks -- if a delegation
-    /// of one appears without a delegation of the other, this fails, whatever
-    /// the sink is called.
+    /// #1237's version of this guard asserted a PAIRING: that a file
+    /// delegating `emit_error` also delegated `emit_run_failure`, because
+    /// taking the trait default for the second flattened the category to
+    /// `unknown` on the wrapped sink. #1266's own comment recorded why that
+    /// was the wrong shape of answer -- the guard read this one file's text,
+    /// so a delegating sink added in any OTHER file was invisible to it, and
+    /// the needle was over an open alphabet.
+    ///
+    /// Deleting `emit_run_failure` closed that class by construction: there is
+    /// one method, a wrapper that does not forward it does not compile, and
+    /// there is no default left to fall into. What remains decidable in text
+    /// is the one thing the compiler cannot check -- that this delegation
+    /// passes `category` THROUGH rather than substituting a literal -- and
+    /// that is what this asserts, with a known-positive control that the
+    /// needle can match at all.
     #[test]
-    fn every_delegated_error_has_its_typed_sibling_delegated() {
+    fn the_delegating_sink_forwards_the_category_it_was_given() {
         let src = include_str!("acp_engine.rs");
-        let delegated_prose = concat!("s.emit_", "error(msg, retryable)");
-        let delegated_typed = concat!("s.emit_run_", "failure(msg, retryable, category)");
-        // Known-positive control: this file DOES delegate, so the pairing
-        // below is being tested against a real delegator and not a typo.
+        let forwarded = concat!("s.emit_", "error(msg, retryable, category)");
         assert!(
-            src.contains(delegated_prose),
-            "control: this file delegates emit_error"
+            src.contains(forwarded),
+            "RelaySink must forward the category it was handed. Passing a \
+             literal here would make every error this wrapper relays carry \
+             that one value, whatever the engine decided (wayland#1266 c1)"
         );
+        // Known-positive control: the needle is matched against a file that
+        // really does delegate, so a green here is not a green against a file
+        // with no delegation in it at all.
         assert!(
-            src.contains(delegated_typed),
-            "a sink that forwards emit_error and not emit_run_failure flattens \
-             every category it is handed to `unknown`"
+            src.contains(concat!("fn emit_", "error(")),
+            "control: this file defines a delegating emit_error"
         );
     }
 

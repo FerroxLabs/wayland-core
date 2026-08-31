@@ -389,14 +389,21 @@ impl OutputSink for ChannelSink {
         });
     }
 
-    fn emit_error(&self, msg: &str, retryable: bool) {
+    fn emit_error(
+        &self,
+        msg: &str,
+        retryable: bool,
+        category: wcore_protocol::events::FailureCategory,
+    ) {
         self.send(ProtocolEvent::Error {
             msg_id: None,
             error: ErrorInfo {
                 code: "engine_error".to_string(),
                 message: msg.to_string(),
                 retryable,
-                category: wcore_protocol::events::FailureCategory::Unknown,
+                // wayland#1266 c1: the engine classified this; the TUI bridge
+                // relays that classification rather than re-deciding it.
+                category,
             },
         });
     }
@@ -5086,7 +5093,11 @@ mod tests {
         let sink = ChannelSink::new(tx);
         // retryable=true asserts the flag is threaded through, not hardcoded
         // false (audit finding: the TUI bridge ChannelSink used to discard it).
-        sink.emit_error("boom", true);
+        sink.emit_error(
+            "boom",
+            true,
+            wcore_protocol::events::FailureCategory::Unknown,
+        );
         match rx.try_recv().expect("event forwarded") {
             ProtocolEvent::Error { error, .. } => {
                 assert_eq!(error.message, "boom");

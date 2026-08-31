@@ -426,7 +426,12 @@ impl OutputSink for TerminalSink {
     /// Terminal-only, deliberately. `ProtocolSink` emits one frame per call
     /// and a host correlates them by `msg_id`; suppressing a frame there would
     /// change the protocol.
-    fn emit_error(&self, msg: &str, _retryable: bool) {
+    fn emit_error(
+        &self,
+        msg: &str,
+        _retryable: bool,
+        _category: wcore_protocol::events::FailureCategory,
+    ) {
         {
             let mut last = self.last_error.lock().unwrap();
             if last
@@ -541,7 +546,12 @@ mod tests {
     fn a_wrapped_restatement_of_the_last_error_is_not_printed_again() {
         let sink = TerminalSink::new(true);
 
-        OutputSink::emit_error(&sink, "boom: the key was rejected", false);
+        OutputSink::emit_error(
+            &sink,
+            "boom: the key was rejected",
+            false,
+            wcore_protocol::events::FailureCategory::Unknown,
+        );
         assert_eq!(
             sink.last_error.lock().unwrap().as_deref(),
             Some("boom: the key was rejected"),
@@ -550,7 +560,12 @@ mod tests {
 
         // The CLI's `{e:#}` render of the same fault: same payload, Display
         // prefix in front.
-        OutputSink::emit_error(&sink, "API error: boom: the key was rejected", false);
+        OutputSink::emit_error(
+            &sink,
+            "API error: boom: the key was rejected",
+            false,
+            wcore_protocol::events::FailureCategory::Unknown,
+        );
         assert_eq!(
             sink.last_error.lock().unwrap().as_deref(),
             Some("boom: the key was rejected"),
@@ -560,7 +575,12 @@ mod tests {
 
         // A genuinely different fault still gets through — without this the
         // guard would be indistinguishable from "print at most one error".
-        OutputSink::emit_error(&sink, "a different failure entirely", false);
+        OutputSink::emit_error(
+            &sink,
+            "a different failure entirely",
+            false,
+            wcore_protocol::events::FailureCategory::Unknown,
+        );
         assert_eq!(
             sink.last_error.lock().unwrap().as_deref(),
             Some("a different failure entirely"),
@@ -595,7 +615,11 @@ mod tests {
         let sink = TerminalSink::new(true);
         sink.emit_stream_start("m1");
         assert!(sink.first_delta_pending.load(Ordering::Acquire));
-        sink.emit_error("boom", false);
+        sink.emit_error(
+            "boom",
+            false,
+            wcore_protocol::events::FailureCategory::Unknown,
+        );
         assert!(!sink.first_delta_pending.load(Ordering::Acquire));
     }
 
@@ -657,7 +681,11 @@ mod tests {
         sink.emit_stream_start("m1");
         sink.emit_tool_call("read_file", r#"{"path":"x"}"#);
         assert!(sink.in_tool_block.load(Ordering::Acquire));
-        sink.emit_error("boom", false);
+        sink.emit_error(
+            "boom",
+            false,
+            wcore_protocol::events::FailureCategory::Unknown,
+        );
         assert!(!sink.in_tool_block.load(Ordering::Acquire));
 
         sink.emit_stream_start("m2");

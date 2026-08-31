@@ -315,7 +315,7 @@ impl OutputSink for ToolResultSink {
         _: wcore_types::message::FinishReason,
     ) {
     }
-    fn emit_error(&self, _: &str, _: bool) {}
+    fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
     fn emit_info(&self, _: &str) {}
 }
 

@@ -143,7 +143,11 @@ async fn handle_slash_or_run(
                 // Not a registered slash command — fall through to engine.
             }
             Err(SlashError::Bad(reason)) => {
-                output.emit_error(&format!("bad slash invocation: {reason}"), false);
+                output.emit_error(
+                    &format!("bad slash invocation: {reason}"),
+                    false,
+                    wcore_protocol::events::FailureCategory::LocalWayland,
+                );
                 return SlashOrRun::Slash;
             }
         }
@@ -2366,6 +2370,7 @@ async fn run() -> anyhow::Result<ExitCode> {
                         "the interrupted turn from the previous run could not be settled: {error}"
                     ),
                     false,
+                    wcore_protocol::events::FailureCategory::LocalWayland,
                 );
                 None
             }
@@ -2473,7 +2478,11 @@ async fn run() -> anyhow::Result<ExitCode> {
                         }
                     }
                     Err(error) => {
-                        output.emit_error(&format!("{error:#}"), false);
+                        output.emit_error(
+                            &format!("{error:#}"),
+                            false,
+                            wcore_protocol::events::FailureCategory::Unknown,
+                        );
                         exit_sink.store(
                             wcore_cli::exit_code::FAILURE,
                             std::sync::atomic::Ordering::SeqCst,
@@ -2544,7 +2553,11 @@ async fn run() -> anyhow::Result<ExitCode> {
             SlashOrRun::Engine(Err(e)) => {
                 // Render the full anyhow chain (`{e:#}` flattens causes onto
                 // `\nCaused by: …` lines which the formatter recognises).
-                output.emit_error(&format!("{e:#}"), false);
+                output.emit_error(
+                    &format!("{e:#}"),
+                    false,
+                    wcore_protocol::events::FailureCategory::Unknown,
+                );
                 ExitCode::from(wcore_cli::exit_code::FAILURE)
             }
         }
@@ -2645,7 +2658,11 @@ async fn repl_loop(
                 );
             }
             SlashOrRun::Engine(Err(e)) => {
-                output.emit_error(&format!("{e:#}"), false);
+                output.emit_error(
+                    &format!("{e:#}"),
+                    false,
+                    wcore_protocol::events::FailureCategory::Unknown,
+                );
             }
         }
     }
@@ -3929,7 +3946,11 @@ async fn note_deferred_mcp_connect(
             for (_, reservation) in reservations {
                 reservation.complete_failed(reason.clone());
             }
-            output.emit_error(&reason, false);
+            output.emit_error(
+                &reason,
+                false,
+                wcore_protocol::events::FailureCategory::LocalWayland,
+            );
             None
         }
     }
@@ -4879,7 +4900,11 @@ async fn handle_resume_turn<C>(
                             RecoveryLifecycle::Cancelled
                         }
                         Err(error) => {
-                            output.emit_error(&format!("resume_turn refused: {error}"), false);
+                            output.emit_error(
+                                &format!("resume_turn refused: {error}"),
+                                false,
+                                error.failure_category(),
+                            );
                             emit_recovered_terminal(output, &request_id, FinishReason::Error);
                             emit_recovery_unavailable(
                                 writer,
@@ -4966,7 +4991,11 @@ async fn handle_resume_turn<C>(
             });
         }
         Err(error) => {
-            output.emit_error(&format!("resume_turn refused: {error}"), false);
+            output.emit_error(
+                &format!("resume_turn refused: {error}"),
+                false,
+                error.failure_category(),
+            );
             let finish_reason = if matches!(error, wcore_agent::engine::AgentError::UserAborted) {
                 FinishReason::Stop
             } else {
@@ -5112,6 +5141,7 @@ async fn handle_recovered_approval<C>(
                     output.emit_error(
                         &format!("resolve_interrupted_approval refused: {error}"),
                         false,
+                        error.failure_category(),
                     );
                     emit_recovered_terminal(output, &request_id, FinishReason::Error);
                     emit_recovery_unavailable(
@@ -5199,6 +5229,7 @@ async fn handle_recovered_approval<C>(
             output.emit_error(
                 &format!("resolve_interrupted_approval refused: {error}"),
                 false,
+                error.failure_category(),
             );
             let finish_reason = if matches!(error, wcore_agent::engine::AgentError::UserAborted) {
                 FinishReason::Stop
@@ -5226,6 +5257,7 @@ fn handle_operator_tool_effect_resolution(
         output.emit_error(
             "resolve_unknown_tool_effect refused: wrong command at dispatcher boundary",
             false,
+            wcore_protocol::events::FailureCategory::LocalWayland,
         );
         return;
     };
@@ -5237,6 +5269,7 @@ fn handle_operator_tool_effect_resolution(
         output.emit_error(
             &format!("resolve_unknown_tool_effect refused: {error}"),
             false,
+            error.failure_category(),
         );
         return;
     }
@@ -5381,7 +5414,11 @@ async fn run_json_stream_mode(
             // The claim keeps this specific message and stands the process-exit
             // chokepoint down, so the host receives exactly one error frame.
             if wcore_cli::startup_error::claim_startup_error_emission() {
-                output.emit_error(&init_failure_message(&e, &provider_name), false);
+                output.emit_error(
+                    &init_failure_message(&e, &provider_name),
+                    false,
+                    wcore_protocol::events::FailureCategory::LocalWayland,
+                );
             }
             return Err(e);
         }
@@ -5662,6 +5699,7 @@ async fn run_json_stream_mode(
                     output.emit_error(
                         &format!("AddMcpServer rejected: invalid request ({reason})"),
                         false,
+                        wcore_protocol::events::FailureCategory::LocalWayland,
                     );
                     let safe_name = if name.len() <= MAX_MCP_SERVER_NAME_LEN {
                         name
@@ -5690,14 +5728,22 @@ async fn run_json_stream_mode(
                 ) {
                     Ok(c) => c,
                     Err(e) => {
-                        output.emit_error(&format!("AddMcpServer '{name}': {e}"), false);
+                        output.emit_error(
+                            &format!("AddMcpServer '{name}': {e}"),
+                            false,
+                            wcore_protocol::events::FailureCategory::LocalWayland,
+                        );
                         continue;
                     }
                 };
                 config = match scope_host_runtime_mcp(config, assistant.as_deref()) {
                     Ok(config) => config,
                     Err(reason) => {
-                        output.emit_error(&format!("AddMcpServer '{name}': {reason}"), false);
+                        output.emit_error(
+                            &format!("AddMcpServer '{name}': {reason}"),
+                            false,
+                            wcore_protocol::events::FailureCategory::LocalWayland,
+                        );
                         let _ = writer.emit(&ProtocolEvent::McpFailed {
                             name: name.clone(),
                             reason: reason.to_string(),
@@ -5707,7 +5753,11 @@ async fn run_json_stream_mode(
                 };
                 if let Err(error) = resolve_live_mcp_credential_references(&mut config) {
                     let reason = format!("credential resolution failed: {error}");
-                    output.emit_error(&format!("AddMcpServer '{name}': {reason}"), false);
+                    output.emit_error(
+                        &format!("AddMcpServer '{name}': {reason}"),
+                        false,
+                        wcore_protocol::events::FailureCategory::LocalWayland,
+                    );
                     let _ = writer.emit(&ProtocolEvent::McpFailed {
                         name: name.clone(),
                         reason,
@@ -5720,7 +5770,7 @@ async fn run_json_stream_mode(
                             "AddMcpServer '{name}': name collides with an effective config declaration"
                         ),
                         false,
-                    );
+                    wcore_protocol::events::FailureCategory::LocalWayland);
                     let _ = writer.emit(&ProtocolEvent::McpFailed {
                         name,
                         reason: "name collides with an effective config declaration".to_string(),
@@ -5752,6 +5802,7 @@ async fn run_json_stream_mode(
                             output.emit_error(
                                 &format!("AddMcpServer '{name}' (replace): {reason}"),
                                 false,
+                                wcore_protocol::events::FailureCategory::LocalWayland,
                             );
                             let _ = writer.emit(&ProtocolEvent::McpFailed { name, reason });
                             continue;
@@ -5765,7 +5816,11 @@ async fn run_json_stream_mode(
                     McpReservationOutcome::Existing(snapshot) => {
                         if snapshot.config_identity != config_identity {
                             let reason = "same-name MCP server is already owned by a different configuration; remove it before re-adding".to_string();
-                            output.emit_error(&format!("AddMcpServer '{name}': {reason}"), false);
+                            output.emit_error(
+                                &format!("AddMcpServer '{name}': {reason}"),
+                                false,
+                                wcore_protocol::events::FailureCategory::LocalWayland,
+                            );
                             let _ = writer.emit(&ProtocolEvent::McpFailed { name, reason });
                             continue;
                         }
@@ -5789,6 +5844,7 @@ async fn run_json_stream_mode(
                                 output.emit_error(
                                     &format!("AddMcpServer '{name}': server is stopping"),
                                     true,
+                                    wcore_protocol::events::FailureCategory::LocalWayland,
                                 );
                             }
                             McpLifecycleState::CleanupUnverified { .. } => {
@@ -5797,7 +5853,7 @@ async fn run_json_stream_mode(
                                         "AddMcpServer '{name}': prior transport cleanup is unverified; retry remove first"
                                     ),
                                     false,
-                                );
+                                wcore_protocol::events::FailureCategory::LocalWayland);
                             }
                             McpLifecycleState::Failed { .. } => {
                                 unreachable!("failed lifecycle entries are retryable")
@@ -5809,6 +5865,7 @@ async fn run_json_stream_mode(
                         output.emit_error(
                             "AddMcpServer refused: session MCP lifecycle capacity exceeded",
                             false,
+                            wcore_protocol::events::FailureCategory::LocalWayland,
                         );
                         continue;
                     }
@@ -5850,6 +5907,7 @@ async fn run_json_stream_mode(
                             output.emit_error(
                                 &format!("AddMcpServer '{name}' failed: {reason}"),
                                 false,
+                                wcore_protocol::events::FailureCategory::ToolRuntime,
                             );
                             let _ = writer.emit(&ProtocolEvent::McpFailed {
                                 name: name.clone(),
@@ -5889,6 +5947,7 @@ async fn run_json_stream_mode(
                                 output.emit_error(
                                     &format!("AddMcpServer '{name}': registry busy"),
                                     true,
+                                    wcore_protocol::events::FailureCategory::LocalWayland,
                                 );
                                 continue;
                             }
@@ -5913,8 +5972,11 @@ async fn run_json_stream_mode(
                         eprintln!("[mcp] connect_one failed for '{name}': {e:#}");
                         let reason = format!("{e:#}");
                         reservation.complete_failed(reason.clone());
-                        output
-                            .emit_error(&format!("AddMcpServer '{name}' failed: {reason}"), false);
+                        output.emit_error(
+                            &format!("AddMcpServer '{name}' failed: {reason}"),
+                            false,
+                            wcore_protocol::events::FailureCategory::ToolRuntime,
+                        );
                         // Companion to the McpReady success emit: tell the host /
                         // TUI *why* this server's tools never appeared so /doctor
                         // can surface it, instead of the failure only hitting stderr.
@@ -6126,7 +6188,11 @@ async fn run_json_stream_mode(
                             // to the normal engine path below.
                         }
                         Err(SlashError::Bad(reason)) => {
-                            output.emit_error(&format!("bad slash invocation: {reason}"), false);
+                            output.emit_error(
+                                &format!("bad slash invocation: {reason}"),
+                                false,
+                                wcore_protocol::events::FailureCategory::LocalWayland,
+                            );
                             output.emit_stream_end(&msg_id, 0, 0, 0, 0, 0, FinishReason::Error);
                             continue;
                         }
@@ -6182,7 +6248,7 @@ async fn run_json_stream_mode(
                                                  The provider likely returned an empty response or an unrecognized completion status. \
                                                  Check the engine log for an 'unrecognized finish_reason' warning, and verify the model name and provider.",
                                                 false,
-                                            );
+                                            wcore_protocol::events::FailureCategory::Unknown);
                                         }
                                         output.emit_stream_end_full(
                                             &msg_id,
@@ -6198,7 +6264,7 @@ async fn run_json_stream_mode(
                                         );
                                     }
                                     Err(e) => {
-                                        output.emit_error(&format!("{e:#}"), false);
+                                        output.emit_error(&format!("{e:#}"), false, wcore_protocol::events::FailureCategory::Unknown);
                                         // stream_end deferred (see run_failed
                                         // above): emitted after this block with
                                         // the engine's usage snapshot.
@@ -6398,7 +6464,7 @@ async fn run_json_stream_mode(
                                         output.emit_error(
                                             "resolve_unknown_tool_effect refused during active turn; resync and retry after the turn stops",
                                             false,
-                                        );
+                                        wcore_protocol::events::FailureCategory::LocalWayland);
                                     }
                                     ProtocolCommand::RemoveMcpServer(command) => {
                                         if mcp_removal_request_id_invalid(&command) {
@@ -6825,6 +6891,7 @@ async fn run_json_stream_mode(
                 output.emit_error(
                     &format!("AddMcpServer '{name}': rejected — only allowed before first Message"),
                     false,
+                    wcore_protocol::events::FailureCategory::LocalWayland,
                 );
             }
             ProtocolCommand::RemoveMcpServer(command) => {
@@ -7966,7 +8033,12 @@ mod tests {
                 .unwrap()
                 .push((msg_id.to_owned(), finish_reason));
         }
-        fn emit_error(&self, msg: &str, _retryable: bool) {
+        fn emit_error(
+            &self,
+            msg: &str,
+            _retryable: bool,
+            _category: wcore_protocol::events::FailureCategory,
+        ) {
             self.errors.lock().unwrap().push(msg.to_owned());
         }
         fn emit_info(&self, _msg: &str) {}

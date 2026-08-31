@@ -32,36 +32,6 @@ pub trait OutputSink: Send + Sync {
     ) {
     }
 
-    /// FerroxLabs/wayland#1237 (from wayland#388 c7) — the TERMINAL error exit
-    /// of a run, carrying its typed category.
-    ///
-    /// `emit_error` below is deliberately left alone. It is the IN-BAND seam:
-    /// it receives prose and a retryable flag, which is all its callers have,
-    /// and deciding a category from prose is the defect #1237 reports. Widening
-    /// it would spread `Unknown`, not information.
-    ///
-    /// This is the other path. `AgentEngine::run` returned `Err`, the caller
-    /// still holds the `AgentError`, and
-    /// [`crate::engine::AgentError::failure_category`] decides the category
-    /// from the variant with an exhaustive match.
-    ///
-    /// The default is not a hole a wire-bearing sink can fall into. A sink that
-    /// serialises a host-facing `error` frame must build a
-    /// `wcore_protocol::events::ErrorInfo`, and `ErrorInfo` has no `Default`:
-    /// naming a category there is a compile-time obligation, not a convention.
-    /// A sink with no wire — the terminal renderer, the null sink, every test
-    /// double — has nowhere to put a category, and prose is the whole of what
-    /// it can show.
-    fn emit_run_failure(
-        &self,
-        msg: &str,
-        retryable: bool,
-        category: wcore_protocol::events::FailureCategory,
-    ) {
-        let _ = category;
-        self.emit_error(msg, retryable);
-    }
-
     /// Stream text delta from LLM
     fn emit_text_delta(&self, text: &str, msg_id: &str);
     /// Stream thinking content from LLM
@@ -138,7 +108,36 @@ pub trait OutputSink: Send + Sync {
     /// cap, IO/persistence). It is a REQUIRED argument so no error can silently
     /// claim a wrong value — the `ProtocolSink` impl previously hardcoded
     /// `retryable: false` for every error regardless of truth.
-    fn emit_error(&self, msg: &str, retryable: bool);
+    ///
+    /// `category` is FerroxLabs/wayland#1266 c1. #1237 typed the TERMINAL exit
+    /// of a run by adding a second method, `emit_run_failure`, and left this
+    /// one taking prose — so an engine error the engine itself had classified
+    /// (a tool breaker firing, a context ceiling, a local authority refusal
+    /// mid-turn) still reached the host as `unknown`, because the
+    /// classification was thrown away one frame earlier.
+    ///
+    /// #1266 c1 asks for a seam where omission is a COMPILE ERROR rather than
+    /// a default. That is why the category is a required argument here and why
+    /// `emit_run_failure` is gone rather than kept alongside: once `emit_error`
+    /// carries a category the two have the same signature and the same body at
+    /// every override, and the only thing the second method still contributed
+    /// was its trait DEFAULT — which the #1266 comment measured flattening a
+    /// category for any sink that delegates `emit_error` to an inner sink and
+    /// takes the default for `emit_run_failure`. Deleting the method removes
+    /// that hazard by construction instead of by a guard that reads one file's
+    /// text.
+    ///
+    /// The honest value is `FailureCategory::Unknown`, and it stays honest:
+    /// a site that genuinely cannot decide — an opaque provider non-2xx, an
+    /// error that arrives only as someone else's prose — must say `Unknown`
+    /// rather than pick the most plausible-looking variant. #1266 c2's control
+    /// is exactly that.
+    fn emit_error(
+        &self,
+        msg: &str,
+        retryable: bool,
+        category: wcore_protocol::events::FailureCategory,
+    );
     /// Display informational message
     fn emit_info(&self, msg: &str);
 
