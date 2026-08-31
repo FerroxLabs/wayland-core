@@ -598,12 +598,29 @@ fn args_stub(name: &str, input: &serde_json::Value, original_bytes: usize) -> se
 
 // ── Accumulated tool-result ceiling (wayland#1150 c4) ───────────────────────
 
+/// Constant PREFIX for the SINGLE aggregate that replaces a run of tool
+/// results this pass has already stubbed, once those stubs have themselves
+/// grown past the budget (FerroxLabs/wayland#1255).
+///
+/// This is the one body in the pass that IS re-mutated, deliberately. Every
+/// other stub is monotone so the provider's cached prefix survives; a fold
+/// rewrites history at the FRONT and therefore costs one uncached turn. The
+/// trade is bought back by frequency, not by monotonicity: a fold happens only
+/// when the stub residue exceeds `total_budget_bytes`, i.e. once per
+/// `total_budget_bytes / stub_len` dropped results (about 237 tool calls on a
+/// 32,768-token window, about 923 on the flat constants). See
+/// [`fold_bounded_tool_rounds`].
+pub const FOLDED_TOOL_RESULTS_PREFIX: &str = "[Earlier tool results elided:";
+
 /// Whether this tool-result body has already been replaced by one of the
-/// compaction stubs, and so must never be re-mutated.
+/// compaction stubs, and so must never be re-mutated by the STUBBING pass.
+/// The fold ([`fold_bounded_tool_rounds`]) is the one caller allowed to
+/// rewrite one, and it only ever rewrites the aggregate it owns.
 fn is_stubbed_result(content: &str) -> bool {
     content == CLEARED_TOOL_RESULT
         || content.starts_with(SUPERSEDED_TOOL_RESULT_PREFIX)
         || content.starts_with(BOUNDED_TOOL_RESULT_PREFIX)
+        || content.starts_with(FOLDED_TOOL_RESULTS_PREFIX)
 }
 
 /// The replacement body for a tool result dropped by the accumulated ceiling.
@@ -642,10 +659,31 @@ fn bounded_result_stub(name: &str, original_bytes: usize) -> String {
 ///   up to a multiple of `epoch_results`, so it advances in batches instead of
 ///   flipping one message per turn inside the provider's cached prefix.
 ///
+/// # The residue, and why monotonicity alone is not a bound (#1255)
+///
+/// Stubbing is monotone, so what the pass leaves behind is
+/// `protected_tail + dropped x stub_len` — bounded in BYTES per result and
+/// unbounded in the NUMBER of results. On a 32,768-token window that crosses
+/// what the pre-flight guard admits at about 238 tool calls, which is
+/// FerroxLabs/wayland#1150's reported symptom reached by a longer session
+/// rather than by a bigger budget.
+///
+/// No per-result constant can fix that: any scheme leaving `k > 0` bytes per
+/// call is still linear in the session. So the pass ends with
+/// [`fold_bounded_tool_rounds`], which ELIDES whole already-stubbed tool
+/// rounds — message pairs, `ToolUse` with its `ToolResult`, so nothing is ever
+/// orphaned — down to one aggregate. That is a real prompt-cache write and it
+/// is priced rather than hidden: the fold fires only when the stub residue
+/// exceeds `total_budget_bytes`, so it costs ONE uncached turn per
+/// `total_budget_bytes / stub_len` dropped results. With the shipped
+/// constants that is 1 turn in ~237 on a 32,768-token window and 1 in ~923 on
+/// the flat fallback, against a session that otherwise aborts on the guard.
+///
 /// Returns a [`MicrocompactResult`] with the number of results dropped and a
-/// rough token estimate freed.
+/// rough token estimate freed. `cleared_count` stays the epoch-quantized
+/// STUB batch; bytes reclaimed by the fold land in `estimated_tokens_freed`.
 pub fn bound_accumulated_tool_results(
-    messages: &mut [Message],
+    messages: &mut Vec<Message>,
     config: &CompactConfig,
     window: Option<usize>,
 ) -> MicrocompactResult {
@@ -706,50 +744,299 @@ pub fn bound_accumulated_tool_results(
         .filter(|(_, _, _, stubbed)| !*stubbed)
         .map(|&(mi, bi, len, _)| (mi, bi, len))
         .collect();
-    if candidates.is_empty() {
-        return none;
-    }
-
-    // How many of the OLDEST candidates must go for the sum to fit again.
-    let mut running = total;
-    let mut need = 0usize;
-    for &(mi, bi, len) in &candidates {
-        if running <= total_budget_bytes {
-            break;
-        }
-        let name = result_tool_name(messages, mi, bi, &tool_names);
-        let stub_len = bounded_result_stub(&name, len).len();
-        running = running.saturating_sub(len.saturating_sub(stub_len));
-        need += 1;
-    }
-    if need == 0 {
-        return none;
-    }
-
-    // Epoch quantization: round the batch UP so the boundary advances in
-    // steps of `epoch_results` and is byte-frozen in between.
-    let epoch = tr.epoch_results.max(1);
-    let eligible = need
-        .div_ceil(epoch)
-        .saturating_mul(epoch)
-        .min(candidates.len());
 
     let mut cleared_count = 0usize;
     let mut tokens_freed = 0usize;
-    for &(mi, bi, len) in &candidates[..eligible] {
-        let name = result_tool_name(messages, mi, bi, &tool_names);
-        let stub = bounded_result_stub(&name, len);
-        if let ContentBlock::ToolResult { content, .. } = &mut messages[mi].content[bi] {
-            tokens_freed += content.len().saturating_sub(stub.len()) / 4;
-            *content = stub;
-            cleared_count += 1;
+
+    if !candidates.is_empty() {
+        // How many of the OLDEST candidates must go for the sum to fit again.
+        let mut running = total;
+        let mut need = 0usize;
+        for &(mi, bi, len) in &candidates {
+            if running <= total_budget_bytes {
+                break;
+            }
+            let name = result_tool_name(messages, mi, bi, &tool_names);
+            let stub_len = bounded_result_stub(&name, len).len();
+            running = running.saturating_sub(len.saturating_sub(stub_len));
+            need += 1;
+        }
+
+        // Epoch quantization: round the batch UP so the boundary advances in
+        // steps of `epoch_results` and is byte-frozen in between.
+        let epoch = tr.epoch_results.max(1);
+        let eligible = need
+            .div_ceil(epoch)
+            .saturating_mul(epoch)
+            .min(candidates.len());
+
+        for &(mi, bi, len) in &candidates[..eligible] {
+            let name = result_tool_name(messages, mi, bi, &tool_names);
+            let stub = bounded_result_stub(&name, len);
+            if let ContentBlock::ToolResult { content, .. } = &mut messages[mi].content[bi] {
+                tokens_freed += content.len().saturating_sub(stub.len()) / 4;
+                *content = stub;
+                cleared_count += 1;
+            }
         }
     }
+
+    // #1255 — the THIRD term. Stubbing above is monotone, so the stubs
+    // themselves accumulate one per tool call forever; the fold is what makes
+    // the carried payload independent of session length. It runs AFTER the
+    // stub loop and on the same call, so a settled history still changes zero
+    // bytes on a second pass.
+    //
+    // The protected tail is expressed as a MESSAGE index here: `all` was built
+    // before the stub loop, which changes body bytes but no positions, so the
+    // index is still the message the newest protected result lives in and
+    // nothing at or after it can be elided.
+    let tail_start = if protected == 0 {
+        messages.len()
+    } else {
+        all[all.len() - protected].0
+    };
+    tokens_freed += fold_bounded_tool_rounds(messages, tail_start, total_budget_bytes) / 4;
 
     MicrocompactResult {
         cleared_count,
         estimated_tokens_freed: tokens_freed,
     }
+}
+
+/// The aggregate body a fold leaves in place of the run it elided.
+///
+/// Deterministic in `(elided, mutating)`, so between folds it is byte-frozen
+/// exactly like every other stub in this module.
+///
+/// The wording is load-bearing, not decoration. [`bounded_result_stub`] ends
+/// "re-run the tool if you still need them", and it says that on an `Edit`
+/// result as readily as on a `Read` — one standing invitation to re-execute a
+/// mutating tool per dropped result. The fold REPLACES a run of those with a
+/// single body that says the opposite, and names how many of the elided calls
+/// changed state, so the count is in front of the model rather than inferred.
+fn folded_results_stub(elided: usize, mutating: usize) -> String {
+    format!(
+        "{FOLDED_TOOL_RESULTS_PREFIX} {elided} earlier tool calls ({mutating} of them \
+         state-changing) were removed from this conversation to keep it inside the \
+         model's context window. Their output is gone - re-read anything you still \
+         need. Do NOT re-run a tool that changed state; inspect the current state \
+         instead.]"
+    )
+}
+
+/// Read back the counts [`folded_results_stub`] wrote, so a later fold reports
+/// the running total instead of restarting from its own batch.
+///
+/// Parses only this module's own deterministic format (the two leading integer
+/// runs after the prefix); anything else answers `(0, 0)`, which undercounts
+/// rather than inventing a figure.
+fn folded_result_counts(content: &str) -> (usize, usize) {
+    let Some(rest) = content.strip_prefix(FOLDED_TOOL_RESULTS_PREFIX) else {
+        return (0, 0);
+    };
+    let mut nums = rest
+        .split(|c: char| !c.is_ascii_digit())
+        .filter_map(|s| s.parse::<usize>().ok());
+    (nums.next().unwrap_or(0), nums.next().unwrap_or(0))
+}
+
+/// One elidable tool round: an assistant message of nothing but `ToolUse`
+/// blocks, answered by the very next message, a user message of nothing but
+/// the matching `ToolResult` blocks, every one already stubbed.
+struct FoldableRound {
+    assistant: usize,
+    user: usize,
+    /// Tool names this round called — the mutation count comes from these.
+    names: Vec<String>,
+    /// Result bytes the round currently carries.
+    bytes: usize,
+}
+
+/// Find the rounds a fold may elide, in conversation order, within
+/// `messages[..before]`.
+///
+/// Deliberately narrow, and the narrowness is the safety argument:
+///
+/// * an assistant message carrying anything besides `ToolUse` (text,
+///   thinking) is never elided, so no model reasoning is thrown away;
+/// * the `tool_use` ids and the `tool_result` ids must match EXACTLY, and the
+///   two messages are only ever removed together, so a fold can never leave a
+///   `tool_use` unanswered or a `tool_result` orphaned — the shape every
+///   provider rejects;
+/// * every result in the round must already be stubbed, so a fold can only
+///   ever remove bodies this pass has already emptied. It never destroys tool
+///   output that is still in the conversation.
+///
+/// A shape outside that set is simply not foldable; the residue bound then
+/// degrades to the stub arithmetic for those rounds rather than failing.
+fn foldable_rounds(messages: &[Message], before: usize) -> Vec<FoldableRound> {
+    let limit = before.min(messages.len());
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i + 1 < limit {
+        let uses: Option<Vec<(&str, &str)>> = {
+            let m = &messages[i];
+            if m.role == Role::Assistant && !m.content.is_empty() {
+                m.content
+                    .iter()
+                    .map(|b| match b {
+                        ContentBlock::ToolUse { id, name, .. } => {
+                            Some((id.as_str(), name.as_str()))
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            } else {
+                None
+            }
+        };
+        let results: Option<Vec<(&str, usize)>> = {
+            let m = &messages[i + 1];
+            if m.role == Role::User && !m.content.is_empty() {
+                m.content
+                    .iter()
+                    .map(|b| match b {
+                        ContentBlock::ToolResult {
+                            tool_use_id,
+                            content,
+                            ..
+                        } if is_stubbed_result(content) => {
+                            Some((tool_use_id.as_str(), content.len()))
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            } else {
+                None
+            }
+        };
+        let matched = match (&uses, &results) {
+            (Some(u), Some(r)) => {
+                u.len() == r.len()
+                    && u.iter().map(|(id, _)| *id).collect::<HashSet<_>>()
+                        == r.iter().map(|(id, _)| *id).collect::<HashSet<_>>()
+            }
+            _ => false,
+        };
+        if matched {
+            let uses = uses.expect("matched implies Some");
+            let results = results.expect("matched implies Some");
+            out.push(FoldableRound {
+                assistant: i,
+                user: i + 1,
+                names: uses.iter().map(|(_, n)| (*n).to_string()).collect(),
+                bytes: results.iter().map(|(_, l)| *l).sum(),
+            });
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// FerroxLabs/wayland#1255 — collapse the accumulated STUB residue.
+///
+/// `bound_accumulated_tool_results` bounds the bytes each result carries and
+/// leaves one stub per dropped result forever, so the carried payload grows
+/// linearly in the number of tool calls and crosses a 32,768-token window's
+/// pre-flight ceiling at about 238 of them. Shortening the stub moves the
+/// constant, not the order of growth; the only change that alters the order is
+/// to stop carrying one body per call.
+///
+/// So: when the residue — the stub bytes outside the protected tail — exceeds
+/// `residue_budget`, every foldable round is elided except the OLDEST, whose
+/// first result becomes the aggregate. That makes the carried payload
+/// `protected_tail + residue` with `residue <= residue_budget` at the end of
+/// every call, which is exactly
+/// `CompactConfig::worst_case_carried_tool_result_bytes` and is independent of
+/// session length.
+///
+/// # The prompt-cache price, stated as a number
+///
+/// A fold rewrites history at the FRONT, so the provider's cached prefix is
+/// invalidated whole: the next turn re-reads the entire prompt. That is the
+/// discipline #1150 c6 and #559 were built on, and it is spent here rather
+/// than pretended away. What buys it back is FREQUENCY. The residue grows by
+/// one stub per dropped result, so a fold happens once per
+/// `residue_budget / stub_len` of them — with the shipped constants, once per
+/// ~237 dropped results on a 32,768-token window (`residue_budget` 30,832,
+/// stub 130 bytes) and once per ~923 on the flat fallback (120,000 / 130).
+/// One uncached turn in ~237, against a session that otherwise walks into the
+/// pre-flight abort and stops. Below the threshold the fold does nothing at
+/// all and the pass is byte-identical to before this change, which is why a
+/// short session's cache behaviour is untouched.
+///
+/// No file-cache generation bump is owed for a fold: it only ever removes
+/// bodies that are already stubs, and the diff-resend base a stubbed body once
+/// backed was invalidated when the STUB was written, on a call that reported
+/// `cleared_count > 0`.
+///
+/// Returns the result bytes reclaimed.
+fn fold_bounded_tool_rounds(
+    messages: &mut Vec<Message>,
+    tail_start: usize,
+    residue_budget: usize,
+) -> usize {
+    let residue: usize = messages[..tail_start.min(messages.len())]
+        .iter()
+        .flat_map(|m| &m.content)
+        .filter_map(|b| match b {
+            ContentBlock::ToolResult { content, .. } if is_stubbed_result(content) => {
+                Some(content.len())
+            }
+            _ => None,
+        })
+        .sum();
+    if residue <= residue_budget {
+        return 0;
+    }
+    let rounds = foldable_rounds(messages, tail_start);
+    let Some((carrier, dropped)) = rounds.split_first() else {
+        return 0;
+    };
+    if dropped.is_empty() {
+        return 0;
+    }
+
+    // What the carrier already stands for. When it is an earlier aggregate its
+    // own round is inside that figure, so only the rounds being elided now are
+    // added; otherwise the carrier's own calls count once.
+    let (prev_elided, prev_mutating) = match &messages[carrier.user].content[0] {
+        ContentBlock::ToolResult { content, .. } => folded_result_counts(content),
+        _ => (0, 0),
+    };
+    let mutating_in = |r: &FoldableRound| -> usize {
+        r.names
+            .iter()
+            .filter(|n| MUTATION_TOOLS.contains(&n.as_str()))
+            .count()
+    };
+    let (mut elided, mut mutating) = if prev_elided > 0 {
+        (prev_elided, prev_mutating)
+    } else {
+        (carrier.names.len(), mutating_in(carrier))
+    };
+    for r in dropped {
+        elided += r.names.len();
+        mutating += mutating_in(r);
+    }
+
+    let mut freed = 0usize;
+    let aggregate = folded_results_stub(elided, mutating);
+    if let ContentBlock::ToolResult { content, .. } = &mut messages[carrier.user].content[0] {
+        freed += content.len().saturating_sub(aggregate.len());
+        *content = aggregate;
+    }
+
+    let mut victims: Vec<usize> = dropped.iter().flat_map(|r| [r.assistant, r.user]).collect();
+    freed += dropped.iter().map(|r| r.bytes).sum::<usize>();
+    victims.sort_unstable();
+    for idx in victims.into_iter().rev() {
+        messages.remove(idx);
+    }
+    freed
 }
 
 /// Name of the tool that produced the result at `(mi, bi)`, or `"tool"` when
@@ -2251,39 +2538,54 @@ mod tests {
         );
     }
 
-    /// The OPEN REMAINDER on #1200, pinned exactly rather than left to be
-    /// rediscovered.
+    /// The stub arithmetic, pinned exactly, BELOW the fold threshold.
     ///
-    /// The pass replaces each over-budget result with a stub and never
-    /// re-mutates one — precisely what makes it prompt-cache safe — so the
-    /// carried total is `protected tail + dropped x stub`, which grows WITHOUT
-    /// BOUND in the number of tool calls. Measured on a 32,768-token window:
-    /// 52,470 bytes at 20 calls, 62,870 at 100, 114,870 at 500, 309,870 at
-    /// 2,000 — the last being 77,467 tokens on a 32,768-token window, which is
-    /// the state #1200 reports, reached by a longer session instead of by a
-    /// bigger budget.
+    /// Stubbing is monotone — a stubbed body is never re-mutated, which is what
+    /// makes it prompt-cache safe — so within one fold interval the carried
+    /// total is exactly `protected tail + dropped x stub`. #1150 c4's evidence
+    /// test hid that term behind a 20,000-byte slack, wide enough to swallow
+    /// the 10,400 bytes between a 20-call and a 100-call session; this states
+    /// it as an equality so it can never again be mistaken for noise.
     ///
-    /// #1150 c4's note used to gloss the guarantee as "carried bytes stop
-    /// growing with the session". They do not. The old evidence test hid the
-    /// term behind a 20,000-byte slack, wide enough to swallow the 10,400 bytes
-    /// between a 20-call and a 100-call session. This states the arithmetic, so
-    /// the growth can never again be mistaken for noise.
+    /// The session lengths stop below the fold threshold ON PURPOSE, and the
+    /// stop is asserted rather than assumed: the message count must be
+    /// untouched in every case, so this test can only ever measure the pure
+    /// stub regime. What happens ABOVE the threshold — the growth stopping, and
+    /// the payload fitting the window at any session length — is
+    /// FerroxLabs/wayland#1255 and is graded by
+    /// `the_carried_payload_fits_the_window_however_long_the_session`.
     #[test]
     fn the_carried_payload_grows_by_one_stub_per_dropped_result() {
-        use wcore_config::compact::{CHARS_PER_TOKEN, MAX_TOOL_RESULT_BYTES};
+        use wcore_config::compact::MAX_TOOL_RESULT_BYTES;
         const WINDOW: usize = 32_768;
         let config = default_config();
         let stub = bounded_result_stub("Read", MAX_TOOL_RESULT_BYTES).len();
+        let residue_budget = config.tool_result_bounds(Some(WINDOW)).total_budget_bytes;
 
         let mut measured = Vec::new();
-        for n in [20usize, 100, 500] {
+        for n in [20usize, 100, 200] {
+            // Non-vacuity for the "below the threshold" claim: the residue this
+            // case builds must genuinely stay under the fold's trigger, or the
+            // equality below would be measuring the fold instead.
+            assert!(
+                (n - 1) * stub <= residue_budget,
+                "n={n}: this case must stay in the pure stub regime, {} vs \
+                 {residue_budget}",
+                (n - 1) * stub
+            );
             let mut msgs = session_with_results(n, MAX_TOOL_RESULT_BYTES);
+            let before_messages = msgs.len();
             let dropped =
                 bound_accumulated_tool_results(&mut msgs, &config, Some(WINDOW)).cleared_count;
             assert_eq!(
                 dropped,
                 n - 1,
                 "n={n}: every result but the newest is dropped"
+            );
+            assert_eq!(
+                msgs.len(),
+                before_messages,
+                "n={n}: below the threshold the fold must not have fired"
             );
             let carried = total_result_bytes(&msgs);
             assert_eq!(
@@ -2294,24 +2596,364 @@ mod tests {
             );
             measured.push(carried);
         }
-        // A strict inequality, not a slack bound: a change that actually made
-        // the total constant would redden this and force the claim to be
-        // rewritten rather than allowed to drift.
+        // A strict inequality, not a slack bound: a change that made the total
+        // constant INSIDE a fold interval would redden this and force the claim
+        // to be rewritten rather than allowed to drift.
         assert!(
             measured[0] < measured[1] && measured[1] < measured[2],
-            "the carried total must be measured GROWING with the session: {measured:?}"
+            "inside one fold interval the carried total must be measured GROWING \
+             with the session: {measured:?}"
+        );
+    }
+
+    /// FerroxLabs/wayland#1255 c2, on the PRODUCTION path.
+    ///
+    /// Same call, same window, opposite polarity to the test above: drive the
+    /// real `bound_accumulated_tool_results(.., Some(32_768))` at session
+    /// lengths PAST the crossing point and assert the carried payload fits
+    /// `input_ceiling_for_window(32_768)`. Before the fold this measured
+    /// 114,870 bytes at 500 tool calls and 309,870 bytes = 77,467 tokens at
+    /// 2,000, against a ceiling of 20,208 tokens.
+    ///
+    /// Three things are asserted per case, and it is the SET that makes the
+    /// grade rather than any one of them:
+    ///
+    /// 1. a non-vacuity precondition — the session must start over the window,
+    ///    AND the pre-fold arithmetic (`tail + (n-1) x stub`) must genuinely
+    ///    exceed what the guard admits, so every case is past the crossing;
+    /// 2. `carried / CHARS_PER_TOKEN <= input_ceiling_for_window(WINDOW)` — the
+    ///    criterion itself, on the bytes production carries;
+    /// 3. `carried <= worst_case_carried_tool_result_bytes(Some(WINDOW))` — the
+    ///    predictor must still be a true upper bound on the pass, so the fix
+    ///    restores the guarantee #1200 claimed rather than inventing a new one.
+    ///
+    /// The closing block is the one that answers "is it BOUNDED, or merely
+    /// smaller?": the spread across a 500-call and a 20,000-call session must
+    /// be under a single stub, which no linear term can satisfy.
+    #[test]
+    fn the_carried_payload_fits_the_window_however_long_the_session() {
+        use wcore_config::compact::{CHARS_PER_TOKEN, MAX_TOOL_RESULT_BYTES};
+        const WINDOW: usize = 32_768;
+        let config = default_config();
+        let stub = bounded_result_stub("Read", MAX_TOOL_RESULT_BYTES).len();
+        let ceiling = config.input_ceiling_for_window(WINDOW);
+        let admissible = ceiling * CHARS_PER_TOKEN;
+        let predicted = config.worst_case_carried_tool_result_bytes(Some(WINDOW));
+        // The crossing point the ticket names, computed rather than quoted.
+        let crossing = (admissible - MAX_TOOL_RESULT_BYTES).div_ceil(stub) + 2;
+
+        let mut carried_at = Vec::new();
+        for n in [crossing, 500, 2_000, 20_000] {
+            let mut msgs = session_with_results(n, MAX_TOOL_RESULT_BYTES);
+            let before = total_result_bytes(&msgs);
+            assert!(
+                before / CHARS_PER_TOKEN > WINDOW,
+                "precondition: {n} results must start over the {WINDOW}-token window"
+            );
+            assert!(
+                MAX_TOOL_RESULT_BYTES + (n - 1) * stub > admissible,
+                "precondition: {n} calls must be PAST the crossing point, or this \
+                 case grades nothing"
+            );
+
+            bound_accumulated_tool_results(&mut msgs, &config, Some(WINDOW));
+            let carried = total_result_bytes(&msgs);
+
+            assert!(
+                carried / CHARS_PER_TOKEN <= ceiling,
+                "{n} results: the pass left {carried} bytes = {} tokens, and the \
+                 pre-flight guard admits only {ceiling}",
+                carried / CHARS_PER_TOKEN
+            );
+            assert!(
+                carried <= predicted,
+                "{n} results: the pass carries {carried} bytes but \
+                 worst_case_carried_tool_result_bytes predicts {predicted}"
+            );
+            carried_at.push(carried);
+        }
+
+        let spread = carried_at.iter().max().unwrap() - carried_at.iter().min().unwrap();
+        assert!(
+            spread < stub,
+            "the carried payload must be BOUNDED in the number of tool calls, not \
+             merely smaller: {carried_at:?} spans {spread} bytes across 500 to \
+             20,000 calls"
+        );
+    }
+
+    /// The bound must hold on the shape production actually has: the pass runs
+    /// once per turn on a conversation that grows one round at a time, not once
+    /// on a finished 20,000-round transcript.
+    ///
+    /// This also MEASURES the prompt-cache price the fold buys the bound with,
+    /// which is the half of #1255 c1 that a behavioural change still owes. A
+    /// fold rewrites history at the front, so it costs one uncached turn; the
+    /// question is how often. The residue grows by one stub per dropped result
+    /// and the fold fires at `total_budget_bytes`, so the interval is
+    /// `30,832 / 130 = 237` turns on this window — asserted here against the
+    /// folds actually observed, so the stated price cannot drift away from the
+    /// code that charges it.
+    #[test]
+    fn a_fold_costs_one_prefix_rewrite_per_budget_of_stubs() {
+        use wcore_config::compact::MAX_TOOL_RESULT_BYTES;
+        const WINDOW: usize = 32_768;
+        const TURNS: usize = 800;
+        let config = default_config();
+        let stub = bounded_result_stub("Read", MAX_TOOL_RESULT_BYTES).len();
+        let predicted = config.worst_case_carried_tool_result_bytes(Some(WINDOW));
+        let expected_interval = config.tool_result_bounds(Some(WINDOW)).total_budget_bytes / stub;
+
+        let mut msgs: Vec<Message> = Vec::new();
+        let mut folds = 0usize;
+        for i in 0..TURNS {
+            let id = format!("t{i}");
+            msgs.push(assistant_msg(vec![tool_use_block(&id, "Read")]));
+            msgs.push(user_msg(vec![tool_result_block(
+                &id,
+                &"x".repeat(MAX_TOOL_RESULT_BYTES),
+            )]));
+
+            let before_len = msgs.len();
+            bound_accumulated_tool_results(&mut msgs, &config, Some(WINDOW));
+            if msgs.len() < before_len {
+                folds += 1;
+            }
+            assert!(
+                total_result_bytes(&msgs) <= predicted,
+                "turn {i}: the bound must hold on EVERY turn, not only at the end: \
+                 {} > {predicted}",
+                total_result_bytes(&msgs)
+            );
+        }
+
+        assert!(folds > 0, "non-vacuity: the fold must have fired at all");
+        // One uncached turn per fold, so the count of folds IS the price. It
+        // must match the stated interval to within a single fold — a pass that
+        // rewrote the prefix every turn (800) or never (0) fails here.
+        let expected_folds = TURNS / expected_interval;
+        assert!(
+            folds.abs_diff(expected_folds) <= 1,
+            "the fold count is the price: {folds} prefix rewrites in {TURNS} turns, \
+             and one rewrite per {expected_interval} turns predicts {expected_folds}"
+        );
+    }
+
+    /// Structural safety: a fold removes `ToolUse` and its `ToolResult`
+    /// TOGETHER, so it can never leave the unanswered call or the orphaned
+    /// result that every provider rejects.
+    #[test]
+    fn the_fold_never_orphans_a_tool_call() {
+        use wcore_config::compact::MAX_TOOL_RESULT_BYTES;
+        let config = default_config();
+        let mut msgs = session_with_results(2_000, MAX_TOOL_RESULT_BYTES);
+        let before = msgs.len();
+
+        bound_accumulated_tool_results(&mut msgs, &config, Some(32_768usize));
+
+        assert!(
+            msgs.len() < before,
+            "non-vacuity: the fold must have removed messages, {} vs {before}",
+            msgs.len()
+        );
+        let uses: HashSet<&str> = msgs
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter_map(|b| match b {
+                ContentBlock::ToolUse { id, .. } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
+        let results: HashSet<&str> = msgs
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter_map(|b| match b {
+                ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(uses, results, "every tool_use must keep its tool_result");
+        // Roles still alternate: pairs are removed whole, never one half.
+        for w in msgs.windows(2) {
+            assert_ne!(
+                w[0].role, w[1].role,
+                "the fold must not leave two messages of the same role adjacent"
+            );
+        }
+    }
+
+    /// The prompt-cache promise still holds where it is claimed: a SETTLED
+    /// history changes zero bytes on the next pass, fold included. The fold is
+    /// part of reaching the settled state, not a per-turn rewrite.
+    #[test]
+    fn a_folded_history_is_byte_stable_on_the_next_pass() {
+        use wcore_config::compact::MAX_TOOL_RESULT_BYTES;
+        let config = default_config();
+        let mut msgs = session_with_results(2_000, MAX_TOOL_RESULT_BYTES);
+        let before = msgs.len();
+
+        bound_accumulated_tool_results(&mut msgs, &config, Some(32_768usize));
+        assert!(msgs.len() < before, "non-vacuity: the fold must have fired");
+        let settled = serde_json::to_string(&msgs).unwrap();
+
+        let second = bound_accumulated_tool_results(&mut msgs, &config, Some(32_768usize));
+
+        assert_eq!(
+            second.cleared_count, 0,
+            "a settled history must not re-stub"
+        );
+        assert_eq!(
+            serde_json::to_string(&msgs).unwrap(),
+            settled,
+            "a second pass over a folded history must change zero bytes"
+        );
+    }
+
+    /// A turn that carries model reasoning is never elided, whatever the
+    /// residue. The fold may only remove a message whose whole content is tool
+    /// traffic; anything else is left where it is.
+    #[test]
+    fn the_fold_leaves_reasoning_turns_alone() {
+        use wcore_config::compact::MAX_TOOL_RESULT_BYTES;
+        let config = default_config();
+        let mut msgs: Vec<Message> = Vec::new();
+        for i in 0..2_000 {
+            let id = format!("t{i}");
+            if i % 100 == 0 {
+                msgs.push(assistant_msg(vec![
+                    text_block(&format!("reasoning {i}")),
+                    tool_use_block(&id, "Read"),
+                ]));
+            } else {
+                msgs.push(assistant_msg(vec![tool_use_block(&id, "Read")]));
+            }
+            msgs.push(user_msg(vec![tool_result_block(
+                &id,
+                &"x".repeat(MAX_TOOL_RESULT_BYTES),
+            )]));
+        }
+
+        bound_accumulated_tool_results(&mut msgs, &config, Some(32_768usize));
+
+        let kept: Vec<&String> = msgs
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter_map(|b| match b {
+                ContentBlock::Text { text } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            kept.len(),
+            20,
+            "every reasoning turn must survive the fold, found {kept:?}"
+        );
+    }
+
+    /// The wrong-refusal side of the trade, asserted rather than asserted-about.
+    ///
+    /// `bounded_result_stub` ends "re-run the tool if you still need them" and
+    /// says it on an `Edit` result as readily as on a `Read` — one standing
+    /// invitation to re-execute a mutating tool per dropped result. The fold
+    /// replaces a run of those with ONE body that says the opposite and names
+    /// how many of the elided calls changed state.
+    #[test]
+    fn the_fold_tells_the_model_not_to_re_run_state_changing_tools() {
+        use wcore_config::compact::MAX_TOOL_RESULT_BYTES;
+        let config = default_config();
+        let mut msgs: Vec<Message> = Vec::new();
+        // Counted over the calls the fold can reach: the newest round is
+        // protected unconditionally and is never elided.
+        let mut mutating = 0usize;
+        for i in 0..2_000 {
+            let id = format!("t{i}");
+            let name = if i % 4 == 0 {
+                if i < 1_999 {
+                    mutating += 1;
+                }
+                "Edit"
+            } else {
+                "Read"
+            };
+            msgs.push(assistant_msg(vec![tool_use_block(&id, name)]));
+            msgs.push(user_msg(vec![tool_result_block(
+                &id,
+                &"x".repeat(MAX_TOOL_RESULT_BYTES),
+            )]));
+        }
+
+        bound_accumulated_tool_results(&mut msgs, &config, Some(32_768usize));
+
+        let aggregate = msgs
+            .iter()
+            .flat_map(|m| &m.content)
+            .find_map(|b| match b {
+                ContentBlock::ToolResult { content, .. }
+                    if content.starts_with(FOLDED_TOOL_RESULTS_PREFIX) =>
+                {
+                    Some(content.clone())
+                }
+                _ => None,
+            })
+            .expect("the fold must have left exactly one aggregate");
+        assert!(
+            aggregate.contains("Do NOT re-run a tool that changed state"),
+            "the aggregate must not repeat the per-result stub's invitation to \
+             re-run: {aggregate}"
+        );
+        // How many of the elided calls were state-changing is a number the
+        // model can act on, not a hedge. The newest round is protected, so the
+        // count covers everything but it.
+        let (elided, muts) = folded_result_counts(&aggregate);
+        assert_eq!(elided, 1_999, "the aggregate must count what it elided");
+        assert_eq!(
+            muts, mutating,
+            "the aggregate must count the state-changing calls among them"
         );
 
-        // And the growth is not academic: it crosses the window's own ceiling.
-        let admissible = config.input_ceiling_for_window(WINDOW) * CHARS_PER_TOKEN;
-        let calls = (admissible - MAX_TOOL_RESULT_BYTES).div_ceil(stub) + 2;
-        let mut over = session_with_results(calls, MAX_TOOL_RESULT_BYTES);
-        bound_accumulated_tool_results(&mut over, &config, Some(WINDOW));
+        // And the count keeps running across a SECOND fold rather than
+        // restarting from that fold's own batch.
+        for i in 2_000..2_600 {
+            let id = format!("t{i}");
+            msgs.push(assistant_msg(vec![tool_use_block(&id, "Read")]));
+            msgs.push(user_msg(vec![tool_result_block(
+                &id,
+                &"x".repeat(MAX_TOOL_RESULT_BYTES),
+            )]));
+            bound_accumulated_tool_results(&mut msgs, &config, Some(32_768usize));
+        }
+        let later = msgs
+            .iter()
+            .flat_map(|m| &m.content)
+            .find_map(|b| match b {
+                ContentBlock::ToolResult { content, .. }
+                    if content.starts_with(FOLDED_TOOL_RESULTS_PREFIX) =>
+                {
+                    Some(content.clone())
+                }
+                _ => None,
+            })
+            .expect("the aggregate must survive later folds");
         assert!(
-            total_result_bytes(&over) > admissible,
-            "the residue must be REAL: {calls} tool calls carry {} bytes against the \
-             {admissible} bytes a {WINDOW}-token window admits",
-            total_result_bytes(&over)
+            folded_result_counts(&later).0 > elided,
+            "the elided count must keep running across folds: {} vs {elided}",
+            folded_result_counts(&later).0
+        );
+    }
+
+    /// Control on the parser the running count depends on: it reads back this
+    /// module's own format and refuses to invent a figure for anything else.
+    #[test]
+    fn folded_counts_round_trip_and_ignore_foreign_bodies() {
+        assert_eq!(folded_result_counts(&folded_results_stub(0, 0)), (0, 0));
+        assert_eq!(
+            folded_result_counts(&folded_results_stub(1_999, 12)),
+            (1_999, 12)
+        );
+        assert_eq!(folded_result_counts(CLEARED_TOOL_RESULT), (0, 0));
+        assert_eq!(
+            folded_result_counts(&bounded_result_stub("Read", 50_000)),
+            (0, 0)
         );
     }
 
