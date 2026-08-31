@@ -3664,11 +3664,15 @@ impl NestedStoreScan {
     /// Every store a git control directory or gitdir at `dir` names, plus the
     /// stores it BORROWS.
     fn stores_named_by(&mut self, dir: &Path) {
+        // #406 — ONE stamp for all six leaves, the same economy
+        // `StoreScan::witness_if_present` already applies at the root: a leaf
+        // cannot appear, vanish or be re-pointed without moving the mtime of
+        // the directory that holds it, so stamping `dir` covers every store
+        // this control directory could come to name. Six stats per checkout on
+        // every admitted guard would be a revalidation as expensive as the
+        // discovery it replaces.
+        self.witness(dir.to_path_buf());
         for (_, leaf) in VCS_CONTENT_STORES {
-            // #406 — the leaf itself is a declaration site: re-pointing a
-            // `.git/objects` SYMLINK changes what this store resolves to
-            // without touching anything else stamped.
-            self.witness(dir.join(leaf));
             self.push_store(dir.join(leaf));
         }
         self.alternates_of(dir.join("objects"));

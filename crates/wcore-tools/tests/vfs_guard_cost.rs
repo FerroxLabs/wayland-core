@@ -228,9 +228,11 @@ async fn a_store_named_path_costs_the_same_at_any_workspace_size() {
 /// and the two sizes below diverge by one probe per extra directory.
 #[tokio::test]
 async fn the_post_walk_freshness_check_scales_with_checkouts_not_directories() {
-    /// Declaration sites one vendored `.git` DIRECTORY contributes: its six
-    /// store leaves (`VCS_CONTENT_STORES`) plus its `objects/info/alternates`.
-    const WITNESSES_PER_CHECKOUT: u64 = 7;
+    /// Declaration sites one vendored `.git` DIRECTORY contributes: the
+    /// control directory itself (one stamp covering all six store leaves,
+    /// which cannot appear or be re-pointed without moving its mtime) and its
+    /// `objects/info/alternates`, whose CONTENT no directory mtime witnesses.
+    const WITNESSES_PER_CHECKOUT: u64 = 2;
 
     async fn warm_probes_per_guard(checkouts: usize, extra_dirs: usize) -> u64 {
         let dir = tempfile::tempdir().expect("workspace");
