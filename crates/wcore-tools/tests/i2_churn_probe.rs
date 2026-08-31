@@ -127,3 +127,45 @@ async fn i2_probe_single_touch_amplification() {
         "one mutation should cost at most ONE re-walk"
     );
 }
+
+/// WRONG-REFUSAL control, written by the second instrument rather than the
+/// lane: after the freshness check fires and re-walks, does ordinary traffic
+/// still get through?
+#[tokio::test]
+async fn i2_wrong_refusal_control_after_a_refire() {
+    let (_dir, root) = build(1, 6);
+    // legitimate content INSIDE the vendored checkout`s working tree, and a
+    // directory whose name is store-ish but which is not a store.
+    std::fs::write(root.join("vendor/pkg0/README.md"), b"hello").unwrap();
+    std::fs::create_dir_all(root.join("modules/vpc")).unwrap();
+    std::fs::write(root.join("modules/vpc/main.tf"), b"# tf").unwrap();
+    std::fs::create_dir_all(root.join("assets/objects")).unwrap();
+    std::fs::write(root.join("assets/objects/logo.png"), b"png").unwrap();
+    let policy = Arc::new(WorkspacePolicy::contained(&root));
+    let fs = stack(&policy, &root);
+    tokio::time::sleep(SETTLE).await;
+    let legit = [
+        root.join("src/deep/deeper/main.rs"),
+        root.join("vendor/pkg0/README.md"),
+        root.join("modules/vpc/main.tf"),
+        root.join("assets/objects/logo.png"),
+    ];
+    for p in &legit {
+        assert!(fs.exists(p).await.is_ok(), "before churn: {p:?}");
+    }
+    let w0 = policy.nested_walk_count();
+    let lock = root.join("vendor/pkg0/.git/index.lock");
+    std::fs::write(&lock, b"").unwrap();
+    std::fs::remove_file(&lock).unwrap();
+    for p in &legit {
+        let r = fs.read(p).await;
+        assert!(r.is_ok(), "WRONG REFUSAL after the freshness check refired: {p:?} -> {r:?}");
+    }
+    // and the real store is still refused (known-positive control)
+    let obj = root.join("vendor/pkg0/.git/objects/ab");
+    std::fs::write(root.join("vendor/pkg0/.git/objects/ab/cd"), b"secret").unwrap();
+    let _ = obj;
+    let denied = fs.read(&root.join("vendor/pkg0/.git/objects/ab/cd")).await;
+    assert!(denied.is_err(), "known-positive control: the store must stay refused, got {denied:?}");
+    println!("I2-WRONG-REFUSAL ok; refires={}", policy.nested_walk_count() - w0);
+}
