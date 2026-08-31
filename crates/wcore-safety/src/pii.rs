@@ -168,6 +168,21 @@ fn scrub_direct<'a>(input: &'a str) -> Cow<'a, str> {
     Cow::Owned(result)
 }
 
+// Number of FULL-LENGTH decode scans [`decoded_contains_secret`] has run on
+// this thread — one UTF-8-lossy allocation plus one 25-pattern `RegexSet`
+// pass over the decoded bytes, which is the entire per-byte cost of
+// [`PIIScrubber::scrub`] on a long candidate run (measured: 12,242 ns/byte
+// for a payload that forms a candidate against 96 ns/byte for one that does
+// not, FerroxLabs/wayland-core#395).
+//
+// Thread-local rather than a global counter because the test harness runs
+// each test on its own thread and several tests in this module scrub
+// concurrently; a shared counter would be read across them.
+#[cfg(test)]
+thread_local! {
+    static DECODE_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// True when any base64 alphabet decodes `candidate` into bytes that carry a
 /// secret.
 ///
@@ -194,6 +209,8 @@ fn decoded_contains_secret(candidate: &str) -> bool {
     use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
 
     fn carries_secret(bytes: &[u8]) -> bool {
+        #[cfg(test)]
+        DECODE_SCANS.with(|scans| scans.set(scans.get() + 1));
         fast_set().is_match(&String::from_utf8_lossy(bytes))
     }
 
@@ -518,6 +535,83 @@ mod tests {
     //! the prior Wayland Python engine's redaction library (T3-4). Existing patterns
     //! (AWS_*, OPENAI_API_KEY, ANTHROPIC_API_KEY, JWT, BEARER_TOKEN) are
     //! covered by ``crates/wcore-safety/tests/safety_tests.rs``.
+
+    /// FerroxLabs/wayland-core#395 c3 / FerroxLabs/wayland#1235 — the
+    /// regression guard for the per-byte term, asserted as WORK rather than as
+    /// wall-clock so it cannot pass or fail on host load.
+    ///
+    /// The cost of scrubbing a long candidate run is
+    /// `decode_scans x payload_bytes`: each scan is a UTF-8-lossy allocation
+    /// of the decoded bytes plus one 25-pattern `RegexSet` sweep over them.
+    /// The payload term is the caller's; the SCAN COUNT is ours, and it is
+    /// what regressed. Before the fix one `scrub` of a single candidate run
+    /// performed EIGHT of them — four base64 alphabets that all decode a
+    /// plain alphanumeric run to identical bytes, evaluated eagerly, and the
+    /// whole thing again in the second (`wrapped_base64_candidates`) loop.
+    ///
+    /// Measured consequence at 480,000 bytes, hetzner-dsm, debug: 22.83 s at
+    /// eight scans, 5.876 s at two. A control payload of the same length that
+    /// forms no candidate at all costs 0.046 s, which is where the ceiling
+    /// below comes from: the scans ARE the cost.
+    #[test]
+    fn a_single_candidate_run_is_decode_scanned_at_most_once_per_scrub_pass() {
+        // Long enough to be one candidate under both candidate regexes, and
+        // free of `+ / - _ =`, so all four alphabets decode it identically.
+        let payload = "x".repeat(4_096);
+        super::DECODE_SCANS.with(|scans| scans.set(0));
+        let scrubbed = PIIScrubber.scrub(&payload);
+        let scans = super::DECODE_SCANS.with(std::cell::Cell::get);
+
+        assert_eq!(
+            scrubbed.as_ref(),
+            payload.as_str(),
+            "the fixture must carry no secret, or this measures the redaction path instead"
+        );
+        assert!(
+            scans > 0,
+            "the fixture stopped forming a base64 candidate, so this guard measures nothing"
+        );
+        assert!(
+            scans <= 2,
+            "one scrub of a single candidate run performed {scans} full-length decode scans; \
+             `scrub` makes two candidate passes over it, so at most one scan each is right. \
+             Each extra scan is another UTF-8-lossy copy plus another 25-pattern RegexSet \
+             sweep of the WHOLE payload, on every tool result on the turn loop, twice \
+             (FerroxLabs/wayland-core#395)."
+        );
+    }
+
+    /// The control for the guard above: the same byte count that forms NO
+    /// candidate must not be decode-scanned at all. Without this a fix that
+    /// simply stopped detecting encoded secrets would pass the ceiling.
+    #[test]
+    fn a_payload_that_forms_no_candidate_is_never_decode_scanned() {
+        // `.` is outside both `base64_candidates` and
+        // `wrapped_base64_candidates`, so no run reaches the 24-character floor.
+        let payload = "xxxxxxx.".repeat(512);
+        super::DECODE_SCANS.with(|scans| scans.set(0));
+        let _ = PIIScrubber.scrub(&payload);
+        assert_eq!(
+            super::DECODE_SCANS.with(std::cell::Cell::get),
+            0,
+            "a payload that forms no base64 candidate must not reach decoded_contains_secret"
+        );
+    }
+
+    /// And the detection control: the scan-count ceiling must not be reachable
+    /// by not looking. A real base64-encoded secret is still found.
+    #[test]
+    fn an_encoded_secret_is_still_found_under_the_scan_ceiling() {
+        use base64::Engine as _;
+        let encoded = base64::engine::general_purpose::STANDARD
+            .encode("AKIAIOSFODNN7EXAMPLE and more padding to clear the 24-char floor");
+        let scrubbed = PIIScrubber.scrub(&encoded);
+        assert!(
+            scrubbed.contains("[REDACTED:ENCODED_SECRET]"),
+            "an encoded AWS key must still be redacted, got: {scrubbed}"
+        );
+    }
+
     use super::{PIIScrubber, decoded_contains_secret, wrapped_base64_candidates};
     use base64::Engine as _;
 
