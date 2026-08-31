@@ -11591,6 +11591,16 @@ mod tests {
     /// proved the transport dead.
     #[tokio::test]
     async fn a_removed_runtime_server_is_not_resurrected_by_a_later_list_changed() {
+        // wayland#1234 c2, MEASURED rather than asserted in a doc comment:
+        // the fixture transport must take the `is_alive` trait DEFAULT
+        // (`true`). If it went dead on close, `refresh_signalled_tools` would
+        // skip it and this test would grade the liveness guard instead of the
+        // withdrawal -- and would stay green with the withdrawal deleted.
+        assert!(
+            SharedTransport(Arc::new(GrowingTestTransport::new(&[]))).is_alive(),
+            "the fixture must report is_alive() == true, or this test proves \
+             the liveness skip instead of the withdrawal"
+        );
         let config = wcore_config::config::Config::default();
         let defer_cold = config.builtin_tools.defer_cold.clone();
         let (mut engine, _sink) =
