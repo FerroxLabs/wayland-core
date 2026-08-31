@@ -753,3 +753,48 @@ retries = 0
 [[profile.ci.overrides]]
 filter = 'binary(=harness_guard_kills_only_its_own_tree) + binary(=harness_owns_spawned_trees) + binary(=harness_owns_spawned_trees_windows)'
 retries = 0
+
+# ── #362 c4: a containment test that never ran its probe must not pass ──────
+#
+# MECHANISM, not instance. These two binaries are the whole of this crate's
+# `run_contained_probe` surface (`crates/wcore-sandbox/src/test_support.rs`),
+# and that helper's contract is that it PANICS rather than returning a
+# degraded result when the backend refuses to spawn, when the child emitted no
+# begin marker, or when it died part-way. Every one of those panics means the
+# same thing: NO CONTAINMENT PROPERTY WAS TESTED. Under `[profile.ci]
+# retries = 2` that is exactly the failure a retry launders.
+#
+# It is not hypothetical. CI run 33240249894 lost
+# `bwrap_confines_filesystem_writes_outside_allowlist` to
+#   "the sandbox backend refused to run the containment probe, so no
+#    containment property was tested:
+#    ExecFailed("sandbox process-tree ownership: No such file or directory")"
+# and the retry passed, so the run CONCLUSION — the number release gates,
+# dashboards and humans read — said SUCCESS over a sandbox test that proved
+# nothing. The underlying race is fixed (`from_observed_root`, #362 c3); this
+# block is the half of the ticket that fixing the race does NOT cover, because
+# the next reason a probe fails to start will not be that race.
+#
+# MEASURED on hetzner-dsm, `--profile ci`, with a probe in `backend_integration`
+# that fails its first attempt and passes on any retry — the exact shape both a
+# race and a refused spawn take:
+#   * without this block: `TRY 1 FAIL`, `TRY 2 PASS`,
+#     `Summary 2 tests run: 2 passed (1 flaky)`, cargo exit 0 — laundered green.
+#   * with this block:    `FAIL`, `Summary 2 tests run: 1 passed, 1 failed`,
+#     cargo exit 100 — the failure reaches the run conclusion.
+# Transcript: .planning/evidence/core-362/c4-retry-laundering.txt
+#
+# `secret_read_deny` is here for the same reason and not as a bystander: it is
+# the crate's other `run_contained_probe` caller, so a refused spawn there
+# reports "no secret-read-deny property was tested" and would be retried away
+# identically. `the_probe_binaries_cannot_be_retried_into_a_pass` in
+# `crates/wcore-sandbox/tests/probe_retry_ratchet.rs` fails if a THIRD binary
+# starts calling that helper without being added here — an override cannot see
+# a new caller, and a gate that silently stops covering one is worse than no
+# gate.
+#
+# Scoped to two binaries, same discipline as the five blocks above: every other
+# test in the suite keeps `retries = 2`.
+[[profile.ci.overrides]]
+filter = 'binary(=backend_integration) + binary(=secret_read_deny)'
+retries = 0

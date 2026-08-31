@@ -1,0 +1,34 @@
+core#362 c4 — the retry-laundering measurement, hetzner-dsm, --profile ci
+
+INSTRUMENT: a probe test in backend_integration that fails its first attempt
+and passes on any later one (marker file across the process boundary a nextest
+retry crosses) — the exact shape a race, or a backend that intermittently
+refuses to start the containment probe, takes. The probe was removed after
+measuring; it is an instrument, not a test.
+
+The REAL containment test bwrap_confines_filesystem_writes_outside_allowlist is
+in the same filterset in both arms, as the WRONG-REFUSAL CONTROL: the override
+must not turn a legitimate pass into a failure.
+
+=== ARM 1 — WITHOUT the #362 c4 override (cargo exit 0) ===
+  TRY 1 FAIL [   0.017s] (───) wcore-sandbox::backend_integration c4_retry_probe_fails_its_first_attempt_only
+    test c4_retry_probe_fails_its_first_attempt_only ... FAILED
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.01s
+  TRY 2 PASS [   0.007s] (1/2) wcore-sandbox::backend_integration c4_retry_probe_fails_its_first_attempt_only
+     Summary [   1.131s] 2 tests run: 2 passed (1 flaky), 7 skipped
+        PASS [   1.109s] (2/2) wcore-sandbox::backend_integration bwrap_confines_filesystem_writes_outside_allowlist
+cargo exit: 0   <- LAUNDERED GREEN: a failed attempt, a green run conclusion
+
+=== ARM 2 — WITH the #362 c4 override (cargo exit 100) ===
+        FAIL [   0.008s] (1/2) wcore-sandbox::backend_integration c4_retry_probe_fails_its_first_attempt_only
+    test c4_retry_probe_fails_its_first_attempt_only ... FAILED
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+     Summary [   0.112s] 2 tests run: 1 passed, 1 failed, 7 skipped
+        PASS [   0.111s] (2/2) wcore-sandbox::backend_integration bwrap_confines_filesystem_writes_outside_allowlist
+        FAIL [   0.008s] (1/2) wcore-sandbox::backend_integration c4_retry_probe_fails_its_first_attempt_only
+    test c4_retry_probe_fails_its_first_attempt_only ... FAILED
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+cargo exit: 100 <- the failure reaches the run conclusion
+
+CONTROL, both arms: bwrap_confines_filesystem_writes_outside_allowlist PASSED.
+The override makes an unstartable probe fail the run; it does not refuse real traffic.
