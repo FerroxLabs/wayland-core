@@ -90,14 +90,13 @@ async fn a_data_less_model_fetch_is_still_admitted() {
 
     let outcome = backend.fetch(&fetch("http://127.0.0.1:1/")).await;
 
-    match outcome {
-        FetchOutcome::Err { message } => assert!(
+    // Anything other than an Err means it was admitted, which is the point.
+    if let FetchOutcome::Err { message } = outcome {
+        assert!(
             !message.contains("chosen by the model"),
             "a data-less fetch must not be gated by the wayland#1264 branch; \
              got: {message}"
-        ),
-        // A response at all means it was admitted, which is the point.
-        _ => {}
+        );
     }
 }
 
