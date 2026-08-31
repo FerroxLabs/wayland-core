@@ -422,17 +422,58 @@ fn probe_real_bundled_set_alone() {
         })
         .collect();
     let block = wcore_agent::context::format_skills_section(&bundled, None);
-    let listing = listing_of(&block);
     let full: usize = bundled
         .iter()
         .map(|s| width(&wcore_skills::prompt::format_skill_entry(s)) + 1)
         .sum();
     eprintln!(
-        "PROBE6 shipped bundled skills={} full_rendering={full} cols, \
-         post-ceiling listing={} cols, budget={budget}, trimmed={}",
-        bundled.len(),
-        width(listing),
-        listing.contains(SKILL_OVERFLOW_HINT)
+        "PROBE6 shipped bundled skills={} full_rendering={full} cols, budget={budget}",
+        bundled.len()
     );
+    if block.is_empty() {
+        eprintln!("PROBE6 the SHIPPED bundled catalog is EMPTY -- no production \
+                   configuration produces a bundled skill, so the 100-bundled arm \
+                   c1 names is unreachable in a shipped build");
+        return;
+    }
+    let listing = listing_of(&block);
+    eprintln!("PROBE6 listing={} cols trimmed={}", width(listing), listing.contains(SKILL_OVERFLOW_HINT));
     assert!(width(listing) <= budget);
+}
+
+// =========================================================================
+// PROBE 7 — the last link in the c2 chain. The overflow line tells the model
+// to "call the Skill tool", but Skill is COLD under defer_cold and is not in
+// tools[]. If nothing in the ordinary-turn payload names Skill as something
+// ToolSearch can hydrate, the escape hatch is advertised and unreachable.
+// =========================================================================
+#[tokio::test]
+#[serial_test::serial]
+async fn probe_the_ordinary_turn_payload_names_the_skill_tool_as_reachable() {
+    let reqs = session(1_000, "", vec![plain_answer()], &["What is 2 + 2?"]).await;
+    let r = &reqs[0];
+    assert!(
+        !r.tools.iter().any(|t| t.name == "Skill"),
+        "Skill is hot, so this probe measures nothing"
+    );
+    let catalog: String = r
+        .tools
+        .iter()
+        .map(|t| format!("{}\n{}", t.name, t.description))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let in_catalog = catalog.contains("Skill");
+    let in_prompt = r.system.contains("Skill tool");
+    eprintln!("PROBE7 skill_named_in_tool_catalog={in_catalog} named_in_system_prompt={in_prompt}");
+    assert!(
+        in_catalog || in_prompt,
+        "nothing in the ordinary-turn payload names the Skill tool, so the \
+         overflow line points at a tool the model cannot obtain"
+    );
+    assert!(
+        in_catalog,
+        "the system prompt tells the model to call the Skill tool, but the \
+         ToolSearch catalog does not name Skill, so the model has nothing to \
+         hydrate it by"
+    );
 }
