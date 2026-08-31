@@ -720,10 +720,16 @@ mod tests {
     /// ordering that places the unlink inside the window — and is then handed
     /// to the very function the direct Write path's `Err` arm calls.
     ///
-    /// Unix only: `Swap::Displaced` on the exchange platforms is
-    /// `RENAME_EXCHANGE` / `RENAME_SWAP`, and Windows restores with
-    /// `ReplaceFileW`, which succeeds against an absent destination and so
-    /// cannot reach this state.
+    /// Unix only, and for a reason about THIS state and not about what
+    /// Windows can observe (wayland#1268): `Swap::Displaced` on the exchange
+    /// platforms is `RENAME_EXCHANGE` / `RENAME_SWAP`, whose restore FAILS
+    /// against a destination that has gone. On Windows `ReplaceFileW` answers
+    /// `ERROR_FILE_NOT_FOUND` there, `publish_displacing` maps that to
+    /// `Swap::Vacant`, and `restore`'s documented fallback -- a plain
+    /// replacing rename -- puts the pre-image back and succeeds, so no
+    /// `RollbackFailed` is produced. Nothing here says a DISPLACED save is
+    /// unobservable on Windows; that claim was false and is corrected at
+    /// `the_vfs_path_names_a_save_the_refusal_displaced`.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn a_refusal_that_could_not_be_rolled_back_is_not_a_fallback() {
@@ -793,10 +799,13 @@ mod tests {
     /// this runs, even outside a repository (`unsaved_work_no_git_test`), and
     /// the test would then grade nothing.
     ///
-    /// Unix exchange platforms only: `Swap::Displaced` is
-    /// `RENAME_EXCHANGE` / `RENAME_SWAP` there, and Windows restores with
-    /// `ReplaceFileW`, which succeeds against an absent destination and so
-    /// cannot reach this state at all.
+    /// Unix exchange platforms only, for the reason
+    /// `a_refusal_that_could_not_be_rolled_back_is_not_a_fallback` gives:
+    /// `ReplaceFileW` answers `ERROR_FILE_NOT_FOUND` against a destination
+    /// that has gone, `publish_displacing` maps that to `Swap::Vacant`, and
+    /// `restore`'s plain-rename fallback succeeds, so `RollbackFailed` is not
+    /// produced on Windows. That is a statement about ROLLBACK FAILURE, not
+    /// about whether a displaced save is observable there (wayland#1268).
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[tokio::test]
     async fn execute_reports_a_refusal_it_could_not_roll_back() {
@@ -899,15 +908,21 @@ mod tests {
     /// that drops a line is refused by the unsaved-work guard before any of
     /// this runs, and the test would then grade nothing.
     ///
-    /// Gated to Linux/macOS because this workspace has no Windows executor,
-    /// NOT because the path is unreachable there. On Windows
-    /// `publish_displacing` returns `Swap::Displaced(backup)` via
-    /// `ReplaceFileW`'s `lpBackupFileName` and `restore` returns
-    /// `Ok(Some(exchanged_out))`, so `intercepted_save` is reachable -- see
-    /// `wcore_config::atomic_io`, which corrects the earlier reading that
-    /// `ReplaceFile` hands nothing back. Windows coverage is
-    /// FerroxLabs/wayland#1268.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    /// NO LONGER GATED TO UNIX (FerroxLabs/wayland#1268 c2). It ran on
+    /// Linux/macOS only because this workspace had no Windows executor, and an
+    /// earlier version of this comment gave a STRUCTURAL reason instead --
+    /// that `ReplaceFileW` "hands nothing back to judge, so no save can be
+    /// intercepted there at all". That was false, and
+    /// `wcore_config::atomic_io` already recorded the correction in its own
+    /// words: the earlier reading "was simply wrong about `lpBackupFileName`".
+    ///
+    /// On Windows `publish_displacing` returns `Swap::Displaced(backup)` via
+    /// `ReplaceFileW`'s `lpBackupFileName`, `restore` publishes with
+    /// `ReplaceFileW` again and returns `Ok(Some(exchanged_out))`, and
+    /// `holds_exactly` then keeps a save that is not ours -- so
+    /// `intercepted_save: Some(..)` is reachable and the preserved file lands
+    /// at `<tmp>.wl-displaced.wl-displaced`. MEASURED on real Windows rather
+    /// than argued; see the ledger entry for wayland#1268.
     #[tokio::test]
     async fn the_vfs_path_names_a_save_the_refusal_displaced() {
         const ORIGINAL: &str = "the only copy of the user's bytes\n";
