@@ -27,6 +27,12 @@ JOB = "  ci-linux:"
 # `Run tests`, `Clippy`, `Check formatting` and `Security audit` down with it: four
 # of the twenty-four steps this issue is about. Exemption is for a step whose
 # failure makes the later ones UNMEASURABLE, never for one that merely comes first.
+# The three pre-build steps were exempt as "build prerequisites" and that was
+# WRONG for the same reason the image was: a prerequisite that does not run
+# produces no artifact, and the step that needs it then RUNS and fails for want
+# of it. MEASURED on core#412 run 33417001379 -- `Release binary smoke` failed
+# in CI while passing 27/27 locally, because `Pre-build wcore-cli release binary`
+# had been skipped. A prerequisite must run, not be excused.
 SUPPRESSIBLE = {
     "Report macOS runner budget": "reads inputs; nothing downstream can be graded if it cannot",
     # NOT because its failure makes later steps unmeasurable -- it does not -- but
@@ -38,9 +44,6 @@ SUPPRESSIBLE = {
     # pre-existing one wins over this general rule. Recorded rather than resolved, so
     # whoever revisits either sees both.
     "Check Desktop protocol contract corpus drift": "its own gate-topology test forbids any if:",
-    "Reserve the outer-retry evidence tree": "sets up the evidence path later steps write to",
-    "Pre-build tool_token_bench": "build prerequisite",
-    "Pre-build wcore-cli release binary": "build prerequisite",
 }
 NON_SUPPRESSING = ("!cancelled()", "always()")
 
@@ -142,7 +145,7 @@ def self_test():
         True, expect="Some later gate somebody adds")
     arm("a new step that IS exempt, with its reason on file",
         lambda s: s.replace(
-            AUDIT, "      - name: Pre-build tool_token_bench (second pass)\n        run: echo hi\n" + AUDIT, 1),
+            AUDIT, "      - name: Report macOS runner budget (second pass)\n        run: echo hi\n" + AUDIT, 1),
         False)
     print("self-test: both directions proven" if ok else "self-test: FAILED")
     return 0 if ok else 1

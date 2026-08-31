@@ -183,11 +183,11 @@ async fn a_child_that_died_on_a_context_ceiling_reaches_the_parent_as_context_li
 
     assert!(
         !categories.is_empty(),
-        "control: the child's failure must reach the parent's drain as an error          frame at all -- if it does not, every assertion below passes vacuously"
+        "control: the child's failure must reach the parent's drain as an error frame at all -- if it does not, every assertion below passes vacuously"
     );
     assert!(
         categories.iter().any(|c| c == "context_limit"),
-        "wayland#1266 c3: the CHILD engine classified this as a context ceiling          at its own call site, and the relay must carry that classification to          the parent's host rather than replacing it. Categories relayed:          {categories:?}"
+        "wayland#1266 c3: the CHILD engine classified this as a context ceiling at its own call site, and the relay must carry that classification to the parent's host rather than replacing it. Categories relayed: {categories:?}"
     );
 }
 
@@ -212,7 +212,7 @@ async fn a_child_that_died_on_an_opaque_upstream_still_reaches_the_parent_as_unk
     for category in &categories {
         assert_eq!(
             category, "unknown",
-            "wayland#1266 c3 control: core cannot tell a provider rate limit              from a router failure (#1184) and must not start guessing on a              CHILD's behalf either. Categories relayed: {categories:?}"
+            "wayland#1266 c3 control: core cannot tell a provider rate limit from a router failure (#1184) and must not start guessing on a CHILD's behalf either. Categories relayed: {categories:?}"
         );
     }
 }
@@ -250,6 +250,6 @@ async fn two_differently_failing_children_do_not_relay_the_same_category() {
     );
     assert_ne!(
         ceiling[0], opaque[0],
-        "two differently-failing children relayed the SAME category, so the          boundary is carrying a constant rather than the child's own          classification"
+        "two differently-failing children relayed the SAME category, so the boundary is carrying a constant rather than the child's own classification"
     );
 }

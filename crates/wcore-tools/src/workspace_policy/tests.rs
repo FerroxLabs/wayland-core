@@ -2630,7 +2630,7 @@ fn every_strong_resolver_site_states_which_resolver_and_why() {
     // found no sites would pass on a file with none.
     assert!(
         sites >= 5,
-        "the scan found only {sites} `canon_existing_ancestor` call sites —          the instrument is looking at the wrong thing"
+        "the scan found only {sites} `canon_existing_ancestor` call sites — the instrument is looking at the wrong thing"
     );
     assert!(
         unlabelled.is_empty(),
@@ -2785,8 +2785,14 @@ fn single_path_returning_fns(source: &str) -> (Vec<SinglePathFn>, usize) {
             .split(|c: char| !(c.is_alphanumeric() || c == '_'))
             .any(|tok| tok == "PathBuf");
         let is_collection = [
-            "Vec<", "VecDeque<", "HashSet<", "BTreeSet<", "HashMap<", "BTreeMap<",
-            "&[", "Box<[",
+            "Vec<",
+            "VecDeque<",
+            "HashSet<",
+            "BTreeSet<",
+            "HashMap<",
+            "BTreeMap<",
+            "&[",
+            "Box<[",
         ]
         .iter()
         .any(|p| ret.contains(p));

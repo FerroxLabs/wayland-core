@@ -1864,12 +1864,15 @@ jobs:
       # walk that makes a cold workspace slow, and it would run on every job to
       # repair a directory that need never have been root-owned.
       - name: Reserve the outer-retry evidence tree for the runner user
+        if: ${{ !cancelled() }}
         run: mkdir -p target/nextest/ci/outer-attempts
 
       - name: Pre-build tool_token_bench
+        if: ${{ !cancelled() }}
         run: $DOCKER_RUN "$CI_IMAGE" cargo build -p wcore-agent --bin tool_token_bench --features test-utils
 
       - name: Pre-build wcore-cli release binary
+        if: ${{ !cancelled() }}
         run: $DOCKER_RUN "$CI_IMAGE" cargo build --release -p wcore-cli
 
       - name: Check formatting

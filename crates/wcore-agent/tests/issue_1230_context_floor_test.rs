@@ -248,11 +248,33 @@ async fn the_baseline_constant_still_describes_this_tree() {
         cfg.input_ceiling_for_window(derived) > floor as usize,
         "the derived remedy window {derived} does not itself hold the floor {floor}"
     );
-    assert!(
-        derived > cfg.minimum_workable_window(),
-        "the derived remedy window {derived} is not above the snapshot-derived \
-         {}, so this tree no longer exhibits the gap #1230 c2 is about and the \
-         guard should be re-derived",
-        cfg.minimum_workable_window()
-    );
+    // The gap is PLATFORM-DEPENDENT, measured rather than assumed. On Linux and
+    // macOS the assembled floor forces a remedy window ABOVE the snapshot-derived
+    // minimum -- that is the gap #1230 c2 is about. On Windows the assembled floor
+    // is smaller (6707 against a snapshot-derived 6929, measured on CI run
+    // 33417001379), so the window it forces lands BELOW that minimum and the gap
+    // does not manifest there at all.
+    //
+    // Asserted in BOTH directions rather than skipped on Windows. A `cfg` that
+    // simply drops the assertion would let the gap APPEAR on Windows without
+    // anything noticing, which is the same silence this test exists to break --
+    // and the message on each side names what changed if it fires.
+    let workable = cfg.minimum_workable_window();
+    if cfg!(windows) {
+        assert!(
+            derived <= workable,
+            "on Windows the assembled floor has been SMALLER than the \
+             snapshot-derived minimum, so #1230 c2's gap did not manifest here. \
+             It now derives {derived} against {workable}, so the gap HAS appeared \
+             on Windows: re-derive the guard and re-grade #1230 c2 for this \
+             platform rather than widening anything"
+        );
+    } else {
+        assert!(
+            derived > workable,
+            "the derived remedy window {derived} is not above the snapshot-derived \
+             {workable}, so this tree no longer exhibits the gap #1230 c2 is about \
+             and the guard should be re-derived"
+        );
+    }
 }
