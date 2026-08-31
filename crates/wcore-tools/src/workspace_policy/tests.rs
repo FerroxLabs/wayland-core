@@ -3054,6 +3054,119 @@ fn probe_vcs_content_stores_per_traversed_directory() {
     );
 }
 
+/// FerroxLabs/wayland-core#394 c3 / #396 c3 / #398 c3 — the instrument that
+/// produced the **5 syscalls/directory** those three criteria are pinned to,
+/// ported verbatim in SHAPE so the bar can be measured rather than argued
+/// about.
+///
+/// The pin has been unmeetable for two lanes, and the reason is that the probe
+/// it names was REDEFINED under the same name. At `875bf32cb`, where 5.000 was
+/// read, `probe_vcs_content_stores_per_traversed_directory` looped
+/// `vcs_content_stores(&ordinary_dir)` `WL_PROBE_DIRS` times — its own doc
+/// comment says so: *"`grep_policy::scope_for` calls it in. `WL_PROBE_DIRS`
+/// sets the loop count"*. It never called `scope_for`, which did not yet exist
+/// on that tree under that name. So 5.000 is the cost of the PREDICATE
+/// `scope_for` pays once per directory it traverses.
+///
+/// The probe carrying that name today measures something else: a whole
+/// `scope_for` traversal of `WL_PROBE_DIRS` real directories, divided by the
+/// directory count — `opendir`/`getdents`/`statx` of the walk itself included.
+/// That is why it reads ~35 and why 35 was being compared with 5. Two
+/// questions, one name.
+///
+/// This is the first question, asked of today's code. `scope_for`'s
+/// `filter_entry` calls `policy.denies_read_content(entry.path())` once per
+/// traversed directory, so that call IS what `vcs_content_stores(&dir)` was:
+///
+/// ```text
+/// for n in 100 1100; do
+///   WL_PROBE_DIRS=$n strace -f -c -o /tmp/q.$n \
+///     cargo test -p wcore-tools --lib -- --exact --nocapture \
+///     workspace_policy::tests::probe_grep_scope_predicate_per_traversed_directory
+/// done
+/// ```
+///
+/// and `(syscalls(1100) - syscalls(100)) / 1000` is the per-directory figure,
+/// with every one-off — process startup, the fixture, the arm-2 scan and arm
+/// 4's single walk — cancelled by the subtraction.
+///
+/// Two known-positive controls in the same run, because a probe that answers
+/// nothing makes no syscalls and reports a flattering zero: the root store must
+/// still be REFUSED, and the ordinary directory must still be ADMITTED. The
+/// second is also the wrong-refusal control — a predicate that had started
+/// refusing everything would be cheap and useless.
+#[test]
+fn probe_grep_scope_predicate_per_traversed_directory() {
+    let n: usize = std::env::var("WL_PROBE_DIRS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(100);
+
+    let tmp = tempfile::tempdir().expect("workspace");
+    let root = std::fs::canonicalize(tmp.path()).expect("canonical root");
+    std::fs::create_dir_all(root.join(".git/objects/ab")).unwrap();
+    std::fs::write(root.join(".git/objects/ab/cdef"), b"x").unwrap();
+    let dir = root.join("src/deep/deeper");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let policy = WorkspacePolicy::contained(&root);
+
+    // CONTROL, known-positive: the store must still be refused. This also warms
+    // every one-off the subtraction would otherwise have to cancel.
+    assert!(
+        policy.denies_read_content(&root.join(".git/objects/ab/cdef")),
+        "probe control: the root store must still be refused, or the figure \
+         below prices a predicate that answers nothing"
+    );
+    // CONTROL, wrong-refusal: the ordinary directory `scope_for` traverses must
+    // still be admitted.
+    assert!(
+        !policy.denies_read_content(&dir),
+        "probe control: an ordinary traversed directory must stay admitted"
+    );
+
+    let mut sink = 0usize;
+    for _ in 0..n {
+        sink += usize::from(policy.denies_read_content(&dir));
+        sink += vcs_content_stores(&dir).len();
+    }
+    assert_eq!(
+        sink, 0,
+        "probe control: the loop must have asked the real predicates n times"
+    );
+}
+
+/// DECOMPOSITION arm (lane f13-s3-vcs-gate): the SECOND of the two calls
+/// `grep_policy::scope_for` makes per traversed directory, alone. Subtracting
+/// this from `probe_grep_scope_predicate_per_traversed_directory` isolates the
+/// first (`denies_read_content`), which is the half that moved.
+#[test]
+fn probe_vcs_content_stores_alone_per_traversed_directory() {
+    let n: usize = std::env::var("WL_PROBE_DIRS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(100);
+    let tmp = tempfile::tempdir().expect("workspace");
+    let root = std::fs::canonicalize(tmp.path()).expect("canonical root");
+    std::fs::create_dir_all(root.join(".git/objects/ab")).unwrap();
+    std::fs::write(root.join(".git/objects/ab/cdef"), b"x").unwrap();
+    let dir = root.join("src/deep/deeper");
+    std::fs::create_dir_all(&dir).unwrap();
+    assert!(
+        !vcs_content_stores(&root).is_empty(),
+        "probe control: the scan must find <root>/.git/objects"
+    );
+    assert!(
+        vcs_content_stores(&dir).is_empty(),
+        "probe control: an ordinary directory names no store"
+    );
+    let mut sink = 0usize;
+    for _ in 0..n {
+        sink += vcs_content_stores(&dir).len();
+    }
+    assert_eq!(sink, 0, "probe control: the loop must have run n times");
+}
+
 // ===========================================================================
 // FerroxLabs/wayland-core#384 c3 — no documented-but-uncalled enforcement
 // predicate remains in workspace_policy.rs.
