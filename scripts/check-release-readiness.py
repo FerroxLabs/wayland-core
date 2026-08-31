@@ -109,6 +109,18 @@ FOREIGN_OWNERS = ("desktop", "flux", "maintainer", "reporter")
 # already passed.
 OPEN_STATES = ("not-met", "blocked")
 
+# The release this gate judges. A SOURCE constant, not a flag: a switch that
+# changes which issues count is a switch that gets typed when a workflow needs
+# green, which is why the `injected` fixture below has no flag either. Bump it
+# when a release is cut. Leftovers become the next release's scope by being
+# re-milestoned on the tracker, in the open, one issue at a time -- never by a
+# default here.
+#
+# An OPEN issue carrying no milestone is a hard failure below. Without that this
+# constant would be a bypass and not a scope: an unmilestoned issue would sit
+# outside every release forever and no gate would ever say so.
+RELEASE_MILESTONE = "0.13.12"
+
 HANDOFF = re.compile(r"^(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#(?P<num>\d+)$")
 # Label names that decide the question on GitHub. Anything else is silence,
 # and silence is not corroboration -- it is reported as such, never as a pass.
@@ -173,6 +185,40 @@ def gh_labels(repo):
     return {int(i["number"]): {l["name"] for l in i["labels"]} for i in rows}
 
 
+def gh_milestones(repo):
+    """-> {number: milestone title or None} for every OPEN issue in `repo`.
+
+    Open only, deliberately. A closed issue's milestone cannot block anything,
+    and asking for every state would fail the gate on historical issues nobody
+    is ever going to re-milestone.
+    """
+    args = ["gh", "issue", "list", "-R", repo, "--state", "open",
+            "--limit", str(GH_LIMIT), "--json", "number,milestone"]
+    try:
+        r = subprocess.run(args, capture_output=True, text=True)
+    except OSError as e:
+        raise TrackerError(
+            "%s: could not run `gh` (%s). The milestone arm decides what is in "
+            "scope for this release; pass --offline if you meant to skip it."
+            % (repo, e))
+    if r.returncode != 0:
+        raise TrackerError("%s: `gh issue list` (milestones) failed -- %s"
+                           % (repo, (r.stderr or "").strip()[:300]))
+    try:
+        rows = json.loads(r.stdout)
+    except ValueError as e:
+        raise TrackerError("%s: unparseable gh milestone output (%s)" % (repo, e))
+    if len(rows) >= GH_LIMIT:
+        raise TrackerError(
+            "%s: the milestone query returned exactly %d rows, which is the "
+            "request limit -- it was TRUNCATED. Raise GH_LIMIT." % (repo, GH_LIMIT))
+    out = {}
+    for i in rows:
+        m = i.get("milestone") or {}
+        out[int(i["number"])] = m.get("title") or None
+    return out
+
+
 def gh_issue_state(ref):
     """-> 'open' / 'closed' / None for `<owner>/<repo>#<number>`."""
     repo, _, num = ref.partition("#")
@@ -203,9 +249,27 @@ def fetch_tracker_state(repos, handoffs, injected):
             labels.setdefault(repo, {})[int(num)] = set(names)
         for repo in repos:
             labels.setdefault(repo, {})
-        return labels, {h: injected.get("issues", {}).get(h) for h in handoffs}
+        # Fixture default: an injected issue with no explicit milestone is
+        # treated as being in THIS release. Without it every arm below is
+        # filtered out of the blocking set before it can be observed, which is
+        # exactly what the self-test caught when this filter was first written.
+        # The default exists ONLY here. The live path queries the tracker and
+        # has no default at all; that asymmetry is what keeps the milestone a
+        # scope and not a bypass.
+        miles = {}
+        for rp, nums in labels.items():
+            for num in nums:
+                miles.setdefault(rp, {})[num] = RELEASE_MILESTONE
+        for ref, title in injected.get("milestones", {}).items():
+            rp, _, num = ref.partition("#")
+            miles.setdefault(rp, {})[int(num)] = title
+        for repo in repos:
+            miles.setdefault(repo, {})
+        return (labels, miles,
+                {h: injected.get("issues", {}).get(h) for h in handoffs})
     labels = {repo: gh_labels(repo) for repo in sorted(repos)}
-    return labels, {h: gh_issue_state(h) for h in sorted(handoffs)}
+    miles = {repo: gh_milestones(repo) for repo in sorted(repos)}
+    return labels, miles, {h: gh_issue_state(h) for h in sorted(handoffs)}
 
 
 # ── the gate ─────────────────────────────────────────────────────────────────
@@ -339,6 +403,9 @@ def run(root, offline=False, injected=None):
                 undecomposed.append((rec, c))
 
     # ── live corroboration ──────────────────────────────────────────────
+    # None means the tracker was never consulted, so release scope is NOT
+    # judged below. That is not a pass; the offline banner says so.
+    miles = None
     if offline:
         say()
         say("OFFLINE: handoff targets were NOT resolved, and `kind:` was NOT "
@@ -351,7 +418,8 @@ def run(root, offline=False, injected=None):
     else:
         repos = sorted({r.get("repo") for r in records if r.get("repo")})
         try:
-            labels, ho_state = fetch_tracker_state(repos, handoffs, injected)
+            labels, miles, ho_state = fetch_tracker_state(
+                repos, handoffs, injected)
         except TrackerError as e:
             say()
             say("FAIL: %s" % e)
@@ -431,6 +499,48 @@ def run(root, offline=False, injected=None):
             for u in uncorroborated:
                 say("        " + u)
 
+    # ── release scope ───────────────────────────────────────────
+    # Only what is milestoned for THIS release blocks it. Everything else
+    # keeps its ledger, its criteria and its owner -- tracked, not dropped
+    # -- but does not stand between a user and a fix that is ready.
+    deferred, unmilestoned = {}, []
+    if miles is not None:
+        def _ms(rec):
+            num = rec.get("issue")
+            if not str(num).isdigit():
+                return None
+            return miles.get(rec.get("repo"), {}).get(int(num))
+
+        keep_o, keep_u = [], []
+        for bucket, keep in ((outstanding, keep_o), (undecomposed, keep_u)):
+            for rec, c in bucket:
+                ms = _ms(rec)
+                if ms is None:
+                    unmilestoned.append((rec.get("repo"), rec.get("issue")))
+                    continue
+                if ms != RELEASE_MILESTONE:
+                    deferred.setdefault(ms, set()).add(
+                        "%s#%s" % (rec.get("repo"), rec.get("issue")))
+                    continue
+                keep.append((rec, c))
+        outstanding, undecomposed = keep_o, keep_u
+
+        for rp, num in sorted(set(unmilestoned)):
+            problems.append(
+                "%s#%s is an OPEN defect owing work and carries NO "
+                "milestone, so no release claims it and none ever will. "
+                "Put it in a milestone. An unmilestoned issue is not out of "
+                "scope -- it is invisible TO scope, which is exactly what a "
+                "defaulting `kind` would have been." % (rp, num))
+        for ms in sorted(deferred):
+            say("NOTE: %d issue(s) owe work under milestone `%s`, not `%s`. "
+                "They are tracked and are NOT part of this release's "
+                "definition of done: %s"
+                % (len(deferred[ms]), ms, RELEASE_MILESTONE,
+                   ", ".join(sorted(deferred[ms]))))
+        if deferred:
+            say()
+
     # ── verdict ─────────────────────────────────────────────────────────
     if problems:
         say()
@@ -447,10 +557,11 @@ def run(root, offline=False, injected=None):
             by_issue.setdefault(rec["path"], (rec, [], []))[1].append(c)
         for rec, c in undecomposed:
             by_issue.setdefault(rec["path"], (rec, [], []))[2].append(c)
-        say("RELEASE BLOCKED: %d defect issue(s) still owe work -- %d "
+        say("RELEASE BLOCKED (%s): %d defect issue(s) still owe work -- %d "
             "core-owned criterion(s) not met, %d handed to another lane with "
             "nothing tracking the remainder."
-            % (len(by_issue), len(outstanding), len(undecomposed)))
+            % (RELEASE_MILESTONE, len(by_issue), len(outstanding),
+               len(undecomposed)))
         say("This list IS the definition of done for the release. A ticket "
             "ends CLOSED or DECOMPOSED; `partial` is a ticket nobody split.")
         say()
@@ -629,6 +740,40 @@ def self_test():
          expect="THIS IS NOT A PASS")
 
     # ── classification ──────────────────────────────────────────────────
+    # ── release scope ───────────────────────────────────
+    # A filter that REMOVES issues from the blocking set is the most
+    # dangerous change this file can carry: every mistake it makes is
+    # silent and points the same way, toward green. Exercised in both
+    # directions, on the SAME mutated defect the blocking arm above uses.
+    # The default `_DEFECT` is the clean control and goes green for reasons
+    # unrelated to milestones -- these arms were written against it once
+    # and all three failed, the control included.
+    case("an OPEN defect owing work with NO milestone", True,
+         defect=_DEFECT.replace(
+             '    state: met\n    evidence: '
+             '"test:src/t.rs::the_boundary_is_probed"\n',
+             "    state: not-met\n"),
+         inj={"labels": _INJ["labels"], "issues": _INJ["issues"],
+              "milestones": {"FerroxLabs/wayland#7": None}},
+         expect="carries NO milestone")
+    case("an OPEN defect milestoned to a LATER release does not block",
+         False,
+         defect=_DEFECT.replace(
+             '    state: met\n    evidence: '
+             '"test:src/t.rs::the_boundary_is_probed"\n',
+             "    state: not-met\n"),
+         inj={"labels": _INJ["labels"], "issues": _INJ["issues"],
+              "milestones": {"FerroxLabs/wayland#7": "0.13.13"}},
+         expect="not `0.13.12`")
+    case("control: that same defect in THIS release still blocks", True,
+         defect=_DEFECT.replace(
+             '    state: met\n    evidence: '
+             '"test:src/t.rs::the_boundary_is_probed"\n',
+             "    state: not-met\n"),
+         inj={"labels": _INJ["labels"], "issues": _INJ["issues"],
+              "milestones": {"FerroxLabs/wayland#7": "0.13.12"}},
+         expect="OUTSTANDING   c1")
+
     case("a ledger entry with no `kind:` field", True,
          defect=_DEFECT.replace("kind: defect\n", ""),
          expect="no `kind:` field")
