@@ -651,9 +651,22 @@ mod tests {
 /// cause — the twelve silent days of `#369` — goes back to being unreadable.
 ///
 /// So this is the SET, and the two checks below are total over the SURFACE
-/// rather than over the one method somebody happened to fix. `#400` c1 adds
-/// `blocks_powershell` to it.
-pub const DISCLOSURE_METHODS: &[&str] = &["known_limitations", "unavailable_reason"];
+/// rather than over the one method somebody happened to fix.
+///
+/// `blocks_powershell` joined the set for `#400` c1, and it is the member that
+/// makes the set's name literal rather than figurative: the other two WITHHOLD
+/// information, whereas this one is read at four production sites in
+/// `wcore-tools/src/bash.rs` that REWRITE the operator's argv. An operator who
+/// asks for `powershell -c ...` under a backend that answers `true` gets a
+/// different shell, and until this landed the only surface describing the
+/// sandbox's posture said nothing about it. The one-off `tracing::warn!` on the
+/// rewrite path is not a substitute: with `RUST_LOG` unset only `ERROR` reaches
+/// stderr, so that warning reaches nobody by default.
+pub const DISCLOSURE_METHODS: &[&str] = &[
+    "known_limitations",
+    "unavailable_reason",
+    "blocks_powershell",
+];
 
 /// Which targets a disclosing type is constructible on.
 ///
@@ -741,7 +754,11 @@ pub const BACKENDS_THAT_DISCLOSE: &[DisclosingBackend] = &[
         name: "appcontainer",
         source_file: "backends/appcontainer/windows_impl/process.rs",
         declared_on: DeclaredOn::WindowsOnly,
-        declares: &["known_limitations", "unavailable_reason"],
+        declares: &[
+            "known_limitations",
+            "unavailable_reason",
+            "blocks_powershell",
+        ],
     },
     DisclosingBackend {
         name: "appcontainer_stub",

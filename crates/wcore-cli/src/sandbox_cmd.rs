@@ -145,6 +145,38 @@ pub struct SandboxStatus {
     pub unavailable_reason: Option<String>,
     /// What the selected backend is KNOWN not to do (#368, #369).
     pub known_limitations: Vec<String>,
+    /// Whether this backend REFUSES PowerShell (#400). Read by four sites in
+    /// `wcore_tools::bash` that rewrite the operator's argv when it is `true`,
+    /// and until #400 it reached no operator surface at all.
+    pub blocks_powershell: bool,
+    /// The CONSEQUENCE of [`Self::blocks_powershell`], in words, or `None`
+    /// when the backend runs every shell (#400 c3).
+    ///
+    /// The boolean alone is the failure #368 c6 identified in the capability
+    /// booleans: accurate, and unreadable as a posture. What the operator SEES
+    /// is a `powershell` command running under `cmd`, so the surface has to
+    /// name the rewrite or it cannot let them attribute what they observe.
+    /// Carried as its own field rather than as prose in the human arm because
+    /// `--json` is the arm a host integration reads, and a consequence only
+    /// the terminal carries is a consequence the desktop app cannot surface.
+    pub shell_downgrade_notice: Option<String>,
+}
+
+/// The consequence sentence for a backend that answers
+/// [`wcore_sandbox::backends::SandboxBackend::blocks_powershell`] `true`.
+///
+/// Derived from the rewrite itself
+/// (`wcore_tools::bash::downgrade_unsupported_shell_for_sandbox`), not from the
+/// method name: that function rewrites `powershell`, `pwsh`, `bash` AND `sh`
+/// prefixes to `cmd /C`, so a notice naming only PowerShell would leave an
+/// operator whose `bash -c` was rewritten with nothing to attribute it to.
+fn shell_downgrade_notice(backend: &str) -> String {
+    format!(
+        "backend `{backend}` cannot run PowerShell: `powershell` / `pwsh` fail \
+         to load .NET/GAC assemblies under its restricted token. A command that \
+         selects one is NOT refused - it is DOWNGRADED to `cmd /C` and run under \
+         that shell instead. `bash` / `sh` selections are downgraded the same way."
+    )
 }
 
 impl SandboxStatus {
@@ -166,6 +198,10 @@ impl SandboxStatus {
                 .into_iter()
                 .map(str::to_owned)
                 .collect(),
+            blocks_powershell: registry.blocks_powershell(),
+            shell_downgrade_notice: registry
+                .blocks_powershell()
+                .then(|| shell_downgrade_notice(registry.backend_name())),
         }
     }
 
@@ -181,6 +217,8 @@ impl SandboxStatus {
             "binds_workspace_authority": self.binds_workspace_authority,
             "unavailable_reason": self.unavailable_reason,
             "known_limitations": self.known_limitations,
+            "blocks_powershell": self.blocks_powershell,
+            "shell_downgrade_notice": self.shell_downgrade_notice,
         })
     }
 }
@@ -205,6 +243,8 @@ mod disclosure_tests {
             binds_workspace_authority: false,
             unavailable_reason: None,
             known_limitations: Vec::new(),
+            blocks_powershell: false,
+            shell_downgrade_notice: None,
         }
     }
 
@@ -369,6 +409,9 @@ mod disclosure_tests {
         fn unavailable_reason(&self) -> Option<String> {
             self.0.unavailable_reason()
         }
+        fn blocks_powershell(&self) -> bool {
+            self.0.blocks_powershell()
+        }
         async fn execute(
             &self,
             _manifest: &wcore_sandbox::SandboxManifest,
@@ -406,6 +449,7 @@ mod disclosure_tests {
             .map(str::to_owned)
             .collect();
         let reason = backend.unavailable_reason();
+        let backend_blocks_powershell = backend.blocks_powershell();
 
         let registry = SandboxRegistry::new(Arc::new(AvailabilityStub(backend)));
         let status = SandboxStatus::project(&registry);
@@ -462,6 +506,56 @@ mod disclosure_tests {
                             human.contains(why.as_str()),
                             "backend `{name}` knows why it is unavailable and \
                              the human arm does not print it: {human}"
+                        );
+                    }
+                }
+                "blocks_powershell" => {
+                    // The backend is REGISTERED as overriding this method, and
+                    // the only reason to override it is to answer `true`: a
+                    // row that answers `false` is registered for a disclosure
+                    // it does not make, and every assertion below would then
+                    // hold vacuously.
+                    assert!(
+                        backend_blocks_powershell,
+                        "backend `{name}` is registered as declaring \
+                         `blocks_powershell` and answers false, so the \
+                         disclosure it is registered for does not exist and \
+                         nothing below grades anything"
+                    );
+                    assert!(
+                        status.blocks_powershell,
+                        "backend `{name}` refuses PowerShell and the status an \
+                         operator reads says it does not; four sites in \
+                         `wcore_tools::bash` rewrite the operator's argv on \
+                         this fact"
+                    );
+                    assert_eq!(
+                        json["blocks_powershell"], true,
+                        "the --json arm a host integration reads does not \
+                         carry backend `{name}`'s PowerShell refusal: {json}"
+                    );
+                    let notice = status.shell_downgrade_notice.clone().expect(
+                        "a backend that refuses PowerShell must carry the \
+                         CONSEQUENCE, not only the boolean (#400 c3)",
+                    );
+                    assert_eq!(
+                        json["shell_downgrade_notice"], notice,
+                        "the consequence must reach --json too, or the desktop \
+                         app cannot surface it: {json}"
+                    );
+                    for word in ["DOWNGRADED", "cmd /C", "powershell"] {
+                        assert!(
+                            notice.contains(word),
+                            "the notice must name the consequence an operator \
+                             SEES, not only the fact; {word:?} missing from \
+                             {notice:?}"
+                        );
+                    }
+                    for line in super::textwrap_notice(&notice) {
+                        assert!(
+                            human.contains(line.as_str()),
+                            "an operator at a terminal reads the human arm and \
+                             nothing else, and it dropped {line:?}: {human}"
                         );
                     }
                 }
@@ -547,6 +641,150 @@ mod disclosure_tests {
             human.contains("UNAVAILABLE"),
             "the cause must be headed as an unavailability, or it reads as \
              prose beside a row of booleans: {human}"
+        );
+    }
+
+    /// A backend's PowerShell refusal must survive the whole path an operator
+    /// reads it through — backend → `SandboxRegistry` → `SandboxStatus` →
+    /// BOTH arms — and this grades the PATH with a sentinel, on EVERY target.
+    ///
+    /// # Why a sentinel and not `AppContainerBackend`
+    ///
+    /// The only backend in this workspace that answers `true` is
+    /// `AppContainerBackend`, which is `cfg(windows)`. Graded only through
+    /// `every_declaring_backends_disclosure_reaches_both_operator_arms` this
+    /// property would be unmeasured on the Linux and macOS legs — and #400 was
+    /// filed precisely because a fact that no test on the developer's own
+    /// platform can reach is a fact that gets deleted with everything green.
+    /// This arm runs everywhere; the table arm adds the real backend on
+    /// Windows. Neither replaces the other.
+    ///
+    /// # The red arm, measured
+    ///
+    /// Replacing `SandboxRegistry::blocks_powershell`'s delegate body with
+    /// `false` — the exact mutation that broke `known_limitations` and
+    /// `unavailable_reason` invisibly before #368 c6 and #400 — compiles, and
+    /// reddens THIS test.
+    #[test]
+    fn a_powershell_refusal_reaches_both_operator_arms_through_the_registry() {
+        struct CmdOnly;
+
+        #[async_trait::async_trait]
+        impl wcore_sandbox::backends::SandboxBackend for CmdOnly {
+            fn name(&self) -> &'static str {
+                "sentinel_cmd_only"
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+            fn blocks_powershell(&self) -> bool {
+                true
+            }
+            async fn execute(
+                &self,
+                _manifest: &wcore_sandbox::SandboxManifest,
+                _cmd: wcore_sandbox::SandboxCommand,
+            ) -> wcore_sandbox::Result<wcore_sandbox::SandboxOutput> {
+                unreachable!("a status read never executes a command")
+            }
+        }
+
+        let registry = SandboxRegistry::new(Arc::new(CmdOnly));
+        let status = SandboxStatus::project(&registry);
+        assert!(
+            status.blocks_powershell,
+            "the registry dropped the backend's PowerShell refusal before the \
+             status was even built"
+        );
+
+        let json = status.to_json();
+        assert_eq!(
+            json["blocks_powershell"], true,
+            "a host integration reads this arm and nothing else: {json}"
+        );
+
+        // c3: the CONSEQUENCE, not only the fact. `blocks powershell true` is
+        // accurate and unreadable as a posture; what the operator SEES is a
+        // powershell command running under cmd.
+        let notice = status
+            .shell_downgrade_notice
+            .clone()
+            .expect("a refusing backend must carry the consequence in words");
+        assert_eq!(
+            json["shell_downgrade_notice"], notice,
+            "the consequence must reach --json, or the desktop app cannot \
+             surface it: {json}"
+        );
+        for word in ["DOWNGRADED", "cmd /C", "powershell", "pwsh", "bash"] {
+            assert!(
+                notice.contains(word),
+                "the notice must let an operator attribute what they OBSERVE; \
+                 {word:?} missing from {notice:?}"
+            );
+        }
+
+        let human = super::render_status_human(&status);
+        assert!(
+            human.contains("POWERSHELL IS REFUSED"),
+            "the consequence must be HEADED, or it reads as prose beside a row \
+             of booleans: {human}"
+        );
+        for line in super::textwrap_notice(&notice) {
+            assert!(
+                human.contains(line.as_str()),
+                "an operator at a terminal reads this arm and nothing else, \
+                 and it dropped {line:?}: {human}"
+            );
+        }
+    }
+
+    /// NEGATIVE CONTROL, and it is the arm that blocks the cheap fix. A
+    /// disclosure that is printed unconditionally discloses nothing: it would
+    /// pass every assertion above while telling an operator on Linux — where
+    /// every shell runs — that their `powershell` command is being rewritten.
+    #[test]
+    fn a_backend_that_runs_every_shell_claims_no_refusal() {
+        struct EveryShell;
+
+        #[async_trait::async_trait]
+        impl wcore_sandbox::backends::SandboxBackend for EveryShell {
+            fn name(&self) -> &'static str {
+                "sentinel_every_shell"
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+            async fn execute(
+                &self,
+                _manifest: &wcore_sandbox::SandboxManifest,
+                _cmd: wcore_sandbox::SandboxCommand,
+            ) -> wcore_sandbox::Result<wcore_sandbox::SandboxOutput> {
+                unreachable!("a status read never executes a command")
+            }
+        }
+
+        let registry = SandboxRegistry::new(Arc::new(EveryShell));
+        let status = SandboxStatus::project(&registry);
+        assert!(!status.blocks_powershell);
+        assert!(
+            status.shell_downgrade_notice.is_none(),
+            "a backend that runs every shell must not carry a downgrade notice"
+        );
+        let json = status.to_json();
+        assert_eq!(json["blocks_powershell"], false);
+        assert!(
+            json["shell_downgrade_notice"].is_null(),
+            "nothing recorded must serialise as null, never as an empty string \
+             a consumer cannot tell from a blank cause: {json}"
+        );
+        let human = super::render_status_human(&status);
+        assert!(
+            !human.contains("POWERSHELL IS REFUSED"),
+            "an unconditional disclosure discloses nothing: {human}"
+        );
+        assert!(
+            !human.contains("DOWNGRADED"),
+            "an unconditional disclosure discloses nothing: {human}"
         );
     }
 
@@ -720,6 +958,27 @@ fn run_status(json: bool) -> anyhow::Result<()> {
 /// property — that the product STATES a defect *where an operator reads the
 /// containment posture* — and this is that place. Returning the text is what
 /// lets `disclosure_tests` grade the read instead of the constant behind it.
+/// Break a one-sentence notice onto terminal-width lines. Kept deliberately
+/// dumb: it never re-orders or drops a word, so the assertion that the human
+/// arm carries the notice's WORDS cannot be satisfied by a paraphrase.
+fn textwrap_notice(notice: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in notice.split_whitespace() {
+        if !current.is_empty() && current.len() + 1 + word.len() > 68 {
+            lines.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(word);
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
 fn render_status_human(status: &SandboxStatus) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
@@ -755,6 +1014,11 @@ fn render_status_human(status: &SandboxStatus) -> String {
         "binds workspace authority {}",
         status.binds_workspace_authority
     );
+    let _ = writeln!(
+        out,
+        "blocks powershell         {}",
+        status.blocks_powershell
+    );
     if let Some(why) = &status.unavailable_reason {
         let _ = writeln!(out);
         let _ = writeln!(out, "UNAVAILABLE, and the backend knows why:");
@@ -769,6 +1033,13 @@ fn render_status_human(status: &SandboxStatus) -> String {
         );
         for l in &status.known_limitations {
             let _ = writeln!(out, "      - {l}");
+        }
+    }
+    if let Some(notice) = &status.shell_downgrade_notice {
+        let _ = writeln!(out);
+        let _ = writeln!(out, "POWERSHELL IS REFUSED by this backend:");
+        for line in textwrap_notice(notice) {
+            let _ = writeln!(out, "      {line}");
         }
     }
     // A row of booleans is not readable as a security posture. Say the
