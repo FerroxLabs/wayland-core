@@ -140,11 +140,46 @@ pub struct SandboxStatus {
     pub owns_descendants_hard: bool,
     pub binds_cwd_authority: bool,
     pub binds_workspace_authority: bool,
+    /// Whether the backend refuses PowerShell (#400 c1). `true` on Windows
+    /// AppContainer: `powershell.exe` / `pwsh.exe` cannot load .NET / GAC
+    /// assemblies under the Low-integrity restricted token
+    /// (`STATUS_DLL_NOT_FOUND`, `0xC0000135`).
+    pub blocks_powershell: bool,
+    /// What [`Self::blocks_powershell`] MEANS for a command the operator
+    /// types, in one sentence, or `None` when the backend runs PowerShell
+    /// (#400 c3).
+    ///
+    /// A boolean alone is the failure `#368` c6 identified in the other
+    /// capability rows: accurate, and unreadable as a posture. What the
+    /// operator actually observes is a `powershell` command running under a
+    /// different shell, so the consequence is stated rather than left to be
+    /// inferred — and it is carried as ONE string projected into both arms,
+    /// so the human and `--json` wordings cannot drift apart.
+    pub powershell_downgrade: Option<String>,
     /// Why `available` is `false`, when the backend knows (#369 c2). An
     /// operator must not have to provoke an `execute()` to find out.
     pub unavailable_reason: Option<String>,
     /// What the selected backend is KNOWN not to do (#368, #369).
     pub known_limitations: Vec<String>,
+}
+
+/// The one sentence `#400` c3 asks for: the FACT plus the CONSEQUENCE.
+///
+/// Written once and projected into both arms of `sandbox status`, so the
+/// human render and the `--json` value a host integration reads cannot say
+/// different things. `None` when the backend runs PowerShell — a note that
+/// appeared for every backend would stop meaning anything.
+///
+/// The consequence is not hypothetical: `blocks_powershell` has four
+/// production call sites (`crates/wcore-tools/src/bash.rs`), every one of them
+/// passing it to `downgrade_unsupported_shell_for_sandbox`, which replaces the
+/// argv prefix with the canonical `cmd /C` one and keeps the command text.
+fn powershell_downgrade_note(blocks_powershell: bool, backend: &str) -> Option<String> {
+    blocks_powershell.then(|| {
+        format!(
+            "backend `{backend}` cannot run PowerShell, so the agent's Bash tool              DOWNGRADES a `powershell` / `pwsh` command (and `bash` / `sh`) to              `cmd /C` and runs it there: your command text is preserved, the              shell you asked for is not. A command that depends on PowerShell              syntax will fail or behave differently, and nothing else on this              host tells you why."
+        )
+    })
 }
 
 impl SandboxStatus {
@@ -160,6 +195,11 @@ impl SandboxStatus {
             owns_descendants_hard: registry.owns_descendants_hard(),
             binds_cwd_authority: registry.binds_cwd_authority(),
             binds_workspace_authority: registry.binds_workspace_authority(),
+            blocks_powershell: registry.blocks_powershell(),
+            powershell_downgrade: powershell_downgrade_note(
+                registry.blocks_powershell(),
+                registry.backend_name(),
+            ),
             unavailable_reason: registry.unavailable_reason(),
             known_limitations: registry
                 .known_limitations()
@@ -179,6 +219,8 @@ impl SandboxStatus {
             "owns_descendants_hard": self.owns_descendants_hard,
             "binds_cwd_authority": self.binds_cwd_authority,
             "binds_workspace_authority": self.binds_workspace_authority,
+            "blocks_powershell": self.blocks_powershell,
+            "powershell_downgrade": self.powershell_downgrade,
             "unavailable_reason": self.unavailable_reason,
             "known_limitations": self.known_limitations,
         })
@@ -203,6 +245,8 @@ mod disclosure_tests {
             owns_descendants_hard: false,
             binds_cwd_authority: false,
             binds_workspace_authority: false,
+            blocks_powershell: false,
+            powershell_downgrade: None,
             unavailable_reason: None,
             known_limitations: Vec::new(),
         }
@@ -231,8 +275,8 @@ mod disclosure_tests {
     /// declare a limitation. One level up, the same hole is still open: the
     /// operator's read is `SandboxStatus`, and a field can reach the struct
     /// and never reach `--json`, which is the arm a host integration and every
-    /// script read. Nothing graded that, and `#400` c1 is about to add exactly
-    /// such a field (`blocks_powershell`).
+    /// script read. Nothing graded that, and `#400` c1 then added exactly such
+    /// a field (`blocks_powershell`, with `powershell_downgrade` beside it).
     ///
     /// The question is inverted rather than enumerated: not "did somebody
     /// remember to serialise this field?", which is undecidable over the
@@ -369,6 +413,9 @@ mod disclosure_tests {
         fn unavailable_reason(&self) -> Option<String> {
             self.0.unavailable_reason()
         }
+        fn blocks_powershell(&self) -> bool {
+            self.0.blocks_powershell()
+        }
         async fn execute(
             &self,
             _manifest: &wcore_sandbox::SandboxManifest,
@@ -406,6 +453,7 @@ mod disclosure_tests {
             .map(str::to_owned)
             .collect();
         let reason = backend.unavailable_reason();
+        let blocks_powershell = backend.blocks_powershell();
 
         let registry = SandboxRegistry::new(Arc::new(AvailabilityStub(backend)));
         let status = SandboxStatus::project(&registry);
@@ -464,6 +512,40 @@ mod disclosure_tests {
                              the human arm does not print it: {human}"
                         );
                     }
+                }
+                "blocks_powershell" => {
+                    assert!(
+                        blocks_powershell,
+                        "backend `{name}` is registered as declaring \
+                         `blocks_powershell` and answers `false`; the row and \
+                         the backend disagree, so nothing below grades anything"
+                    );
+                    assert_eq!(
+                        status.blocks_powershell, blocks_powershell,
+                        "backend `{name}` refuses PowerShell and the status an \
+                         operator reads says otherwise"
+                    );
+                    assert_eq!(
+                        json["blocks_powershell"], true,
+                        "backend `{name}` refuses PowerShell and the --json arm \
+                         a host integration reads does not say so: {json}"
+                    );
+                    let note = json["powershell_downgrade"].as_str().unwrap_or_else(|| {
+                        panic!(
+                            "backend `{name}` refuses PowerShell and the --json \
+                             arm carries no consequence (#400 c3): {json}"
+                        )
+                    });
+                    assert!(
+                        note.to_lowercase().contains("downgrad") && note.contains("cmd"),
+                        "the consequence must name what happens to the \
+                         operator's command, not restate the boolean: {note:?}"
+                    );
+                    assert!(
+                        human.contains(note),
+                        "backend `{name}` refuses PowerShell and the human arm \
+                         an operator reads does not print the consequence: {human}"
+                    );
                 }
                 other => panic!(
                     "row `{name}` declares `{other}`, which is in \
@@ -627,6 +709,120 @@ mod disclosure_tests {
              nothing here"
         );
     }
+
+    /// `#400` c1 + c2 + c3, on EVERY target — backend → [`SandboxRegistry`] →
+    /// [`SandboxStatus`] → both arms of `sandbox status`.
+    ///
+    /// # Why a sentinel backend and not the real one
+    ///
+    /// The only backend that answers `blocks_powershell() == true` is Windows
+    /// AppContainer, whose row in `BACKENDS_THAT_DISCLOSE` is
+    /// `DeclaredOn::WindowsOnly`. Grading only through that row would leave
+    /// this criterion ungraded on Linux and macOS — i.e. on every host the
+    /// release is actually built and tested on — and a criterion graded
+    /// nowhere the tests run is a criterion nothing defends. The sentinel
+    /// carries the capability instead, so the PATH is what is under test.
+    ///
+    /// # The red arm this is built for
+    ///
+    /// `#400` c2 asks that making `blocks_powershell` return `false` redden a
+    /// test. Every link is real here — the registry's delegate, the
+    /// projection, `to_json`, `render_status_human` — so mutating any one of
+    /// them reddens this. Asserting the boolean on the backend, which is what
+    /// `#368` c6 was first graded on, would survive all of them.
+    #[test]
+    fn a_backend_that_refuses_powershell_says_so_and_names_the_consequence() {
+        struct Sentinel(bool);
+
+        #[async_trait::async_trait]
+        impl wcore_sandbox::backends::SandboxBackend for Sentinel {
+            fn name(&self) -> &'static str {
+                "sentinel_powershell"
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+            fn blocks_powershell(&self) -> bool {
+                self.0
+            }
+            async fn execute(
+                &self,
+                _manifest: &wcore_sandbox::SandboxManifest,
+                _cmd: wcore_sandbox::SandboxCommand,
+            ) -> wcore_sandbox::Result<wcore_sandbox::SandboxOutput> {
+                unreachable!("a status read never executes a command")
+            }
+        }
+
+        let status = SandboxStatus::project(&SandboxRegistry::new(Arc::new(Sentinel(true))));
+        assert!(
+            status.blocks_powershell,
+            "the registry dropped the backend's answer before the status was \
+             even built"
+        );
+        let note = status
+            .powershell_downgrade
+            .clone()
+            .expect("a backend that refuses PowerShell must say what that does");
+
+        // c3: the CONSEQUENCE, not only the fact. An operator who sees a
+        // `powershell` command run under `cmd` has to be able to attribute it.
+        let lower = note.to_lowercase();
+        assert!(
+            lower.contains("downgrad") && lower.contains("cmd"),
+            "the disclosure restates the boolean instead of naming what \
+             happens to the operator's command: {note:?}"
+        );
+
+        let json = status.to_json();
+        assert_eq!(
+            json["blocks_powershell"], true,
+            "a host integration and every script read this arm and nothing \
+             else: {json}"
+        );
+        assert_eq!(
+            json["powershell_downgrade"], note,
+            "the --json arm must carry the same consequence the human arm \
+             prints, or the desktop app and the terminal say different \
+             things: {json}"
+        );
+
+        let human = super::render_status_human(&status);
+        assert!(
+            human.contains("blocks powershell         true"),
+            "the fact must sit in the capability rows an operator scans: {human}"
+        );
+        assert!(
+            human.contains(note.as_str()),
+            "an operator at a terminal reads this arm and nothing else. The \
+             `tracing::warn!` beside the four rewriting call sites does NOT \
+             reach them: with RUST_LOG unset only ERROR goes to stderr: {human}"
+        );
+
+        // WRONG-REFUSAL CONTROL, same body. A backend that runs PowerShell
+        // must not be described as refusing it — a disclosure that fires for
+        // everything discloses nothing, and it would send an operator hunting
+        // a downgrade that never happened.
+        let ok = SandboxStatus::project(&SandboxRegistry::new(Arc::new(Sentinel(false))));
+        assert!(!ok.blocks_powershell);
+        assert_eq!(ok.powershell_downgrade, None);
+        let ok_json = ok.to_json();
+        assert_eq!(ok_json["blocks_powershell"], false);
+        assert!(
+            ok_json["powershell_downgrade"].is_null(),
+            "nothing recorded must serialise as null, never as an empty \
+             string a consumer cannot tell from a blank cause: {ok_json}"
+        );
+        let ok_human = super::render_status_human(&ok);
+        assert!(
+            !ok_human.to_lowercase().contains("refuses powershell"),
+            "a backend that RUNS PowerShell was told it does not: {ok_human}"
+        );
+        assert!(
+            ok_human.contains("blocks powershell         false"),
+            "the row must still be readable as a negative answer: {ok_human}"
+        );
+    }
 }
 
 /// Resolve the workspace root the sandbox will be scoped to.
@@ -755,6 +951,20 @@ fn render_status_human(status: &SandboxStatus) -> String {
         "binds workspace authority {}",
         status.binds_workspace_authority
     );
+    let _ = writeln!(
+        out,
+        "blocks powershell         {}",
+        status.blocks_powershell
+    );
+    if let Some(note) = &status.powershell_downgrade {
+        let _ = writeln!(out);
+        let _ = writeln!(
+            out,
+            "NOTE: backend `{}` refuses PowerShell, and your command is CHANGED:",
+            status.backend
+        );
+        let _ = writeln!(out, "      {note}");
+    }
     if let Some(why) = &status.unavailable_reason {
         let _ = writeln!(out);
         let _ = writeln!(out, "UNAVAILABLE, and the backend knows why:");

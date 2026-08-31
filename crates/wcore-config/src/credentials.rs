@@ -3,17 +3,31 @@
 //! Closes SECURITY MAJOR #16 (API keys + AWS secret + GCP secret persisted
 //! in plaintext config with default OS permissions).
 //!
-//! Two backends ship:
+//! LADDER: keyring -> encrypted vault -> refuse
 //!
-//! * `PlaintextCredentialsStore` — backs onto the existing
-//!   `~/.config/wayland-core/config.toml` path; every save enforces
-//!   `0o600` perms on Unix and tries a deny-all ACL on Windows. The
-//!   fallback half of the default `Auto` backend (and the explicit
-//!   `backend = "plaintext"` opt-out).
-//! * `KeyringCredentialsStore` — uses the OS credential store via the
-//!   `keyring` crate (macOS Keychain, Windows Credential Manager, Linux
-//!   Secret Service). Behind the `keyring` cargo feature (on by default
-//!   in this workspace) and selected via `backend = "keyring"`.
+//! That is the whole write path of the default `Auto` backend, and the last
+//! rung is a REFUSAL rather than a downgrade: when neither secure rung is
+//! mounted, `LadderCredentialsStore::put` returns an error and no cleartext
+//! is written. `build_ladder` mounts those two and nothing else.
+//!
+//! Three stores ship:
+//!
+//! * `KeyringCredentialsStore` — the OS credential store via the `keyring`
+//!   crate (macOS Keychain, Windows Credential Manager, Linux Secret
+//!   Service). Behind the `keyring` cargo feature (on by default in this
+//!   workspace); top rung of the `Auto` ladder, and selectable on its own
+//!   via `backend = "keyring"`.
+//! * `EncryptedFileCredentialsStore` — Argon2id-derived key +
+//!   XChaCha20-Poly1305 over a TOML secrets table. Second rung, mounted only
+//!   when unlock material is present; selectable via
+//!   `backend = "encrypted_file"`.
+//! * `PlaintextCredentialsStore` — the legacy `0o600` file (deny-all ACL on
+//!   Windows). Under `Auto` it is READ-AND-DELETE-ONLY: it is consulted on
+//!   read so pre-existing keys are not stranded, and a value found there is
+//!   promoted to a secure rung and then deleted. The `Auto` ladder never
+//!   writes to it. It becomes a write target only through the explicit
+//!   `backend = "plaintext"` opt-out, which prints a warning to stderr when
+//!   the store is opened.
 //!
 //! The trait is intentionally minimal so callers can also swap in a
 //! test-only in-memory store. Lookups go through `Config::resolve_*`
@@ -37,14 +51,30 @@ use thiserror::Error;
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CredentialsBackend {
-    /// Default: prefer the OS keyring, transparently falling back to the
-    /// plaintext `0o600` file when no keyring is available (headless Linux,
-    /// CI). Reads consult the keyring first, then plaintext, so credentials
-    /// written by either backend — including pre-existing plaintext keys —
-    /// stay resolvable; new writes prefer the keyring. Closes the
-    /// "secrets cleartext by default" finding (deep-sweep F16) without
-    /// breaking headless or stranding existing keys. Set `backend =
-    /// "plaintext"` to opt back in to the legacy always-plaintext store.
+    /// Default: the fail-closed credential ladder.
+    ///
+    /// LADDER: keyring -> encrypted vault -> refuse
+    ///
+    /// [`build_ladder`] mounts the OS keyring (skipped for an isolated
+    /// `WAYLAND_HOME` profile, whose top rung is the in-home vault) and then
+    /// the encrypted vault when its unlock material is present, and mounts
+    /// nothing else as a write target. When neither is mounted, `put`
+    /// REFUSES — it returns `no_secure_backend_for_write` and no cleartext is
+    /// written — and `warn_no_secure_credential_tier` says so on stderr.
+    ///
+    /// The legacy plaintext `0o600` file is READ-AND-DELETE-ONLY here: reads
+    /// still descend to it so credentials written before a secure tier
+    /// existed stay resolvable, and a value found there is promoted to the
+    /// top mounted rung and then deleted from below. Writing cleartext is
+    /// reachable only through the explicit `backend = "plaintext"` opt-out,
+    /// which prints a warning to stderr when the store is opened.
+    ///
+    /// Stated at this length on purpose. The earlier version of this comment
+    /// described a transparent downgrade to the cleartext file that the code
+    /// refuses, ~2,650 lines away from the `put` that refuses it, and three
+    /// independent readings took the claim at face value
+    /// (FerroxLabs/wayland-core#397). `credentials_documented_ladder_matches_code`
+    /// now fails if this block and the code disagree again.
     #[default]
     Auto,
     /// Plaintext TOML on disk with `0o600` perms enforced.

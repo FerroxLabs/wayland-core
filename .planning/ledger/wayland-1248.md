@@ -70,19 +70,37 @@ RED arm for the guard: restoring `rollback_tool.rs`'s consumer to `Ok(FileMutati
 
 Named, not silent:
 
-* **Windows -- CORRECTED 2026-08-30, the earlier claim here was FALSE.** Both c3 tests are
-  `#[cfg(any(target_os = "linux", target_os = "macos"))]` because this workspace has no Windows
-  executor, NOT because the path is unreachable. The previous note asserted `ReplaceFileW`
-  "hands nothing back to judge" and that `intercepted_save` is "structurally always `None`" on
-  Windows. That reproduced the exact reading `wcore_config::atomic_io` already records as
-  "simply wrong about `lpBackupFileName`". Measured by compile probe on the Windows target with
-  a Linux control in the same pass: the `#[cfg(windows)]` arm of `publish_displacing` returns
-  `Swap::Displaced(backup)` and `restore` returns `Ok(Some(exchanged_out))`, both live
-  (`cargo check --target x86_64-pc-windows-gnu` = 101 with the probe, Linux control = 0), so
-  `Refusal { intercepted_save: Some(..) }` is reachable there. What is true is narrower and is
-  a COVERAGE gap, now tracked as FerroxLabs/wayland#1268: the path is unexercised on Windows,
-  and whether it behaves correctly there is unmeasured. c4's control tests, the producer
-  sweep's subject and the source guard all run on every platform.
+* **Windows -- CORRECTED TWICE. Read the whole bullet; the middle version is also stale.**
+
+  *The original claim, FALSE.* This note asserted that `ReplaceFileW` "hands nothing back to
+  judge, so no save can be intercepted there at all" and that `intercepted_save` is
+  "structurally always `None`" on Windows. That reproduced the exact reading
+  `wcore_config::atomic_io:442-451` already records as "simply wrong about `lpBackupFileName`",
+  and it converted a true residual -- *the notice path is untested on Windows* -- into a false
+  one -- *it cannot happen on Windows*. The false version is what justified filing no follow-up.
+  Measured by compile probe on the Windows target with a Linux control in the same pass: the
+  `#[cfg(windows)]` arm of `publish_displacing` returns `Swap::Displaced(backup)` and `restore`
+  returns `Ok(Some(exchanged_out))`, both live (`cargo check --target x86_64-pc-windows-gnu`
+  = 101 with the probe, Linux control = 0), so `Refusal { intercepted_save: Some(..) }` is
+  reachable there.
+
+  *The 2026-08-30 correction, now itself STALE.* It replaced the impossibility with the real
+  reason -- the tests were gated `#[cfg(any(target_os = "linux", target_os = "macos"))]`
+  because this workspace has no Windows executor -- and stated it in the present tense. The gate
+  is GONE: `7d4a7c928` ungated both `the_vfs_path_names_a_save_the_refusal_displaced`
+  (`write.rs`) and `the_vfs_edit_path_names_a_save_the_refusal_displaced` (`edit.rs`), so they
+  are compiled and run on every target this workspace builds. A reader taking this bullet at
+  face value would go looking for a `cfg` that is not there.
+
+  *What is true at this commit.* Neither test is gated. The reason they once were was the
+  absent Windows executor and never a structural impossibility. Whether they PASS on a Windows
+  host is a separate question, is not answered here, and is FerroxLabs/wayland#1268 c2 -- whose
+  ledger records it as not-met, on this branch, for the reason that this lane has no Windows
+  host. `write.rs`'s own doc comment says the same thing in the same words, deliberately: the
+  place a reader lands first must not be the place that is wrong. c4's control tests, the
+  producer sweep's subject and the source guard all run on every platform, and
+  `crates/wcore-config/tests/issue_1268_windows_impossibility_guard.rs` fails the build if a
+  doc comment in `wcore-tools` or `wcore-config` asserts the impossibility again.
 * **`RollbackTool` renders its own sentence.** It names the preserved path, so the notice is not
   lost, but it composes bespoke prose instead of going through `conflict_message`, because its
   surface is a suspension reason and not a tool refusal. The source guard covers the

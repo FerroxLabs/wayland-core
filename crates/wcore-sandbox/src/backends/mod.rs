@@ -651,9 +651,19 @@ mod tests {
 /// cause — the twelve silent days of `#369` — goes back to being unreadable.
 ///
 /// So this is the SET, and the two checks below are total over the SURFACE
-/// rather than over the one method somebody happened to fix. `#400` c1 adds
-/// `blocks_powershell` to it.
-pub const DISCLOSURE_METHODS: &[&str] = &["known_limitations", "unavailable_reason"];
+/// rather than over the one method somebody happened to fix. `#400` c1 added
+/// `blocks_powershell` to it: it is a capability fact that four production
+/// sites in `wcore_tools::bash` use to REWRITE the operator's argv
+/// (`downgrade_unsupported_shell_for_sandbox`), and until `#400` the only
+/// surface describing the sandbox's posture said nothing about it. The
+/// `tracing::warn!` beside that rewrite is not a disclosure: with `RUST_LOG`
+/// unset only `ERROR` reaches stderr, so the operator sees a different shell
+/// and no reason for it.
+pub const DISCLOSURE_METHODS: &[&str] = &[
+    "known_limitations",
+    "unavailable_reason",
+    "blocks_powershell",
+];
 
 /// Which targets a disclosing type is constructible on.
 ///
@@ -741,7 +751,11 @@ pub const BACKENDS_THAT_DISCLOSE: &[DisclosingBackend] = &[
         name: "appcontainer",
         source_file: "backends/appcontainer/windows_impl/process.rs",
         declared_on: DeclaredOn::WindowsOnly,
-        declares: &["known_limitations", "unavailable_reason"],
+        declares: &[
+            "known_limitations",
+            "unavailable_reason",
+            "blocks_powershell",
+        ],
     },
     DisclosingBackend {
         name: "appcontainer_stub",
