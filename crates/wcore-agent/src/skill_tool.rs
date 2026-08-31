@@ -178,9 +178,29 @@ impl SkillTool {
         self.permission_for(skill) == SkillPermission::Allow
     }
 
-    /// Build a comma-separated list of available skill names for error messages.
+    /// Available skill names for a not-found message, bounded in the skill
+    /// count.
+    ///
+    /// FerroxLabs/wayland#1280: this used to join EVERY visible name, so on a
+    /// machine with a thousand skills installed one mistyped name answered with
+    /// a thousand names in the tool result — the same unbounded-in-the-skill-
+    /// count term the prompt listing carried, relocated to the message stream.
+    /// It now names at most [`wcore_skills::prompt::SKILL_SEARCH_MAX_RESULTS`]
+    /// and points at the search for the rest.
     fn available_names(&self) -> String {
-        self.catalog.visible_names().join(", ")
+        let names = self.catalog.visible_names();
+        let total = names.len();
+        let shown = total.min(wcore_skills::prompt::SKILL_SEARCH_MAX_RESULTS);
+        let head = names[..shown].join(", ");
+        if total > shown {
+            format!(
+                "{head} (+{} more — call Skill with {{\"query\": \"<what you \
+                 need>\"}} to search all {total})",
+                total - shown
+            )
+        } else {
+            head
+        }
     }
 
     /// One telemetry event per call, whatever early-return path fires, with
@@ -244,10 +264,41 @@ impl SkillTool {
         vfs: &Arc<dyn VirtualFs>,
     ) -> (Option<String>, ToolResult) {
         let Some(skill_name) = input["skill"].as_str() else {
+            // FerroxLabs/wayland#1280 c2 — the reachability half of the skills
+            // ceiling. The system-prompt listing is capped at 1% of the resolved
+            // context window, so on a machine with many skills installed most of
+            // them are named nowhere the model can see. `{"query": ...}` ranks
+            // EVERY installed skill against the query and returns a bounded
+            // shortlist; the model then invokes one by exact name through the
+            // resolution below, which never consulted the listing in the first
+            // place. Without this branch the ceiling would silently refuse
+            // skills the session genuinely has, which is a worse defect than the
+            // prompt bytes it saves.
+            if let Some(query) = input["query"].as_str() {
+                let visible = self.catalog.visible();
+                let hits = wcore_skills::prompt::search_skills(
+                    &visible,
+                    query,
+                    wcore_skills::prompt::SKILL_SEARCH_MAX_RESULTS,
+                );
+                return (
+                    None,
+                    ToolResult {
+                        content: wcore_skills::prompt::format_skill_search_results(
+                            &hits,
+                            visible.len(),
+                        ),
+                        is_error: false,
+                    },
+                );
+            }
             return (
                 None,
                 ToolResult {
-                    content: "Missing required parameter: skill".to_string(),
+                    content: "Missing parameter: pass `skill` with a skill's exact \
+                              name to run it, or `query` to search the installed \
+                              skills for one."
+                        .to_string(),
                     is_error: true,
                 },
             );
@@ -468,9 +519,12 @@ impl Tool for SkillTool {
     }
 
     fn description(&self) -> &str {
-        "Invoke a named skill by name. \
-         Use the skill name exactly as listed in the system prompt. \
-         Optionally pass arguments as a single string."
+        "Invoke a named skill, or search for one. Pass `skill` with the exact \
+         name to run it. The system prompt lists only as many skills as fit its \
+         budget, so when what you need is not listed there, pass `query` instead \
+         to search EVERY installed skill by name and description, then invoke the \
+         one you want by its exact name. Optionally pass arguments as a single \
+         string."
     }
 
     fn input_schema(&self) -> JsonSchema {
@@ -484,9 +538,15 @@ impl Tool for SkillTool {
                 "args": {
                     "type": "string",
                     "description": "Optional arguments for the skill"
+                },
+                "query": {
+                    "type": "string",
+                    "description": "Search every installed skill by name and \
+        description instead of invoking one. Use this when the skill you need is not in \
+        the system prompt's listing, which is capped at a fraction of the context window."
                 }
             },
-            "required": ["skill"]
+            "required": []
         })
     }
 
@@ -767,7 +827,43 @@ mod tests {
         let tool = tool_with(vec![]);
         let result = tool.execute(json!({})).await;
         assert!(result.is_error);
-        assert!(result.content.contains("Missing required parameter"));
+        // FerroxLabs/wayland#1280 c2: `skill` is no longer the only way in, so
+        // the message names both and this test checks it names both.
+        assert!(result.content.contains("Missing parameter"));
+        assert!(result.content.contains("skill"));
+        assert!(result.content.contains("query"));
+    }
+
+    /// FerroxLabs/wayland#1280 c2 — the discovery mode of the same tool.
+    #[tokio::test]
+    async fn test_query_searches_instead_of_invoking() {
+        let tool = tool_with(vec![
+            make_skill("commit", "body"),
+            make_skill("reticulate-splines", "body"),
+        ]);
+        let result = tool.execute(json!({ "query": "reticulate splines" })).await;
+        assert!(
+            !result.is_error,
+            "a search is not an error: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("reticulate-splines"),
+            "the search did not name the matching skill: {}",
+            result.content
+        );
+
+        // CONTROL: a query matching nothing says so rather than listing
+        // everything, which is what made the not-found path unbounded.
+        let miss = tool
+            .execute(json!({ "query": "zzzz-nothing-matches" }))
+            .await;
+        assert!(!miss.is_error);
+        assert!(
+            !miss.content.contains("reticulate-splines"),
+            "a miss returned a hit: {}",
+            miss.content
+        );
     }
 
     #[tokio::test]
@@ -992,15 +1088,21 @@ mod supplemental_tests {
         assert_eq!(tool.name(), "Skill");
     }
 
+    /// `skill` stopped being schema-required when `query` arrived
+    /// (FerroxLabs/wayland#1280 c2): a call carrying only `query` is valid, and
+    /// a provider enforcing `required: ["skill"]` would refuse the one path a
+    /// model has to a skill the listing trimmed. Exactly-one-of is enforced in
+    /// `execute_inner`, which answers a call with neither by naming both.
     #[test]
-    fn tc_12_2_schema_skill_required() {
+    fn tc_12_2_schema_offers_skill_and_query_and_requires_neither() {
         let tool = tool_with(vec![]);
         let schema = tool.input_schema();
-        let required = schema["required"].as_array().unwrap();
-        let names: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
+        let props = schema["properties"].as_object().unwrap();
+        assert!(props.contains_key("skill"));
+        assert!(props.contains_key("query"));
         assert!(
-            names.contains(&"skill"),
-            "schema required must contain 'skill'"
+            schema["required"].as_array().unwrap().is_empty(),
+            "requiring either parameter would refuse the other's call shape"
         );
     }
 

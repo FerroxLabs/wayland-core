@@ -746,9 +746,16 @@ mod tests {
         );
     }
 
+    /// A budget too small for even a name drops the entry and says so.
+    ///
+    /// This used to assert that a 50-token window (a 2-character budget) still
+    /// rendered `- nb-skill` — minimal mode emitting names with nothing capping
+    /// the total, which is one of the three unbounded terms
+    /// FerroxLabs/wayland#1280 c1 removed. The listing is now clamped, and what
+    /// it clamps away it counts and points at: the model reaches a trimmed
+    /// skill through `Skill { query }`, not through the listing.
     #[test]
-    fn test_build_system_prompt_small_budget_triggers_minimal_mode() {
-        // context_window_tokens = 50 → budget = 2 chars, triggers minimal mode for non-bundled
+    fn test_build_system_prompt_budget_below_one_entry_trims_and_says_so() {
         let skill = make_test_skill("nb-skill", &"x".repeat(100), false, false);
         let result = build_system_prompt(
             &mut SystemPromptCache::new(),
@@ -763,15 +770,32 @@ mod tests {
             &[],
             false,
         );
-        // Minimal mode: skill appears as name only, no ': '
         assert!(
-            result.contains("- nb-skill"),
-            "skill name should appear in minimal mode"
+            !result.contains("- nb-skill"),
+            "a 2-character budget cannot hold an entry, so none should be rendered"
         );
         assert!(
-            !result.contains("- nb-skill: "),
-            "non-bundled should not have description in minimal mode"
+            result.contains(wcore_skills::prompt::SKILL_OVERFLOW_HINT),
+            "the skill was dropped with no route back to it"
         );
+
+        // CONTROL: the same skill at a budget that fits IS listed in full, so
+        // the assertion above is about the budget and not about the skill.
+        let roomy = build_system_prompt(
+            &mut SystemPromptCache::new(),
+            None,
+            "/tmp",
+            "test-model",
+            &[make_test_skill("nb-skill", "short", false, false)],
+            Some(100_000),
+            None,
+            false,
+            false,
+            &[],
+            false,
+        );
+        assert!(roomy.contains("- nb-skill: short"));
+        assert!(!roomy.contains(wcore_skills::prompt::SKILL_OVERFLOW_HINT));
     }
 
     #[test]

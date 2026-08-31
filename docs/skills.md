@@ -251,6 +251,25 @@ from disk on demand and cached in a session-bounded 32-entry LRU.
 This means: adding 50 skills to a project no longer adds 50× body-length
 tokens to the prompt — only 50 rows of (name + ~250-char description).
 
+## The listing budget is a ceiling
+
+The listing gets **1% of the resolved context window**, in characters — 1,310
+characters on a 32,768-token model, 8,000 on a 200,000-token one. That is a hard
+ceiling, not a target: past it the listing degrades (full descriptions →
+truncated → names only, bundled skills included) and is then cut, ending in a
+line stating how many skills were withheld.
+
+Nothing is lost by being cut. The `Skill` tool takes an optional `query`:
+
+```json
+{"query": "convert a spreadsheet to a chart"}
+```
+
+which ranks **every** installed skill by name and description and returns a
+shortlist of up to ten. Invoke the one you want by its exact name — resolution
+never consulted the listing, so a skill that is installed is always callable
+whether it was listed or not.
+
 ## Artifacts (W4)
 
 A skill can declare files to be written when it activates:
