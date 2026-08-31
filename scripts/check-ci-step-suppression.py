@@ -29,6 +29,15 @@ JOB = "  ci-linux:"
 # failure makes the later ones UNMEASURABLE, never for one that merely comes first.
 SUPPRESSIBLE = {
     "Report macOS runner budget": "reads inputs; nothing downstream can be graded if it cannot",
+    # NOT because its failure makes later steps unmeasurable -- it does not -- but
+    # because `wcore-protocol::contract_gate_topology::the_corpus_drift_step_is_a_gate_
+    # and_carries_nothing_that_could_silence_it` forbids ANY `if:` on it, including
+    # `!cancelled()`. That invariant is older and explicit: ask #2 narrowed the corpus
+    # gate to one standalone step, and a condition on it removes that coverage QUIETLY.
+    # Two invariants about the same step, and they genuinely conflict; the specific and
+    # pre-existing one wins over this general rule. Recorded rather than resolved, so
+    # whoever revisits either sees both.
+    "Check Desktop protocol contract corpus drift": "its own gate-topology test forbids any if:",
     "Reserve the outer-retry evidence tree": "sets up the evidence path later steps write to",
     "Pre-build tool_token_bench": "build prerequisite",
     "Pre-build wcore-cli release binary": "build prerequisite",

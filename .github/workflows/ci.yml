@@ -2270,7 +2270,6 @@ jobs:
       # _and_carries_nothing_that_could_silence_it` fails if either ever appears,
       # on the step or on this job.
       - name: Check Desktop protocol contract corpus drift
-        if: ${{ !cancelled() && steps.ci_image.outcome == 'success' }}
         run: $DOCKER_RUN "$CI_IMAGE" cargo run -p wcore-protocol --bin wcore-contract -- check
 
       # WCORE_SMOKE_REQUIRE_PREBUILT=1 (passed into the container): a missing
