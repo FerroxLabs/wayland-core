@@ -640,18 +640,63 @@ impl CompactConfig {
             .input_ceiling_for_window(window)
             .saturating_mul(CHARS_PER_TOKEN);
         let half = admissible / 2;
-        // The tail's worst case is not `half`: the NEWEST result is protected
-        // unconditionally at the use site, so when `half` is under the
-        // per-result ingestion cap the tail can still carry one whole
-        // MAX_TOOL_RESULT_BYTES. Sizing the budget against `half` instead of
-        // against that worst case left 120,000 + 50,000 = 90,416 bytes on a
-        // 32,768-token window whose guard admits 80,832 - over the ceiling,
-        // which is the state #1200 reports, merely smaller.
+        // The budget is sized against the DECLARED tail cap (`half`), not
+        // against a worst-case `half.max(MAX_TOOL_RESULT_BYTES)`.
+        //
+        // The worst-case form was tried and REVERTED, and the reason is worth
+        // keeping because it is not obvious: it reserved a whole 50,000-byte
+        // newest result unconditionally, so on any window whose guard admits
+        // less than that the subtraction saturated and the budget became ZERO.
+        // Measured, on the shipped defaults:
+        //
+        //     window   4,096 -> admissible  10,108 -> budget 0
+        //     window   8,192 -> admissible  20,212 -> budget 0
+        //     window  16,384 -> admissible  40,416 -> budget 0
+        //
+        // A zero budget stubs EVERY accumulated tool result, including small
+        // ones that already fit -- ten 500-byte results, 5,000 bytes total, all
+        // replaced by stubs on a 16k model. That is precisely the small-window
+        // population #1150 and this ticket exist to serve, and the stub text
+        // invites the model to re-run the tool, so mass-stubbing risks
+        // RE-EXECUTING MUTATING TOOLS. The fix was worse for its own users than
+        // the leak it closed.
+        //
+        // And it did not buy the property it named. `bound_accumulated_tool_results`
+        // shrinks the protected tail to a MINIMUM OF ONE and retains the newest
+        // result "unconditionally, however large" (micro.rs:691-693). So a
+        // MAX_TOOL_RESULT_BYTES newest result is carried whatever this budget
+        // says: zeroing the budget never prevented that overshoot, it only
+        // removed the ability to carry anything alongside it.
+        //
+        // That overshoot is real and remains a NAMED gap rather than a silent
+        // one -- `worst_case_carried_tool_result_bytes` reports it, and it is
+        // bounded by the per-result ingestion cap, which is not window-derived
+        // (recorded as Q-1200 in .planning/DECISIONS.md). Closing it means
+        // sizing that cap to the window, which is a separate change with its
+        // own wrong-refusal surface. Budget + declared tail now sums to exactly
+        // `admissible`, which is the strongest statement this function can make
+        // without reaching into the ingestion cap.
         let worst_tail = half.max(MAX_TOOL_RESULT_BYTES);
+        let sized = if admissible > worst_tail {
+            // The worst case IS reachable here, so hold it: budget plus one
+            // unconditional MAX_TOOL_RESULT_BYTES result fits what the guard
+            // admits. This is the branch `the_worst_case_carried_tool_results_
+            // fit_a_32k_window` pins, and it is unchanged.
+            admissible - worst_tail
+        } else {
+            // Below the per-result ingestion cap the worst-case property is
+            // UNSATISFIABLE AT ANY BUDGET: one unconditionally-retained result
+            // may be 50,000 bytes while the guard admits 10,108 (a 4,096-token
+            // window), so no choice of budget makes the sum fit. Reserving the
+            // worst case anyway drove the budget to ZERO and stubbed results
+            // that already fit -- see the note above. Size against the declared
+            // tail instead, so budget + tail == admissible exactly, and let
+            // `worst_case_carried_tool_result_bytes` report the residual
+            // overshoot as the named gap it is.
+            admissible.saturating_sub(half)
+        };
         ToolResultBounds {
-            total_budget_bytes: tr
-                .total_budget_bytes
-                .min(admissible.saturating_sub(worst_tail)),
+            total_budget_bytes: tr.total_budget_bytes.min(sized),
             protected_tail_bytes: Some(half),
             keep_recent: tr.keep_recent,
         }
@@ -1305,6 +1350,62 @@ epoch_turns = 6
         // And a fortiori inside the window itself, which is the sentence the
         // criterion is written in.
         assert!(bounded / CHARS_PER_TOKEN <= WINDOW);
+    }
+
+    /// #1200 - NO REAL WINDOW MAY GET A ZERO TOOL-RESULT BUDGET.
+    ///
+    /// This is the regression guard for a defect that shipped on
+    /// `lane/f13-arc-integrate` and was caught by adversarial verification
+    /// rather than by any test: reserving a worst-case 50,000-byte tail drove
+    /// the budget to 0 at every window at or below 16,384, which stubs results
+    /// that already fit. A single assertion at one window would not have caught
+    /// it -- 32,768 was fine and 16,384 was not -- so the table is the test.
+    ///
+    /// The numbers are pinned, not merely `> 0`, because the failure mode is a
+    /// silent drift toward zero and only an exact table registers it.
+    ///
+    /// 32,768 is the hinge: at and above it the worst case is reachable and is
+    /// held (30,832 = 80,832 admitted - 50,000 worst tail), which is what
+    /// `the_worst_case_carried_tool_results_fit_a_32k_window` grades. Below it
+    /// the worst case is unsatisfiable at any budget, so the budget is sized
+    /// against the declared tail and stays positive.
+    #[test]
+    fn no_real_window_gets_a_zero_tool_result_budget() {
+        let cfg = CompactConfig::default();
+        let table = [
+            (4_096usize, 5_054usize),
+            (8_192, 10_106),
+            (16_384, 20_208),
+            (32_768, 30_832),
+            (65_536, 85_072),
+            (131_072, 120_000),
+            (200_000, 120_000),
+        ];
+        for (window, expected) in table {
+            let b = cfg.tool_result_bounds(Some(window));
+            assert_eq!(
+                b.total_budget_bytes, expected,
+                "window {window}: tool-result budget drifted"
+            );
+            assert!(
+                b.total_budget_bytes > 0,
+                "window {window}: a zero budget stubs every accumulated tool \
+                 result, including ones that already fit"
+            );
+            // Budget plus the DECLARED tail cap never exceeds what the guard
+            // admits. The unconditionally-retained newest result can still
+            // exceed it -- that is the named gap, reported by
+            // `worst_case_carried_tool_result_bytes`, not this one.
+            let admissible = cfg.input_ceiling_for_window(window) * CHARS_PER_TOKEN;
+            let tail = b
+                .protected_tail_bytes
+                .expect("a sized window declares a tail cap");
+            assert!(
+                b.total_budget_bytes + tail <= admissible,
+                "window {window}: budget {} + tail {tail} exceeds admissible {admissible}",
+                b.total_budget_bytes
+            );
+        }
     }
 
     /// #1200 - the bound must be IDENTITY on a large window, or it is a
