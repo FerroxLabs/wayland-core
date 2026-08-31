@@ -170,6 +170,20 @@ async fn a_nested_alternates_borrow_is_refused_whatever_its_target_is_named() {
 /// supports it and pointing an object database at another filesystem that way
 /// is ordinary practice. Read here by the RESOLVED path, which is the harder
 /// arm — reaching it through the symlink's own name is answered lexically.
+// UNIX-ONLY, and the gate is the fix for a BUILD break, not a test failure:
+// `std::os::unix::fs::symlink` does not exist on Windows, so without this the
+// whole `vfs_nested_store_deny` target fails to compile and `nextest` can run
+// NO wcore-tools test on Windows at all. Found by cross-checking
+// `--target x86_64-pc-windows-gnu`, after a real Windows run died here before
+// reaching a single test.
+//
+// Ported rather than gated would be wrong: Windows has symlinks, but creating
+// one needs SeCreateSymbolicLinkPrivilege unless Developer Mode is on, so the
+// ported arm would fail on an ordinary Windows host for a reason unrelated to
+// the property under test. The coverage loss is stated here rather than
+// silently taken -- every other arm in this file is platform-neutral and still
+// grades the nested-store refusal on Windows.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_symlinked_nested_store_leaf_is_refused_by_its_resolved_path() {
     let (_dir, root) = workspace();
