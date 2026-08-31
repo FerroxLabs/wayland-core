@@ -84,16 +84,53 @@ async fn the_engine_spills_where_this_session_can_read_it_back() {
     ];
     let provider = Arc::new(MockLlmProvider::with_turns(vec![turn1, turn2]));
 
+    // FerroxLabs/wayland#1235 ask 3 — the payload is DERIVED from the two
+    // thresholds it has to sit between, not written down beside them.
+    //
+    // It was `"x".repeat(480_000)` next to a hand-written window, and halving
+    // it to 120,000 made the test PASS WITHOUT SPILLING: the subject of the
+    // assertion quietly disappeared while every assertion still held, because
+    // `spilled_path` panics only when nothing spilled and 120,000 is under the
+    // shed's trigger. A test whose subject vanishes when one constant moves is
+    // one refactor away from grading nothing.
+    //
+    // The shed (#636) fires when the estimated request exceeds
+    // `input_ceiling_for_window(window)`; `truncate_result` caps the result at
+    // `max_result_size` BEFORE the estimate is taken, so the payload must clear
+    // the ceiling and stay under the cap. Both bounds are asserted below rather
+    // than trusted, so a change to the reserves, to `MAX_RESERVE_FRACTION`, or
+    // to the estimator's chars-per-token reds HERE with the arithmetic printed
+    // instead of silently un-spilling.
+    const CHARS_PER_TOKEN: usize = 4;
+    const WINDOW: usize = 60_000;
+    const MAX_RESULT_SIZE: usize = 600_000;
+
     let mut config = test_config();
     config.compact.enabled = false;
-    config.compact.context_window = Some(60_000);
+    config.compact.context_window = Some(WINDOW);
     config.compact.output_reserve = 10_000;
     config.compact.emergency_buffer = 10_000;
 
+    let ceiling_chars = config.compact.input_ceiling_for_window(WINDOW) * CHARS_PER_TOKEN;
+    // Twice the ceiling: comfortably over the trigger without sitting on it, so
+    // a small change in the estimator's overhead cannot flip the subject off.
+    let payload_chars = ceiling_chars * 2;
+    assert!(
+        payload_chars > ceiling_chars,
+        "the payload ({payload_chars} chars) must exceed the {ceiling_chars}-char shed trigger, \
+         or this test passes without ever spilling"
+    );
+    assert!(
+        payload_chars < MAX_RESULT_SIZE,
+        "the payload ({payload_chars} chars) must stay under the {MAX_RESULT_SIZE}-char \
+         max_result_size, or truncate_result cuts it back below the trigger before the shed \
+         is ever consulted"
+    );
+
     let mut registry = ToolRegistry::new();
-    let huge = "x".repeat(480_000);
+    let huge = "x".repeat(payload_chars);
     registry.register(Box::new(
-        MockTool::new("mock_tool", &huge, false).with_max_result_size(600_000),
+        MockTool::new("mock_tool", &huge, false).with_max_result_size(MAX_RESULT_SIZE),
     ));
     // Exactly what bootstrap installs for a Workspace posture.
     registry.set_tool_vfs(Arc::new(SandboxedFs::new(RealFs, workspace.path())));
