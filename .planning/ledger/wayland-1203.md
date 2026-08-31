@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "The spend-audit trail is keyed by a throwaway UUID minted per engine construction, then swapped for the real session id on a /model rebind"
 status: open
-last_verified_commit: e4cf8c10
+last_verified_commit: 50c6aad6
 criteria:
   - id: c1
     text: "install_spend_guard receives the authoritative budget_session_id() at all three call sites, not uuid::Uuid::new_v4() at two of them"

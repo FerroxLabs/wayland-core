@@ -914,37 +914,6 @@ impl WorkspacePolicy {
         self.fs_confinement_backend.as_deref()
     }
 
-    /// True when `path` is inside a standing grant that confers WRITE.
-    ///
-    /// The write sibling of
-    /// [`is_session_read_granted`](Self::is_session_read_granted), and the
-    /// predicate `SandboxedFs`'s mutating operations ask.
-    pub fn is_session_write_granted(&self, path: &Path) -> bool {
-        // #383 c3 — resolver: `canon_for_scope`, and the reason is not that the
-        // weak one is good enough here: this predicate HAS NO PRODUCTION CALL
-        // SITE. Grepped at the tree that closed #383 — the only callers are two
-        // assertions in `tests/path_write_grant_test.rs`. The write path is
-        // gated by `SandboxedFs::contain_write`, which resolves the
-        // dangling-link boundary itself through `landing_prefix` before
-        // comparing against the live grants, so moving THIS to the deeper
-        // resolver would change nothing that runs and would dress an uncalled
-        // predicate up as a hardened one.
-        //
-        // That is FerroxLabs/wayland-core#384's finding, filed independently,
-        // and its c1 is the decision this note is deliberately NOT pre-empting:
-        // either this becomes the predicate the mutating VFS path asks, or it
-        // is deleted with its two tests. Whichever way #384 lands, the resolver
-        // question moves with it — if it ever becomes an enforcement point it
-        // must move to `canon_existing_ancestor` on that same change.
-        let canon = canon_for_scope(path);
-        let now = SystemTime::now();
-        self.session_path_grants
-            .read()
-            .iter()
-            .filter(|grant| grant.confers(now, true))
-            .any(|grant| canon.starts_with(&grant.root))
-    }
-
     /// Override the network posture. Used at bootstrap to grant `Inherit` to a
     /// genuinely-local session (see [`local_bash_network`]); the bare
     /// constructors stay on the fail-safe Deny default.
@@ -1290,6 +1259,10 @@ impl WorkspacePolicy {
 
     /// [`canon_existing_ancestor`], counted. See [`GuardCounters`].
     fn resolve(&self, path: &Path) -> PathBuf {
+        // #356 c4 — resolver: `canon_existing_ancestor`, because both predicates this feeds
+        // (`is_project_secret_resolved`, `is_vcs_content_store_resolved`) are
+        // security REFUSALS, and a refusal must judge where a path lands, not
+        // where its spelling sits. #383 moved them here from the weak one.
         self.guard_counters.resolves.fetch_add(1, Ordering::Relaxed);
         canon_existing_ancestor(path)
     }
@@ -1354,7 +1327,8 @@ impl WorkspacePolicy {
         // the real root was refused. See
         // `crates/wcore-tools/tests/repo_control_symlink.rs`.
         //
-        // #356: it was `canon_deep` until this line, and the doc comment above
+        // #356 c4 — resolver: `canon_existing_ancestor`.
+        // It was `canon_deep` until this line, and the doc comment above
         // claims a benign-named symlink "resolves before the prefix match".
         // That was only true of a link whose target already exists —
         // `std::fs::canonicalize` fails on a DANGLING one, and the walk-up form
@@ -1401,8 +1375,8 @@ impl WorkspacePolicy {
     /// their `SKILL.md` files through `wcore_config::atomic_write` / `std::fs`,
     /// never the tool VFS, so skill installation and drafting are unaffected.
     pub fn is_skill_source_path(&self, path: &Path) -> bool {
-        // #356 — WHICH resolver, stated here rather than only at its
-        // definition, because this file used to hold two with different escape
+        // #356 c4 — resolver: `canon_existing_ancestor`: WHICH resolver, stated
+        // here rather than only at its definition, because this file used to hold two with different escape
         // properties seventy lines apart and a reader here could not see that a
         // choice had been made. `canon_existing_ancestor` walks DOWN and
         // re-resolves after every component; the walk-UP-and-append-verbatim
@@ -1450,6 +1424,11 @@ impl WorkspacePolicy {
     /// that hands its path to the model should keep the target under
     /// [`root`](Self::root).
     pub fn ensure_write_target_readable(&self, path: &Path) -> Result<(), WriteTargetNotReadable> {
+        // #356 c4 — resolver: `canon_existing_ancestor`, on BOTH sides of the
+        // comparison. A write target whose directories do not exist yet must
+        // still be judged on where it would land, and a readable root reached
+        // through a symlink must be compared as its target; resolving only one
+        // side would make the prefix match answer on spelling.
         let resolved = canon_existing_ancestor(path);
         let covered = self
             .readable_roots()
@@ -2051,11 +2030,13 @@ impl WorkspacePolicy {
     /// the layer that will actually do the refusing: a prompt keyed to the
     /// wider list would stay silent for a path the tool then refuses anyway.
     pub fn is_read_reachable(&self, path: &Path) -> bool {
-        // #383 c3 — resolver: `canon_for_scope`, for the reason stated on
-        // [`is_session_write_granted`](Self::is_session_write_granted). This
-        // predicate decides whether to PROMPT, never whether to permit;
+        // #383 c3 — resolver: `canon_for_scope`, because this predicate
+        // decides whether to PROMPT, never whether to permit;
         // `SandboxedFs::contain_read` does the permitting and does its own
-        // dangling-link resolution.
+        // dangling-link resolution. (The reason used to be stated on
+        // the write-grant predicate deleted under
+        // FerroxLabs/wayland-core#384 as an enforcement predicate that
+        // enforced nothing.)
         let canon = canon_for_scope(path);
         canon.starts_with(&self.root) || self.is_session_read_granted(&canon)
     }
