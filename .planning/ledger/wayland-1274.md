@@ -3,7 +3,7 @@ issue: 1274
 repo: FerroxLabs/wayland
 kind: defect
 title: "A superseded criterion's successor is the first #N in its note, so prose decides where a residual is tracked"
-status: open
+status: closed
 last_verified_commit: 07ee39f6
 criteria:
   - id: c1

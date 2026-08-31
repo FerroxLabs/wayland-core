@@ -3,7 +3,7 @@ issue: 388
 repo: FerroxLabs/wayland-core
 kind: defect
 title: "GitTool reconstructs VCS content-store bytes in a Contained workspace (split from #244 c3)"
-status: open
+status: closed
 last_verified_commit: 30fd6cfde
 criteria:
   - id: c1

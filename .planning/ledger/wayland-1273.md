@@ -3,7 +3,7 @@ issue: 1273
 repo: FerroxLabs/wayland
 kind: defect
 title: "CI runs the ledger coverage gate with --offline, so a tracker can go invisible — and 29 issues did, for two days"
-status: open
+status: closed
 last_verified_commit: 07ee39f6
 criteria:
   - id: c1

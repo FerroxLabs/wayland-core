@@ -2,7 +2,7 @@
 issue: 361
 repo: FerroxLabs/wayland-core
 title: "Shared-process lib suite: active_approval_token_split_by_truncation_leaves_no_fragment fails its anti-vacuity control under load"
-status: open
+status: closed
 kind: defect
 last_verified_commit: d9f7e0a0
 criteria:

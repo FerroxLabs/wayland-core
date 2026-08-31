@@ -3,7 +3,7 @@ issue: 1239
 repo: FerroxLabs/wayland
 kind: defect
 title: "atomic_write_checked destroys a concurrent save that lands inside the exchange-to-verdict window, and the refusal is byte-identical to one that lost nothing"
-status: open
+status: closed
 last_verified_commit: 09d06e1ff
 criteria:
   - id: c1

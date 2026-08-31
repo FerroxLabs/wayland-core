@@ -3,7 +3,7 @@ issue: 1175
 repo: FerroxLabs/wayland
 kind: defect
 title: "A runtime-added MCP server's tools/list_changed is ignored for the life of the session"
-status: open
+status: closed
 last_verified_commit: 6cb9a119d
 criteria:
   - id: c1

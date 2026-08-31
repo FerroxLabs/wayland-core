@@ -3,7 +3,7 @@ issue: 1220
 repo: FerroxLabs/wayland
 kind: defect
 title: "A cleared flaky-allowlist entry came back through a merge, and nothing in this repo can detect a resurrected line"
-status: open
+status: closed
 last_verified_commit: 70a47aaed
 criteria:
   - id: c1

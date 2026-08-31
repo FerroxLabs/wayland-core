@@ -3,7 +3,7 @@ issue: 385
 repo: FerroxLabs/wayland-core
 kind: defect
 title: "every_spawn_site_owns_its_tree grades WRAPPING, never ownership, so it stayed green through a period the guard owned nothing"
-status: open
+status: closed
 last_verified_commit: 70a47aaed
 criteria:
   - id: c1

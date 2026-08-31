@@ -3,7 +3,7 @@ issue: 1216
 repo: FerroxLabs/wayland
 kind: defect
 title: "The report job's evidence floor cannot notice that the leg running the whole workspace suite contributed nothing"
-status: open
+status: closed
 last_verified_commit: 70a47aaed
 criteria:
   - id: c1

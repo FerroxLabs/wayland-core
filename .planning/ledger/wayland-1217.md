@@ -3,7 +3,7 @@ issue: 1217
 repo: FerroxLabs/wayland
 kind: defect
 title: "The Anthropic provider builds /v1/v1/messages and //v1/messages -- the defect #1178 fixed on the OpenAI wire, still armed here"
-status: open
+status: closed
 last_verified_commit: 1775bc762
 criteria:
   - id: c1

@@ -3,7 +3,7 @@ issue: 314
 repo: FerroxLabs/wayland-core
 kind: defect
 title: "grant_path, revoke_path and grant_workspace_capability are missing from the published desktop contract schema"
-status: open
+status: closed
 last_verified_commit: d8b422fe3
 criteria:
   - id: c1

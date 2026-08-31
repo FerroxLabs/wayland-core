@@ -3,7 +3,7 @@ issue: 1197
 repo: FerroxLabs/wayland
 kind: defect
 title: "The #1134 CI lint is structurally blind to the defect shape it was filed for: a set_var inside a non-test helper"
-status: open
+status: closed
 last_verified_commit: 70a47aaed
 criteria:
   - id: c1

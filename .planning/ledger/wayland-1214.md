@@ -3,7 +3,7 @@ issue: 1214
 repo: FerroxLabs/wayland
 kind: defect
 title: "Static context/output arms are live for host-variable open-weights ids, and model_output_ceiling ignores the provider entirely"
-status: open
+status: closed
 last_verified_commit: 1798076f
 criteria:
   - id: c1

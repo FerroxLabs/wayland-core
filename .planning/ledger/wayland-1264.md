@@ -3,7 +3,7 @@ issue: 1264
 repo: FerroxLabs/wayland
 kind: defect
 title: "Egress: an allowlisted apex is admitted on the host match alone, so tool-driven traffic is never shape-checked (split from #1195 c8)"
-status: open
+status: closed
 last_verified_commit: 4a738f2e
 criteria:
   - id: c1

@@ -3,7 +3,7 @@ issue: 1215
 repo: FerroxLabs/wayland
 kind: defect
 title: "The #1177 evidence wrapper cannot create target/nextest and kills the containerized Linux test leg on both attempts"
-status: open
+status: closed
 last_verified_commit: 1798076f
 criteria:
   - id: c1

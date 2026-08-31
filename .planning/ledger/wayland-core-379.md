@@ -3,7 +3,7 @@ issue: 379
 repo: FerroxLabs/wayland-core
 kind: defect
 title: "The #338 setsid hardening turns a quarantine git timeout into an unreaped detached process tree"
-status: open
+status: closed
 last_verified_commit: 8fdae557c
 criteria:
   - id: c1
