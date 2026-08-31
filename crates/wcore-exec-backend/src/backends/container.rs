@@ -849,13 +849,24 @@ impl ExecutionBackend for ContainerBackend {
     /// real wedged container, where the key-presence filter returned it and
     /// the current run's nonce returned nothing.
     ///
-    /// #366 d2 — WHICH CALLERS MOVE: none. `cancel()` keeps calling
-    /// `scan_orphans(entry.nonce)`, because "did MY removal leave residue"
-    /// is a question about one run and answering it with every tenant's
-    /// containers would report other tasks as that cancellation's failure.
-    /// `conformance.rs` keeps its scoped call for the same reason. This is a
-    /// new caller-facing question, reached from `wayland backend orphans`
-    /// with no `--nonce`.
+    /// #366 d2 — WHICH CALLERS MOVE: NONE. Every nonce-scoped production
+    /// caller keeps the scoped query, and each has its own reason:
+    ///
+    /// * `cancel()` (this file, via `list_containers_with_nonce(&entry.nonce)`
+    ///   directly — the same query `scan_orphans` wraps) re-enumerates to
+    ///   verify its OWN `docker rm -f`. "Did MY removal leave residue" is a
+    ///   question about one run; widening it would report another task's
+    ///   container as this cancellation's unremoved residual and turn a clean
+    ///   cancel into a false failure.
+    /// * `orphan::scan_all` and `wayland backend scan` are the F25 per-task
+    ///   gate and exit non-zero on a found orphan, so they must count only
+    ///   the surfaces of the task they were handed.
+    /// * `conformance.rs` scans a deliberately-unused nonce; #366 d4 states
+    ///   what that check does and does not establish.
+    /// * `wayland backend orphans --nonce <n>` is unchanged.
+    ///
+    /// This method is reached from `wayland backend orphans` with NO
+    /// `--nonce`: a new question, not an old one re-aimed.
     ///
     /// #366 d6 — REPORT ONLY, DECIDED, not left open. This scan does not
     /// remove anything, and the asymmetry with #365's submit-path reclaim is
