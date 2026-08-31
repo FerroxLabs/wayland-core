@@ -1721,6 +1721,7 @@ jobs:
           python3 scripts/flake-ledger.py --self-test
 
       - name: Free disk space (drop unused preinstalled toolchains)
+        if: ${{ !cancelled() }}
         run: |
           set -e
           echo "=== BEFORE ==="; df -h /
@@ -1736,6 +1737,7 @@ jobs:
           echo "=== AFTER ==="; df -h /
 
       - name: Build CI image (deps + cargo tools baked in)
+        if: ${{ !cancelled() }}
         id: ci_image
         run: |
           docker build -t "$CI_IMAGE" -f - . <<'EOF'

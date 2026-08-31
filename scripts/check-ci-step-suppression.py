@@ -21,10 +21,14 @@ JOB = "  ci-linux:"
 # Steps whose failure means the steps after them CANNOT produce a meaningful
 # verdict -- setup, disk, and the image every later step runs inside. Suppression
 # is correct here; the reason is recorded so the exemption is a decision.
+# `Free disk space` and `Build CI image` were exempt here for exactly one run, and
+# it was WRONG -- measured on the core#412 proof run. Neither depends on the checks
+# above it, so exempting them let one redaction violation skip the image and take
+# `Run tests`, `Clippy`, `Check formatting` and `Security audit` down with it: four
+# of the twenty-four steps this issue is about. Exemption is for a step whose
+# failure makes the later ones UNMEASURABLE, never for one that merely comes first.
 SUPPRESSIBLE = {
     "Report macOS runner budget": "reads inputs; nothing downstream can be graded if it cannot",
-    "Free disk space": "a full disk fails every later step for one cause, not twenty-four",
-    "Build CI image": "every build-dependent step runs INSIDE this image",
     "Reserve the outer-retry evidence tree": "sets up the evidence path later steps write to",
     "Pre-build tool_token_bench": "build prerequisite",
     "Pre-build wcore-cli release binary": "build prerequisite",
@@ -129,7 +133,7 @@ def self_test():
         True, expect="Some later gate somebody adds")
     arm("a new step that IS exempt, with its reason on file",
         lambda s: s.replace(
-            AUDIT, "      - name: Free disk space (second pass)\n        run: echo hi\n" + AUDIT, 1),
+            AUDIT, "      - name: Pre-build tool_token_bench (second pass)\n        run: echo hi\n" + AUDIT, 1),
         False)
     print("self-test: both directions proven" if ok else "self-test: FAILED")
     return 0 if ok else 1
