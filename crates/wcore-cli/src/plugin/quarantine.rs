@@ -504,8 +504,14 @@ pub fn announce_on_every_operator_sink(notice: &str) -> NoticeDelivery {
 /// `DETACHED_PROCESS` — the child is CREATED with no console and does not
 /// inherit ours (#338). Creation-time only; see
 /// [`harden_against_credential_prompt`]'s doc for the measured residual.
-#[cfg(windows)]
-const DETACHED_PROCESS: u32 = 0x0000_0008;
+///
+/// NOT `#[cfg(windows)]`, and `pub`, for the reason recorded on
+/// [`QUARANTINE_SPAWN_FLAGS`]: the two `#393` behavioural tests are
+/// `#![cfg(windows)]` and compile to nothing on every host our gates run on,
+/// so the VALUE of these flags is graded from Linux by
+/// `tests/issue_393_quarantine_spawn_flags_guard.rs`. A `u32` costs nothing on
+/// the platforms that never apply it.
+pub const DETACHED_PROCESS: u32 = 0x0000_0008;
 
 /// The creation flags every quarantine spawn is made with, composed in ONE
 /// place because `CommandExt::creation_flags` is a SETTER and not an OR.
@@ -513,7 +519,8 @@ const DETACHED_PROCESS: u32 = 0x0000_0008;
 /// # The trap this constant exists to remove (`#393`)
 ///
 /// `harden_against_credential_prompt` sets `DETACHED_PROCESS` for `#338`, and
-/// [`WindowsJobObject::create_suspended`](wcore_types::job_object::WindowsJobObject::create_suspended)
+/// `WindowsJobObject::create_suspended` (in `wcore_types::job_object`, which is
+/// itself `#![cfg(windows)]`, so this is not an intra-doc link)
 /// sets `CREATE_SUSPENDED` for `#393`. Both spell that as
 /// `command.creation_flags(..)`, which OVERWRITES. Composing them by calling
 /// both — in either order — silently drops one, and the one it drops when the
@@ -533,8 +540,20 @@ const DETACHED_PROCESS: u32 = 0x0000_0008;
 ///   `tests/quarantine_console_authority_windows.rs`, which drives a probe
 ///   through this exact spawn path and asserts it does not share the
 ///   operator's console. That is `#393` c3.
-#[cfg(windows)]
-const QUARANTINE_SPAWN_FLAGS: u32 = DETACHED_PROCESS | 0x0000_0004 /* CREATE_SUSPENDED */;
+///
+/// # Why it is not `#[cfg(windows)]`
+///
+/// Both proofs above run only on Windows, and both test files are
+/// `#![cfg(windows)]`, so on every host these gates actually execute on they
+/// compile to zero tests and this constant is provable by nothing. Leaving it
+/// gated would mean the OR could be edited back into a single flag with every
+/// green staying green. Ungated, `tests/issue_393_quarantine_spawn_flags_guard.rs`
+/// pins the composed VALUE — including that `DETACHED_PROCESS` is `0x8` and not
+/// `0x10` (`CREATE_NEW_CONSOLE`), which reads identically in source — from
+/// Linux. What that guard explicitly does NOT establish is that the flags reach
+/// `CreateProcessW` or have their effect; that stays Windows-only and is stated
+/// in its module doc rather than implied away.
+pub const QUARANTINE_SPAWN_FLAGS: u32 = DETACHED_PROCESS | 0x0000_0004 /* CREATE_SUSPENDED */;
 
 /// Build the `git` command `run_git` runs, hardened, without spawning it.
 ///
