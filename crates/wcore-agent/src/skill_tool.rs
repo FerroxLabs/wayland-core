@@ -827,7 +827,43 @@ mod tests {
         let tool = tool_with(vec![]);
         let result = tool.execute(json!({})).await;
         assert!(result.is_error);
-        assert!(result.content.contains("Missing required parameter"));
+        // FerroxLabs/wayland#1280 c2: `skill` is no longer the only way in, so
+        // the message names both and this test checks it names both.
+        assert!(result.content.contains("Missing parameter"));
+        assert!(result.content.contains("skill"));
+        assert!(result.content.contains("query"));
+    }
+
+    /// FerroxLabs/wayland#1280 c2 — the discovery mode of the same tool.
+    #[tokio::test]
+    async fn test_query_searches_instead_of_invoking() {
+        let tool = tool_with(vec![
+            make_skill("commit", "body"),
+            make_skill("reticulate-splines", "body"),
+        ]);
+        let result = tool.execute(json!({ "query": "reticulate splines" })).await;
+        assert!(
+            !result.is_error,
+            "a search is not an error: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("reticulate-splines"),
+            "the search did not name the matching skill: {}",
+            result.content
+        );
+
+        // CONTROL: a query matching nothing says so rather than listing
+        // everything, which is what made the not-found path unbounded.
+        let miss = tool
+            .execute(json!({ "query": "zzzz-nothing-matches" }))
+            .await;
+        assert!(!miss.is_error);
+        assert!(
+            !miss.content.contains("reticulate-splines"),
+            "a miss returned a hit: {}",
+            miss.content
+        );
     }
 
     #[tokio::test]
@@ -1052,15 +1088,21 @@ mod supplemental_tests {
         assert_eq!(tool.name(), "Skill");
     }
 
+    /// `skill` stopped being schema-required when `query` arrived
+    /// (FerroxLabs/wayland#1280 c2): a call carrying only `query` is valid, and
+    /// a provider enforcing `required: ["skill"]` would refuse the one path a
+    /// model has to a skill the listing trimmed. Exactly-one-of is enforced in
+    /// `execute_inner`, which answers a call with neither by naming both.
     #[test]
-    fn tc_12_2_schema_skill_required() {
+    fn tc_12_2_schema_offers_skill_and_query_and_requires_neither() {
         let tool = tool_with(vec![]);
         let schema = tool.input_schema();
-        let required = schema["required"].as_array().unwrap();
-        let names: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
+        let props = schema["properties"].as_object().unwrap();
+        assert!(props.contains_key("skill"));
+        assert!(props.contains_key("query"));
         assert!(
-            names.contains(&"skill"),
-            "schema required must contain 'skill'"
+            schema["required"].as_array().unwrap().is_empty(),
+            "requiring either parameter would refuse the other's call shape"
         );
     }
 
