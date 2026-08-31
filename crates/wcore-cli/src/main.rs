@@ -12028,7 +12028,30 @@ mod tests {
                 let source = std::fs::read_to_string(&path).expect("read rust source");
                 let source = strip_cfg_test_modules(&source);
                 let source = strip_line_comments(&source);
-                sources.push((path.display().to_string(), source));
+                // wayland-core#409 c3/c4. Every comparison downstream of this
+                // walk is written with `/` -- `ends_with("src/main.rs")`, the
+                // `EXEMPT` table's `"tui/surfaces/mod.rs"`, and the positive
+                // control's `rsplit_once("/src/")`. `Path::display` emits the
+                // PLATFORM separator, so on Windows all three stopped matching
+                // at once: the add-side lint asserted "discovery is broken and
+                // this lint grades an empty set" WHILE PRINTING the file it
+                // said it could not find, and the withdrawal-side lint lost its
+                // exemption and accused `dispatch_command` of a defect it does
+                // not have. Both were correct on Linux and red on the
+                // self-hosted runner, which is why nothing caught it until a
+                // Windows leg ran for the first time.
+                //
+                // Normalised once here rather than at three call sites, because
+                // a fourth comparison would inherit the bug. Guarded on
+                // `cfg!(windows)`: a backslash is a legal character in a Unix
+                // filename, and rewriting it there would be a different bug.
+                let display = path.display().to_string();
+                let display = if cfg!(windows) {
+                    display.replace('\\', "/")
+                } else {
+                    display
+                };
+                sources.push((display, source));
             }
         }
         sources
