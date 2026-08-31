@@ -15,6 +15,17 @@
 //! 3. **Nothing legitimate is refused** — a wrong refusal is a defect too, and
 //!    it is the one that gets shipped, because a refusal looks like the guard
 //!    working.
+//!
+//! FerroxLabs/wayland-core#384: two assertions in this file used to also ask
+//! `WorkspacePolicy::is_session_write_granted`. That predicate had NO
+//! production call site — its doc comment claimed `SandboxedFs`'s mutating
+//! operations asked it, and they never did — so those two assertions graded
+//! nothing reachable, and it has been deleted. The enclosing tests are
+//! deliberately KEPT: each drives `fs.write` / `fs.read` on the real
+//! `SandboxedFs`, which is the enforcement point (`contain_write` ->
+//! `contain_granted` -> `live_grant_roots`). Deleting them to satisfy the
+//! letter of "deleted together with the two tests that grade it" would remove
+//! #1104's definition-of-done arms and grade the live path less, not more.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -91,7 +102,6 @@ async fn a_granted_write_folder_can_be_written_and_read_back() {
     // A write grant IMPLIES a read grant. The reverse never holds.
     assert!(policy.writable_roots().contains(&granted));
     assert!(policy.readable_roots().contains(&granted));
-    assert!(policy.is_session_write_granted(&target));
     assert!(policy.is_session_read_granted(&target));
 }
 
@@ -148,7 +158,6 @@ async fn a_read_only_grant_on_the_same_folder_still_refuses_the_write() {
         "a read grant is somewhere the agent may LOOK"
     );
     assert!(!policy.writable_roots().contains(&granted));
-    assert!(!policy.is_session_write_granted(&target));
     assert_eq!(
         std::fs::read(&target).unwrap(),
         b"%PDF-1.7".to_vec(),

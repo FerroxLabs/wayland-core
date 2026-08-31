@@ -1792,6 +1792,21 @@ impl<F: VirtualFs> SandboxedFs<F> {
         self.contain_granted(path, true).await
     }
 
+    /// **The write-grant enforcement point.** FerroxLabs/wayland-core#384: this
+    /// is the predicate `SandboxedFs`'s mutating operations actually ask, and
+    /// the only one. `WorkspacePolicy::is_session_write_granted` used to carry
+    /// that claim in its own doc comment while having no production call site
+    /// at all; it is deleted, and the documentation lives here, on the code
+    /// that runs.
+    ///
+    /// A reader looking for "where is a write grant checked?" is looking at it.
+    /// The four mutating operations reach here through
+    /// [`contain_write`](Self::contain_write); the live roots come from
+    /// [`live_grant_roots`](Self::live_grant_roots); and the dangling-boundary
+    /// resolution below (`canonicalize_existing_prefix` + `landing_prefix`) is
+    /// this function's own, which is why a lexical `starts_with` on a
+    /// shallow-canonicalised path is NOT an equivalent question to ask.
+    ///
     /// Falls through to [`contain`](Self::contain) first so the ordinary
     /// in-workspace path is byte-for-byte unchanged, and so a session with no
     /// grants behaves exactly as it did before this existed. The grant check
@@ -1855,6 +1870,11 @@ impl<F: VirtualFs> SandboxedFs<F> {
     }
 
     /// The roots of every live grant conferring at least `write`.
+    ///
+    /// FerroxLabs/wayland-core#384: the write half of the grant question is
+    /// answered HERE and in [`contain_granted`](Self::contain_granted), not by
+    /// any predicate on `WorkspacePolicy`. The one that claimed otherwise had
+    /// no caller and is gone.
     ///
     /// Expiry is evaluated HERE, at use time, not when the grant was made: a
     /// long-running turn must lose access the moment the deadline passes, not

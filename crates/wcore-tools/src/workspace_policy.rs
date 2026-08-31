@@ -893,37 +893,6 @@ impl WorkspacePolicy {
         self.fs_confinement_backend.as_deref()
     }
 
-    /// True when `path` is inside a standing grant that confers WRITE.
-    ///
-    /// The write sibling of
-    /// [`is_session_read_granted`](Self::is_session_read_granted), and the
-    /// predicate `SandboxedFs`'s mutating operations ask.
-    pub fn is_session_write_granted(&self, path: &Path) -> bool {
-        // #383 c3 — resolver: `canon_for_scope`, and the reason is not that the
-        // weak one is good enough here: this predicate HAS NO PRODUCTION CALL
-        // SITE. Grepped at the tree that closed #383 — the only callers are two
-        // assertions in `tests/path_write_grant_test.rs`. The write path is
-        // gated by `SandboxedFs::contain_write`, which resolves the
-        // dangling-link boundary itself through `landing_prefix` before
-        // comparing against the live grants, so moving THIS to the deeper
-        // resolver would change nothing that runs and would dress an uncalled
-        // predicate up as a hardened one.
-        //
-        // That is FerroxLabs/wayland-core#384's finding, filed independently,
-        // and its c1 is the decision this note is deliberately NOT pre-empting:
-        // either this becomes the predicate the mutating VFS path asks, or it
-        // is deleted with its two tests. Whichever way #384 lands, the resolver
-        // question moves with it — if it ever becomes an enforcement point it
-        // must move to `canon_existing_ancestor` on that same change.
-        let canon = canon_for_scope(path);
-        let now = SystemTime::now();
-        self.session_path_grants
-            .read()
-            .iter()
-            .filter(|grant| grant.confers(now, true))
-            .any(|grant| canon.starts_with(&grant.root))
-    }
-
     /// Override the network posture. Used at bootstrap to grant `Inherit` to a
     /// genuinely-local session (see [`local_bash_network`]); the bare
     /// constructors stay on the fail-safe Deny default.
@@ -1135,6 +1104,12 @@ impl WorkspacePolicy {
     /// [`canon_existing_ancestor`], counted. See [`GuardCounters`].
     fn resolve(&self, path: &Path) -> PathBuf {
         self.guard_counters.resolves.fetch_add(1, Ordering::Relaxed);
+        // #356 c4 — resolver: `canon_existing_ancestor`, because every caller
+        // of this wrapper is a `SecretDenyFs` guard predicate and a guard must
+        // resolve the two escapes #1097 was written for (`..` after a missing
+        // component, and the dangling-symlink hop). This is the ONE place the
+        // guards get their resolution from, so the choice is stated once here
+        // rather than at each of them.
         canon_existing_ancestor(path)
     }
 
@@ -1196,6 +1171,12 @@ impl WorkspacePolicy {
         // link by hand (`resolve_prefix`), so the claim above is now true as
         // written. Graded by
         // `tests::a_dangling_symlink_into_the_skill_load_path_is_refused`.
+        //
+        // #356 c4 — resolver: `canon_existing_ancestor`, and NOT
+        // `canon_for_scope`: this predicate backs a write refusal, and the
+        // weak resolver appends the tail verbatim after the longest existing
+        // ancestor, which judges where the LINK sits rather than where the
+        // write lands.
         let canon = canon_existing_ancestor(path);
         REPO_CONTROL_DIRS
             .iter()
@@ -1248,6 +1229,12 @@ impl WorkspacePolicy {
         // and `tests::a_parent_dir_after_a_missing_component_still_reaches_the_skill_load_path`,
         // and end to end through the real `Write` tool by
         // `wcore-agent/tests/skill_source_write_refusal.rs`.
+        //
+        // #356 c4 — resolver: `canon_existing_ancestor` at BOTH calls in this
+        // function (the target and each user skill dir it is compared
+        // against). Resolving the two sides differently would compare a
+        // link-resolved path against an unresolved prefix, which is a
+        // mismatch, not a refusal.
         let canon = canon_existing_ancestor(path);
         if under_project_load_path(&canon) {
             return true;
@@ -1284,6 +1271,11 @@ impl WorkspacePolicy {
     /// that hands its path to the model should keep the target under
     /// [`root`](Self::root).
     pub fn ensure_write_target_readable(&self, path: &Path) -> Result<(), WriteTargetNotReadable> {
+        // #356 c4 — resolver: `canon_existing_ancestor`, on the target and
+        // on every readable root it is compared against. This is a refusal
+        // (#1097's unreadable-write-target check) and the target is routinely
+        // a file that does not exist yet, which is precisely where the weak
+        // resolver stops resolving.
         let resolved = canon_existing_ancestor(path);
         let covered = self
             .readable_roots()
@@ -1885,11 +1877,12 @@ impl WorkspacePolicy {
     /// the layer that will actually do the refusing: a prompt keyed to the
     /// wider list would stay silent for a path the tool then refuses anyway.
     pub fn is_read_reachable(&self, path: &Path) -> bool {
-        // #383 c3 — resolver: `canon_for_scope`, for the reason stated on
-        // [`is_session_write_granted`](Self::is_session_write_granted). This
-        // predicate decides whether to PROMPT, never whether to permit;
+        // #383 c3 — resolver: `canon_for_scope`. This predicate decides
+        // whether to PROMPT, never whether to permit;
         // `SandboxedFs::contain_read` does the permitting and does its own
-        // dangling-link resolution.
+        // dangling-link resolution, so the deeper resolver would not change
+        // any refusal. (This note used to cite `is_session_write_granted` for
+        // that reasoning; #384 deleted that predicate, so it is stated here.)
         let canon = canon_for_scope(path);
         canon.starts_with(&self.root) || self.is_session_read_granted(&canon)
     }
@@ -3419,6 +3412,65 @@ impl StoreScan {
         }
     }
 }
+
+// ===========================================================================
+// RESOLVER INVENTORY — FerroxLabs/wayland-core#402
+// ===========================================================================
+//
+// Every function in this file that returns a `PathBuf` is listed below and
+// classified. `resolver` means it answers "where does this caller-supplied
+// path actually land on disk?", and its call sites owe the #356 c4 obligation
+// to say which resolver they picked and why. `helper` means it does not answer
+// that question — it composes a path this module already owns, or it is a
+// private step of exactly one resolver and must not be called from a
+// predicate.
+//
+// The list is not decoration: `resolver_inventory_covers_every_pathbuf_returning_fn`
+// in `workspace_policy/tests.rs` parses these `inventory:` lines, enumerates
+// the file's `-> PathBuf` signatures, and fails if the two sets differ. That
+// is what makes a THIRD resolver arrive gated instead of silently — the defect
+// #402 was filed for. A gate keyed to the two names it was given can only ever
+// catch the two names it was given.
+//
+// inventory: canon_for_scope = resolver -- the WEAK one. Canonicalizes, and on
+//   failure canonicalizes the parent and re-attaches ONE component. Resolves
+//   neither `..` after a missing component nor a dangling-symlink hop. Correct
+//   only where the answer is advisory (a prompt, a `$HOME` lookup), never
+//   where it is a refusal.
+// inventory: canon_existing_ancestor = resolver -- the STRONG one. Walks DOWN
+//   re-canonicalizing after every component and hops dangling links through
+//   `resolve_prefix`. The resolver every security refusal in this file uses.
+// inventory: resolve = resolver -- `canon_existing_ancestor`, counted for
+//   `GuardCounters`. The single resolution seam for the `SecretDenyFs` guard
+//   predicates.
+// inventory: resolve_against = resolver -- resolves a path supplied by a VCS
+//   file (`.git/objects/info/alternates`, a gitfile) against that file's own
+//   directory. Caller-supplied and security-relevant, so it is a resolver, not
+//   a join.
+// inventory: canon_ancestor_only = helper -- CLASSIFIED DELIBERATELY, #402 c3.
+//   It is the walk-UP-and-append-verbatim shape #1097 abandoned, and it is a
+//   private step of `canon_existing_ancestor` / `resolve_prefix`: it exists so
+//   the hop walk can canonicalize what already exists WITHOUT recursing into
+//   itself. It must never be called from a predicate — the whole of #356 is
+//   what happens when that shape guards a refusal.
+// inventory: canon = helper -- CLASSIFIED DELIBERATELY, #402 c3.
+//   `canonicalize().unwrap_or(p)` and nothing else: no missing-component
+//   handling, no link hop. Used only for roots that already exist at
+//   construction time (the workspace root, `writable_extra`). It answers "give
+//   me the canonical spelling of a directory I already have", not "where does
+//   this land", so it is not a resolver and its call sites owe no c4 note.
+// inventory: resolve_prefix = helper -- the dangling-symlink hop walk, a
+//   private step of `canon_existing_ancestor` with a `MAX_SYMLINK_HOPS` bound.
+// inventory: lexical_normalize = helper -- applies `.` and `..` textually so
+//   an unresolvable symlink target stays honest. Touches no filesystem.
+// inventory: session_output_root = helper -- joins this policy's own root with
+//   a fixed leaf. No caller-supplied path.
+// inventory: revoke_session_read_root = helper -- returns the root of the
+//   grant it just revoked. A lookup, not a resolution.
+// inventory: auto_run_overlap = helper -- reports which auto-run directory a
+//   directory this module already resolved overlaps.
+// inventory: scratch_dir = helper -- composes the trust-keyed scratch path
+//   under the host temp dir.
 
 /// Resolve a VCS-file-supplied path: absolute as written, relative against the
 /// file's own directory, then canonicalized so it compares against the rest of

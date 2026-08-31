@@ -2651,3 +2651,397 @@ fn every_weak_resolver_site_states_which_resolver_and_why() {
         );
     }
 }
+
+// ===========================================================================
+// FerroxLabs/wayland-core#384 c3 — no enforcement predicate without a caller.
+// ===========================================================================
+
+/// Every path predicate `workspace_policy.rs` exposes has at least one
+/// PRODUCTION call site.
+///
+/// `is_session_write_granted` documented itself as "the predicate
+/// `SandboxedFs`'s mutating operations ask" and had none: `grep` found its
+/// definition plus two assertions in an integration test. It was graded by two
+/// assertions that therefore graded nothing reachable, and a future change
+/// routed through it would have been dead on arrival.
+///
+/// The instrument is the INVERTED question, not a search for that one name.
+/// Searching for the spelling could only ever find the defect already known;
+/// enumerating the predicates and demanding a caller for each is decidable and
+/// total over this file, so the NEXT one is caught on arrival.
+///
+/// Scope, stated so nobody widens it by accident:
+/// - A predicate is a `pub fn` in `workspace_policy.rs` taking a path and
+///   returning `bool`. That is the shape a security refusal is asked in here,
+///   and it is the shape #384's defect had.
+/// - A production call site is any `.name(` / `name(` occurrence in a `.rs`
+///   file under `crates/`, EXCLUDING this file's own tests, any `tests/`
+///   directory, and everything after a file's first `#[cfg(test)]` line.
+///   A predicate reachable only from tests is exactly the defect.
+/// - The definition itself does not count as a call site.
+#[test]
+fn every_path_predicate_in_this_file_has_a_production_call_site() {
+    const SOURCE: &str = include_str!("../workspace_policy.rs");
+
+    // 1. Enumerate the predicates.
+    let mut predicates: Vec<String> = Vec::new();
+    for line in SOURCE.lines() {
+        let trimmed = line.trim_start();
+        let Some(rest) = trimmed.strip_prefix("pub fn ") else {
+            continue;
+        };
+        if !line.contains("-> bool") {
+            continue;
+        }
+        if !line.contains("path: &Path") && !line.contains("p: &Path") {
+            continue;
+        }
+        let Some((name, _)) = rest.split_once('(') else {
+            continue;
+        };
+        predicates.push(name.to_string());
+    }
+
+    // Known-positive control on the ENUMERATION. An `include_str!` pointing at
+    // the wrong file, or a change to how these are declared, would find
+    // nothing and this test would pass by scanning air.
+    assert!(
+        predicates.len() >= 10,
+        "the scan found only {} path predicates in workspace_policy.rs — the \
+         instrument is looking at the wrong thing: {predicates:?}",
+        predicates.len()
+    );
+    for expected in [
+        "is_project_secret",
+        "is_skill_source_path",
+        "is_secret_path",
+    ] {
+        assert!(
+            predicates.iter().any(|p| p == expected),
+            "known-positive control: `{expected}` must be enumerated"
+        );
+    }
+
+    // 2. Collect production source, workspace-wide.
+    let crates_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates/wcore-tools has a parent");
+    let mut production = String::new();
+    let mut files_scanned = 0usize;
+    let mut stack = vec![crates_dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                // `tests/` holds integration tests; `target/` is build output.
+                if name == "tests" || name == "target" {
+                    continue;
+                }
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            if path.file_name().and_then(|n| n.to_str()) == Some("tests.rs") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            files_scanned += 1;
+            production.push_str(&strip_column_zero_test_items(&text));
+            production.push('\n');
+        }
+    }
+
+    // Known-positive control on the CORPUS. A walk that found nothing (a wrong
+    // root, a permissions failure) would report every predicate as uncalled,
+    // which reads as a catastrophe rather than as a broken instrument.
+    assert!(
+        files_scanned >= 200,
+        "the walk read only {files_scanned} production .rs files — the corpus \
+         is wrong, not the code"
+    );
+    assert!(
+        production.matches("is_secret_path_static(").count() >= 4,
+        "known-positive control: `is_secret_path_static` is called from \
+         production in at least four places and the corpus must see them"
+    );
+    // Known-positive control on the STRIPPER, in both directions. It must
+    // remove an inline test module...
+    assert!(
+        !production.contains("async fn secret_deny_fs_blocks_and_passes"),
+        "the stripper left an inline `#[cfg(test)]` module in the corpus — \
+         every predicate would then look called by its own tests"
+    );
+    // ...and must NOT remove production that merely sits after one. `vfs.rs`
+    // carries a column-zero `#[cfg(test)] pub(crate) mod publish_window` at
+    // roughly a quarter of its length, and the two predicates it calls at
+    // :2259/:2264 come long after it. A cut at the FIRST `#[cfg(test)]` was
+    // the first shape of this corpus and reported those two as uncalled.
+    assert!(
+        production.contains("self.policy.is_skill_source_path(path)"),
+        "the stripper ate production code that follows an inline test module"
+    );
+
+    // 3. Demand a caller for each.
+    let mut uncalled: Vec<&str> = Vec::new();
+    for name in &predicates {
+        let definition = format!("pub fn {name}(");
+        let calls = production.matches(&format!("{name}(")).count()
+            - production.matches(&definition).count();
+        if calls == 0 {
+            uncalled.push(name);
+        }
+    }
+    assert!(
+        uncalled.is_empty(),
+        "these `workspace_policy.rs` predicates have NO production call site — \
+         wire them to the path that enforces, or delete them with the tests \
+         that grade them (FerroxLabs/wayland-core#384):\n{}",
+        uncalled.join("\n")
+    );
+}
+
+/// `source` with every COLUMN-ZERO `#[cfg(test)]` item removed — the corpus
+/// filter [`every_path_predicate_in_this_file_has_a_production_call_site`]
+/// uses to tell production code from test code inside one file.
+///
+/// Column zero is the discriminator that matters: a `#[cfg(test)]` on an
+/// indented item (a test-only branch inside a function, as `vfs.rs` has at
+/// :582) is left in place, which is conservative — it can only ever make a
+/// predicate look MORE called, and the gate's job is to catch the ones that
+/// are not called at all.
+///
+/// Cutting the file at its first `#[cfg(test)]` instead — the obvious shape,
+/// and the one this started as — is wrong: `vfs.rs` declares a column-zero
+/// test-only module a quarter of the way in, and the cut hid the two real
+/// production call sites that follow it.
+fn strip_column_zero_test_items(source: &str) -> String {
+    let lines: Vec<&str> = source.lines().collect();
+    let mut kept = String::with_capacity(source.len());
+    let mut index = 0usize;
+    while index < lines.len() {
+        if lines[index].trim_end() != "#[cfg(test)]" {
+            kept.push_str(lines[index]);
+            kept.push('\n');
+            index += 1;
+            continue;
+        }
+        // Skip the attribute and the item it decorates.
+        index += 1;
+        let mut depth = 0usize;
+        let mut opened = false;
+        while index < lines.len() {
+            let line = lines[index];
+            depth += line.matches('{').count();
+            opened |= depth > 0;
+            depth = depth.saturating_sub(line.matches('}').count());
+            index += 1;
+            if opened && depth == 0 {
+                break;
+            }
+            // A `#[cfg(test)] use ...;` / `mod x;` has no body at all.
+            if !opened && line.trim_end().ends_with(';') {
+                break;
+            }
+        }
+    }
+    kept
+}
+
+/// FerroxLabs/wayland-core#356 c4 — every `canon_existing_ancestor` call site
+/// in this file states which resolver it uses and why.
+///
+/// The mirror of [`every_weak_resolver_site_states_which_resolver_and_why`].
+/// c4 reads "if both resolvers remain, the reason each call site picked one is
+/// stated AT the call site", and both DO remain — `canon_for_scope` is correct
+/// where the answer is advisory. Only the weak half was gated, so a reader
+/// standing at a STRONG site still could not see that a choice had been made,
+/// which is exactly the condition c4 names.
+///
+/// Same instrument as its sibling, deliberately: the look-back stops at the
+/// enclosing function's signature, because a fixed line window was the first
+/// shape of that test and it was VACUOUS — it read the note belonging to the
+/// function next door.
+#[test]
+fn every_strong_resolver_site_states_which_resolver_and_why() {
+    const SOURCE: &str = include_str!("../workspace_policy.rs");
+    const MARKER: &str = "resolver: `canon_existing_ancestor`";
+
+    let lines: Vec<&str> = SOURCE.lines().collect();
+    let mut sites = 0usize;
+    let mut unlabelled: Vec<String> = Vec::new();
+
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//") {
+            continue;
+        }
+        if !line.contains("canon_existing_ancestor(") {
+            continue;
+        }
+        if line.contains("fn canon_existing_ancestor(") {
+            continue;
+        }
+        sites += 1;
+        let start = lines[..index]
+            .iter()
+            .rposition(|above| is_fn_signature(above))
+            .map_or(0, |at| at + 1);
+        if !lines[start..index]
+            .iter()
+            .any(|above| above.contains(MARKER))
+        {
+            unlabelled.push(format!("line {}: {}", index + 1, trimmed));
+        }
+    }
+
+    // Known-positive control, the same shape the weak gate carries: a rename
+    // or a wrong `include_str!` would find nothing and pass by scanning air.
+    assert!(
+        sites >= 6,
+        "the scan found only {sites} `canon_existing_ancestor` call sites — \
+         the instrument is looking at the wrong thing"
+    );
+    assert!(
+        SOURCE.contains("fn canon_existing_ancestor("),
+        "known-positive control: the resolver's own definition must be in the \
+         file being scanned"
+    );
+    assert!(
+        unlabelled.is_empty(),
+        "these `canon_existing_ancestor` call sites do not say which resolver \
+         they use or why — add a `{MARKER}` note (FerroxLabs/wayland-core#356 \
+         c4):\n{}",
+        unlabelled.join("\n")
+    );
+}
+
+/// FerroxLabs/wayland-core#402 c1 + c3 — a THIRD path resolver arrives GATED.
+///
+/// The two site gates above are each keyed to one literal name. Each fails
+/// closed if its own needle stops matching, which is right, but neither can
+/// notice a name it was not given: add
+/// `fn canon_third(path: &Path) -> PathBuf` to `workspace_policy.rs`, call it
+/// from a predicate with no note at all, and both stay green.
+///
+/// The fix is the INVERTED question, and it is the same fix `core#377` c2 took
+/// when a gate over the spelling `continue;` was replaced by a gate over the
+/// closed alphabet of loop exits: enumerate what the file DEFINES rather than
+/// search for what it was told to look for. "Every function here that returns
+/// a `PathBuf`" is decidable and total, so a resolver cannot arrive unnamed.
+///
+/// This gate does NOT decide the classification — a human does, in the
+/// inventory block in `workspace_policy.rs`, where the reason lives beside the
+/// name. It decides only that no `-> PathBuf` function is missing from that
+/// block and no entry in that block names a function that no longer exists.
+#[test]
+fn resolver_inventory_covers_every_pathbuf_returning_fn() {
+    const SOURCE: &str = include_str!("../workspace_policy.rs");
+
+    // 1. What the file DEFINES.
+    let mut defined: Vec<String> = Vec::new();
+    for line in SOURCE.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//") {
+            continue;
+        }
+        if !(trimmed.contains("-> PathBuf") || trimmed.contains("-> Option<PathBuf>")) {
+            continue;
+        }
+        let Some(at) = trimmed.find("fn ") else {
+            continue;
+        };
+        let rest = &trimmed[at + 3..];
+        let Some((name, _)) = rest.split_once('(') else {
+            continue;
+        };
+        defined.push(name.to_string());
+    }
+
+    // 2. What the inventory CLASSIFIES.
+    let mut classified: Vec<(String, String)> = Vec::new();
+    for line in SOURCE.lines() {
+        let trimmed = line.trim_start();
+        let Some(entry) = trimmed.strip_prefix("// inventory: ") else {
+            continue;
+        };
+        let Some((name, tail)) = entry.split_once(" = ") else {
+            panic!("malformed inventory line, expected `<name> = <kind> -- <reason>`: {trimmed}");
+        };
+        let (kind, reason) = tail.split_once(" -- ").unwrap_or((tail, ""));
+        assert!(
+            kind == "resolver" || kind == "helper",
+            "inventory entry `{name}` is classified `{kind}` — the only two \
+             classifications are `resolver` and `helper` (#402 c3)"
+        );
+        assert!(
+            !reason.trim().is_empty(),
+            "inventory entry `{name}` states no reason — the classification \
+             without the reason is the thing #402 c3 rules out"
+        );
+        classified.push((name.to_string(), kind.to_string()));
+    }
+
+    // Anti-vacuity, both directions. An empty enumeration or an empty
+    // inventory would make the set comparison below trivially true.
+    assert!(
+        defined.len() >= 12,
+        "the scan found only {} `-> PathBuf` functions in workspace_policy.rs \
+         — the instrument is looking at the wrong thing: {defined:?}",
+        defined.len()
+    );
+    assert!(
+        classified.len() >= 12,
+        "the inventory holds only {} entries — it is not the file's inventory",
+        classified.len()
+    );
+    // The two names #402 c3 asks for BY NAME must each carry a classification.
+    for required in ["canon_ancestor_only", "canon"] {
+        let entry = classified.iter().find(|(name, _)| name == required);
+        assert!(
+            entry.is_some(),
+            "#402 c3 names `{required}` explicitly: it must be classified as \
+             resolver or helper in the inventory, with its reason"
+        );
+    }
+    // ...and so must the two resolvers the site gates are keyed to, or the
+    // inventory could agree with a file that no longer has them.
+    for required in ["canon_for_scope", "canon_existing_ancestor"] {
+        assert!(
+            classified
+                .iter()
+                .any(|(name, kind)| name == required && kind == "resolver"),
+            "`{required}` must be in the inventory as a resolver"
+        );
+    }
+
+    // 3. The two sets must agree, in both directions.
+    let missing: Vec<&String> = defined
+        .iter()
+        .filter(|name| !classified.iter().any(|(known, _)| known == *name))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "these `-> PathBuf` functions are not in the RESOLVER INVENTORY block \
+         of workspace_policy.rs — classify each as `resolver` or `helper` with \
+         its reason, and if it is a resolver give its call sites the #356 c4 \
+         note (FerroxLabs/wayland-core#402 c1):\n{missing:?}"
+    );
+    let stale: Vec<&String> = classified
+        .iter()
+        .map(|(name, _)| name)
+        .filter(|name| !defined.contains(name))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "the RESOLVER INVENTORY names functions this file no longer defines — \
+         an inventory that rots is an inventory that lies:\n{stale:?}"
+    );
+}
