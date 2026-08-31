@@ -9,9 +9,10 @@ criteria:
   - id: c1
     text: "ErrorInfo carries a typed failure category covering the three #388 names core can decide: context/token limit, tool/runtime failure, local Wayland error"
     state: met
-    evidence: "symbol:crates/wcore-protocol/src/events.rs::FailureCategory"
+    evidence: "symbol:crates/wcore-types/src/failure.rs::FailureCategory"
     owner: core
-    note: "MET. `ErrorInfo` carries `category: FailureCategory` -- an enum with exactly the three decidable #388 names (ContextLimit, ToolRuntime, LocalWayland) plus Unknown. Re-verified in THIS tree, where it is load-bearing rather than asserted: sixteen `ErrorInfo` construction sites written on integ/f13 after the peer lane branched FAILED TO COMPILE on merge with `error[E0063]: missing field `category``, which is the no-Default claim doing its job on code that had never seen it."
+    note: "MET. `ErrorInfo` carries `category: FailureCategory` -- an enum with exactly the three decidable #388 names (ContextLimit, ToolRuntime, LocalWayland) plus Unknown. Re-verified in THIS tree, where it is load-bearing rather than asserted: sixteen `ErrorInfo` construction sites written on integ/f13 after the peer lane branched FAILED TO COMPILE on merge with `error[E0063]: missing field `category``, which is the no-Default claim doing its job on code that had never seen it. --- RE-ANCHORED 2026-08-31 by the relay-misc lane; criterion text and verdict UNTOUCHED. wayland#1266 c3 moved the FailureCategory DECLARATION to crates/wcore-types/src/failure.rs so SubAgentResult -- which lives in wcore-types, BELOW wcore-protocol in the dependency graph -- can carry a child's own category across the sub-agent relay. wcore_protocol::events re-exports the type, so every existing call site resolves unchanged and wcore-contract check reports schema_digest UNCHANGED (a source-hash rebase, not a wire change). THE GATE CAUGHT THIS DRIFT ITSELF -- 'c1 evidence does not resolve -- crates/wcore-protocol/src/events.rs declares no FailureCategory' -- which is the anchor discipline working as designed: the old anchor named the file that now merely RE-EXPORTS the type, and a symbol anchor must name the declaration. The new path was added to contract SOURCE_INPUTS in the same change, so the corpus still hashes the declaration of a wire-visible type rather than losing sight of it."
+
   - id: c2
     text: "Every terminal error exit of the run loop sets the category, and the set of exits is enumerated rather than sampled"
     state: met
