@@ -335,25 +335,47 @@ pub async fn run_conformance(
         )),
     }
 
-    // 5. An orphan scan for a nonce that never ran must return an empty,
-    //    ENUMERATED answer — not an empty answer because the scan failed.
+    // 5. An orphan scan must ENUMERATE rather than assume.
+    //
+    // #366 d4 — WHAT THIS CHECK PROVES, AND WHAT IT DOES NOT. It used to
+    // assert `scan.enumerated && scan.found.is_empty()`, and to anyone
+    // reading the check list it looked like orphan-scan coverage. It was not.
+    // The nonce is `{id_prefix}-nonce-never-used`, chosen precisely so that
+    // nothing can ever have run under it, so `found.is_empty()` is true BY
+    // CONSTRUCTION — no reachable state of any backend, and no state of the
+    // host however dirty, can falsify it. A conjunct that cannot be false
+    // contributes nothing to a conjunction: the whole verdict was always the
+    // `enumerated` half, and the other half made the check look twice as
+    // strong as it was.
+    //
+    // The vacuous conjunct is gone from the ASSERTION. The count is still
+    // reported, in the detail, where it is an observation rather than a
+    // claim, and the check is renamed to say only what it can establish: the
+    // backend really issued its enumeration, and did not answer "clean"
+    // because it could not look.
+    //
+    // The arm this check could never carry — plant a labelled leftover and
+    // require the scan to FIND it — lives in
+    // `wcore-exec-backend/tests/unscoped_orphan_scan.rs`. It is
+    // backend-specific by necessity, because planting a leftover means
+    // creating one the way that ONE backend creates them, which is why it
+    // cannot live in this backend-generic harness.
     let fresh_nonce = format!("{id_prefix}-nonce-never-used");
+    const SCOPED_SCAN_CHECK: &str = "an orphan scan for an unused nonce ENUMERATES rather than assuming (that it finds \
+         nothing under that nonce is true by construction and is NOT asserted; the arm that \
+         requires a real leftover to be FOUND is in tests/unscoped_orphan_scan.rs)";
     match backend.scan_orphans(&fresh_nonce).await {
         Ok(scan) => checks.push(check(
-            "an orphan scan enumerates rather than assuming, and finds nothing for an unused nonce",
-            scan.enumerated && scan.found.is_empty(),
+            SCOPED_SCAN_CHECK,
+            scan.enumerated,
             format!(
-                "enumerated={} found={} via {}",
+                "enumerated={} found={} (vacuously — nothing ever ran under this nonce) via {}",
                 scan.enumerated,
                 scan.found.len(),
                 scan.method
             ),
         )),
-        Err(e) => checks.push(check(
-            "an orphan scan enumerates rather than assuming, and finds nothing for an unused nonce",
-            false,
-            e.to_string(),
-        )),
+        Err(e) => checks.push(check(SCOPED_SCAN_CHECK, false, e.to_string())),
     }
 
     // 6. Cancelling a task that does not exist must be an explicit error, not

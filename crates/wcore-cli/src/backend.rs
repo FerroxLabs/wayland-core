@@ -61,10 +61,25 @@ pub enum BackendCmd {
         #[arg(long)]
         backend: Option<String>,
     },
-    /// Enumerate surfaces still carrying a task nonce, per backend.
+    /// Enumerate leftover execution surfaces, per backend.
+    ///
+    /// WITHOUT `--nonce` this is the UNSCOPED scan (#366): every surface the
+    /// backend labelled as its own, whatever run created it, flagged by
+    /// whether this process has a live task holding that nonce. That is the
+    /// only form that can see a leftover from an EARLIER run, because a
+    /// nonce is fresh per run and a scan for the current one is structurally
+    /// incapable of returning a previous one's residue.
+    ///
+    /// WITH `--nonce` it is the scoped scan: surfaces still carrying exactly
+    /// that nonce. Use it when you already hold the nonce of a run you are
+    /// asking about.
+    ///
+    /// Both forms REPORT ONLY. Neither removes anything — see
+    /// `ExecutionBackend::scan_all_orphans` for why removal cannot be proven
+    /// safe from an enumeration alone.
     Orphans {
         #[arg(long)]
-        nonce: String,
+        nonce: Option<String>,
     },
     /// F25-05: scan every backend for orphaned execution left behind by a
     /// task, printing the RAW enumeration alongside the count and naming the
@@ -224,7 +239,10 @@ pub async fn run(args: BackendArgs) -> Result<()> {
             receipt_out,
         } => execute(&backend, task.as_deref(), &receipt_out).await,
         BackendCmd::Cancel { task_id, backend } => cancel(&task_id, backend.as_deref()).await,
-        BackendCmd::Orphans { nonce } => orphans(&nonce).await,
+        BackendCmd::Orphans { nonce } => match nonce {
+            Some(nonce) => orphans(&nonce).await,
+            None => all_orphans().await,
+        },
         BackendCmd::Scan {
             task_id,
             nonce,
@@ -445,6 +463,59 @@ async fn orphans(nonce: &str) -> Result<()> {
         "\n{found} orphan(s) found; {unscannable} surface(s) could NOT be enumerated. An \
          un-enumerated surface is not a clean surface — a scan that could not run must never be \
          read as zero orphans."
+    );
+    Ok(())
+}
+
+/// `wayland backend orphans` with no `--nonce` — the UNSCOPED scan (#366).
+///
+/// #366 d3: the row an operator needs is one this process did not create, so
+/// each row is graded against the live-task registry and the ones no live
+/// task can account for are called out separately. A scan that could only
+/// report containers the current process already holds a nonce for answers a
+/// question nobody needed asked — the two leftovers in #365 sat for a day and
+/// were found by a human running `docker ps -a` by hand.
+///
+/// Exit code is deliberately 0 even with rows found. This REPORTS, it does
+/// not judge: an unaccounted row may be a live task in another process (the
+/// registry is per-state-dir) or another tenant's container, so it is not by
+/// itself a failure the way `backend scan`'s nonce-scoped count is.
+async fn all_orphans() -> Result<()> {
+    let backends = reference_backends(reference_budget())?;
+    let mut unscannable = 0usize;
+    let mut unaccounted = 0usize;
+    for reference in &backends {
+        let scan = reference.backend.scan_all_orphans().await?;
+        println!(
+            "{:<10} enumerated={:<5} found={} via {}",
+            scan.backend_id,
+            scan.enumerated,
+            scan.found.len(),
+            scan.method
+        );
+        for row in &scan.found {
+            println!(
+                "           - {} (nonce {}) {}",
+                row.surface,
+                row.nonce,
+                if row.in_live_registry {
+                    "— a live task in THIS process holds this nonce"
+                } else {
+                    "— NOT held by any live task in this process"
+                }
+            );
+        }
+        if !scan.enumerated {
+            unscannable += 1;
+        }
+        unaccounted += scan.unaccounted().count();
+    }
+    println!(
+        "\n{unaccounted} labelled surface(s) that no live task in this process accounts for; \
+         {unscannable} surface(s) could NOT be enumerated. An un-enumerated surface is not a \
+         clean surface. Nothing here was removed: an unaccounted surface may still belong to a \
+         live task in another process or to another tenant, so reclamation is the operator's \
+         call, not this command's."
     );
     Ok(())
 }

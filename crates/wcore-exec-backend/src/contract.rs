@@ -306,6 +306,71 @@ pub struct OrphanScan {
     pub enumerated: bool,
 }
 
+/// One surface an UNSCOPED scan found, together with the nonce it carries.
+///
+/// [`OrphanScan::found`] is a bare list of names because its caller already
+/// holds the nonce it asked about, so every row is known to be that run's.
+/// An unscoped scan has no such caller. Its whole purpose (#366) is to report
+/// a leftover from a run THIS process never made, so the nonce has to travel
+/// with the row: without it an operator cannot tell a genuine leftover from
+/// the container a live task in this very process is using right now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LabelledSurface {
+    /// The surface's name, as the backend's own enumeration reports it.
+    pub surface: String,
+    /// The value the surface carries under the backend's nonce label.
+    pub nonce: String,
+    /// True when `nonce` belongs to a task in THIS process's live-task
+    /// registry. FALSE is the interesting case, and the one #366 d3 is about:
+    /// a leftover no caller in this process could ever have named.
+    pub in_live_registry: bool,
+}
+
+/// What [`ExecutionBackend::scan_all_orphans`] observed.
+///
+/// Deliberately NOT an `OrphanScan` with an empty nonce. `OrphanScan.nonce`
+/// is the question that was asked, and every consumer of it — the `cancel()`
+/// residual check, `orphan::scan_all`, the `backend scan` gate — reads it as
+/// "these rows carry THIS nonce". A sentinel there would silently change the
+/// meaning of rows those callers already trust.
+#[derive(Debug, Clone)]
+pub struct UnscopedOrphanScan {
+    pub backend_id: String,
+    pub kind: BackendKind,
+    /// The enumeration that was actually performed, quoted so an operator can
+    /// re-run it by hand.
+    pub method: String,
+    pub found: Vec<LabelledSurface>,
+    /// False when the scan could not actually enumerate. Same rule as
+    /// [`OrphanScan::enumerated`]: reporting zero leftovers because the scan
+    /// failed is how a leftover hides.
+    pub enumerated: bool,
+}
+
+impl UnscopedOrphanScan {
+    /// The rows that no live task in this process can account for — the
+    /// leftovers #366 exists to surface.
+    pub fn unaccounted(&self) -> impl Iterator<Item = &LabelledSurface> {
+        self.found.iter().filter(|row| !row.in_live_registry)
+    }
+
+    /// The answer a backend gives when it has no way to enumerate its
+    /// surfaces without a nonce.
+    ///
+    /// `enumerated: false`, never an empty `found`, because those two are not
+    /// the same claim and conflating them is exactly the failure mode
+    /// [`OrphanScan::enumerated`] was added for.
+    pub fn unsupported(backend_id: &str, kind: BackendKind, why: &str) -> Self {
+        Self {
+            backend_id: backend_id.into(),
+            kind,
+            method: format!("no unscoped enumeration exists for this backend: {why}"),
+            found: Vec::new(),
+            enumerated: false,
+        }
+    }
+}
+
 /// The provider-neutral execution backend.
 #[async_trait]
 pub trait ExecutionBackend: Send + Sync {
@@ -334,7 +399,36 @@ pub trait ExecutionBackend: Send + Sync {
     async fn health(&self) -> Result<Health>;
 
     /// Enumerate surfaces still carrying `nonce`.
+    ///
+    /// SCOPED, and it stays scoped (#366 d2). `cancel()` genuinely wants ONE
+    /// run's surfaces: it re-enumerates by the cancelled task's nonce to
+    /// verify its own removal, and widening this method would make another
+    /// task's container show up as that cancellation's unremoved residual.
+    /// The unscoped question is [`Self::scan_all_orphans`], an ADDITION
+    /// alongside this one rather than a change of meaning to it.
     async fn scan_orphans(&self, nonce: &str) -> Result<OrphanScan>;
+
+    /// Enumerate every surface this backend LABELS as its own, with NO nonce
+    /// supplied (#366 d1).
+    ///
+    /// `scan_orphans` can only ever answer "are there surfaces from the run
+    /// whose nonce I am already holding". In ordinary operation the nonce is
+    /// fresh per run, so that question is structurally incapable of returning
+    /// a PREVIOUS run's leftover — which is the only kind there is. This
+    /// method asks the other question: key PRESENCE, not key equality.
+    ///
+    /// REPORT ONLY — it never removes anything (#366 d6). See the container
+    /// implementation for why removal cannot be proven safe from here.
+    ///
+    /// The default is `unsupported`, not an empty enumeration: a backend that
+    /// has no label to enumerate on must say so rather than answer "clean".
+    async fn scan_all_orphans(&self) -> Result<UnscopedOrphanScan> {
+        Ok(UnscopedOrphanScan::unsupported(
+            &self.capabilities().backend_id,
+            self.capabilities().kind,
+            "its surfaces carry no backend-owned label that can be enumerated              by key presence",
+        ))
+    }
 }
 
 pub(crate) fn hex(bytes: &[u8]) -> String {

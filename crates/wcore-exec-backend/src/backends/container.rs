@@ -16,8 +16,8 @@ use async_trait::async_trait;
 
 use crate::contract::{
     Availability, BackendCapabilities, BackendKind, CleanupObservation, ExecutionBackend,
-    ExecutionTask, Health, HibernationObservation, OrphanScan, ProbeBasis, ResourceBudget,
-    SecretChannel, validate_identifier,
+    ExecutionTask, Health, HibernationObservation, LabelledSurface, OrphanScan, ProbeBasis,
+    ResourceBudget, SecretChannel, UnscopedOrphanScan, validate_identifier,
 };
 use crate::error::{ExecError, Result};
 use crate::policy::{EffectivePolicy, declared_secret_exposure};
@@ -837,6 +837,116 @@ impl ExecutionBackend for ContainerBackend {
             }),
         }
     }
+
+    /// #366 d1: enumerate every container this backend labelled, with no
+    /// nonce supplied.
+    ///
+    /// The difference from `scan_orphans` is one character in the filter —
+    /// `label=wayland.task.nonce` (key PRESENCE) instead of
+    /// `label=wayland.task.nonce=<value>` (key EQUALITY) — and it is the
+    /// whole defect. Labels are applied at CREATE time, so a container that
+    /// never started still carries one; MEASURED while closing #365 c6 on a
+    /// real wedged container, where the key-presence filter returned it and
+    /// the current run's nonce returned nothing.
+    ///
+    /// #366 d2 — WHICH CALLERS MOVE: none. `cancel()` keeps calling
+    /// `scan_orphans(entry.nonce)`, because "did MY removal leave residue"
+    /// is a question about one run and answering it with every tenant's
+    /// containers would report other tasks as that cancellation's failure.
+    /// `conformance.rs` keeps its scoped call for the same reason. This is a
+    /// new caller-facing question, reached from `wayland backend orphans`
+    /// with no `--nonce`.
+    ///
+    /// #366 d6 — REPORT ONLY, DECIDED, not left open. This scan does not
+    /// remove anything, and the asymmetry with #365's submit-path reclaim is
+    /// the reason. That reclaim can PROVE removal is safe because it holds
+    /// the task id it is about to use: the name it is clearing is the name it
+    /// is about to take, so a container under that name is either its own
+    /// predecessor or a collision it must refuse anyway — and it still
+    /// refuses a RUNNING holder and an unlabelled one. An unscoped scan holds
+    /// no such claim over ANY row it returns. A labelled container may belong
+    /// to a live task in a DIFFERENT process (this process's registry is
+    /// per-`WAYLAND_EXEC_BACKEND_STATE_DIR`, so `in_live_registry == false`
+    /// does not mean "nobody owns it"), or to another tenant on a shared
+    /// daemon. Removing on that evidence would destroy real work to tidy a
+    /// report. The operator is given the names and the exact `docker` command
+    /// that produced them, and makes the call.
+    async fn scan_all_orphans(&self) -> Result<UnscopedOrphanScan> {
+        let method = format!("docker ps -a --filter label={NONCE_LABEL} (key presence, no value)");
+        match list_all_labelled_containers().await {
+            Ok(rows) => {
+                let live: std::collections::HashSet<String> = registry::list()
+                    .into_iter()
+                    .filter(|t| t.backend_id == BACKEND_ID)
+                    .map(|t| t.nonce)
+                    .collect();
+                Ok(UnscopedOrphanScan {
+                    backend_id: BACKEND_ID.into(),
+                    kind: BackendKind::Container,
+                    method,
+                    found: rows
+                        .into_iter()
+                        .map(|(surface, nonce)| LabelledSurface {
+                            in_live_registry: live.contains(&nonce),
+                            surface,
+                            nonce,
+                        })
+                        .collect(),
+                    enumerated: true,
+                })
+            }
+            Err(detail) => Ok(UnscopedOrphanScan {
+                backend_id: BACKEND_ID.into(),
+                kind: BackendKind::Container,
+                // Same rule as the scoped scan: an unscannable surface is
+                // never reported as zero leftovers.
+                method: format!("{method} FAILED: {detail}"),
+                found: Vec::new(),
+                enumerated: false,
+            }),
+        }
+    }
+}
+
+/// Every container carrying the nonce LABEL, whatever its value, as
+/// `(name, nonce)`.
+///
+/// The `--filter label=<key>` form matches on key presence. The `{{.Label
+/// "key"}}` format directive is what carries the VALUE back in the same round
+/// trip, so an operator surface can say which run each row belongs to without
+/// a second `docker inspect` per container.
+///
+/// A tab separates the two fields because a docker container NAME cannot
+/// contain one (`[a-zA-Z0-9][a-zA-Z0-9_.-]*`), while a nonce is only
+/// constrained by `validate_identifier`. A row that does not split is
+/// reported as a row with an empty nonce rather than dropped: dropping it
+/// would be the "an orphan hides" direction.
+async fn list_all_labelled_containers() -> std::result::Result<Vec<(String, String)>, String> {
+    let filter = format!("label={NONCE_LABEL}");
+    let format = format!("{{{{.Names}}}}\t{{{{.Label \"{NONCE_LABEL}\"}}}}");
+    let mut command = wcore_config::shell::shell_command_argv(
+        "docker",
+        &["ps", "-a", "--filter", &filter, "--format", &format],
+    );
+    command.stdin(std::process::Stdio::null());
+    command.stdout(std::process::Stdio::piped());
+    command.stderr(std::process::Stdio::piped());
+    let output = tokio::time::timeout(std::time::Duration::from_secs(10), command.output())
+        .await
+        .map_err(|_| "docker ps did not answer within 10s".to_string())?
+        .map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| match line.split_once('\t') {
+            Some((name, nonce)) => (name.trim().to_string(), nonce.trim().to_string()),
+            None => (line.to_string(), String::new()),
+        })
+        .collect())
 }
 
 async fn list_containers_with_nonce(nonce: &str) -> std::result::Result<Vec<String>, String> {
