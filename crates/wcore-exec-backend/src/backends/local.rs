@@ -24,7 +24,7 @@ use async_trait::async_trait;
 use crate::contract::{
     Availability, BackendCapabilities, BackendKind, CleanupObservation, ExecutionBackend,
     ExecutionTask, Health, HibernationObservation, OrphanScan, ProbeBasis, ResourceBudget,
-    SecretChannel,
+    SecretChannel, UnscopedOrphanScan,
 };
 use crate::error::{ExecError, Result};
 use crate::policy::{EffectivePolicy, declared_secret_exposure};
@@ -322,6 +322,32 @@ impl ExecutionBackend for LocalBackend {
             },
             found,
             enumerated,
+        })
+    }
+
+    /// UNSUPPORTED, and it says so rather than answering zero.
+    ///
+    /// This backend's surface is the host process table, and nothing in a
+    /// wayland child's argv marks it as ours except the per-task NONCE itself
+    /// — which is the value an unscoped scan is defined as not having. The
+    /// registry crossing is no help either: it can only return tasks this
+    /// process already knows about, which is the question #366 d3 says nobody
+    /// needed asked. Closing this needs a product-wide argv marker, which is a
+    /// change to the spawn path and not to the scanner, so it is stated here
+    /// rather than faked.
+    async fn scan_all_orphans(&self) -> Result<UnscopedOrphanScan> {
+        Ok(UnscopedOrphanScan {
+            backend_id: BACKEND_ID.into(),
+            kind: BackendKind::Local,
+            method: "no unscoped enumeration exists for the host process table".into(),
+            found: Vec::new(),
+            enumerated: false,
+            unsupported_reason: Some(
+                "a local child carries no product-wide marker in its argv, only its own \
+                 task nonce, so the process table cannot be filtered for `any wayland run`. \
+                 This is NOT a report of zero orphans."
+                    .into(),
+            ),
         })
     }
 }

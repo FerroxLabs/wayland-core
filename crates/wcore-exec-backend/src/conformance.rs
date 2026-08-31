@@ -337,10 +337,33 @@ pub async fn run_conformance(
 
     // 5. An orphan scan for a nonce that never ran must return an empty,
     //    ENUMERATED answer — not an empty answer because the scan failed.
+    //
+    //    WHAT THIS CHECK DOES NOT COVER (FerroxLabs/wayland-core#366 d4). Its
+    //    nonce is chosen precisely so that nothing can ever have run under it,
+    //    so the `found.is_empty()` half CANNOT FAIL on this axis and does no
+    //    work: the whole verdict rests on `enumerated`. It grades that the
+    //    scan RUNS and does not fabricate a clean answer out of a failure. It
+    //    is NOT orphan-scan coverage and must not be read as any: nothing here
+    //    ever asks a scan to FIND something, so a scan that could never find
+    //    anything would pass it. Its name says so now, rather than leaving the
+    //    limit to be discovered.
+    //
+    //    The arm that does require a FIND cannot live here: it has to plant a
+    //    labelled surface, which is backend-specific and side-effecting on the
+    //    host, and this function is the provider-neutral conformance pass that
+    //    every backend runs. It lives in
+    //    `crates/wcore-exec-backend/tests/container_orphan_scan.rs`, which
+    //    plants a labelled container under a nonce this process has never
+    //    used, requires the UNSCOPED scan to report it as a leftover, and
+    //    removes it again.
     let fresh_nonce = format!("{id_prefix}-nonce-never-used");
+    const SCOPED_SCAN_CHECK: &str = "a SCOPED orphan scan enumerates rather than assuming (this \
+                                     grades that the scan RUNS; its nonce is unused by \
+                                     construction, so it can never grade FINDING an orphan — \
+                                     see #366 d4)";
     match backend.scan_orphans(&fresh_nonce).await {
         Ok(scan) => checks.push(check(
-            "an orphan scan enumerates rather than assuming, and finds nothing for an unused nonce",
+            SCOPED_SCAN_CHECK,
             scan.enumerated && scan.found.is_empty(),
             format!(
                 "enumerated={} found={} via {}",
@@ -349,11 +372,37 @@ pub async fn run_conformance(
                 scan.method
             ),
         )),
-        Err(e) => checks.push(check(
-            "an orphan scan enumerates rather than assuming, and finds nothing for an unused nonce",
-            false,
-            e.to_string(),
-        )),
+        Err(e) => checks.push(check(SCOPED_SCAN_CHECK, false, e.to_string())),
+    }
+
+    // 5b. The UNSCOPED scan must answer at all, and must never launder "I
+    //     cannot look without a nonce" into "there is nothing there". A
+    //     backend with no unscoped enumeration passes by SAYING so; one that
+    //     claims to enumerate must not also carry an unsupported reason.
+    const UNSCOPED_SCAN_CHECK: &str = "an UNSCOPED orphan scan either enumerates, or states that \
+                                       it cannot — never a silent zero (#366 d1)";
+    match backend.scan_all_orphans().await {
+        Ok(scan) => {
+            // Decidable, and it CAN fail: two states are incoherent however a
+            // backend answers. Claiming to have enumerated while also saying
+            // it cannot enumerate is the one that would launder a silent zero;
+            // reporting finds from a scan that did not enumerate is the
+            // mirror image.
+            let claims_both = scan.enumerated && scan.unsupported_reason.is_some();
+            let finds_without_looking = !scan.enumerated && !scan.found.is_empty();
+            checks.push(check(
+                UNSCOPED_SCAN_CHECK,
+                !claims_both && !finds_without_looking,
+                format!(
+                    "enumerated={} found={} unsupported={:?} via {}",
+                    scan.enumerated,
+                    scan.found.len(),
+                    scan.unsupported_reason,
+                    scan.method
+                ),
+            ));
+        }
+        Err(e) => checks.push(check(UNSCOPED_SCAN_CHECK, false, e.to_string())),
     }
 
     // 6. Cancelling a task that does not exist must be an explicit error, not

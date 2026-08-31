@@ -306,6 +306,80 @@ pub struct OrphanScan {
     pub enumerated: bool,
 }
 
+/// One surface an UNSCOPED scan found, with the fact that decides whether it
+/// is a leftover: whether the running process knows about it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnscopedOrphan {
+    /// The surface's handle — the container name, for the container backend.
+    pub handle: String,
+    /// The nonce it carries.
+    pub nonce: String,
+    /// True when this nonce is in the live registry of the process running the
+    /// scan. FALSE is the interesting value and the one #366 d3 is about: it
+    /// means this surface belongs to a run that is over as far as this process
+    /// is concerned, which is exactly the shape a nonce-scoped scan can never
+    /// return.
+    pub known_to_this_process: bool,
+}
+
+/// What an UNSCOPED orphan scan found — every surface this product created,
+/// enumerated WITHOUT being handed a nonce.
+///
+/// # Why this is a second method and not a widening of `scan_orphans`
+///
+/// `scan_orphans(nonce)` answers "are there surfaces still carrying THIS
+/// nonce", and one caller genuinely wants that: `ExecutionBackend::cancel`
+/// re-enumerates by the cancelled task's own nonce to verify its own
+/// `docker rm -f`, and widening it would make that verification report other
+/// tasks' containers as its own residual. So the scoped contract is left
+/// exactly as it was, and this is an addition. See FerroxLabs/wayland-core#366
+/// d2.
+///
+/// # REPORT ONLY — the reclamation decision, recorded rather than left open
+///
+/// An unscoped scan REPORTS and never removes (#366 d6). This is not
+/// timidity, it is the asymmetry against `#365`'s submit-path reclaim, which
+/// DOES remove: that path can prove removal safe because it holds the exact
+/// task id it is about to run under and can refuse a running holder or an
+/// unlabelled one. A background unscoped scan holds no such claim. Every
+/// candidate it finds is, by construction, one this process did not create, so
+/// it cannot distinguish a dead leftover from a live task in ANOTHER wayland
+/// process on the same daemon — whose nonce is fresh and absent from THIS
+/// process's registry for exactly the same reason a leftover's is. Removing on
+/// that evidence would destroy another agent's running work; the failure mode
+/// of reporting is a line an operator has to act on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnscopedOrphanScan {
+    pub backend_id: String,
+    pub kind: BackendKind,
+    /// Free-text description of the enumeration actually performed.
+    pub method: String,
+    pub found: Vec<UnscopedOrphan>,
+    /// False when the scan could not enumerate. An unscannable surface must
+    /// never be read as zero orphans — the same rule as [`OrphanScan`].
+    pub enumerated: bool,
+    /// `Some` when this backend has NO unscoped enumeration at all, carrying
+    /// why. Distinct from `enumerated: false`, which means the enumeration
+    /// exists and failed this time. Both are "not zero", and neither may be
+    /// rendered as a clean surface.
+    pub unsupported_reason: Option<String>,
+}
+
+impl UnscopedOrphanScan {
+    /// The surfaces this process did not create — the answer to "are there
+    /// wayland containers left over from ANY run", which is the question
+    /// `scan_orphans` is structurally incapable of asking.
+    pub fn leftovers(&self) -> impl Iterator<Item = &UnscopedOrphan> {
+        self.found.iter().filter(|o| !o.known_to_this_process)
+    }
+
+    /// Whether this scan is a positive statement about the surface at all.
+    /// `false` for both "could not look" and "cannot look without a nonce".
+    pub fn is_determinate(&self) -> bool {
+        self.enumerated && self.unsupported_reason.is_none()
+    }
+}
+
 /// The provider-neutral execution backend.
 #[async_trait]
 pub trait ExecutionBackend: Send + Sync {
@@ -334,7 +408,26 @@ pub trait ExecutionBackend: Send + Sync {
     async fn health(&self) -> Result<Health>;
 
     /// Enumerate surfaces still carrying `nonce`.
+    ///
+    /// SCOPED, and deliberately still scoped: `cancel()` re-enumerates by the
+    /// cancelled task's nonce to verify its own cleanup, and that caller wants
+    /// exactly one run's residue. For "are there surfaces left over from ANY
+    /// run" use [`Self::scan_all_orphans`] — a scan for a nonce this process
+    /// is already holding is structurally incapable of returning a previous
+    /// run's leftover (FerroxLabs/wayland-core#366).
     async fn scan_orphans(&self, nonce: &str) -> Result<OrphanScan>;
+
+    /// Enumerate every surface this product created, WITHOUT being given a
+    /// nonce.
+    ///
+    /// No default is provided ON PURPOSE. A default returning "nothing found"
+    /// would answer the question dishonestly for every backend nobody got
+    /// round to, which is the failure #366 is about; a backend that cannot do
+    /// this must SAY so, by returning
+    /// [`UnscopedOrphanScan::unsupported_reason`].
+    ///
+    /// REPORTS ONLY — see [`UnscopedOrphanScan`] for why it must not reclaim.
+    async fn scan_all_orphans(&self) -> Result<UnscopedOrphanScan>;
 }
 
 pub(crate) fn hex(bytes: &[u8]) -> String {
