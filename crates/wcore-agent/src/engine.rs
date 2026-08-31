@@ -25248,8 +25248,10 @@ mod compact_tests {
         // -- measured case 2: the CONFIGURED 16,384 window --
         {
             const WINDOW: usize = 16_384;
-            let mut cfg = CompactConfig::default();
-            cfg.context_window = Some(WINDOW);
+            let cfg = CompactConfig {
+                context_window: Some(WINDOW),
+                ..CompactConfig::default()
+            };
             let mut engine = make_compact_engine(cfg.clone(), CompactState::new(), vec![]);
             engine.max_tokens = 64_000;
             let ceiling = cfg.input_ceiling_for_window(WINDOW);
