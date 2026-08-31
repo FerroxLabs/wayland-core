@@ -1470,6 +1470,7 @@ jobs:
       # moved again, confirm from a real run's log that it printed a scan
       # result — not merely that the job was green.
       - name: No vacuous `cargo test` invocations
+        if: ${{ !cancelled() }}
         run: |
           python3 scripts/check-no-vacuous-cargo-test.py --self-test
           python3 scripts/check-no-vacuous-cargo-test.py
@@ -1487,6 +1488,7 @@ jobs:
       # sail through every release green, which is the same "green-looking
       # absence of signal" the step above was moved twice to avoid.
       - name: Model-limits freshness checker self-test
+        if: ${{ !cancelled() }}
         run: python3 scripts/check-model-limits-freshness.py --self-test
 
       # ── pre-publish personal-identifier gate ──────────────────────────
@@ -1519,6 +1521,7 @@ jobs:
       # self-test drives the real scanner over throwaway git repos to prove
       # exactly that split, in both directions, on every run.
       - name: No personal identifiers in committed content
+        if: ${{ !cancelled() }}
         run: |
           python3 scripts/check-no-personal-identifiers.py --self-test
           python3 scripts/check-no-personal-identifiers.py
@@ -1546,6 +1549,7 @@ jobs:
       # against the four defects the shared-process leg found and would have
       # flagged none of them while calling the binary compliant.
       - name: No unserialized test writes to shared process globals
+        if: ${{ !cancelled() }}
         run: |
           python3 scripts/check-test-env-globals.py --self-test
           python3 scripts/check-test-env-globals.py
@@ -1570,6 +1574,7 @@ jobs:
       # 9 that must stay silent -- so a scanner that has stopped matching fails
       # loudly rather than passing everything.
       - name: No collapsed continuation whitespace in messages
+        if: ${{ !cancelled() }}
         run: |
           python3 scripts/check-message-whitespace.py --self-test
           python3 scripts/check-message-whitespace.py crates
@@ -1613,6 +1618,7 @@ jobs:
       # leg, reported "found 2, expected 3", and nobody saw. A gate nothing runs
       # is a gate that cannot fail.
       - name: macOS/Windows admission control is consistent
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           python3 .planning/evidence/ci-macos-budget/gate.py --self-test .github/workflows/ci.yml
@@ -1640,7 +1646,13 @@ jobs:
       # ledger file, filed over the preceding two days, none of which any green
       # run on this leg could have seen. If you are widening this step, the
       # question to ask is whether it should also run on a schedule.
+      - name: One red measures one thing (ci-linux step suppression)
+        if: ${{ !cancelled() }}
+        run: |
+          python3 scripts/check-ci-step-suppression.py --self-test
+          python3 scripts/check-ci-step-suppression.py
       - name: Criteria ledger is anchored and parseable
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           python3 scripts/check-criteria-ledger.py --self-test
@@ -1677,6 +1689,7 @@ jobs:
       # not read .planning/ledger at all, so it says nothing about whether a
       # release is ready; only that the thing which would say so still works.
       - name: Release-readiness gate can still fail
+        if: ${{ !cancelled() }}
         run: python3 scripts/check-release-readiness.py --self-test
       # ── Windows-attribution gate (#1146) ──────────────────────────────
       # Same placement reasoning as the two steps above: AFTER checkout (it
@@ -1698,6 +1711,7 @@ jobs:
       # `--self-test` runs first and proves the checker fires AND stays silent
       # on the fixtures, so a checker that has stopped matching fails loudly.
       - name: Windows CI failures stay attributable
+        if: ${{ !cancelled() }}
         run: |
           python3 scripts/check-windows-attribution.py --self-test
           python3 scripts/check-windows-attribution.py
@@ -1722,6 +1736,7 @@ jobs:
           echo "=== AFTER ==="; df -h /
 
       - name: Build CI image (deps + cargo tools baked in)
+        id: ci_image
         run: |
           docker build -t "$CI_IMAGE" -f - . <<'EOF'
           FROM rust:1.95-slim-bookworm
@@ -1812,7 +1827,7 @@ jobs:
       # failing emits a ::warning, so a future permissions regression is visible
       # rather than merely absent.
       - name: Desktop contract corpus pre-flight hint (advisory)
-        if: github.event_name == 'pull_request'
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1856,9 +1871,11 @@ jobs:
         run: $DOCKER_RUN "$CI_IMAGE" cargo build --release -p wcore-cli
 
       - name: Check formatting
+        if: ${{ !cancelled() && steps.ci_image.outcome == 'success' }}
         run: $DOCKER_RUN "$CI_IMAGE" cargo fmt --all -- --check
 
       - name: Clippy (warnings = errors)
+        if: ${{ !cancelled() && steps.ci_image.outcome == 'success' }}
         run: $DOCKER_RUN "$CI_IMAGE" cargo clippy --workspace --all-targets -- -D warnings
 
       # `--workspace` above does NOT cover this. `live-docker` is an optional
@@ -1877,6 +1894,7 @@ jobs:
       # `cfg(target_os = "macos")` branch inside the same file is unreachable
       # from here and is covered by the macOS leg's twin of this step.
       - name: Clippy the live-docker feature graph (not covered by --workspace)
+        if: ${{ !cancelled() && steps.ci_image.outcome == 'success' }}
         run: |
           $DOCKER_RUN "$CI_IMAGE" cargo clippy -p wcore-sandbox --features live-docker --all-targets -- -D warnings
           $DOCKER_RUN "$CI_IMAGE" cargo clippy -p wcore-swarm --features wcore-sandbox/live-docker --all-targets -- -D warnings
@@ -1920,6 +1938,7 @@ jobs:
       # preserved as outer-attempts/outer-attempt-1.xml and reds the required
       # `report` check.
       - name: Run tests (nextest CI profile)
+        if: ${{ !cancelled() && steps.ci_image.outcome == 'success' }}
         uses: nick-fields/retry@v3
         with:
           timeout_minutes: 45
@@ -2046,6 +2065,7 @@ jobs:
       # would otherwise steal cargo's exit status. Floors are the counts
       # measured at the commit that added this step (agent 14, tools 32).
       - name: Voice suite (--features voice; runs in no other configuration)
+        if: ${{ !cancelled() && steps.ci_image.outcome == 'success' }}
         run: |
           set -euo pipefail
           run_suite() {
@@ -2128,6 +2148,7 @@ jobs:
       # below reads only 'test result: ok.' lines; the enclosing test's own
       # verdict is what decides the step.
       - name: Shared-process lib suite (cargo test, one process per binary)
+        if: ${{ !cancelled() && steps.ci_image.outcome == 'success' }}
         run: |
           set -euo pipefail
           MIN=11000
@@ -2193,6 +2214,7 @@ jobs:
       # no reason, and refuses one naming a target it no longer selects, so that
       # list cannot rot into a standing excuse.
       - name: Shared-process integration suite (cargo test, one process per target)
+        if: ${{ !cancelled() && steps.ci_image.outcome == 'success' }}
         run: |
           set -euo pipefail
           MIN_TARGETS=60
@@ -2246,11 +2268,13 @@ jobs:
       # _and_carries_nothing_that_could_silence_it` fails if either ever appears,
       # on the step or on this job.
       - name: Check Desktop protocol contract corpus drift
+        if: ${{ !cancelled() && steps.ci_image.outcome == 'success' }}
         run: $DOCKER_RUN "$CI_IMAGE" cargo run -p wcore-protocol --bin wcore-contract -- check
 
       # WCORE_SMOKE_REQUIRE_PREBUILT=1 (passed into the container): a missing
       # release artifact is a hard failure here, never a silent skip (#190).
       - name: Release binary smoke (catches plugin dead-code-strip)
+        if: ${{ !cancelled() && steps.ci_image.outcome == 'success' }}
         run: $DOCKER_RUN -e WCORE_SMOKE_REQUIRE_PREBUILT=1 "$CI_IMAGE" cargo nextest run -p wcore-cli --test release_binary_smoke
 
       # F01 E3 — non-optional packaged boundary proof. The release Core binary
@@ -2262,9 +2286,11 @@ jobs:
       # (`cargo install --locked cargo-nextest` in the Dockerfile heredoc), and
       # the two neighbouring steps in this job already use it.
       - name: F01 packaged wayland-eval driver gate
+        if: ${{ !cancelled() && steps.ci_image.outcome == 'success' }}
         run: $DOCKER_RUN -e WAYLAND_BUILD_SOURCE_SHA=${{ github.sha }} "$CI_IMAGE" cargo nextest run --no-tests=fail --locked -p wcore-eval-scenarios --features packaged-driver-gate --test packaged_driver_gate
 
       - name: Security audit
+        if: ${{ !cancelled() && steps.ci_image.outcome == 'success' }}
         run: $DOCKER_RUN "$CI_IMAGE" cargo audit
 
       - name: Upload nextest JUnit report
