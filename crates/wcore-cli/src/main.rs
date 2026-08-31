@@ -3758,6 +3758,20 @@ async fn teardown_runtime_mcp_for_replace(
             cleanup_failures.join("; ")
         );
         let _ = lifecycle.mark_cleanup_unverified(name, reason.clone());
+        // wayland#1234 -- WITHDRAW HERE TOO, on the arm the tree used to skip.
+        //
+        // The old rationale was "on CleanupUnverified the manager is left in
+        // place and the name stays reserved, so nothing is withdrawn either".
+        // It does not survive the state this arm actually leaves: the tools
+        // were ALREADY taken out of the live registry above and are NOT put
+        // back. CleanupUnverified means `close_server` could not be verified,
+        // i.e. the transport may still be ALIVE -- so the manager stays in
+        // McpCatalogRefresh, the server announces `tools/list_changed`, and the
+        // tools the operator just removed are re-registered. That is #1234's
+        // resurrection shape, on the one arm most likely to have a live
+        // transport. Withdrawing here makes the refresh state agree with the
+        // registry state on BOTH arms.
+        withdraw_runtime_mcp_from_refresh(engine, name);
         return Err(reason);
     }
     dynamic_managers
@@ -3853,6 +3867,20 @@ async fn remove_runtime_mcp_server(
             cleanup_failures.join("; ")
         );
         let _ = lifecycle.mark_cleanup_unverified(&command.name, reason);
+        // wayland#1234 -- WITHDRAW HERE TOO, on the arm the tree used to skip.
+        //
+        // The old rationale was "on CleanupUnverified the manager is left in
+        // place and the name stays reserved, so nothing is withdrawn either".
+        // It does not survive the state this arm actually leaves: the tools
+        // were ALREADY taken out of the live registry above and are NOT put
+        // back. CleanupUnverified means `close_server` could not be verified,
+        // i.e. the transport may still be ALIVE -- so the manager stays in
+        // McpCatalogRefresh, the server announces `tools/list_changed`, and the
+        // tools the operator just removed are re-registered. That is #1234's
+        // resurrection shape, on the one arm most likely to have a live
+        // transport. Withdrawing here makes the refresh state agree with the
+        // registry state on BOTH arms.
+        withdraw_runtime_mcp_from_refresh(engine, &command.name);
         emit_mcp_removal_receipt(
             &command,
             cleanup_outcome,
@@ -9557,6 +9585,10 @@ mod tests {
     struct GrowingTestTransport {
         tools: std::sync::Mutex<Vec<String>>,
         tools_changed: std::sync::atomic::AtomicBool,
+        /// wayland#1234 — model the `CleanupUnverified` arm: `close()` fails,
+        /// so the removal path cannot prove the transport dead, and the
+        /// transport goes on answering `tools/list` and announcing changes.
+        close_fails: bool,
     }
 
     impl GrowingTestTransport {
@@ -9564,6 +9596,16 @@ mod tests {
             Self {
                 tools: std::sync::Mutex::new(initial.iter().map(|n| n.to_string()).collect()),
                 tools_changed: std::sync::atomic::AtomicBool::new(false),
+                close_fails: false,
+            }
+        }
+
+        /// A transport whose close cannot be verified — the arm on which a
+        /// live server is MOST likely, and the one the withdrawal used to skip.
+        fn new_refusing_close(initial: &[&str]) -> Self {
+            Self {
+                close_fails: true,
+                ..Self::new(initial)
             }
         }
 
@@ -9595,6 +9637,11 @@ mod tests {
             Ok(())
         }
         async fn close(&self) -> Result<(), McpError> {
+            if self.close_fails {
+                return Err(McpError::Transport(
+                    "transport refused to close (test fixture)".to_string(),
+                ));
+            }
             Ok(())
         }
         fn take_tools_changed(&self) -> bool {
@@ -11372,6 +11419,156 @@ mod tests {
         assert!(
             engine.tools().get("warehouse_audit_export").is_some(),
             "the late tool must be callable"
+        );
+    }
+
+    /// FerroxLabs/wayland#1234 c1/c2 — the SAME resurrection, on the
+    /// `CleanupUnverified` arm, which is the arm this tree used to skip.
+    ///
+    /// WHY THIS IS A SEPARATE TEST AND NOT A VARIANT SPELLING. The sibling
+    /// below drives the `Removed` arm, where `close_server` succeeded and the
+    /// withdrawal has landed since #1213 c4. This drives the arm where
+    /// `close_server` FAILS. Until wayland#1234 the handler returned early on
+    /// that arm — after it had already taken the tools out of the live
+    /// registry — so the manager stayed in `McpCatalogRefresh` while its
+    /// transport was, by the definition of the arm, NOT proven dead. The next
+    /// `notifications/tools/list_changed` re-registered the tools the operator
+    /// had just removed.
+    ///
+    /// The criterion says "regardless of what its transport reports about
+    /// liveness", so the fixture is alive in both directions: it refuses to
+    /// close AND it goes on serving `tools/list`. Nothing here is carried by
+    /// a dead-transport skip in `refresh_signalled_tools`.
+    ///
+    /// RED ARM (recorded, re-runnable): delete the
+    /// `withdraw_runtime_mcp_from_refresh(engine, &command.name);` line on the
+    /// cleanup-unverified arm of `remove_runtime_mcp_server`, `touch`
+    /// `main.rs`, rebuild — this test fails on the resurrection assertion
+    /// while the `Removed`-arm sibling stays green.
+    #[tokio::test]
+    async fn an_unverified_removal_still_withdraws_so_the_server_cannot_resurrect() {
+        let config = wcore_config::config::Config::default();
+        let defer_cold = config.builtin_tools.defer_cold.clone();
+        let (mut engine, _sink) =
+            wcore_agent::bootstrap::AgentBootstrap::build_for_test(config, vec![]);
+        engine.set_mcp_catalog_refresh(Arc::new(wcore_mcp::tool_proxy::McpCatalogRefresh::new(
+            Vec::new(),
+            engine.tool_names(),
+            HashMap::new(),
+        )));
+
+        let fixture = Arc::new(GrowingTestTransport::new_refusing_close(&[
+            "warehouse_reserve",
+        ]));
+        let manager = Arc::new(McpManager::new_for_test_with_tools(vec![(
+            "warehouse",
+            false,
+            Box::new(SharedTransport(fixture.clone())) as Box<dyn McpTransport>,
+            vec![tool("warehouse_reserve")],
+        )]));
+        let server_config = to_mcp_server_config(
+            "stdio",
+            Some("unused-test-command".to_string()),
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+        )
+        .expect("valid test server config");
+        let resolved = HashMap::from([("warehouse".to_string(), server_config.clone())]);
+        let writer = ProtocolWriter::new();
+        let mut dynamic_managers = Vec::new();
+        let mut reservations = lifecycle_reservations(&resolved);
+        assert!(integrate_deferred_mcp(
+            &mut engine,
+            manager.clone(),
+            &resolved,
+            &mut reservations,
+            &writer,
+            &mut dynamic_managers,
+            &mut inert_late_binder(),
+            &mut Vec::new(),
+        ));
+        assert!(
+            engine.tools().get("warehouse_reserve").is_some(),
+            "precondition: the runtime-added server's tool is live"
+        );
+
+        let mut diagnostics = RuntimeDiagnosticsState::from_launch(
+            &wcore_config::config::Config::default(),
+            &wcore_config::resolution_provenance::ConfigResolutionProvenance::default(),
+            None,
+            wcore_protocol::diagnostics::RuntimeEngineMode::Unknown,
+            wcore_protocol::diagnostics::RuntimeWorkspaceKind::Unknown,
+        );
+        assert!(diagnostics.record_runtime_declaration("warehouse", &server_config));
+        let lifecycle = McpLifecycleCatalog::new();
+        // Seed the name READY so the removal has a lifecycle entry to move.
+        // Without this mark_stopping is a no-op, mark_cleanup_unverified
+        // records nothing, and the arm control below cannot observe which arm
+        // ran -- which is exactly what it caught on the first attempt.
+        assert!(lifecycle.seed_ready(
+            "warehouse",
+            wcore_agent::mcp_lifecycle::McpConfigIdentity::for_server(&server_config),
+        ));
+        let mut removal_ledger = McpRemovalLedger::default();
+        remove_runtime_mcp_server(
+            RemoveMcpServerCommand {
+                lifecycle_version: MCP_LIFECYCLE_VERSION,
+                request_id: "removal-unverified-1".to_string(),
+                name: "warehouse".to_string(),
+            },
+            &mut removal_ledger,
+            &mut diagnostics,
+            &lifecycle,
+            &mut engine,
+            &mut dynamic_managers,
+            &writer,
+        )
+        .await;
+
+        // CONTROL ON THE ARM. Without this the test could be driving the
+        // ordinary `Removed` path and grading nothing new: the whole point is
+        // that cleanup was NOT verified here.
+        assert!(
+            matches!(
+                lifecycle.snapshot("warehouse").map(|s| s.state),
+                Some(McpLifecycleState::CleanupUnverified { .. })
+            ),
+            "control: this test must exercise the CleanupUnverified arm, and \
+             the lifecycle says it took a different one: {:?}",
+            lifecycle.snapshot("warehouse").map(|s| s.state)
+        );
+        // The tools are gone from the live registry on this arm too — which is
+        // exactly why leaving the manager in the refresh is a resurrection and
+        // not a harmless no-op.
+        assert!(
+            engine.tools().get("warehouse_reserve").is_none(),
+            "precondition: an unverified removal still drops the server's \
+             tools from the live registry"
+        );
+
+        // The server the operator detached goes on talking.
+        fixture.register_and_announce("warehouse_audit_export");
+        let refresh = engine
+            .mcp_catalog_refresh()
+            .expect("the refresh outlives the removal");
+        let registry = engine
+            .registry_mut()
+            .expect("idle fixture registry must be mutable");
+        let refreshed = refresh.apply(registry, &defer_cold).await;
+        assert!(
+            refreshed.is_empty(),
+            "wayland#1234: a server removed on the CleanupUnverified arm was \
+             still polled by McpCatalogRefresh. Refreshed: {refreshed:?}"
+        );
+        assert!(
+            engine.tools().get("warehouse_audit_export").is_none(),
+            "wayland#1234: the removed server's NEW tool was re-registered \
+             into the live registry after an unverified removal — the operator \
+             took the server away and it came back"
         );
     }
 

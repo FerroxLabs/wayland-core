@@ -3446,6 +3446,22 @@ impl TuiEngine {
                 generation,
                 format!("MCP transport cleanup could not be verified: {error}"),
             );
+            // wayland#1234 -- WITHDRAW HERE TOO, on the arm the tree used to skip.
+            //
+            // The old rationale was "on CleanupUnverified the manager is left in
+            // place and the name stays reserved, so nothing is withdrawn either".
+            // It does not survive the state this arm actually leaves: the tools
+            // were ALREADY taken out of the live registry above and are NOT put
+            // back. CleanupUnverified means `close_server` could not be verified,
+            // i.e. the transport may still be ALIVE -- so the manager stays in
+            // McpCatalogRefresh, the server announces `tools/list_changed`, and the
+            // tools the operator just removed are re-registered. That is #1234's
+            // resurrection shape, on the one arm most likely to have a live
+            // transport. Withdrawing here makes the refresh state agree with the
+            // registry state on BOTH arms.
+            if let Some(refresh) = catalog_refresh.as_ref() {
+                refresh.forget_runtime_server(&name);
+            }
             let _ = tx.send(ProtocolEvent::McpRemovalResult {
                 lifecycle_version: wcore_protocol::commands::MCP_LIFECYCLE_VERSION,
                 request_id,
@@ -3455,9 +3471,9 @@ impl TuiEngine {
             });
             return None;
         }
-        // Only on the arm where the transport is proven closed, matching the
-        // headless path: on `CleanupUnverified` the manager stays in place and
-        // the name stays reserved, so nothing is withdrawn there either.
+        // Both arms withdraw since wayland#1234: the tools are out of the
+        // registry either way, so leaving the manager in McpCatalogRefresh on
+        // the unverified arm is what let a removed server resurrect them.
         if let Some(refresh) = catalog_refresh.as_ref() {
             refresh.forget_runtime_server(&name);
         }
