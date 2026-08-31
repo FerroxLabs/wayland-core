@@ -21,6 +21,7 @@ criteria:
   - id: c3
     text: "The same guarantee holds on Windows, where the product ships"
     state: superseded
+    successor: FerroxLabs/wayland-core#370
     evidence: "symbol:crates/wcore-config/src/atomic_io.rs::publish_displacing"
     owner: core
     handoff: "FerroxLabs/wayland-core#370"

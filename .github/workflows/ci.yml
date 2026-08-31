@@ -1573,10 +1573,47 @@ jobs:
           python3 .planning/evidence/ci-macos-budget/gate.py --self-test .github/workflows/ci.yml
           python3 .planning/evidence/ci-macos-budget/gate.py .github/workflows/ci.yml
 
+      # ── Criteria ledger: STRUCTURE here, COVERAGE at release ───────────
+      # `--offline` is deliberate and it is not free, so the cost is written
+      # down rather than left for the next reader to discover.
+      #
+      # Two arms exist. The STRUCTURAL arm parses every ledger and resolves
+      # every `met` criterion's evidence anchor; it needs nothing but the
+      # checkout and runs here, on every push. The COVERAGE arm asks the one
+      # question this repo cannot answer from its own files -- is there an OPEN
+      # in-scope issue with NO ledger at all -- and to ask it, it queries BOTH
+      # FerroxLabs/wayland and FerroxLabs/wayland-core. The repo-scoped
+      # GITHUB_TOKEN cannot see the second tracker, so the arm cannot run on a
+      # PR from a fork or on any leg without `LEDGER_ISSUES_TOKEN`.
+      #
+      # It DOES run, and can fail, at release.yml:104 -- with that token, on the
+      # release path, which is the moment coverage decides something.
+      #
+      # What that costs: between releases a missing ledger is invisible here. It
+      # is not hypothetical. On 2026-08-31 the live arm was run by hand for the
+      # first time in this cycle and reported 29 open in-scope issues with no
+      # ledger file, filed over the preceding two days, none of which any green
+      # run on this leg could have seen. If you are widening this step, the
+      # question to ask is whether it should also run on a schedule.
       - name: Criteria ledger is anchored and parseable
         run: |
+          set -euo pipefail
           python3 scripts/check-criteria-ledger.py --self-test
-          python3 scripts/check-criteria-ledger.py --offline
+          python3 scripts/check-criteria-ledger.py --offline | tee /tmp/ledger-offline.log
+          # The gate prints "THIS IS NOT A PASS for coverage" and, inside a
+          # green step, that sentence reaches nobody. Project it where a reader
+          # of the run actually looks. A disclosure nothing surfaces is the
+          # defect wayland-core#400 is about, one layer up in our own tooling.
+          {
+            echo "### Criteria ledger (structural arm only)"
+            echo
+            echo "\`--offline\`: tracker COVERAGE was **not** checked on this run."
+            echo "An open in-scope issue with no ledger file would not be seen here."
+            echo "The coverage arm runs on the release path (\`release.yml\`), which"
+            echo "is the moment it decides something."
+            echo
+            grep -E "^(OK|OFFLINE)" /tmp/ledger-offline.log || true
+          } >> "$GITHUB_STEP_SUMMARY"
       # ── Release-readiness gate: SELF-TEST ONLY ─────────────────────────
       # The gate itself is NOT run here, and that is the whole design. It
       # refuses a release while any in-scope defect still owes core work, so

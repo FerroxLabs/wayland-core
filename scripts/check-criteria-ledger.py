@@ -149,7 +149,8 @@ OWNERS = ("core", "desktop", "flux", "maintainer", "reporter")
 STATUSES = ("open", "closed")
 
 TOP_KEYS = {"issue", "repo", "title", "status", "last_verified_commit", "criteria"}
-CRIT_KEYS = {"id", "text", "state", "evidence", "owner", "note", "handoff"}
+CRIT_KEYS = {"id", "text", "state", "evidence", "owner", "note", "handoff",
+             "successor"}
 # Keys this schema ALLOWS but does not require, and does not itself judge.
 # `kind: defect|feature` and a criterion's `handoff:` belong to
 # scripts/check-release-readiness.py, which decides whether an issue is
@@ -160,7 +161,19 @@ CRIT_KEYS = {"id", "text", "state", "evidence", "owner", "note", "handoff"}
 # that drift. Nothing this gate fails on changes: `kind` is required by the
 # release gate, not by this one, and `handoff` is judged there too.
 TOP_OPTIONAL = {"kind"}
-SUCCESSOR = re.compile(r"#(\d+)")
+# A superseded criterion names its successor in a FIELD, never in prose.
+# `SUCCESSOR` used to be `re.compile(r"#(\d+)")` applied to the note with
+# `.search`, so the first issue number anywhere in the sentence decided
+# where a residual was tracked. Measured over the 16 superseded criteria
+# in this tree, that mis-resolved three of them -- two to their OWN issue,
+# which every check passed because the issue exists and is open.
+#
+# The repo is REQUIRED, not defaulted to the ledger's own. #370, #368,
+# #373 and #389 all exist in both trackers; wayland-1155 c2 supersedes
+# into wayland-core#370 while wayland#370 is a merged PR, and only the
+# prose distinguished them.
+SUCCESSOR = re.compile(
+    r"^(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#(?P<num>\d+)$")
 CRIT_REQUIRED = {"id", "text", "state", "owner"}
 
 
@@ -623,12 +636,30 @@ def validate_record(root, rec, git, shallow=False):
                            "blocked criterion without a `note` saying what is "
                            "being waited on is a suppression." % (w, cid))
         if st == "superseded":
-            if not SUCCESSOR.search(c.get("note", "")):
+            suc = (c.get("successor") or "").strip()
+            if not suc:
                 bad.append(
-                    "%s: %s is `superseded` but its note names no successor "
-                    "issue. A residual nobody can find is a residual nobody "
-                    "will fix -- put the `#<number>` that carries it in the "
-                    "note." % (w, cid))
+                    "%s: %s is `superseded` and declares no `successor:` "
+                    "field. A residual nobody can find is a residual nobody "
+                    "will fix. Name it as `<owner>/<repo>#<number>` -- NOT in "
+                    "the note: the successor used to be read as the first "
+                    "`#<number>` in that prose, which sent three of this "
+                    "tree's sixteen residuals to the wrong issue." % (w, cid))
+            else:
+                m = SUCCESSOR.match(suc)
+                if not m:
+                    bad.append(
+                        "%s: %s has `successor: %s`, which is not "
+                        "`<owner>/<repo>#<number>`. The repo is required: the "
+                        "same issue number exists on both trackers, so a bare "
+                        "number names two different tickets." % (w, cid, suc))
+                elif (m.group("repo") == rec.get("repo")
+                      and m.group("num") == str(rec.get("issue"))):
+                    bad.append(
+                        "%s: %s is `superseded` into its OWN issue (%s). That "
+                        "is not decomposition, it is a residual handed to "
+                        "nobody -- and it passed every check this gate had, "
+                        "because the issue exists and is open." % (w, cid, suc))
         if ev:
             why = resolve_evidence(root, ev, git, shallow)
             if why:
@@ -910,21 +941,26 @@ def run(root, offline=False, injected=None, quiet=False):
             for c in rec["criteria"]:
                 if c.get("state") != "superseded":
                     continue
-                m2 = SUCCESSOR.search(c.get("note", ""))
+                m2 = SUCCESSOR.match((c.get("successor") or "").strip())
                 if not m2:
-                    continue
-                n2 = int(m2.group(1))
-                where = [(rp, st) for rp, m3 in allstate.items()
-                         for nn, st in m3.items() if nn == n2]
-                if not where:
+                    continue          # validate_record already complained
+                rp2, n2 = m2.group("repo"), int(m2.group("num"))
+                # Addressed by repo AND number. The old code scanned every
+                # tracker for the bare number and accepted a hit anywhere,
+                # so a residual could be certified against a same-numbered
+                # ticket in the other repo -- #370, #368, #373 and #389 all
+                # exist on both.
+                st2 = allstate.get(rp2, {}).get(n2)
+                if st2 is None:
                     problems.append(
-                        "%s: %s is superseded into #%d, which exists in "
-                        "neither tracker." % (rec["path"], c.get("id"), n2))
-                elif all(st == "closed" for _, st in where):
+                        "%s: %s is superseded into %s#%d, which does not exist "
+                        "on THAT tracker. The repo is part of the address."
+                        % (rec["path"], c.get("id"), rp2, n2))
+                elif st2 == "closed":
                     problems.append(
-                        "%s: %s is superseded into #%d, which is CLOSED. A "
+                        "%s: %s is superseded into %s#%d, which is CLOSED. A "
                         "residual handed to a closed issue is not tracked; it "
-                        "is lost." % (rec["path"], c.get("id"), n2))
+                        "is lost." % (rec["path"], c.get("id"), rp2, n2))
             states = [c.get("state") for c in rec["criteria"]]
             if (states and all(s in ("met", "superseded") for s in states)
                     and gh_state == "open"):
@@ -1259,28 +1295,65 @@ def self_test():
              '    state: met\n    owner: maintainer\n'
              '    note: "needs a Slack workspace credential the core lane does not hold"\n',
              ''), True, expect="marks every criterion met, but")
-    case("superseded with no successor named in its note",
+    # A superseded criterion's successor is a FIELD. It used to be the
+    # first `#<number>` in the note, resolved against every tracker at
+    # once -- which sent 3 of this tree's 16 residuals to the wrong issue,
+    # two of them to their own.
+    case("superseded with no `successor:` field",
          lambda b: b.replace("    state: not-met\n    owner: core",
                              "    state: superseded\n    owner: core\n"
-                             "    note: \"the rest of this moved somewhere, trust me\""),
-         True, expect="names no successor issue")
+                             "    note: \"the residual moved on\""),
+         True,
+         expect="declares no `successor:` field")
     case("superseded into an issue that is CLOSED",
          lambda b: b.replace("    state: not-met\n    owner: core",
-                             "    state: superseded\n    owner: core\n"
-                             "    note: \"the residual is carried by #11 on the core tracker\""),
+                             "    state: superseded\n    successor: FerroxLabs/wayland#11\n    owner: core\n"
+                             "    note: \"the residual moved on\""),
          True,
          inj={"all": {"FerroxLabs/wayland": {7: "open", 11: "closed"},
                       "FerroxLabs/wayland-core": {9: "open"}},
-              "scoped": {"FerroxLabs/wayland": [7], "FerroxLabs/wayland-core": [9]}},
+              "scoped": {"FerroxLabs/wayland": [7],
+                         "FerroxLabs/wayland-core": [9]}},
          expect="which is CLOSED")
     case("superseded into an issue that is OPEN",
          lambda b: b.replace("    state: not-met\n    owner: core",
-                             "    state: superseded\n    owner: core\n"
-                             "    note: \"the residual is carried by #11 on the core tracker\""),
+                             "    state: superseded\n    successor: FerroxLabs/wayland#11\n    owner: core\n"
+                             "    note: \"the residual moved on\""),
          False,
          inj={"all": {"FerroxLabs/wayland": {7: "open", 11: "open"},
                       "FerroxLabs/wayland-core": {9: "open"}},
-              "scoped": {"FerroxLabs/wayland": [7], "FerroxLabs/wayland-core": [9]}})
+              "scoped": {"FerroxLabs/wayland": [7],
+                         "FerroxLabs/wayland-core": [9]}})
+    case("superseded into its OWN issue",
+         lambda b: b.replace("    state: not-met\n    owner: core",
+                             "    state: superseded\n    successor: FerroxLabs/wayland#7\n    owner: core\n"
+                             "    note: \"the residual moved on\""),
+         True,
+         inj={"all": {"FerroxLabs/wayland": {7: "open", 11: "open"},
+                      "FerroxLabs/wayland-core": {9: "open"}},
+              "scoped": {"FerroxLabs/wayland": [7],
+                         "FerroxLabs/wayland-core": [9]}},
+         expect="into its OWN issue")
+    case("successor names a tracker the number is not on",
+         lambda b: b.replace("    state: not-met\n    owner: core",
+                             "    state: superseded\n    successor: FerroxLabs/wayland-core#11\n    owner: core\n"
+                             "    note: \"the residual moved on\""),
+         True,
+         inj={"all": {"FerroxLabs/wayland": {7: "open", 11: "open"},
+                      "FerroxLabs/wayland-core": {9: "open"}},
+              "scoped": {"FerroxLabs/wayland": [7],
+                         "FerroxLabs/wayland-core": [9]}},
+         expect="does not exist on THAT tracker")
+    case("a bare `#11` is refused: the repo is half the address",
+         lambda b: b.replace("    state: not-met\n    owner: core",
+                             "    state: superseded\n    successor: #11\n    owner: core\n"
+                             "    note: \"the residual moved on\""),
+         True,
+         inj={"all": {"FerroxLabs/wayland": {7: "open", 11: "open"},
+                      "FerroxLabs/wayland-core": {9: "open"}},
+              "scoped": {"FerroxLabs/wayland": [7],
+                         "FerroxLabs/wayland-core": [9]}},
+         expect="is not `<owner>/<repo>#<number>`")
     case("an unmet criterion on an issue GitHub says is CLOSED",
          _ident, True,
          inj={"all": {"FerroxLabs/wayland": {7: "closed"},

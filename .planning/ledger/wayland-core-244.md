@@ -41,6 +41,7 @@ criteria:
   - id: c6
     text: "Whether the Windows local-operator shell is expected to confine the VCS content store at all is a decided question, and the product claims no more than it delivers"
     state: superseded
+    successor: FerroxLabs/wayland-core#391
     evidence: "test:crates/wcore-tools/tests/bash_vcs_store_local_operator_gap.rs::a_non_local_principal_gets_no_shell_at_all_on_a_non_enforcing_backend"
     owner: maintainer
     handoff: "FerroxLabs/wayland-core#391"
@@ -48,6 +49,7 @@ criteria:
   - id: c7
     text: "A VFS read of a store named by a gitfile on a VENDORED checkout, rather than by the workspace root`s own .git, is refused"
     state: superseded
+    successor: FerroxLabs/wayland-core#390
     evidence: "test:crates/wcore-tools/tests/grep_vcs_named_store_deny.rs::grep_cannot_harvest_a_nested_gitfile_named_store"
     owner: core
     handoff: "FerroxLabs/wayland-core#390"
