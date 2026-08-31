@@ -392,7 +392,34 @@ fn seen_for<'a>(cells: &'a [Cell], tool: &str) -> &'a Seen {
 /// recorded decision rather than an accident.
 #[test]
 fn a_read_outside_the_workspace_escalates_in_every_mode_except_force() {
-    let outside = serde_json::json!({ "file_path": "/etc/hostname" });
+    // A readable path outside the session workspace, BUILT here rather than
+    // borrowed from the OS.
+    //
+    // core#409 c1 — the probe used to be the literal `/etc/hostname`, and on
+    // Windows that measured nothing. `Path::new("/etc/hostname").is_absolute()`
+    // is FALSE there (a root with no drive prefix), so `read_path_boundary`
+    // takes its relative branch and resolves the probe against the workspace
+    // root, which on Windows means the drive prefix plus `etc\hostname` —
+    // measured on a real host as `\\?\F:\etc\hostname`. Neither that file nor its
+    // containing
+    // folder exists, so `grantable_read_root`'s `canonicalize` fails and the
+    // classifier declines the card, exactly as it is documented to: it never
+    // offers a folder grant it could not actually mint. `Read` then fell
+    // through to the shipped allow_list and auto-ran, and this assertion read
+    // `Auto`. The PRODUCT was right; the fixture's notion of "outside" was
+    // Unix-only.
+    //
+    // Making the folder ourselves is what the rest of this file already does
+    // for the workspace side, and it makes "outside the workspace" true by
+    // construction on every platform instead of by borrowing a system path.
+    let outside_dir = TempDir::new().expect("outside tempdir");
+    let outside_root = outside_dir.path().join("readable");
+    std::fs::create_dir(&outside_root).expect("outside root");
+    let outside_file = outside_root.join("note.txt");
+    std::fs::write(&outside_file, b"outside\n").expect("outside file");
+    let outside = serde_json::json!({
+        "file_path": outside_file.to_str().expect("utf-8 outside path"),
+    });
 
     for mode in ["default", "auto_edit"] {
         let cell = measure(mode, "Read", outside.clone());
