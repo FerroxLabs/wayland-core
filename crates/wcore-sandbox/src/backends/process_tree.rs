@@ -127,8 +127,21 @@ impl ProcessTreeGuard {
     /// 33240249894 (linux-containerized) turned two `wcore-sandbox` tests that
     /// had run to completion into
     /// `ExecFailed("sandbox process-tree ownership: No such file or directory
-    /// (os error 2)")`, and the same reproduces on hetzner-dsm by pinning
-    /// concurrent bwrap execs onto two CPUs.
+    /// (os error 2)")`.
+    ///
+    /// CORRECTED 2026-08-31, because this comment used to claim reproduction
+    /// "on hetzner-dsm by pinning concurrent bwrap execs onto two CPUs" and
+    /// that is not what happens. CPU starvation does NOT reproduce it: 240
+    /// executions pinned to ONE cpu on a plain host and 240 more in the CI
+    /// image lost the race zero times, each arm positive-controlled that the
+    /// executions really ran. Starving the CPU slows the sandboxed child by as
+    /// much as it slows this read, so it widens both sides of the window at
+    /// once. What DOES decide it is a stall on THIS side alone, and the window
+    /// was measured by injecting one: the unfixed tree fails at a 100 ms stall
+    /// on a plain host (2/5, and 5/5 from 125 ms) and at 15 ms in CI's
+    /// nested-bwrap-in-docker shape (2/5, and 5/5 from 20 ms). So it reaches a
+    /// plain Linux host and CI is merely ~5x more exposed. Full arms:
+    /// `.planning/evidence/f13-sandbox/362-WINDOW-AND-RATE.md`.
     ///
     /// # Why "gone" is safe to answer with no guard
     ///

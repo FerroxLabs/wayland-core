@@ -4,99 +4,41 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "sandbox status never says the backend refuses PowerShell, while four production sites silently downgrade the shell"
 status: open
-last_verified_commit: bb8706ee
+last_verified_commit: 6c87400b2
 criteria:
   - id: c1
     text: "sandbox status states, in both the human and the --json arm, that the active backend refuses PowerShell whenever blocks_powershell() is true"
-    state: not-met
+    state: met
+    evidence: "test:crates/wcore-cli/src/sandbox_cmd.rs::a_powershell_refusal_reaches_both_operator_arms_through_the_registry"
     owner: core
-    note: "FILED AND NOT TAKEN 2026-08-30 by lane w3-windows-honesty, which found it while closing #368 c6 and is recording WHY it stopped rather than shipping it. This adds a field to `sandbox status --json`, an operator surface a host integration reads, and the lane's assignment was #368/#369/#370/#389 -- a new field on a shipped surface at RC time, on a lane already answering a refutation, is not work that traces to any of those four. It is filed rather than deferred so it has a carrier: a deferral with no ticket decays into nothing. VERIFIED AGAINST THE TREE, not taken from the issue prose: `SandboxRegistry::blocks_powershell` exists at crates/wcore-sandbox/src/lib.rs:424; `SandboxStatus::project` at crates/wcore-cli/src/sandbox_cmd.rs:150-190 projects eight fields and this is not one of them; the four rewriting call sites are crates/wcore-tools/src/bash.rs:715, :800, :1018, :1180, each passing it to `downgrade_unsupported_shell_for_sandbox`."
+    note: "`SandboxStatus` gains `blocks_powershell` and `shell_downgrade_notice`, both projected in `SandboxStatus::project` straight off the live `SandboxRegistry` (sandbox_cmd.rs:201-204), emitted in `to_json` and rendered in the human arm under a `POWERSHELL IS REFUSED` heading. `blocks_powershell` also joins `DISCLOSURE_METHODS` (crates/wcore-sandbox/src/backends/mod.rs), so the two totality checks added for #368 c6 now range over it: every override under `wcore-sandbox/src` must be registered in `BACKENDS_THAT_DISCLOSE` against the method it overrides, and every registered row must survive backend -> registry -> status -> BOTH arms. THE FOUR PRODUCTION SITES WERE RE-CONFIRMED BY GREP, not taken from the ticket: `grep -n downgrade_unsupported_shell_for_sandbox crates/wcore-tools/src/bash.rs` gives exactly :715, :800, :1018, :1180, and the helper at :199 rewrites `powershell`, `pwsh`, `bash` AND `sh`.\n\nTHE SECOND INSTANCE THE TICKET RECORDS IS ALSO CLOSED, in `642b8b23f`, because c1's own ticket asks whoever takes c1 to do it in the same change. `SessionSandboxBackend` (crates/wcore-agent/src/orchestration/anvil/forge.rs) forwarded 5 of `SandboxBackend`'s 17 items; it now forwards `known_limitations`, `unavailable_reason` AND `availability_probe_is_startup_safe` -- the three whose trait defaults are wrong in the non-conservative direction. The third could not be delegated before: `SandboxRegistry` had no such accessor, so one was added with its single caller named in its doc. The other nine defaults were read individually and are safe (two return `PolicyNotSupported`, one delegates to a third that does, `hard_containment_identity`'s `None` is documented as structurally incapable of minting hard containment, four booleans default `false` and UNDER-claim containment, `execute_streaming` drives `self.execute` which is forwarded). `forge.rs` is in `SOURCE_INPUTS`: the Desktop corpus was regenerated and key-diffed before committing -- only `fixture_digest` and `source_inputs_digest` moved, `schema_digest` is unchanged at `sha256:e31365bb...b07b`, the same two keys are the only movement in the six fixture files, and `cargo test -p wcore-protocol` is 32 binaries all ok."
   - id: c2
     text: "The statement is graded through backend -> SandboxRegistry -> SandboxStatus -> both arms, and a red arm making blocks_powershell return false reddens a test"
-    state: not-met
+    state: met
+    evidence: "test:crates/wcore-agent/src/orchestration/anvil/forge.rs::the_session_decorator_does_not_answer_for_the_backend_it_wraps"
     owner: core
-    note: "The property, and it is the one #368 c6 was first graded WITHOUT. c6 was anchored to a test asserting two constants were well formed; replacing `AppContainerBackend::known_limitations` with `Vec::new()` compiled, emptied the disclosure on real Windows, and left every test green because nothing called the method. Grading a boolean here would repeat that exactly. The machinery to do it right already exists on this branch -- `BACKENDS_THAT_DISCLOSE` plus `every_declaring_backends_disclosure_reaches_both_operator_arms` -- so whoever takes this extends that projection rather than writing a new assertion on `blocks_powershell()`. HALF OF THAT IS NOW ENFORCED FOR YOU, added 2026-08-30 on lane w3-windows-honesty as the N+1 of #368 c6 rather than left as advice: `wcore_cli::sandbox_cmd::disclosure_tests::every_status_field_reaches_the_json_arm` asserts the `--json` key set EQUALS the field set scanned from `SandboxStatus`'s own source, so adding a `blocks_powershell` field and forgetting `to_json` reddens before review sees it. Its red arm is measured (dropping `binds_workspace_authority` from `to_json` compiles and reddens at sandbox_cmd.rs:286). The HUMAN arm is deliberately NOT covered by it -- that arm renders labels, not field names -- so c1's human half still needs its own assertion, and c3 is untouched by any of this."
+    note: "GRADED ON THE PATH, NOT ON THE BOOLEAN -- which is what #368 c6 was first graded WITHOUT. A sentinel backend answering `true` is wrapped in a REAL `SandboxRegistry`, projected through `SandboxStatus::project`, and both arms are read. It runs on EVERY target, deliberately: the only backend in the workspace that answers `true` is `cfg(windows)`, so graded only through the `BACKENDS_THAT_DISCLOSE` table this property would be unmeasured on the Linux and macOS legs, which is exactly how a fact gets deleted with everything green.\n\nRED ARM, the one the criterion names, run on hetzner-dsm: replace `SandboxRegistry::blocks_powershell`'s delegate body with `false`. It COMPILES (`cargo check -p wcore-cli --tests` clean before the red was believed), and:\n\n  FAIL wcore-cli sandbox_cmd::disclosure_tests::a_powershell_refusal_reaches_both_operator_arms_through_the_registry\n  panicked at crates/wcore-cli/src/sandbox_cmd.rs:694:9:\n  the registry dropped the backend's PowerShell refusal before the status was even built\n  Summary 10 tests run: 9 passed, 1 failed\n\nNine of the ten disclosure tests stayed green under it, so the one that reddened is the one that grades this path and not a neighbour. `every_status_field_reaches_the_json_arm` (added on the earlier lane) separately asserts the `--json` key set EQUALS the field set scanned from `SandboxStatus`'s own source, so a future field that never reaches `to_json` reddens before review sees it.\n\nSECOND RED ARM for the decorator half of c1 (`642b8b23f`): each of the three newly forwarded methods was removed in turn from `SessionSandboxBackend`. All three compile, and all three redden `forge::tests::the_session_decorator_does_not_answer_for_the_backend_it_wraps` at a named assertion -- `the decorator inherited the trait default vec![]` / `... None` / `... true, which would put a backend's startup-UNSAFE probe back on the --json-stream readiness path`. That test drives the PRODUCTION decorator through a real registry, with the registry itself asserted first as a control so a failure cannot be the fixture."
   - id: c3
     text: "The disclosure names the consequence (the command is downgraded to another shell) and not only the fact"
-    state: not-met
+    state: met
+    evidence: "test:crates/wcore-cli/src/sandbox_cmd.rs::the_disclosure_names_the_downgrade_and_not_only_the_refusal"
     owner: core
-    note: "Separated from c1 so it cannot be met by inattention. A row reading `blocks powershell true` is the same failure mode #368 c6 identified in the capability booleans: accurate, and unreadable as a posture. What the operator SEES is a powershell command running under a different shell, so the disclosure has to name that or it does not let them attribute what they observe."
+    note: "The notice is DERIVED FROM THE REWRITE, not from the method name: `downgrade_unsupported_shell_for_sandbox` rewrites `powershell`, `pwsh`, `bash` and `sh` to the canonical `cmd` prefix, so a notice naming only PowerShell would leave an operator whose `bash -c` was rewritten with nothing to attribute it to. That the helper really does rewrite all four was checked at the source (bash.rs:206) rather than assumed from the ticket. The test pins PROPERTIES and not wording -- the backend name, `DOWNGRADED`, `cmd /C`, `NOT refused` (an operator told only that PowerShell is blocked would expect their command to FAIL; it does not, it runs somewhere else, which is the harder thing to attribute), and all four rewritten prefixes -- so an honest rewording does not redden and a disclosure that drops the rewrite does. It then asserts the notice reaches `--json` verbatim and every wrapped line of it reaches the human arm.\n\nRED ARM: reduce `shell_downgrade_notice` to the bare fact, `\"backend `{backend}` blocks powershell\"`. It compiles, and reddens two tests:\n\n  panicked at crates/wcore-cli/src/sandbox_cmd.rs:760:9:\n  the notice must say the command is downgraded and to WHAT, or an operator cannot attribute the shell they see: \"backend `sentinel_backend` blocks powershell\"\n  Summary 10 tests run: 8 passed, 2 failed\n\nThat is the accurate-but-unreadable row #368 c6 identified in the capability booleans, and it is now blocked. The `tracing::warn!` on the rewrite path is not a second chance and is not counted as one: with `RUST_LOG` unset only ERROR reaches stderr, so it reaches nobody by default."
 ---
 
-Filed 2026-08-30 by lane w3-windows-honesty as the N+1 of the class #368 c6
-closed, and filed rather than fixed for the reason recorded on c1.
+All three criteria graded against the tree on 2026-08-31 by lane `sandbox`
+(branch `lane/f13-sandbox`), every red arm run on hetzner-dsm and every mutation
+compile-checked before its red was believed.
 
-#368 c6 asked that the product state a defect where an operator reads the
-containment posture, and closed that for `known_limitations`. `blocks_powershell`
-is the same shape one trait method over and is worse: `known_limitations` was
-information withheld, whereas this one silently REWRITES the operator's argv at
-four production sites while the only surface describing the sandbox's posture
-says nothing about it.
-
-Both trackers were searched before filing, with a control that returned hits so
-an empty result could not read as absence: FerroxLabs/wayland-core#252 and
-FerroxLabs/wayland#737 / #754 are the PowerShell EXECUTION failures, and none of
-them is about the posture surface.
-
-A SECOND INSTANCE OF THE SAME CLASS, found in the same sweep and recorded here
-rather than filed separately, because the remedy is the same one and splitting it
-would give two tickets one fix. `SessionSandboxBackend`
-(crates/wcore-agent/src/orchestration/anvil/forge.rs:167) is a DECORATOR over a
-real `SandboxRegistry`. It delegates `execute`, `name`, `is_available`,
-`enforces_read_deny` and `blocks_powershell` -- and does NOT delegate
-`known_limitations` or `unavailable_reason`, so through it both fall back to the
-trait defaults `vec![]` and `None`. Any future status read taken through that
-decorator would report a backend with no known limitations and no reason for
-being unavailable, which is precisely the reassurance #368 c6 was filed about.
-
-TOTAL OVER THE TRAIT, so those are not two somebody stopped at. Re-derived
-2026-08-30 by the resuming fix lane, which read every default rather than
-assuming the unnamed ones were harmless: `SandboxBackend` declares 17 items,
-the decorator forwards 5, and the other 12 inherit their defaults. THREE of
-those inherit in a NON-CONSERVATIVE direction, not two.
-
-The third is `availability_probe_is_startup_safe`, whose default is `true`,
-and it is behavioural rather than disclosure. `AppContainerBackend` overrides
-it to `false` (crates/wcore-sandbox/src/backends/appcontainer/windows_impl/
-process.rs:382) precisely because its probe is a 15s wall-clock-guarded real
-spawn, and `select_without_startup_probe` (crates/wcore-sandbox/src/lib.rs:731)
-reads it to keep that spawn off the `--json-stream` readiness path. Through the
-decorator that answer flips to `true`, which would put the guarded spawn back
-on a startup path -- the #125 hang class. It is latent for the same reason the
-other two are (nothing selects a backend through this decorator), and it cannot
-be delegated today even by an author who wanted to: `SandboxRegistry` exposes no
-`availability_probe_is_startup_safe`, so closing it needs a registry accessor as
-well as a forwarding method.
-
-The remaining nine are safe, checked individually and not by assumption:
-`execute_with_cwd_authority` returns `PolicyNotSupported`; `probe_hard_containment`
-returns `PolicyNotSupported`; `execute_with_workspace_authority` delegates to the
-former; `hard_containment_identity` defaults `None`, which the trait documents as
-structurally incapable of minting hard containment; `confines_filesystem`,
-`owns_descendants_hard`, `binds_cwd_authority` and `binds_workspace_authority`
-default `false`, i.e. they UNDER-claim containment; and `execute_streaming`'s
-default drives `self.execute`, which the decorator does forward. So the hazard
-through this decorator is the disclosure pair PLUS the startup-probe answer, and
-that is a statement about all 17 items rather than about the ones that were
-noticed first.
-
-It is NOT reached today: the decorator is Anvil's gate-closure executor and
-nothing projects `SandboxStatus` through it, so this is a latent hole, not a live
-one -- and it is stated as latent rather than as a bug, because overstating it
-here would be the same failure the ticket is about. It is NOT fixed here for one
-stated reason: `forge.rs` is in the generated Desktop contract corpus's
-`SOURCE_INPUTS`, so a six-line delegation forces a corpus regeneration, and
-churning that at RC time to close an unreached path is a worse trade than
-recording it. Whoever takes c1 delegates both methods in the same change.
-
-Note also what the scanner in
-`crates/wcore-sandbox/tests/declared_limitations_are_registered.rs` can and
-cannot see: it walks `wcore-sandbox/src` only, so it is TOTAL over that crate and
-BLIND to a `SandboxBackend` implementation in any other -- which is how the
-decorator above escapes it. Widening it to the workspace would sweep in the many
-test doubles in `wcore-tools` and turn a decidable check into a maintained
-denylist, so the boundary is deliberate and is written down here rather than
-discovered later.
+The disclosure itself landed in `b34b160c3` (c1/c2) and `ede0ceaca` (c3). This
+lane additionally closed the SECOND INSTANCE the ticket records rather than
+leaving it: `642b8b23f` makes `SessionSandboxBackend` total over the three trait
+defaults that were wrong in the non-conservative direction, adds the registry
+accessor the third one needed, and pays the Desktop corpus regeneration that
+`forge.rs` being in `SOURCE_INPUTS` forces. It is still LATENT -- nothing
+projects `SandboxStatus` through that decorator today -- and is described that
+way here rather than overstated, because overstating it would be the failure this
+ticket is about.
 
 Nothing here reopens the Windows filesystem-sandbox or AppContainer decision.
-This is disclosure only.
+Disclosure only.
