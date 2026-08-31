@@ -1,0 +1,65 @@
+---
+issue: 395
+repo: FerroxLabs/wayland-core
+kind: defect
+title: "engine.run() cost is ~linear in tool-result size (~100 s/MB in the test profile), and it is not the spill path"
+status: open
+last_verified_commit: 6bcf1b503
+criteria:
+  - id: c1
+    text: "The debug-vs-release question is SETTLED by measurement: the same probe is run under --release at 240,000 and 480,000 chars, and the per-byte term is either reproduced (a product finding) or shown to collapse (a test-profile artifact). Whichever it is, the numbers and the host load are recorded."
+    state: met
+    evidence: "test:crates/wcore-agent/tests/spill_timing_probe.rs::timing_probe"
+    owner: core
+    note: "SETTLED BY MEASUREMENT, and the answer is the one the ticket said it could not assume: the per-byte term SURVIVES release. The probe #395 shipped for exactly this (crates/wcore-agent/tests/spill_timing_probe.rs::timing_probe, #[ignore]d) was run at both payloads in both profiles on hetzner-dsm, host load quoted with every figure as the ticket asks. BASELINE tree (this lane at ca4b2b5e0, which is integ/f13 70a47aaed plus two ignored probes and no production change): debug 240,000 -> run_s 22.136 (load 46), debug 480,000 -> run_s 44.063 (load 46); release 240,000 -> run_s 1.743 then 1.631 (load 45 / 44), release 480,000 -> run_s 3.541 then 3.544 (load 44), the two payloads INTERLEAVED in one 480/240/480 sequence rather than run as separate blocks. Release is 12.4-12.7x faster than debug and the term is intact and linear in it: 2.00x the bytes costs 2.03x the seconds (3.541/1.743). In release that is 7,377 ns per byte, i.e. 7.4 SECONDS PER MEGABYTE of tool output through one turn, on the path a user hits whenever a tool returns a large result. #395's own hypothesis #1 - 'if release is ~50x faster this is a test-profile artifact and should be closed as such' - is REFUTED, not confirmed. The shed is not the cause and was already excluded by #395's own control; these runs all have shed=true, and the fixture and read-back phases the probe times separately are 0.002 s and 0.001 s, under 0.02% of the total. AFTER the fix recorded on c2/c3 the term is REDUCED, not removed, and the reduction is measured in BOTH profiles on the function that carries it (release 3,220 -> 880.5 ns/byte, debug 47,569 -> 14,049 ns/byte) and end to end in debug (engine.run() at 480,000: 44.063 s -> 12.196 s). WHAT WAS NOT RE-RUN, stated rather than implied: the post-fix RELEASE arm of this engine probe. The release rebuild of wcore-agent is a 20-minute link on this host and the lane ran out of budget for it; the post-fix release claim rests on the function-level release arm (3.66x, which matches debug's 3.61x on the same change to within 1.4%) rather than on a re-measured turn. c1 as WRITTEN is about the baseline debug-versus-release question and that is fully measured; this is a limit on the after picture, not on the answer."
+  - id: c2
+    text: "If the per-byte term survives release, the function carrying it is NAMED by measurement -- a profiler, or bisecting instrumentation inside run_turn -- and not inferred."
+    state: met
+    evidence: "test:crates/wcore-safety/tests/scrub_cost_probe.rs::scrub_cost_probe"
+    owner: core
+    note: "NAMED BY MEASUREMENT, then CONFIRMED BY MUTATING THE NAMED FUNCTION - not inferred, which is what the criterion refuses. hetzner still has neither perf nor gdb, so the naming is done with an independent microbenchmark plus a fix arm rather than with a profiler. THE FUNCTION: wcore_agent::output_redaction::redact_tool_output, which is wcore_safety::PIIScrubber::scrub plus an exact-token replace. It runs TWICE on every successful tool result - crates/wcore-agent/src/orchestration/mod.rs:2594 ('Redact the original result before any truncation or compaction') and again at :2607 after truncate_result and compact_output. THE MEASUREMENT: crates/wcore-safety/tests/scrub_cost_probe.rs::scrub_cost_probe times scrub alone on the same fixture shape, on the same host. Baseline release, 480,000 bytes: 1.546 s = 3,220 ns/byte at load 47. Two calls per tool result is 6,441 ns/byte against the whole turn's measured 7,377 ns/byte - 87% of the release per-byte term, in one function. Baseline debug, 480,000 bytes: 22.833 s = 47,569 ns/byte, against the whole turn's 44.063 s. THE BRANCH, by control: the probe's second arm holds the byte count and changes only the payload SHAPE. 'solid' is #1235's and #395's own fixture, 'x'.repeat(N), one whitespace-free run that both candidate regexes match end to end and hand to decoded_contains_secret. 'dotted' is the same byte count with a '.' every 8 characters, so no run reaches the 24-character candidate floor and the encoded-secret branch never executes. Measured: solid 12,242 ns/byte, dotted 96 ns/byte - 128x. The whole per-byte term is that branch. THE CONTROL'S OWN FIRST CUT WAS WRONG AND IS RECORDED: it separated with SPACES, and a space is inside wrapped_base64_candidates' own character class ([A-Za-z0-9+/_=\r\n\t ]), so the 'spaced' payload was still one candidate run end to end. It measured 41,000 ns/byte against solid's 46,000 - within 12% - and would have been read as 'the base64 branch is not the cost', which is the opposite of the truth. A control has to be checked against the code it claims to disable. THE FIX ARM, which is the part that makes this a naming rather than a correlation: changing ONLY PIIScrubber::scrub, with the probe fixture byte-identical, takes engine.run() at 480,000 from 44.063 s to 12.196 s in debug - 3.61x - at a HIGHER host load (67 vs 46), so the improvement is understated. If the cost lived anywhere else this arm could not have moved it. INDEPENDENT CORROBORATION on an instance this lane did not tune: #395's own comment names wcore-agent::engine_compact_test::tc_2_6_context_overflow_sheds_tool_output_and_continues as a second member of the class and predicts it should collapse with whatever answer c1 returns. It was 44.4 s alone and FLAKY 2/2 at 54.589 s under load; at the lane tip it is PASS 11.779 s at load 53. It is untouched by this lane's fixture change (that is a different file) - only the pii.rs fix reaches it."
+  - id: c3
+    text: "A regression guard exists for whichever answer c1 gives: if it is a product cost, a test that fails when the per-byte term grows; if it is an artifact, the finding is recorded where the next person measuring a slow wcore-agent test will find it."
+    state: met
+    evidence: "test:crates/wcore-safety/src/pii.rs::a_single_candidate_run_is_decode_scanned_at_most_once_per_scrub_pass"
+    owner: core
+    note: "c1 returned 'product cost', so this is the guard for a product cost: test:crates/wcore-safety/src/pii.rs::a_single_candidate_run_is_decode_scanned_at_most_once_per_scrub_pass. IT ASSERTS WORK, NOT WALL CLOCK, deliberately: every timing observation in this ticket moved with host load (the same tree measured 12,242 and 15,068 ns/byte at loads 48 and 63), so a seconds bound on a shared 96-core box is a gate that fails on co-tenants and passes on a quiet night. The cost of scrubbing a long candidate run is decode_scans x payload_bytes - each scan is a UTF-8-lossy allocation of the decoded bytes plus one 25-pattern RegexSet sweep over them. The payload term is the caller's; the SCAN COUNT is ours, it is what regressed, and it is an integer. A thread-local counter (cfg(test), thread-local because the harness runs each test on its own thread and several tests in the module scrub concurrently) counts them; the ceiling is 2, one per candidate pass scrub makes. TWO CONTROLS, neither decoration: a_payload_that_forms_no_candidate_is_never_decode_scanned (a '.'-separated payload must reach 0 scans, so the ceiling cannot be met by the fixture quietly ceasing to be a candidate - the subject-disappearance failure #1235 ask 3 is about), and an_encoded_secret_is_still_found_under_the_scan_ceiling (a real base64-encoded AWS key is still redacted, so the ceiling cannot be met by not looking). The subject also asserts scans > 0 for the same reason. RED ARM, on executable code, diff read back before the run and the file touched after both the mutation and the restore: replacing the dedupe test in decoded_contains_secret with 'if false' - the one line, leaving the fast_set equivalence and the rest of the function alone - fails the subject with 'one scrub of a single candidate run performed 8 full-length decode scans; scrub makes two candidate passes over it, so at most one scan each is right.' 84 passed, 1 failed: selective, and both controls stayed green. Restored with git checkout --, touched, re-run: 85 passed, 0 failed. THE FIX the guard protects, in two parts, both semantics-preserving by construction rather than by spot check. (1) decoded_contains_secret asked matches!(scrub_direct(..), Cow::Owned(_)). scrub_direct returns Cow::Borrowed if and only if !fast_set().is_match(input) - that is its first statement - and Cow::Owned on every other path, so the discriminant being read IS fast_set().is_match, and the rewritten string built to produce it was never looked at. Asking the pre-filter directly drops 25 Regex::replace_all passes and 25 full-length allocations per decode attempt and answers the identical question. (2) The four base64 alphabets disagree only on '+/' vs '-_' and on padding, so an ordinary long alphanumeric run decodes to the SAME bytes four times and the expensive half was paid four times; deduplicating on the decoded bytes is exact, because a byte string already checked cannot answer differently on a second look. Separately, scrub_direct now takes replace_all's buffer only when it actually replaced - Cow::Borrowed means unchanged - instead of into_owned()ing a full copy once per non-matching pattern. Decode scans per scrub of one candidate run: 8 -> 2. Detection is unchanged and the whole crate is green (85 unit + 22 integration). RESIDUAL, stated rather than left to be found: the per-byte term is REDUCED, not removed. At the lane tip release scrub is 0.4226 s at 480,000 (880.5 ns/byte), so a megabyte of tool output still costs real time twice per tool call. The remaining ~2x is that scrub() makes TWO candidate passes over the same span (base64_candidates then wrapped_base64_candidates) and each pays one full-length decode, one lossy allocation and one RegexSet sweep. Collapsing them to one is the obvious next step and was NOT taken here: the two loops have different replacement semantics (whole-candidate ENCODED_SECRET versus minimal split windows) and the equivalence is not provable by inspection the way the two changes above are. It needs its own ticket and its own arms, not an improvisation inside a perf fix to security code."
+---
+
+This ticket asked one question first and the answer decides the other two:
+does the ~100 s/MB term survive `--release`? It does. Release is ~12.5x
+faster and the term is intact and linear inside it -- 7.4 seconds per
+megabyte of tool output through one turn, on the path a user hits whenever
+a tool returns a large result. #395's hypothesis #1 said that if release
+collapsed the term this should be closed as a test-profile artifact. It
+did not collapse, so it is not.
+
+The function is `wcore_safety::PIIScrubber::scrub`, reached through
+`wcore_agent::output_redaction::redact_tool_output`, which runs TWICE on
+every successful tool result. It is named by measurement three ways: a
+microbenchmark of the function alone that accounts for 87% of the whole
+turn's per-byte term; a shape control that narrows it to one branch
+(a payload that forms a base64 candidate costs 12,242 ns/byte, the same
+byte count that forms none costs 96); and a fix arm -- changing only that
+function, with the fixture byte-identical, takes the turn from 44.063 s to
+12.196 s.
+
+The shape control's first cut was wrong and that is recorded on c2 rather
+than quietly corrected. It separated the payload with spaces, and a space
+is inside the candidate regex's own character class, so the control
+disabled nothing and read as evidence for the opposite conclusion.
+
+What is fixed is the part that was provably redundant: a predicate that
+rebuilt a whole redacted string to read one Cow discriminant that the
+pre-filter already had, four base64 alphabets decoding an alphanumeric run
+to identical bytes and each paying the expensive half, and a per-pattern
+`into_owned()` that copied the payload once for every pattern that did not
+match. Eight full-length decode scans per scrub became two.
+
+What is NOT fixed is stated on c3: `scrub` still makes two candidate passes
+over the same span, and each pays a full decode, a lossy allocation and a
+RegexSet sweep. That is the remaining ~2x. It is left open on purpose --
+the two loops have different replacement semantics and collapsing them is
+not provably equivalent by inspection, which is the standard the two
+changes here do meet. This is security code; a perf fix that cannot show
+its equivalence does not belong in it.
