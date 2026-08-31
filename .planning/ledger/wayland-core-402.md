@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "core#356 c4's resolver gate is keyed to two literal names, so a third path resolver arrives ungated"
 status: open
-last_verified_commit: 4a738f2e
+last_verified_commit: 488fbbae9
 criteria:
   - id: c1
     text: "Adding a path-resolving function to `workspace_policy.rs` that is not one of the two named resolvers fails a gate, rather than passing silently -- shown RED by adding one."
@@ -50,3 +50,25 @@ The gate that enforces it is the inverted question, not a third literal name:
 `resolver_inventory_covers_every_pathbuf_returning_fn` enumerates what the file
 DEFINES and fails when the inventory and the file disagree in either
 direction.
+## Independently re-verified 2026-08-31 by lane f13-authority at 488fbbae9
+
+c1's red arm was RE-RUN exactly as the criterion asks -- by ADDING a resolver,
+not by substituting one. A third `fn canon_third(path: &Path) -> PathBuf` was
+added and called from `is_skill_source_path` with no inventory entry and no
+call-site note. `cargo check -p wcore-tools --tests` returned RC=0, so the
+mutation genuinely compiled, and
+
+    panicked at crates/wcore-tools/src/workspace_policy/tests.rs:3030:5:
+    these `-> PathBuf` functions are not in the RESOLVER INVENTORY block of
+    workspace_policy.rs -- classify each as `resolver` or `helper` with its
+    reason, and if it is a resolver give its call sites the #356 c4 note
+    (FerroxLabs/wayland-core#402 c1):
+    ["canon_third"]
+
+c2 measured UNDER THE SAME MUTATION rather than asserted separately. In that one
+run `every_strong_resolver_site_states_which_resolver_and_why`,
+`every_weak_resolver_site_states_which_resolver_and_why` and
+`every_path_predicate_in_this_file_has_a_production_call_site` all PASSED while
+the inventory gate alone went red -- `4 tests run: 3 passed, 1 failed`. Neither
+site gate was weakened to make c1 pass, and their blindness to a name they were
+not given is exactly what #402 describes, now measured rather than modelled.

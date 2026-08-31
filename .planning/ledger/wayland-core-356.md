@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "Two path resolvers with different escape properties 70 lines apart, and the weaker one guards the skill-source write refusal"
 status: open
-last_verified_commit: 9de21aa1
+last_verified_commit: 488fbbae9
 criteria:
   - id: c1
     text: "is_skill_source_path is graded against dotdot-after-a-missing-component and the dangling-symlink hop, the two escapes #1097 was written for"
@@ -51,3 +51,26 @@ resolver and no choice for a later reader to make blind.
 
 Graded against `origin/integ/next` at `43848f75`, after `lane/session-tickets`
 merged in as `2165c30a`.
+## Independently re-verified 2026-08-31 by lane f13-authority at 488fbbae9
+
+c1/c2's red arm was RE-RUN: `is_skill_source_path` was switched back to the WEAK
+resolver (`canon_for_scope` at both of its calls), `cargo check -p wcore-tools
+--tests` returned RC=0, and
+
+    panicked at crates/wcore-tools/src/workspace_policy/tests.rs:2373:5:
+    a DANGLING symlink into a skill load path was not recognised -- the refusal
+    judged where the LINK sits, not where the path leads
+
+Recorded honestly rather than rounded up: under that SAME mutation
+`a_parent_dir_after_a_missing_component_still_reaches_the_skill_load_path`
+PASSED. Only ONE of the two escapes c1 names actually lands on the weak
+resolver. c1 asks that the predicate be GRADED against both, and it is; c2 asks
+for a red arm "for whichever escape lands", and exactly one landed.
+
+c4 re-confirmed as written at HEAD rather than against the 0.13.12 sweep comment
+that re-graded it `not-met`: both resolvers do remain, and every site of each
+now states which one and why. `every_strong_resolver_site_states_which_resolver_and_why`
+and `every_weak_resolver_site_states_which_resolver_and_why` are both green, and
+the `is_project_secret` site that comment named as unlabelled carries
+`#383 c3 -- resolver: `canon_for_scope`` with its reason at
+`workspace_policy.rs:1880`.

@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "is_session_write_granted documents itself as the write-grant enforcement predicate and has no production call site"
 status: open
-last_verified_commit: 9de21aa1
+last_verified_commit: 488fbbae9
 criteria:
   - id: c1
     text: "Either is_session_write_granted is the predicate the mutating VFS path actually asks, or it is deleted together with the two tests that grade it"
@@ -34,3 +34,21 @@ criteria:
 **Why it matters.** Not an exploitable hole today — the real enforcement path is the VFS one and it resolves correctly — but it is a documented enforcement predicate that enforces nothing, graded by two tests that therefore grade nothing reachable. A future author reading that doc comment could reasonably believe write grants are checked here, and a future change routed through it would be dead on arrival.
 
 Criteria are taken verbatim from the issue's Acceptance section. Nothing has been done: this entry exists so the release gate counts the work rather than anyone having to remember it.
+## Independently re-verified 2026-08-31 by lane f13-authority at 488fbbae9
+
+c3's red arm was RE-RUN, and by RE-ADDING the defect rather than by trusting the
+gate's own text: a `pub fn is_session_write_granted(&self, path: &Path) -> bool`
+carrying the original "the predicate `SandboxedFs`'s mutating operations ask"
+doc claim was added back with no production caller. `cargo check -p wcore-tools
+--tests` returned RC=0, so the mutation genuinely compiled, and
+
+    panicked at crates/wcore-tools/src/workspace_policy/tests.rs:2802:5:
+    these `workspace_policy.rs` predicates have NO production call site -- wire
+    them to the path that enforces, or delete them with the tests that grade
+    them (FerroxLabs/wayland-core#384):
+    is_session_write_granted
+
+c1 and c2 re-confirmed by reading the tree: no `is_session_write_granted`
+remains anywhere in `crates/`, and `SandboxedFs::contain_granted` opens with
+"**The write-grant enforcement point.**" with `live_grant_roots` carrying the
+matching note. All 14 tests in `path_write_grant_test.rs` pass.

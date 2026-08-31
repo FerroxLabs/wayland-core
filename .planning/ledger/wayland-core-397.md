@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "Stale doc comment on CredentialsBackend::Auto claims a plaintext fallback the code refuses"
 status: open
-last_verified_commit: 4a738f2e
+last_verified_commit: 488fbbae9
 criteria:
   - id: c1
     text: "The doc comment at crates/wcore-config/src/credentials.rs:40-47 and the module header at :8-12 state the fail-closed behaviour the implementation actually has: build_ladder mounts keyring then encrypted vault and nothing else, and put refuses when no secure rung is mounted."
@@ -53,3 +53,33 @@ plaintext credentials claim in THREE independent readings -- two external audit
 models and one drafting pass -- and came within one review of being published
 in a public threat model, conceding a security weakness fixed nine releases
 ago. The cost of this defect is already measured and it is not zero.
+## Independently re-verified 2026-08-31 by lane f13-authority at 488fbbae9
+
+c2's red arm was RE-RUN on BOTH halves of the claim, because the claim has two.
+
+Rung list -- the declaration changed to `ladder: keyring -> plaintext -> refuse`:
+
+    panicked at crates/wcore-config/src/credentials.rs:3617:9:
+    assertion `left == right` failed: the `ladder:` line in
+    `CredentialsBackend::Auto`'s doc comment and the rungs `build_ladder` mounts
+    disagree (FerroxLabs/wayland-core#397)
+      left: ["keyring", "plaintext"]
+     right: ["keyring", "encrypted_vault"]
+
+Terminal word -- the declaration changed to `ladder: keyring -> plaintext`:
+
+    panicked at crates/wcore-config/src/credentials.rs:3612:9:
+    assertion `left == right` failed: #397: the ladder's terminal behaviour is
+    REFUSE. A declaration ending any other way is claiming a fallback the code
+    does not have
+      left: "plaintext"
+     right: "refuse"
+
+**Correction to the first pass's wording on c3.** The stale sentence IS present
+at `v0.13.11`, but NOT "byte-identically": it is line-wrapped there as
+`transparently falling back to the` / `//!   plaintext `0o600` file`. A one-line
+grep for the sentence returns EMPTY at the tag, which reads as absence and is
+not. At that same tag `build_ladder`'s write path still ends in
+`Err(no_secure_backend_for_write(key))` (`credentials.rs:1707`), so doc and code
+did disagree AT THE TAG and not only at HEAD. c3 holds as written; only the word
+"byte-identically" was wrong, and it is corrected here rather than left standing.

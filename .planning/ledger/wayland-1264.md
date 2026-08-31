@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "Egress: an allowlisted apex is admitted on the host match alone, so tool-driven traffic is never shape-checked (split from #1195 c8)"
 status: open
-last_verified_commit: 4a738f2e
+last_verified_commit: 488fbbae9
 criteria:
   - id: c1
     text: "A decision is recorded in `.planning/DECISIONS.md` with its reasoning: either the allowlist grant is split by traffic origin (provider vs tool-driven), or the current posture is affirmed as intended and the reason is written down where an operator reading the egress policy can see it."
@@ -48,3 +48,41 @@ Criteria are transcribed from the issue body without edit. Where the body's
 wording is loose it is LEFT loose rather than tightened here: sharpening a
 criterion inside the ledger is how a criterion quietly becomes an easier
 adjacent property. Whoever takes this restates it on the ISSUE first.
+## Independently re-verified 2026-08-31 by lane f13-authority at 488fbbae9
+
+c2's red arm was RE-RUN LIVE rather than taken on the first pass's word. The
+split was neutered in place (`if false && origin == EgressOrigin::Tool &&
+request_carries_data(method, url)`), `cargo check -p wcore-agent --tests`
+returned RC=0 so the mutation genuinely compiled, and the REAL `WebFetch`
+surface then dispatched the payload and was answered:
+
+    panicked at crates/wcore-agent/tests/egress_tool_origin_test.rs:71:9:
+    a tool-driven payload to an allowlisted apex must be refused, got
+    Ok { status: 200, content_type: "text/html; charset=utf-8", text: "..." }
+
+    panicked at crates/wcore-agent/tests/egress_tool_origin_test.rs:96:5:
+    a high-entropy path payload to an allowlisted apex must be refused, got
+    HttpError { status: 404, message: "HTTP 404 -- {\"message\": \"Not Found\",
+    \"documentation_url\": \"https://docs.github.com/rest\", \"status\":
+    \"404\"}" }
+
+github.com answered both. That is the defect measured end to end on the shipped
+surface, not modelled. With the split restored both arms refuse BEFORE dispatch
+and `a_data_less_webfetch_still_reaches_the_origin_under_the_same_policy` stays
+green, so the fix did not simply break `WebFetch`.
+
+The mandated direction was checked against the code rather than the commit
+message: origin is stamped centrally (`EgressClientBuilder::origin`, set once on
+`build_ssrf_safe_tool_client`), it is a LABEL and not a second policy
+(`AgentEgressPolicy::check` reads `EgressOrigin::of(request)` and passes it to
+the ONE `classify`), the marker is stripped in `EgressRequestBuilder::send`
+before dispatch, provider semantics are untouched (absent marker reads as
+`Provider`), and the fail-open at the doorbell is not relied on -- `ToolData`
+resolves to DENY with no doorbell while `Ask` keeps its deliberate Allow, so no
+legitimate unattended provider traffic is blanket-denied. Redirects are followed
+by `HttpFetchBackend` itself and re-issued through the gate per hop.
+
+One operator-facing defect was found in this lane's OWN commit and fixed at
+`488fbbae9`: the `ToolData` refusal reason carried a 22-space run where a line
+continuation was meant, so the message read "...data the model
+<22 spaces> chose...". Text only; the verdict and every test are unchanged.

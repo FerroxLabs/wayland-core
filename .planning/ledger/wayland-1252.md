@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "Three more hand-cut authority parsers survive #1243: /doctor suppresses its base-url caveat, a browser origin pattern normalises to a different host, and a redaction renders the smuggled host as the surviving one"
 status: open
-last_verified_commit: 1775bc762
+last_verified_commit: 488fbbae9
 criteria:
   - id: c1
     text: "With base_url = https://evil.example\\@api.openai.com/v1 and provider openai, /doctor PRINTS the base-url caveat naming the vendor host"
@@ -53,3 +53,68 @@ by originating issue (`1211`, `1243`), and by component across open
 FerroxLabs/wayland + FerroxLabs/wayland-core. The only hits were #1211 and
 #1243 themselves. Control run in the same session: the query `sandbox`
 returned 12 open issues, so the search was not silently returning nothing.
+## Independently re-verified 2026-08-31 by lane f13-authority at 488fbbae9
+
+Every red arm below was RE-RUN by a second pass rather than taken on the first
+pass's word, and each mutation was confirmed to COMPILE (`cargo check -p
+<crate> --tests`, RC=0) before its arm was believed.
+
+* **c1** — the hand cut restored inside `base_url_caveat` (both sides cut by
+  `split(['/','?','#'])` then `rsplit_once('@')`):
+
+      panicked at crates/wcore-cli/src/doctor/mod.rs:1886:9:
+      a base_url that dials evil.example must still print the caveat
+
+* **c2** — the hand cut restored inside `strip_pattern_decorations`:
+
+      panicked at crates/wcore-browser/src/policy.rs:1784:9:
+      a pattern that PARSES as evil.example must not match github.com
+
+* **c5** — the hand cut restored AHEAD of the parser in `strip_url_userinfo`:
+
+      panicked at crates/wcore-config/src/portability/redact.rs:336:9:
+      assertion `left != right` failed: the smuggled URL and a
+      credential-bearing github.com URL must not render identically -- that is
+      the whole defect
+        left: "https://<redacted>@github.com/x"
+       right: "https://<redacted>@github.com/x"
+
+  Under that SAME mutation `scrub_detail_removes_embedded_credentials_but_keeps_the_shape`
+  stayed GREEN, so the arm is specific to the smuggled spelling and is not a
+  general break of the redaction.
+
+**c3 graded against the INVERTED question the body asks for**, not against the
+idiom list that missed Site C. The decidable total set used is every production
+`.rs` line under `crates/` carrying the scheme-separator literal `"://"` -- a
+superset of every cutting idiom, and the one that DOES catch `find("://")`.
+24 hits, all read:
+
+* IN CLASS AND FIXED -- `doctor/mod.rs`, `wcore-browser/src/policy.rs`,
+  `portability/redact.rs`: this ticket's three sites, all now answering through
+  `wcore_types::url_authority` or `url::Url`.
+* ALREADY CORRECT -- `wcore-tools/src/website_policy.rs:155` (`Url::parse` +
+  `host_str()`).
+* OUT OF CLASS, each for a stated reason -- `sources_block.rs:91`,
+  `tool_formatters/web_fetch.rs:103`, `tool_formatters/web.rs:212` render the
+  whole authority and strip no userinfo (the body's own disposition);
+  `events.rs:2022` is `split_endpoint`, redaction-only and forbidden by its doc
+  comment from answering which host is reached; `discord/gateway.rs:713`
+  (`ensure_path`) inserts a missing `/` into the process's own gateway URL and
+  returns no host; `compat.rs:1403` (`split_authority`) joins a path onto the
+  operator's own `base_url` and makes no name comparison;
+  `video_analyze.rs:266` reads the SCHEME only, to require https, and a `\`
+  cannot forge a scheme; `monitor.rs:285` builds a log-noise fingerprint for
+  dedup, never a rendered host; `egress_proxy.rs:218`, `bash/policy.rs:314` and
+  `:540`, `marketplace.rs:515`, `retry.rs:728`, `website_policy.rs:411` and
+  `skills/mcp.rs:217` are `contains("://")` shape tests that return no host at
+  all.
+* TEST-ONLY -- `limits.rs:1317` and `:1427` DO cut a host and compare it against
+  `VENDOR_API_DOMAINS`, which is the class shape; both sit inside `#[cfg(test)]`
+  and their input is the bundled `providers.toml` this repo ships, not model
+  output or user config.
+
+**Stated bound, so this is not over-read.** The sweep above is a MEASUREMENT,
+not a standing gate. Nothing fails when a FOURTH hand cut is added, so a future
+one is caught by the next sweep rather than on arrival. c3 as written is a
+property of the two named sites and it holds; the class-closure gate that would
+make it permanent is filed as FerroxLabs/wayland#1276 rather than claimed here.
