@@ -25289,6 +25289,158 @@ mod compact_tests {
         messages
     }
 
+    // ── wayland#1200 — the resolved window must reach the accumulated
+    //    tool-result ceiling on the PRODUCTION path ─────────────────────────
+    //
+    // Both production call sites of `micro::bound_accumulated_tool_results`
+    // (`compact_now` and `run_compaction`) pass
+    // `Some(self.compaction_window_now())`. Every test in `compact/micro.rs`
+    // drives the HELPER and hand-supplies that argument, so the whole suite
+    // stayed green with BOTH sites changed to `None` — the window was passed
+    // but nothing bound it. These two tests grade the engine methods, one per
+    // site, so `None` at either site reddens.
+
+    /// Ten `WebFetch` results of 6,000 bytes: 60,000 bytes carried.
+    ///
+    /// Sized to sit BETWEEN the two bounds, which is what makes the assertions
+    /// discriminating — 60,000 fits the flat `total_budget_bytes` (120,000)
+    /// untouched, and breaks the 32,768-token window's budget (30,832).
+    ///
+    /// `WebFetch` is deliberately NOT in `compactable_tools`, so `microcompact`
+    /// cannot touch these bodies at all: `bound_accumulated_tool_results` is
+    /// the only pass in either pipeline that can mutate them, and any byte
+    /// moved is therefore attributable to it.
+    fn results_over_a_32k_window_but_under_the_flat_budget() -> Vec<Message> {
+        let mut messages = Vec::new();
+        for i in 0..10 {
+            let id = format!("wf{i}");
+            messages.push(tool_use_msg(&id, "WebFetch"));
+            messages.push(tool_result_msg(&id, &"y".repeat(6_000)));
+        }
+        messages
+    }
+
+    fn carried_tool_result_bytes(engine: &super::AgentEngine) -> usize {
+        engine
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter_map(|b| match b {
+                ContentBlock::ToolResult { content, .. } => Some(content.len()),
+                _ => None,
+            })
+            .sum()
+    }
+
+    fn bounded_tool_results(engine: &super::AgentEngine) -> usize {
+        engine
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter(|b| {
+                matches!(b, ContentBlock::ToolResult { content, .. }
+                    if content.starts_with(super::micro::BOUNDED_TOOL_RESULT_PREFIX))
+            })
+            .count()
+    }
+
+    /// The property both #1200 tests assert: the ceiling the pass enforced was
+    /// derived from the engine's window, not from the flat constants.
+    fn assert_the_window_bound_reached_the_pass(
+        engine: &super::AgentEngine,
+        carried_before: usize,
+    ) {
+        let flat = CompactConfig::default().tool_results.total_budget_bytes;
+        let windowed = engine
+            .compact_config
+            .tool_result_bounds(Some(32_768))
+            .total_budget_bytes;
+
+        // Anti-vacuity, checked rather than assumed: at this size the flat
+        // constants alone would have moved NOTHING, and the window's budget is
+        // genuinely exceeded. If a future default breaks either half, this
+        // fails here instead of passing for the wrong reason.
+        assert!(
+            carried_before <= flat,
+            "fixture must fit the flat budget untouched ({carried_before} B vs {flat} B), \
+             or a pass that never saw the window could satisfy the assertions below"
+        );
+        assert!(
+            windowed < carried_before,
+            "fixture must exceed the window budget ({carried_before} B vs {windowed} B)"
+        );
+
+        assert!(
+            bounded_tool_results(engine) > 0,
+            "no result carries the accumulated-ceiling stub: the pass ran with the flat \
+             {flat} B budget, so the window never reached it"
+        );
+        assert!(
+            carried_tool_result_bytes(engine) <= windowed,
+            "carried tool-result bytes ({} B) still exceed the budget the engine's own \
+             32,768-token window allows ({windowed} B)",
+            carried_tool_result_bytes(engine)
+        );
+
+        // The newest result is protected whatever the window says — a stubbed
+        // working set is how #1172's re-read loop starts.
+        let newest = engine
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter_map(|b| match b {
+                ContentBlock::ToolResult { content, .. } => Some(content),
+                _ => None,
+            })
+            .next_back()
+            .expect("fixture carries tool results");
+        assert_eq!(
+            newest.len(),
+            6_000,
+            "the newest tool result must survive the ceiling whole"
+        );
+    }
+
+    /// Site 1 — `compact_now` (the TUI `/compact` command).
+    #[test]
+    fn compact_now_bounds_tool_results_against_the_engines_own_window() {
+        let config = CompactConfig {
+            context_window: Some(32_768),
+            ..Default::default()
+        };
+        let mut engine = make_compact_engine(
+            config,
+            CompactState::new(),
+            results_over_a_32k_window_but_under_the_flat_budget(),
+        );
+        let carried_before = carried_tool_result_bytes(&engine);
+
+        engine.compact_now();
+
+        assert_the_window_bound_reached_the_pass(&engine, carried_before);
+    }
+
+    /// Site 2 — the automatic `run_compaction` pipeline. `last_real_input_tokens`
+    /// stays at zero so the pressure-gated microcompact below step 0b cannot
+    /// fire: the accumulated ceiling is ungated, and it is the only pass under
+    /// test here.
+    #[tokio::test]
+    async fn run_compaction_bounds_tool_results_against_the_engines_own_window() {
+        let config = CompactConfig {
+            context_window: Some(32_768),
+            ..Default::default()
+        };
+        let mut engine = make_compact_engine(
+            config,
+            CompactState::new(),
+            results_over_a_32k_window_but_under_the_flat_budget(),
+        );
+        let carried_before = carried_tool_result_bytes(&engine);
+
+        engine.run_compaction().await.unwrap();
+
+        assert_the_window_bound_reached_the_pass(&engine, carried_before);
+    }
     fn cleared_results(engine: &super::AgentEngine) -> usize {
         engine
             .messages
