@@ -308,6 +308,7 @@ fn golden_error_v0_1_21() {
             code: "provider_unavailable".into(),
             message: "Anthropic returned 503".into(),
             retryable: true,
+            category: wcore_protocol::events::FailureCategory::Unknown,
         },
     };
     assert_eq!(
@@ -318,7 +319,11 @@ fn golden_error_v0_1_21() {
             "error": {
                 "code": "provider_unavailable",
                 "message": "Anthropic returned 503",
-                "retryable": true
+                "retryable": true,
+                // wayland#1237: an upstream 503 is exactly the case core must
+                // NOT classify -- provider or router is #1184's question -- so
+                // the golden pins `unknown` rather than a guess.
+                "category": "unknown"
             }
         })
     );
@@ -333,6 +338,7 @@ fn golden_error_without_msg_id_v0_1_21() {
             code: "session_init_failed".into(),
             message: "could not bind socket".into(),
             retryable: false,
+            category: wcore_protocol::events::FailureCategory::Unknown,
         },
     };
     let got = serialize(&event);

@@ -328,6 +328,7 @@ impl OutputSink for TestSink {
                 code: "test_sink_error".to_string(),
                 message: msg.to_string(),
                 retryable,
+                category: wcore_protocol::events::FailureCategory::Unknown,
             },
         });
     }

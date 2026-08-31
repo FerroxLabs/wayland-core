@@ -174,6 +174,20 @@ impl OutputSink for RelaySink {
     fn emit_error(&self, msg: &str, retryable: bool) {
         self.with_sink(|s| s.emit_error(msg, retryable));
     }
+    /// wayland#1237. This sink DELEGATES, so it has to delegate the typed
+    /// terminal exit too. Taking the trait default here would route back
+    /// through `emit_error` above and flatten the category to `unknown` on
+    /// whatever sink is wrapped -- the one way a wrapper can silently undo the
+    /// classification. `every_delegated_error_has_its_typed_sibling_delegated`
+    /// is the guard.
+    fn emit_run_failure(
+        &self,
+        msg: &str,
+        retryable: bool,
+        category: wcore_protocol::events::FailureCategory,
+    ) {
+        self.with_sink(|s| s.emit_run_failure(msg, retryable, category));
+    }
     fn emit_info(&self, msg: &str) {
         self.with_sink(|s| s.emit_info(msg));
     }
@@ -351,6 +365,9 @@ impl Drop for TerminalGuard {
                 message: "The turn ended unexpectedly (engine task panicked or was aborted)."
                     .to_string(),
                 retryable: true,
+                // wayland#1237: the engine task itself died. #388's
+                // "tool/runtime failure".
+                category: wcore_protocol::events::FailureCategory::ToolRuntime,
             },
         });
         let _ = self.tx.send(ProtocolEvent::StreamEnd {
@@ -421,6 +438,10 @@ fn error_info_for(e: &AgentError) -> wcore_protocol::events::ErrorInfo {
         // UserAborted / ContextTooLong / ApiError(honest already fired) /
         // Provider => not retryable at this outer arm.
         retryable: false,
+        // wayland#1237: `code` stays "engine_error" — the host-facing code
+        // vocabulary does not widen — and the machine-readable answer rides
+        // the typed category, decided exhaustively from the variant.
+        category: e.failure_category(),
     }
 }
 
@@ -853,6 +874,7 @@ impl EngineSession {
                                     model name and provider."
                                     .to_string(),
                                 retryable: false,
+                                category: wcore_protocol::events::FailureCategory::Unknown,
                             },
                         });
                     }
@@ -1919,6 +1941,7 @@ mod tests {
                 code: "engine_error".into(),
                 message: "kaboom".into(),
                 retryable: true,
+                category: wcore_protocol::events::FailureCategory::Unknown,
             },
         }];
         let out = project_all(events).await;
@@ -1983,6 +2006,7 @@ mod tests {
                     code: "provider_error".into(),
                     message: "upstream 503".into(),
                     retryable: true,
+                    category: wcore_protocol::events::FailureCategory::Unknown,
                 },
             },
         ];
@@ -2014,6 +2038,34 @@ mod tests {
         // The guard emitted Error (terminal) — projection stops there.
         assert_eq!(out.len(), 1);
         assert!(matches!(out[0], MessageEvent::Error { .. }));
+    }
+
+    /// wayland#1237 — a sink that DELEGATES `emit_error` must delegate
+    /// `emit_run_failure` as well.
+    ///
+    /// This is the one way a wrapper can silently undo the classification: the
+    /// trait default for `emit_run_failure` calls `emit_error`, so a delegator
+    /// that forwards only `emit_error` sends the wrapped sink prose and drops
+    /// the category on the floor. The property is asserted as a PAIRING over
+    /// this file's own text rather than as a list of sinks -- if a delegation
+    /// of one appears without a delegation of the other, this fails, whatever
+    /// the sink is called.
+    #[test]
+    fn every_delegated_error_has_its_typed_sibling_delegated() {
+        let src = include_str!("acp_engine.rs");
+        let delegated_prose = concat!("s.emit_", "error(msg, retryable)");
+        let delegated_typed = concat!("s.emit_run_", "failure(msg, retryable, category)");
+        // Known-positive control: this file DOES delegate, so the pairing
+        // below is being tested against a real delegator and not a typo.
+        assert!(
+            src.contains(delegated_prose),
+            "control: this file delegates emit_error"
+        );
+        assert!(
+            src.contains(delegated_typed),
+            "a sink that forwards emit_error and not emit_run_failure flattens \
+             every category it is handed to `unknown`"
+        );
     }
 
     // ── error_info_for (T-A7) ──────────────────────────────────────────

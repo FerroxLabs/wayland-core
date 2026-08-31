@@ -219,6 +219,7 @@ impl ChannelSink {
                     code: "sub_agent_error".to_owned(),
                     message: message.to_owned(),
                     retryable: false,
+                    category: wcore_protocol::events::FailureCategory::Unknown,
                 },
             },
         };
@@ -338,6 +339,11 @@ impl OutputSink for ChannelSink {
                 code: "sub_agent_error".to_string(),
                 message: msg.to_string(),
                 retryable,
+                // wayland#1237: a sub-agent that died is a tool/runtime
+                // failure from the parent turn's point of view -- the child
+                // was something the parent invoked. The CHILD's own category
+                // is not carried across this relay; see the ticket's residual.
+                category: wcore_protocol::events::FailureCategory::ToolRuntime,
             },
         });
     }

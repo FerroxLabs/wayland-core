@@ -537,6 +537,12 @@ impl ProtocolSink {
                 code: code.to_string(),
                 message: msg.to_string(),
                 retryable,
+                // wayland#1237. This seam receives PROSE, and deciding a
+                // category from prose is the defect the ticket reports, so it
+                // does not try: `unknown` is the honest answer here and the
+                // typed answer arrives through `emit_run_failure`, which still
+                // holds the `AgentError`.
+                category: wcore_protocol::events::FailureCategory::Unknown,
             },
         });
     }
@@ -1051,6 +1057,25 @@ impl OutputSink for ProtocolSink {
         });
     }
 
+    fn emit_run_failure(
+        &self,
+        msg: &str,
+        retryable: bool,
+        category: wcore_protocol::events::FailureCategory,
+    ) {
+        let code = auth_error_code(msg).unwrap_or("engine_error");
+        let _ = self.writer.emit(&ProtocolEvent::Error {
+            msg_id: None,
+            error: ErrorInfo {
+                code: code.to_string(),
+                message: msg.to_string(),
+                retryable,
+                category,
+            },
+        });
+        self.release_pre_ready_info();
+    }
+
     fn emit_error(&self, msg: &str, retryable: bool) {
         // Distinguish auth failures with a machine-readable code so the host can
         // branch (prompt re-auth, or refresh an OAuth token and re-spawn the
@@ -1065,6 +1090,9 @@ impl OutputSink for ProtocolSink {
                 code: code.to_string(),
                 message: msg.to_string(),
                 retryable,
+                // wayland#1237: prose in, so `unknown` out. See
+                // `emit_run_failure` for the typed terminal exit.
+                category: wcore_protocol::events::FailureCategory::Unknown,
             },
         });
         // A startup failure means `ready` is never coming. Release the holding

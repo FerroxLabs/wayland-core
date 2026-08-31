@@ -32,6 +32,36 @@ pub trait OutputSink: Send + Sync {
     ) {
     }
 
+    /// FerroxLabs/wayland#1237 (from wayland#388 c7) — the TERMINAL error exit
+    /// of a run, carrying its typed category.
+    ///
+    /// `emit_error` below is deliberately left alone. It is the IN-BAND seam:
+    /// it receives prose and a retryable flag, which is all its callers have,
+    /// and deciding a category from prose is the defect #1237 reports. Widening
+    /// it would spread `Unknown`, not information.
+    ///
+    /// This is the other path. `AgentEngine::run` returned `Err`, the caller
+    /// still holds the `AgentError`, and
+    /// [`crate::engine::AgentError::failure_category`] decides the category
+    /// from the variant with an exhaustive match.
+    ///
+    /// The default is not a hole a wire-bearing sink can fall into. A sink that
+    /// serialises a host-facing `error` frame must build a
+    /// `wcore_protocol::events::ErrorInfo`, and `ErrorInfo` has no `Default`:
+    /// naming a category there is a compile-time obligation, not a convention.
+    /// A sink with no wire — the terminal renderer, the null sink, every test
+    /// double — has nowhere to put a category, and prose is the whole of what
+    /// it can show.
+    fn emit_run_failure(
+        &self,
+        msg: &str,
+        retryable: bool,
+        category: wcore_protocol::events::FailureCategory,
+    ) {
+        let _ = category;
+        self.emit_error(msg, retryable);
+    }
+
     /// Stream text delta from LLM
     fn emit_text_delta(&self, text: &str, msg_id: &str);
     /// Stream thinking content from LLM

@@ -2164,6 +2164,10 @@ async fn run() -> anyhow::Result<ExitCode> {
                         code: "init_failed".to_string(),
                         message: init_failure_message(&e, &provider_label_for_error),
                         retryable: false,
+                        // A startup failure is this process refusing to
+                        // proceed on its own account -- FailureCategory's
+                        // LocalWayland names "a startup failure" outright.
+                        category: wcore_protocol::events::FailureCategory::LocalWayland,
                     },
                 });
             }
@@ -4747,6 +4751,9 @@ where
                             code: "recovery_busy".to_string(),
                             message: "resolve_unknown_tool_effect refused while another recovery action is active; resync and retry".to_string(),
                             retryable: true,
+                            // A refused host command. Nothing upstream is
+                            // implicated: this process declined it.
+                            category: wcore_protocol::events::FailureCategory::LocalWayland,
                         },
                     });
                 }
