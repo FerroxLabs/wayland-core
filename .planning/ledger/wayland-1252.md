@@ -118,3 +118,9 @@ not a standing gate. Nothing fails when a FOURTH hand cut is added, so a future
 one is caught by the next sweep rather than on arrival. c3 as written is a
 property of the two named sites and it holds; the class-closure gate that would
 make it permanent is filed as FerroxLabs/wayland#1276 rather than claimed here.
+
+
+DELIBERATE core#412 c2 PROOF ARM (round 4). The tree this is cut from is
+17,811/17,811 with cargo audit RC=0, fmt clean, and every ci-linux checker green,
+so the ONLY red this run should carry is the line below. Evidence, never merged.
+proof-arm-only@notreal-example-domain.com
