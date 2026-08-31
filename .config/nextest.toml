@@ -312,6 +312,65 @@ retries = 0
 filter = 'binary(walk_parallel_identity_test)'
 slow-timeout = { period = "60s", terminate-after = 3 }
 
+
+# The two mock-turn tests that carry a large tool result through a full
+# `AgentEngine::run()`. FerroxLabs/wayland#1235 reported the first of these
+# being killed 3/3 by the default budget; FerroxLabs/wayland-core#395 asked
+# whether the cost was real. It is, and it is now MEASURED, so this entry
+# records a known price rather than hiding an unknown one.
+#
+# WHERE THE TIME GOES, measured not inferred. Bisecting instrumentation inside
+# the turn (hetzner-dsm, host load recorded with every reading) attributes
+# essentially the whole runtime to ONE function:
+#
+#   engine.run(), 480,000-char tool result, shed forced OFF
+#     release:  run 3.018s   of which PIIScrubber::scrub 3.004s (99.8%)
+#                            of which decoded_contains_secret 2.981s (98.8%)
+#     debug:    run 46.530s  of which PIIScrubber::scrub 46.446s (99.8%)
+#                            of which decoded_contains_secret 46.106s (99.1%)
+#
+# `decoded_contains_secret` base64-decodes the ENTIRE candidate run under four
+# alphabets and re-scans each decode; the engine scrubs each tool result twice
+# per turn, so a turn costs ~2 whole-payload scrub passes. Ruled out by the
+# same measurement, so nobody re-derives them: `estimate_tokens_from_messages`
+# 0.0000s, the #636 shed 0.0013s, `scrub_direct` 0.0015s, fixture construction
+# and the read-back through the jail 0.001s each.
+#
+# THE SHAPE, four payload sizes 60,000 -> 480,000 chars, shed off so every
+# size takes one identical path (log-log least-squares fit):
+#     release  exponent 0.986  R^2 0.9987   6.49 s per MB of tool output
+#     debug    exponent 1.022  R^2 0.9996  97.18 s per MB of tool output
+# So it is LINEAR, not superlinear (#1235's body suspected otherwise; that
+# table's non-monotonicity was the 120,000-char case taking a different path,
+# not a superlinear term), and it SURVIVES --release at 15x less cost. It is a
+# product cost a real user pays on a large `Read` or a verbose `Bash`, not a
+# test-profile artifact.
+#
+# MEASURED RUNTIMES, this tree, debug (which is what CI runs), each test alone
+# on hetzner-dsm at host load 41-54:
+#     the_engine_spills_where_this_session_can_read_it_back   44.08 / 45.04 / 45.47 s
+#     tc_2_6_context_overflow_sheds_tool_output_and_continues 49.60 / 44.59 s
+# Against 30s x terminate-after 2 = 60s, both sit ~20% under the hard kill, so
+# any co-tenant load crosses it -- which is exactly the 3/3 kill #1235 reports
+# and the FLAKY 2/2 recorded on #395.
+#
+# `period` is deliberately left at the profile default of 30s rather than
+# raised: these tests SHOULD keep printing the SLOW notice on every run, so the
+# price above stays visible in the log. Only the hard kill moves, 60s -> 120s,
+# which is 2.4x the slowest measured run. `retries` is left at the profile
+# default for the same reason as the entries above.
+#
+# NOT an entry in .config/flaky-allowlist.txt, deliberately. #1235 is explicit
+# that allowlisting would suppress the symptom of a product cost nobody had
+# measured. The cost is now measured, named and guarded
+# (crates/wcore-agent/tests/turn_cost_per_byte_guard.rs fails if the per-byte
+# term grows), so this is a budget for a known price, not a suppression.
+#
+# Scoped to the two tests by name: nothing else's budget moves.
+[[profile.default.overrides]]
+filter = 'test(=the_engine_spills_where_this_session_can_read_it_back) + test(=tc_2_6_context_overflow_sheds_tool_output_and_continues)'
+slow-timeout = { period = "30s", terminate-after = 4 }
+
 # ── CI profile ─────────────────────────────────────────────────────────────
 [profile.ci]
 # In CI: always show output for failed tests, machine-readable JUnit
