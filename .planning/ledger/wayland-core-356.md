@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "Two path resolvers with different escape properties 70 lines apart, and the weaker one guards the skill-source write refusal"
 status: open
-last_verified_commit: 50c6aad6
+last_verified_commit: 607d6ba9
 criteria:
   - id: c1
     text: "is_skill_source_path is graded against dotdot-after-a-missing-component and the dangling-symlink hop, the two escapes #1097 was written for"
