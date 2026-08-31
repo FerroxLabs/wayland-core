@@ -18,7 +18,7 @@
 | Q-1172c3 / wayland#1172 c3 | what happens when the LEARNED served window is one core cannot compact in (the 4,096 slot) | **NARROW ONTO IT UNCONDITIONALLY AND REFUSE THE RUN OUT LOUD** | No `supports_compaction` escape hatch in `narrow_to_served_window`; the refusal carries `minimum_workable_window` and the `num_ctx` remedy; the truncation notice needs the matching third arm |
 | Q-1218 / wayland#1218 | clamp `size_output_cap` to the withheld RESERVE, or to the room left in the window in force | **TO THE ROOM IN THE WINDOW IN FORCE** | Never clamp the ask to the reserve at every input - that cuts a 200k Claude turn to the compaction reserve |
 | Q-1200 / wayland#1200 | bound the tool-result BUDGET only, or the protected tail too | **BOTH, and record the term that cannot be bounded** | The per-result ingestion cap is not window-derived; the named gap belongs beside the arithmetic, not in a lane report |
-| Q-1255 / wayland#1200 residue | fix the unbounded stub term here, or ticket it | **TICKET IT — FerroxLabs/wayland#1255 — and pin the arithmetic in-tree** | The only fix collapses already-stubbed bodies, which is the one thing the pass promises never to do; that trade is a decision, not a patch |
+| Q-1255 / wayland#1200 residue | fix the unbounded stub term here, or ticket it | **TICKET IT — FerroxLabs/wayland#1255 — and pin the arithmetic in-tree.** SUPERSEDED 2026-08-31: **FOLD IT, and price the cache write** | The pin discharged neither arm of the ticket's own c1, and c2 asks for the opposite polarity of the pin. The fold costs one uncached turn per ~237 dropped results; the leak costs the session |
 | Q-391 / core#244 c4 | is the Windows local-operator shell expected to confine the VCS content store? | **NO — and say so everywhere the product speaks** | Rewrite #244 c4 to its true scope; keep the standing pin test; do not reopen AppContainer |
 
 ## D-SECRET-2 — REFUTED 2026-08-29. Do not build this.
@@ -216,3 +216,53 @@ cannot be rediscovered as a surprise. The corresponding false gloss — that car
 growing with the session" — has been removed from wayland#1150 c4's ledger note, and the
 `+ 20_000` slack that hid the term (the real difference between a 20-call and a 100-call session is
 10,400 bytes) has been replaced by an equality on it.
+
+### SUPERSEDED 2026-08-31 — Q-1255 is FOLDED, and the cache write is priced
+
+The decision above was to ticket the third term and pin its arithmetic. Executing wayland#1255 in
+lane `f13-ctx-1255` showed that the pin discharges **neither** arm of the ticket's own c1, so the
+ticket could not have been closed on it:
+
+* c1's second arm is *"the prompt-cache cost of **bounding** them is measured and the tradeoff
+  recorded as a decision"*. The section above records the tradeoff and then says, in its own words,
+  that *"the cost of that rewrite has not been measured"*. Recorded, not measured — the arm is open.
+* c2 asks for the **opposite polarity** of the pin: the same call,
+  `bound_accumulated_tool_results(.., Some(32_768))`, at a session past the crossing, asserting the
+  carried payload **fits**. No statement *about* the pass can satisfy that, however well measured.
+  Closing c1 on the pin would have left c2 permanently unmeetable while the ticket read as answered.
+
+So the behaviour changed, along the shape this section itself proposed: **collapse at a boundary,
+not per turn.** `fold_bounded_tool_rounds` elides whole already-stubbed tool ROUNDS — `ToolUse`
+together with its `ToolResult`, matching ids, all results already stubbed, nothing carrying text or
+thinking — down to a single aggregate, and only when the stub residue exceeds `total_budget_bytes`.
+
+**The cache cost, now measured rather than deferred.** A fold rewrites history at the front, so the
+provider's cached prefix is invalidated whole: one uncached turn. What buys it back is frequency.
+The residue grows one stub per dropped result and the fold fires at `total_budget_bytes`, so the
+interval is `30,832 / 130 = 237` dropped results on a 32,768-token window and `120,000 / 130 = 923`
+on the flat unknown-window constants. Driving the real pass turn-by-turn for 800 turns on a
+32,768-token window: **3 folds — one prefix rewrite per 267 turns.** Below the threshold the fold
+does nothing at all and the pass is byte-identical to before, which is why every pre-existing
+prompt-cache test (`the_ceiling_is_byte_stable_on_a_second_pass`,
+`the_ceiling_advances_in_epoch_sized_batches`,
+`a_large_window_leaves_the_pass_byte_identical_to_the_unknown_window_arm`, and the four
+`compact_tool_call_args` monotonicity tests) passes unedited.
+
+The trade, stated as the two numbers it is: **1 uncached turn in 237**, against a session that
+otherwise carries 309,870 bytes = 77,467 tokens at 2,000 tool calls on a window whose pre-flight
+guard admits 20,208 and aborts the run. After the fold the same session carries 50,295 bytes =
+12,573 tokens, and 20,000 tool calls carry 50,296.
+
+**The wrong-refusal side, weighed above the leak.** `bounded_result_stub` ends *"re-run the tool if
+you still need them"* and says it on an `Edit` result as readily as on a `Read` — one standing
+invitation to re-execute a mutating tool per dropped result, 1,999 of them at 2,000 calls. The
+aggregate that replaces a run of them says the opposite (*"Do NOT re-run a tool that changed state;
+inspect the current state instead"*) and names how many of the elided calls were state-changing, a
+running count carried across later folds. The exposure falls from `n-1` invitations to none outside
+the protected tail. What is genuinely lost is the tool names and arguments of the elided rounds,
+whose results were already stubs; that is the price the aggregate's counts partially repay, and it
+is why the fold refuses to touch any message carrying model reasoning.
+
+Shortening `bounded_result_stub` remains **not** a fix, for the reason given above: it moves the
+constant, not the order of growth. So does any scheme leaving `k > 0` bytes per call. The count of
+carried bodies, not their size, is what had to stop growing.
