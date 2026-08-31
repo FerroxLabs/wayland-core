@@ -2715,3 +2715,711 @@ fn probe_vcs_content_stores_per_traversed_directory() {
          syscall figure below is measuring a traversal that did nothing"
     );
 }
+
+// ===========================================================================
+// The resolver inventory and its gates.
+//
+// FerroxLabs/wayland-core#356 c4, #402 c1/c2/c3, #384 c3.
+// ===========================================================================
+
+/// `workspace_policy.rs`, as the gates below read it.
+const POLICY_SOURCE: &str = include_str!("../workspace_policy.rs");
+
+/// How a path-resolving function in `workspace_policy.rs` is classified.
+///
+/// #402 c3. The point of writing this down is that `canon_ancestor_only` and
+/// `canon` are NOT obviously one thing or the other, and a reader who has to
+/// guess picks whichever resolver is nearest — which is the whole defect
+/// #356 described.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ResolverClass {
+    /// A resolver a CALL SITE CHOOSES when it has a path to judge. Every call
+    /// site must say which one it picked and why: `#356 c4`.
+    JudgementStrong,
+    /// The same, for the weaker resolver.
+    JudgementWeak,
+    /// Reachable only from inside another resolver's own walk. No call site
+    /// chooses it, so there is no choice to state. The gate CHECKS that claim
+    /// rather than taking it: every call site must sit inside the owner.
+    WalkInternal { owner: &'static str },
+    /// Resolves a path, but not one being judged against a boundary.
+    NonJudgement,
+    /// Returns a `PathBuf` and takes one, but resolves nothing itself: it
+    /// answers a policy question and delegates every resolution.
+    NotAResolver,
+}
+
+/// EVERY function in `workspace_policy.rs` that takes a path and returns one.
+///
+/// #402 c1: the gate below derives the same set from the source and fails when
+/// the two disagree, so a THIRD resolver cannot arrive by simply not being
+/// named here. #402 c3: the classification and its reason are recorded HERE,
+/// which is where the gate reads them.
+const RESOLVER_INVENTORY: &[(&str, ResolverClass, &str)] = &[
+    (
+        "canon_existing_ancestor",
+        ResolverClass::JudgementStrong,
+        "Walks DOWN and re-canonicalizes after every component, so it survives \
+         the two escapes that only appear when part of the path is missing: a \
+         `..` after a component that does not exist, and a dangling symlink \
+         hop. Every security refusal in this file uses it.",
+    ),
+    (
+        "resolve",
+        ResolverClass::JudgementStrong,
+        "`canon_existing_ancestor` plus a guard-cost counter and nothing else. \
+         Listed as a resolver in its own right because a call site can pick it \
+         instead, and that is the same choice.",
+    ),
+    (
+        "canon_for_scope",
+        ResolverClass::JudgementWeak,
+        "Resolves at most ONE missing component and gives the raw path back \
+         when the leaf cannot be canonicalized, so it judges where a dangling \
+         link SITS rather than where it lands. Correct only where the path is \
+         known to exist ($HOME) or where the answer is advisory.",
+    ),
+    (
+        "resolve_prefix",
+        ResolverClass::WalkInternal {
+            owner: "canon_existing_ancestor",
+        },
+        "The dangling-link hop walk. Called once, from the component loop in \
+         `canon_existing_ancestor`.",
+    ),
+    (
+        "canon_ancestor_only",
+        ResolverClass::WalkInternal {
+            owner: "resolve_prefix",
+        },
+        "HELPER, not a resolver a call site may pick: it canonicalizes the \
+         deepest EXISTING ancestor and re-appends the rest verbatim -- exactly \
+         the walk-UP-and-append shape #1097 abandoned. It is sound only as the \
+         terminating step of `resolve_prefix`'s hop walk, where the hops have \
+         already been taken. Picking it directly would reintroduce #356.",
+    ),
+    (
+        "lexical_normalize",
+        ResolverClass::WalkInternal {
+            owner: "resolve_prefix",
+        },
+        "Applies `.` and `..` textually to a symlink target that cannot be \
+         canonicalized yet. Touches no filesystem, so it is not a resolver.",
+    ),
+    (
+        "canon",
+        ResolverClass::NonJudgement,
+        "NOT a judgement resolver: it is `fs::canonicalize` with the input as \
+         its fallback, and every call site is a ROOT being normalized once at \
+         construction (`trusted_local`, `contained`, the scratch dir, the \
+         secret-deny walk seed) -- never a path arriving from a tool call. It \
+         has no missing-component handling at all, which is safe there and \
+         nowhere else.",
+    ),
+    (
+        "resolve_against",
+        ResolverClass::NonJudgement,
+        "NOT a judgement resolver: it joins a path NAMED BY A VCS FILE \
+         (gitdir, commondir, objects/info/alternates) against that file's own \
+         directory so the result can be compared with the rest of the deny \
+         set. Its output is added TO a boundary, never checked against one.",
+    ),
+    (
+        "vcs_store_entry",
+        ResolverClass::NonJudgement,
+        "NOT a judgement resolver: it canonicalizes ONE walk entry so the store \
+         it found can be ADDED to the deny list. Nothing is compared against a \
+         boundary here, so there is no weaker-resolver escape to close; a \
+         store that cannot be canonicalized is simply not a store.",
+    ),
+    (
+        "secret_entry",
+        ResolverClass::NonJudgement,
+        "NOT a judgement resolver, for the same reason as `vcs_store_entry`: it \
+         canonicalizes a walk entry to decide what goes INTO the deny list. \
+         The per-access refusal is `denies_read_content`, which resolves the \
+         path it is asked about itself.",
+    ),
+    (
+        "grant_session_read_root",
+        ResolverClass::NotAResolver,
+        "Mints a grant; the root it returns was resolved by `grantable_read_root`.",
+    ),
+    (
+        "grant_session_read_root_full",
+        ResolverClass::NotAResolver,
+        "Same as `grant_session_read_root`, with the full grant shape (id \
+         and expiry); the root it returns is `grantable_read_root_shape`'s.",
+    ),
+    (
+        "grantable_read_root",
+        ResolverClass::NotAResolver,
+        "Validates a candidate grant root and hands back the canonical form its \
+         shape check produced.",
+    ),
+    (
+        "grantable_read_root_shape",
+        ResolverClass::NotAResolver,
+        "The shape rules behind `grantable_read_root`: it validates a \
+         candidate root and returns the canonical form, resolving nothing of \
+         its own beyond that one canonicalization.",
+    ),
+    (
+        "auto_run_overlap",
+        ResolverClass::NotAResolver,
+        "Names the auto-run directory a candidate grant would overlap, so \
+         `check_write_grantable` can refuse it. It compares paths it is \
+         given; it does not resolve them.",
+    ),
+    (
+        "compute_secret_deny",
+        ResolverClass::NotAResolver,
+        "Builds the deny LIST by walking the workspace. The per-entry \
+         resolution is `secret_entry`/`vcs_store_entry`; this only collects.",
+    ),
+    (
+        "project_committed_secrets",
+        ResolverClass::NotAResolver,
+        "The walk behind `compute_secret_deny`, with the same division: it \
+         enumerates entries and lets `secret_entry` decide and resolve.",
+    ),
+    (
+        "vcs_content_stores",
+        ResolverClass::NotAResolver,
+        "Scans for store roots; every path it returns came out of \
+         `StoreScan`, which resolves each candidate itself. This function \
+         chooses no resolver.",
+    ),
+    (
+        "gitfile_targets",
+        ResolverClass::NotAResolver,
+        "Reads a gitfile and returns what it NAMES; `resolve_against` does the \
+         resolving.",
+    ),
+];
+
+/// The needles the two call-site gates scan for, keyed to the inventory class
+/// they discharge. #402 c1's second half: a resolver classified as a judgement
+/// resolver but covered by no gate is itself a finding.
+const GATED_NEEDLES: &[(&str, ResolverClass)] = &[
+    ("canon_existing_ancestor", ResolverClass::JudgementStrong),
+    ("resolve", ResolverClass::JudgementStrong),
+    ("canon_for_scope", ResolverClass::JudgementWeak),
+];
+
+/// Every function in `source` that takes a path-typed parameter AND returns a
+/// path-typed value, with the line its signature opens on.
+///
+/// This is the STRUCTURAL half of #402 c1. The gate it feeds cannot be keyed to
+/// a literal name, because the thing it has to notice is a name nobody has
+/// written yet. Signatures may span lines, so the scan joins forward to the `{`
+/// or `;` that ends the signature.
+fn path_resolving_functions(source: &str) -> Vec<(String, usize)> {
+    const PATH_PARAM: &[&str] = &[
+        "&Path",
+        "PathBuf",
+        "&PathBuf",
+        "impl Into<PathBuf>",
+        "impl AsRef<Path>",
+    ];
+    let lines: Vec<&str> = source.lines().collect();
+    let mut found = Vec::new();
+    let mut index = 0usize;
+    while index < lines.len() {
+        let trimmed = lines[index].trim_start();
+        if trimmed.starts_with("//") || !trimmed.contains("fn ") {
+            index += 1;
+            continue;
+        }
+        let Some(name) = fn_name(trimmed) else {
+            index += 1;
+            continue;
+        };
+        // Join forward until the signature ends.
+        let mut signature = trimmed.to_string();
+        let mut end = index;
+        while !signature.contains('{') && !signature.contains(';') && end + 1 < lines.len() {
+            end += 1;
+            signature.push(' ');
+            signature.push_str(lines[end].trim());
+        }
+        let head = signature
+            .split('{')
+            .next()
+            .unwrap_or(&signature)
+            .to_string();
+        let (params, ret) = match head.split_once("->") {
+            Some((p, r)) => (p.to_string(), r.to_string()),
+            None => (head.clone(), String::new()),
+        };
+        if PATH_PARAM.iter().any(|p| params.contains(p)) && ret.contains("PathBuf") {
+            found.push((name, index + 1));
+        }
+        index = end + 1;
+    }
+    found
+}
+
+/// The name in `fn NAME(`, for a line that opens a function.
+fn fn_name(trimmed: &str) -> Option<String> {
+    let at = trimmed.find("fn ")?;
+    // `fn` must start the line or follow a visibility/asyncness word, never sit
+    // inside an identifier or a string.
+    let before = &trimmed[..at];
+    if !before.is_empty() && !before.ends_with(' ') {
+        return None;
+    }
+    let rest = &trimmed[at + 3..];
+    let open = rest.find('(')?;
+    let name = rest[..open].trim();
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+    {
+        return None;
+    }
+    Some(name.to_string())
+}
+
+/// FerroxLabs/wayland-core#402 c1 + c3 — the file's resolver inventory is
+/// EXACTLY the set of path-resolving functions the file defines.
+///
+/// #356 c4's gates are keyed to two literal names. That half is sound for the
+/// two resolvers that exist, and blind by construction to a THIRD: a new
+/// `canon_v3(&Path) -> PathBuf` needs no call-site note, and both name-keyed
+/// gates stay green. The inversion is what closes it — the set of path
+/// resolvers DEFINED here must equal the set the gate knows about — and it is
+/// decidable and total, because a resolver has to be a function that takes a
+/// path and returns one.
+#[test]
+fn the_resolver_inventory_covers_every_path_resolving_function_in_this_file() {
+    let detected = path_resolving_functions(POLICY_SOURCE);
+
+    // Known-positive control. An `include_str!` pointing at the wrong file, or
+    // a scanner that stopped matching signatures, would detect nothing and this
+    // gate would pass by scanning air.
+    assert!(
+        detected.len() >= 15,
+        "the scan found only {} path-resolving functions — the instrument is \
+         looking at the wrong thing:\n{detected:#?}",
+        detected.len()
+    );
+    for required in ["canon_existing_ancestor", "canon_for_scope", "canon"] {
+        assert!(
+            detected.iter().any(|(name, _)| name == required),
+            "known-positive control: `{required}` is a path resolver in this \
+             file and the scanner did not find it"
+        );
+    }
+    // Known-NEGATIVE control: the scanner must be able to say no, or "every
+    // function is in the inventory" would be true of a scanner that matched
+    // everything.
+    assert!(
+        !detected
+            .iter()
+            .any(|(name, _)| name == "is_secret_path" || name == "under_project_load_path"),
+        "known-negative control: a predicate that returns `bool` is not a path \
+         resolver, and the scanner classified one as one"
+    );
+
+    let declared: Vec<&str> = RESOLVER_INVENTORY
+        .iter()
+        .map(|(name, _, _)| *name)
+        .collect();
+
+    let undeclared: Vec<String> = detected
+        .iter()
+        .filter(|(name, _)| !declared.contains(&name.as_str()))
+        .map(|(name, line)| format!("line {line}: fn {name}"))
+        .collect();
+    assert!(
+        undeclared.is_empty(),
+        "a path-resolving function was added to workspace_policy.rs and not \
+         classified. Add it to `RESOLVER_INVENTORY` with the reason a call \
+         site would pick it — and if it is a THIRD judgement resolver, say why \
+         the two that exist were not enough:\n{}",
+        undeclared.join("\n")
+    );
+
+    let stale: Vec<&str> = declared
+        .iter()
+        .filter(|name| !detected.iter().any(|(found, _)| found == *name))
+        .copied()
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "`RESOLVER_INVENTORY` names functions this file no longer defines — a \
+         stale entry is how the inventory stops describing the file: {stale:?}"
+    );
+
+    // Every entry carries a REASON, not just a class.
+    for (name, _, reason) in RESOLVER_INVENTORY {
+        assert!(
+            reason.len() >= 40,
+            "`{name}` is classified without a usable reason"
+        );
+    }
+
+    // Every judgement resolver is covered by a call-site gate. Classifying a
+    // new resolver but gating nothing would satisfy the paragraph above and
+    // leave its call sites free.
+    for (name, class, _) in RESOLVER_INVENTORY {
+        if matches!(
+            class,
+            ResolverClass::JudgementStrong | ResolverClass::JudgementWeak
+        ) {
+            assert!(
+                GATED_NEEDLES
+                    .iter()
+                    .any(|(gated, gated_class)| gated == name && gated_class == class),
+                "`{name}` is classified as a judgement resolver but no \
+                 call-site gate scans for it"
+            );
+        }
+    }
+
+    // A `WalkInternal` claim is CHECKED, not taken: every call site must sit
+    // inside the owner it names. This is what stops the next author moving
+    // `canon_ancestor_only` -- the abandoned walk-UP shape -- back onto a
+    // guard by calling it directly and leaving the classification alone.
+    let lines: Vec<&str> = POLICY_SOURCE.lines().collect();
+    for (name, class, _) in RESOLVER_INVENTORY {
+        let ResolverClass::WalkInternal { owner } = class else {
+            continue;
+        };
+        let needle = format!("{name}(");
+        let mut sites = 0usize;
+        let mut escaped: Vec<String> = Vec::new();
+        for (index, line) in lines.iter().enumerate() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") || !line.contains(&needle) {
+                continue;
+            }
+            if line.contains(&format!("fn {needle}")) {
+                continue;
+            }
+            sites += 1;
+            let enclosing = lines[..index]
+                .iter()
+                .rposition(|above| is_fn_signature(above))
+                .map(|at| fn_name(lines[at].trim_start()).unwrap_or_default())
+                .unwrap_or_default();
+            if enclosing != *owner && enclosing != *name {
+                escaped.push(format!("line {}: called from `{enclosing}`", index + 1));
+            }
+        }
+        assert!(
+            sites >= 1,
+            "no call site found for `{name}` — the walk-internal check is \
+             scanning air"
+        );
+        assert!(
+            escaped.is_empty(),
+            "`{name}` is classified walk-internal to `{owner}`, but it is \
+             called from outside it. Either the call site chose a resolver and \
+             must say so, or the classification is wrong:\n{}",
+            escaped.join("\n")
+        );
+    }
+}
+
+/// FerroxLabs/wayland-core#356 c4 — every call site of the STRONG resolver says
+/// which resolver it uses and why.
+///
+/// The sibling of [`every_weak_resolver_site_states_which_resolver_and_why`],
+/// which that ticket's own close left un-built: only the weak resolver's sites
+/// were labelled, so half of c4's sentence ("the reason EACH call site picked
+/// one") was ungraded. Both needles are scanned because `self.resolve` IS
+/// `canon_existing_ancestor` under a counter — a call site that picks it has
+/// made the same choice, and gating only the bare name leaves that door open.
+#[test]
+fn every_strong_resolver_site_states_which_resolver_and_why() {
+    const MARKER: &str = "resolver: `canon_existing_ancestor`";
+    const NEEDLES: &[&str] = &["canon_existing_ancestor(", "self.resolve("];
+
+    let lines: Vec<&str> = POLICY_SOURCE.lines().collect();
+    let mut sites = 0usize;
+    let mut unlabelled: Vec<String> = Vec::new();
+
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//") {
+            continue;
+        }
+        if !NEEDLES.iter().any(|needle| line.contains(needle)) {
+            continue;
+        }
+        if line.contains("fn canon_existing_ancestor(") {
+            continue;
+        }
+        sites += 1;
+        // Scoped to the ENCLOSING function, for the reason the weak gate's own
+        // comment records: a fixed look-back window reads the note belonging
+        // to the function next door and passes vacuously.
+        let start = lines[..index]
+            .iter()
+            .rposition(|above| is_fn_signature(above))
+            .map_or(0, |at| at + 1);
+        if !lines[start..index]
+            .iter()
+            .any(|above| above.contains(MARKER))
+        {
+            unlabelled.push(format!("line {}: {}", index + 1, trimmed));
+        }
+    }
+
+    // Known-positive control, the same shape the weak gate carries: a renamed
+    // resolver or a wrong `include_str!` would find nothing and pass.
+    assert!(
+        sites >= 8,
+        "the scan found only {sites} strong-resolver call sites — the \
+         instrument is looking at the wrong thing"
+    );
+    assert!(
+        POLICY_SOURCE.contains("fn canon_existing_ancestor("),
+        "known-positive control: the resolver's own definition must be in the \
+         file being scanned"
+    );
+    assert!(
+        unlabelled.is_empty(),
+        "these strong-resolver call sites do not say which resolver they use \
+         or why — add a `{MARKER}` note stating what the weaker resolver would \
+         get wrong here:\n{}",
+        unlabelled.join("\n")
+    );
+}
+
+/// Public predicates whose doc comment must NOT claim to be where a refusal is
+/// made, together with the function that actually makes it.
+///
+/// FerroxLabs/wayland-core#384 c3. Both are the public predicate surface the
+/// crate's integration tests drive; neither is on the production path, because
+/// `denies_read_content` resolves the path once and asks the `_resolved`
+/// siblings. That is a legitimate reason to have no production call site — and
+/// it is the ONLY one this file is allowed, because "no call site" is exactly
+/// what made `is_session_write_granted` read as protection while enforcing
+/// nothing.
+const PUBLIC_SURFACE_NOT_AN_ENFORCEMENT_POINT: &[(&str, &str)] = &[
+    ("is_project_secret", "denies_read_content"),
+    ("is_vcs_content_store", "denies_read_content"),
+];
+
+/// True for a line inside a `#[cfg(test)]` module, tracked by the caller.
+fn strip_test_modules(source: &str) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    let mut pending_cfg_test = false;
+    let mut test_depth: Option<i32> = None;
+    for (index, line) in source.lines().enumerate() {
+        let trimmed = line.trim();
+        if let Some(depth) = test_depth.as_mut() {
+            *depth += line.matches('{').count() as i32 - line.matches('}').count() as i32;
+            if *depth <= 0 {
+                test_depth = None;
+            }
+            continue;
+        }
+        if trimmed == "#[cfg(test)]" {
+            pending_cfg_test = true;
+            continue;
+        }
+        if pending_cfg_test {
+            pending_cfg_test = false;
+            if trimmed.starts_with("mod ") {
+                if !trimmed.ends_with(';') {
+                    let depth = line.matches('{').count() as i32 - line.matches('}').count() as i32;
+                    if depth > 0 {
+                        test_depth = Some(depth);
+                    }
+                }
+                continue;
+            }
+        }
+        if trimmed.starts_with("//") {
+            continue;
+        }
+        out.push((index + 1, line.to_string()));
+    }
+    out
+}
+
+/// Every `.rs` file under `crates/` that ships in a library or binary — not a
+/// `tests/` integration target, not an `examples/` instrument, not a `tests.rs`
+/// test module.
+fn production_sources() -> Vec<(std::path::PathBuf, Vec<(usize, String)>)> {
+    fn walk(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy().to_string();
+            if path.is_dir() {
+                if matches!(name.as_str(), "target" | "tests" | "examples" | "benches") {
+                    continue;
+                }
+                walk(&path, out);
+            } else if name.ends_with(".rs") && name != "tests.rs" {
+                out.push(path);
+            }
+        }
+    }
+    let crates = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates/ is the parent of this crate")
+        .to_path_buf();
+    let mut files = Vec::new();
+    walk(&crates, &mut files);
+    files
+        .into_iter()
+        .filter_map(|path| {
+            let text = std::fs::read_to_string(&path).ok()?;
+            let lines = strip_test_modules(&text);
+            Some((path, lines))
+        })
+        .collect()
+}
+
+/// FerroxLabs/wayland-core#384 c3 — no predicate this file exposes is graded by
+/// tests alone while calling itself an enforcement point.
+///
+/// `is_session_write_granted`'s doc comment said it was "the predicate
+/// `SandboxedFs`'s mutating operations ask" and no production line called it.
+/// A guard nothing calls is worse than no guard, because it reads as
+/// protection — so this gate is written over the SUPERSET (every `pub fn`
+/// returning `bool`, whether its doc claims enforcement or not), because
+/// "which words count as an enforcement claim" is the open alphabet that
+/// name-keyed gates die of.
+#[test]
+fn no_public_predicate_in_this_file_is_uncalled_in_production() {
+    let policy_lines = strip_test_modules(POLICY_SOURCE);
+    let predicates: Vec<(String, usize)> = policy_lines
+        .iter()
+        .filter(|(_, line)| line.contains("-> bool"))
+        .filter_map(|(number, line)| {
+            let trimmed = line.trim_start();
+            let name = trimmed.strip_prefix("pub fn ")?;
+            let name = name.split('(').next()?.trim();
+            Some((name.to_string(), *number))
+        })
+        .collect();
+
+    let sources = production_sources();
+
+    // Known-positive controls on the INSTRUMENT, before any of its zeros are
+    // believed. A walk that read no files, or a scan that found no predicates,
+    // would report every predicate as uncalled or none of them.
+    assert!(
+        sources.len() >= 200,
+        "the walk found only {} production source files — it is looking at the \
+         wrong tree",
+        sources.len()
+    );
+    assert!(
+        predicates.len() >= 12,
+        "the scan found only {} public predicates in workspace_policy.rs",
+        predicates.len()
+    );
+
+    let call_sites = |name: &str| -> Vec<String> {
+        let mut hits = Vec::new();
+        for (path, lines) in &sources {
+            for (number, line) in lines {
+                if line.contains(&format!("fn {name}(")) {
+                    continue;
+                }
+                if !mentions_word(line, name) {
+                    continue;
+                }
+                hits.push(format!("{}:{number}", path.display()));
+            }
+        }
+        hits
+    };
+
+    // The instrument can say YES for a live predicate...
+    assert!(
+        !call_sites("denies_read_content").is_empty(),
+        "known-positive control: `denies_read_content` is called from \
+         production and the scan did not see it"
+    );
+    // ...and NO for a name that is not there. Without this, "every predicate
+    // has a call site" could be true of a scan that matched everything.
+    assert!(
+        call_sites("is_session_write_granted_zzz_absent").is_empty(),
+        "known-negative control: the scan reported call sites for a name that \
+         does not exist"
+    );
+
+    let exempt: Vec<&str> = PUBLIC_SURFACE_NOT_AN_ENFORCEMENT_POINT
+        .iter()
+        .map(|(name, _)| *name)
+        .collect();
+
+    let uncalled: Vec<String> = predicates
+        .iter()
+        .filter(|(name, _)| !exempt.contains(&name.as_str()))
+        .filter(|(name, _)| call_sites(name).is_empty())
+        .map(|(name, line)| format!("workspace_policy.rs:{line}: pub fn {name}"))
+        .collect();
+    assert!(
+        uncalled.is_empty(),
+        "these predicates have NO production call site. Either wire them into \
+         the path that enforces, or delete them with the tests that grade \
+         them — a documented guard nothing calls reads as protection:\n{}",
+        uncalled.join("\n")
+    );
+
+    // The exemption is not free. Each exempt predicate must SAY it is not the
+    // enforcement point, and name the function that is, at its definition.
+    for (name, enforcer) in PUBLIC_SURFACE_NOT_AN_ENFORCEMENT_POINT {
+        let at = policy_lines
+            .iter()
+            .position(|(_, line)| line.trim_start().starts_with(&format!("pub fn {name}(")))
+            .unwrap_or_else(|| panic!("exempt predicate `{name}` is no longer defined here"));
+        assert!(
+            call_sites(name).is_empty(),
+            "`{name}` is exempt as a non-enforcing public surface but IS \
+             called from production now — drop the exemption"
+        );
+        let all: Vec<&str> = POLICY_SOURCE.lines().collect();
+        let doc: String = all[..policy_lines[at].0 - 1]
+            .iter()
+            .rev()
+            .take_while(|line| {
+                let trimmed = line.trim_start();
+                trimmed.starts_with("///") || trimmed.starts_with("#[")
+            })
+            .copied()
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            doc.contains("NOT AN ENFORCEMENT POINT"),
+            "`{name}` has no production call site and its doc comment does not \
+             say so — that is exactly the shape #384 was filed for"
+        );
+        assert!(
+            doc.contains(enforcer),
+            "`{name}`'s doc comment must name `{enforcer}` as the function \
+             that actually refuses"
+        );
+    }
+}
+
+/// `name` appears in `line` as a whole word.
+fn mentions_word(line: &str, name: &str) -> bool {
+    let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let mut from = 0usize;
+    while let Some(at) = line[from..].find(name) {
+        let start = from + at;
+        let end = start + name.len();
+        let before_ok = start == 0 || !line[..start].chars().next_back().is_some_and(is_ident);
+        let after_ok = line[end..].chars().next().is_none_or(|c| !is_ident(c));
+        if before_ok && after_ok {
+            return true;
+        }
+        from = end;
+    }
+    false
+}

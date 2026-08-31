@@ -1792,6 +1792,18 @@ impl<F: VirtualFs> SandboxedFs<F> {
         self.contain_granted(path, true).await
     }
 
+    /// **This is the predicate the mutating operations ask.** With `write`
+    /// true it is the whole of the write-grant question: is `path` inside the
+    /// sandbox root, or inside a grant that is live NOW and confers WRITE. It
+    /// carries that sentence because `WorkspacePolicy::is_session_write_granted`
+    /// used to claim it in a doc comment while having no production call site
+    /// at all; it was deleted under FerroxLabs/wayland-core#384 rather than
+    /// left to read as protection. Nothing else answers this question for a
+    /// mutation — the in-process file tools reach it through
+    /// [`contain_write`](Self::contain_write), and the OS shell sandbox is
+    /// scoped from `WorkspacePolicy::writable_roots`, which reads the same
+    /// grant list.
+    ///
     /// Falls through to [`contain`](Self::contain) first so the ordinary
     /// in-workspace path is byte-for-byte unchanged, and so a session with no
     /// grants behaves exactly as it did before this existed. The grant check
@@ -1855,6 +1867,12 @@ impl<F: VirtualFs> SandboxedFs<F> {
     }
 
     /// The roots of every live grant conferring at least `write`.
+    ///
+    /// The grant half of the enforcement predicate
+    /// [`contain_granted`](Self::contain_granted) — the `write` flag is where
+    /// "a read-only grant on the same folder still refuses the write" is
+    /// decided, and it is decided here and nowhere else
+    /// (FerroxLabs/wayland-core#384).
     ///
     /// Expiry is evaluated HERE, at use time, not when the grant was made: a
     /// long-running turn must lose access the moment the deadline passes, not

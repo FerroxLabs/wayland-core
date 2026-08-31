@@ -91,7 +91,12 @@ async fn a_granted_write_folder_can_be_written_and_read_back() {
     // A write grant IMPLIES a read grant. The reverse never holds.
     assert!(policy.writable_roots().contains(&granted));
     assert!(policy.readable_roots().contains(&granted));
-    assert!(policy.is_session_write_granted(&target));
+    // FerroxLabs/wayland-core#384: the `policy.is_session_write_granted(..)`
+    // assertion that stood here graded a predicate with no production call
+    // site, so it graded nothing reachable. It is gone with the predicate. The
+    // write grant is asserted by the two lines it actually runs through: the
+    // `fs.write` above (`SandboxedFs::contain_granted`, the enforcement point)
+    // and `writable_roots()` (the OS sandbox scope) directly above this.
     assert!(policy.is_session_read_granted(&target));
 }
 
@@ -148,7 +153,6 @@ async fn a_read_only_grant_on_the_same_folder_still_refuses_the_write() {
         "a read grant is somewhere the agent may LOOK"
     );
     assert!(!policy.writable_roots().contains(&granted));
-    assert!(!policy.is_session_write_granted(&target));
     assert_eq!(
         std::fs::read(&target).unwrap(),
         b"%PDF-1.7".to_vec(),
