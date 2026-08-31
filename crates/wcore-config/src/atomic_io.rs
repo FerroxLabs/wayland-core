@@ -464,7 +464,7 @@ fn restore(displaced: &Path, dest: &Path) -> std::io::Result<Option<PathBuf>> {
 fn restore(displaced: &Path, dest: &Path) -> std::io::Result<Option<PathBuf>> {
     match publish_displacing(displaced, dest)? {
         Swap::Displaced(exchanged_out) => Ok(Some(exchanged_out)),
-        Swap::Vacant | Swap::Unsupported => std::fs::rename(displaced, dest).map(|()| None),
+        Swap::Vacant | Swap::Unsupported(_) => std::fs::rename(displaced, dest).map(|()| None),
     }
 }
 
