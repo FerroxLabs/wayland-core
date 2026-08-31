@@ -126,6 +126,44 @@ pub fn has_device_or_verbatim_prefix(path: &Path) -> bool {
     lower.starts_with(r"\\?\") || lower.starts_with(r"\\.\")
 }
 
+/// Does `path` name a Windows **verbatim DISK** path — `\\?\C:\…`?
+///
+/// The one member of the `\\?\` family that names an ordinary local file, and
+/// the reason [`has_device_or_verbatim_prefix`] is too coarse to refuse on by
+/// itself. `std::fs::canonicalize` RETURNS this form on Windows, so it is the
+/// spelling this workspace's own canonical paths carry — refusing it refuses
+/// the product's own output (FerroxLabs/wayland-core#409 c2).
+///
+/// Everything else under `\\?\` stays outside this predicate:
+/// `\\?\GLOBALROOT\Device\…` and `\\?\Volume{…}` reach raw devices and
+/// volumes, `\\.\…` is the device namespace, and `\\?\UNC\…` is UNC (see
+/// [`has_unc_prefix`]). Answers the same on every platform, for the reason
+/// given on [`has_unc_prefix`].
+pub fn has_verbatim_disk_prefix(path: &Path) -> bool {
+    // Authoritative on Windows, exactly as in the two predicates above.
+    #[cfg(windows)]
+    {
+        use std::path::{Component, Prefix};
+        if let Some(Component::Prefix(p)) = path.components().next()
+            && matches!(p.kind(), Prefix::VerbatimDisk(..))
+        {
+            return true;
+        }
+    }
+
+    let lower = normalised_lower(path);
+    let Some(rest) = lower.strip_prefix(r"\\?\") else {
+        return false;
+    };
+    // A single drive letter, a colon, then a separator or the end of the path.
+    // `\\?\GLOBALROOT\…` fails on the first character, `\\?\UNC\…` on the
+    // second, and `\\?\Volume{…}` on both.
+    let mut chars = rest.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic())
+        && chars.next() == Some(':')
+        && matches!(chars.next(), Some('\\') | None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,6 +295,58 @@ mod tests {
         }
         #[cfg(windows)]
         let _ = legacy_vision_tools(&unc);
+    }
+
+    /// core#409 c2 — the `\\?\` family splits in two and only one half is
+    /// refusable. Pins BOTH directions: the ordinary half must be recognised
+    /// as ordinary, and the device half must stay caught.
+    #[test]
+    fn verbatim_disk_is_distinguished_from_the_device_namespace() {
+        // ORDINARY. `std::fs::canonicalize` returns exactly this shape on
+        // Windows, so a guard that refuses it refuses the product's own paths.
+        for ordinary in [
+            r"\\?\C:\Users\me\notes.txt",
+            r"\\?\c:\x",
+            r"\\?\F:\ws\.wayland-out",
+            r"\\?\C:",
+            "//?/C:/x",
+        ] {
+            assert!(
+                has_verbatim_disk_prefix(&p(ordinary)),
+                "{ordinary:?} names an ordinary local file"
+            );
+            assert!(!has_unc_prefix(&p(ordinary)));
+        }
+
+        // DEVICE / NON-DISK VERBATIM. None of these is a disk path, and the
+        // coarse predicate must keep claiming every one that is not UNC — this
+        // is the half callers still refuse.
+        for device in [
+            r"\\.\PhysicalDrive0",
+            r"\\.\pipe\wayland",
+            r"\\?\GLOBALROOT\Device\HarddiskVolume1\secret",
+            r"\\?\Volume{00000000-0000-0000-0000-000000000000}\x",
+            r"\\?\CC:\x",
+        ] {
+            assert!(
+                !has_verbatim_disk_prefix(&p(device)),
+                "{device:?} is not an ordinary local disk path"
+            );
+            assert!(
+                has_device_or_verbatim_prefix(&p(device)),
+                "{device:?} must stay claimed by the coarse predicate"
+            );
+        }
+
+        // `\\?\UNC\…` belongs to neither: it is UNC and nothing else.
+        let unc = p(r"\\?\UNC\server\share");
+        assert!(!has_verbatim_disk_prefix(&unc));
+        assert!(!has_device_or_verbatim_prefix(&unc));
+        assert!(has_unc_prefix(&unc));
+
+        // Ordinary non-namespace paths are not verbatim disks either.
+        assert!(!has_verbatim_disk_prefix(&p(r"C:\Users\me")));
+        assert!(!has_verbatim_disk_prefix(&p("/home/alice")));
     }
 
     #[test]
