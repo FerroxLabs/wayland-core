@@ -584,6 +584,9 @@ fn canonical_intents(manifest: &SandboxManifest) -> Result<Vec<AclIntent>> {
                 ))
             })?;
             validate_local_canonical_path(&canonical)?;
+            if kind == IntentKind::Allow {
+                refuse_over_broad_allow_root(&canonical)?;
+            }
             let canonical = canonical.to_str().ok_or_else(|| {
                 exec_error(format!(
                     "AppContainer ACL path is not valid Unicode: {}",
@@ -650,6 +653,84 @@ fn validate_local_canonical_path(path: &Path) -> Result<()> {
             "AppContainer ACL path must be local (no UNC/device): {}",
             path.display()
         )));
+    }
+    Ok(())
+}
+
+/// Refuse to write an AppContainer package ALLOW onto a root so broad that
+/// the grant is effectively the whole machine or the whole user (`#369` c3).
+///
+/// # Found, not modelled
+///
+/// `#369` reports a lease on SEANDESKTOP whose FIRST intent is
+/// `path = '\\?\C:\Users\seand'  kind = "allow"  mask = 1180095`. That mask
+/// is [`ACL_WRITE_MASK`] to the bit, so the grant came from
+/// `SandboxManifest::fs_write_allow`, which `wcore-tools`' bash policy fills
+/// from `WorkspacePolicy::writable_roots()` -- i.e. the WORKSPACE root. The
+/// workspace root was the user's profile directory, because wayland-core was
+/// started there. Nothing in the ACL layer went wrong; it faithfully applied
+/// what it was handed.
+///
+/// The other 4366 intents in that same lease are DENIES, one per secret found
+/// beneath it -- `.aws\credentials` and `.aws\config` among them. That is the
+/// shape of the problem: a single inheritable ALLOW on the profile root
+/// confers the entire subtree, and what claws it back is an ENUMERATION of
+/// secrets computed at one instant. `FerroxLabs/wayland-core#368` measures
+/// that same deny mechanism being stripped by a concurrent identity, so the
+/// enumeration is not merely incomplete in principle, it is unreliable in
+/// practice.
+///
+/// # Why refusing, and what it costs
+///
+/// Refusing means an operator who runs wayland-core FROM their home directory
+/// with `WAYLAND_SANDBOX` set to the AppContainer backend gets a fail-closed
+/// refusal instead of a whole-profile package grant. That cost is bounded:
+/// AppContainer is opt-in on Windows (`windows_candidate`), the shipping
+/// default is the Job Object backend, so no default configuration reaches
+/// this. A grant that wide is not a sandbox, and applying it silently is worse
+/// than declining to.
+///
+/// The three roots below are the observed one plus the two that strictly
+/// contain it. Nothing speculative is added: a project directory at any depth,
+/// including `C:\src`, is still granted.
+fn refuse_over_broad_allow_root(canonical: &Path) -> Result<()> {
+    let too_broad = |reason: &str| {
+        Err(exec_error(format!(
+            "refusing to grant the AppContainer package read/write on {}: {reason}. A single              inheritable ALLOW there confers the whole subtree, and the per-secret denies              that would claw it back are an enumeration taken at one instant              (FerroxLabs/wayland-core#369, and #368 for why that enumeration is not              reliable). Start wayland-core in a project directory, or use the default              Windows backend, which does not write ACLs at all.",
+            canonical.display()
+        )))
+    };
+
+    // A drive root: `C:\` has a prefix, a root, and no normal component.
+    if !canonical
+        .components()
+        .any(|component| matches!(component, std::path::Component::Normal(_)))
+    {
+        return too_broad("it is a drive root");
+    }
+    // The user's own profile directory, and the directory holding every
+    // profile on the machine. Compared through the same canonicalization the
+    // intent went through, so `C:\Users\seand` and `\\?\C:\Users\seand`
+    // are the same answer.
+    for (variable, description) in [
+        ("USERPROFILE", "it is this user's entire profile directory"),
+        ("PUBLIC", "it is the machine's shared public profile"),
+    ] {
+        let Ok(value) = std::env::var(variable) else {
+            continue;
+        };
+        let Ok(root) = fs::canonicalize(&value) else {
+            continue;
+        };
+        if same_windows_path(canonical, &root) {
+            return too_broad(description);
+        }
+        // The parent of every profile (`C:\Users`), which is broader still.
+        if let Some(parent) = root.parent()
+            && same_windows_path(canonical, parent)
+        {
+            return too_broad("it is the directory holding every user profile on this machine");
+        }
     }
     Ok(())
 }
@@ -788,6 +869,38 @@ unsafe fn recover_dead_leases_locked(lease_dir: &Path) -> Result<()> {
     paths.sort();
 
     for path in paths {
+        // #369 c1. EVERY failure recovering ONE lease is bounded to that
+        // lease. Before this, any `Err` raised below propagated out of the
+        // loop, out of `recover_dead_leases_locked`, and out of
+        // `ExecutionIdentity::start` -- so a single unrecoverable file
+        // disabled ALL sandboxed execution on the machine, permanently,
+        // because nothing expired it and every later process re-read it and
+        // failed the same way. MEASURED: twelve days on SEANDESKTOP, cleared
+        // by moving one file aside.
+        //
+        // Bounding it HERE and not at each failing call site is deliberate,
+        // and is the difference between closing c1 as written and closing an
+        // easier adjacent property. Two failure shapes already had bespoke
+        // reclamation (`reclaim_zero_length_lease`,
+        // `reclaim_unreconcilable_lease`) and the one #369 actually reported
+        // -- `cleanup_locked` failing inside `remove_and_verify_exact_sid` --
+        // had none, because the list of shapes was being extended one
+        // incident at a time. A criterion that says "a lease that cannot be
+        // recovered" means every way it can fail to recover, including the
+        // ones nobody has hit yet.
+        if let Err(error) = unsafe { recover_one_dead_lease_locked(&path) } {
+            quarantine_unrecoverable_lease(&path, &error)?;
+        }
+    }
+    Ok(())
+}
+
+/// Recover ONE dead-owner lease, or say why it could not be.
+///
+/// Split out of the sweep so that its caller can bound a failure to this one
+/// file. Every `?` in here used to abort the whole pass; see the call site.
+unsafe fn recover_one_dead_lease_locked(path: &Path) -> Result<()> {
+    {
         // An interrupted create leaves a 0-byte lease, which
         // `read_validated_lease` rejects — and that rejection used to propagate
         // straight out of this loop, wedging the sandbox permanently on every
@@ -804,13 +917,13 @@ unsafe fn recover_dead_leases_locked(lease_dir: &Path) -> Result<()> {
         // running; it is a crash or power-loss remnant. This is the exact
         // argument `recover_rewrite_temps` already relies on to delete orphaned
         // `.rewrite-*.tmp` files unconditionally.
-        if lease_is_zero_length(&path)? {
-            reclaim_zero_length_lease(&path)?;
-            continue;
+        if lease_is_zero_length(path)? {
+            reclaim_zero_length_lease(path)?;
+            return Ok(());
         }
-        let lease = read_validated_lease(&path)?;
+        let lease = read_validated_lease(path)?;
         if owner_is_live(&lease)? {
-            continue;
+            return Ok(());
         }
         if matches!(
             lease.state,
@@ -824,8 +937,8 @@ unsafe fn recover_dead_leases_locked(lease_dir: &Path) -> Result<()> {
                     lease.profile_name
                 )));
             }
-            remove_validated_lease(&path)?;
-            continue;
+            remove_validated_lease(path)?;
+            return Ok(());
         }
 
         let profile = widen(&lease.profile_name);
@@ -838,24 +951,102 @@ unsafe fn recover_dead_leases_locked(lease_dir: &Path) -> Result<()> {
         };
         if derive_hr != 0 || derived_sid.is_null() {
             reclaim_unreconcilable_lease(
-                &path,
+                path,
                 &lease,
                 &format!(
                     "no AppContainer SID can be derived from its profile name {:?} (hr={derive_hr:#x})",
                     lease.profile_name
                 ),
             )?;
-            continue;
+            return Ok(());
         }
         let sid_guard = SidFreeGuard(derived_sid);
         let bytes = unsafe { sid_bytes(sid_guard.0)? };
         if !constant_time_eq(sha256_hex(&bytes).as_bytes(), lease.sid_sha256.as_bytes()) {
-            reclaim_unreconcilable_lease(&path, &lease, &unreconcilable_lease_reason(&lease))?;
-            continue;
+            reclaim_unreconcilable_lease(path, &lease, &unreconcilable_lease_reason(&lease))?;
+            return Ok(());
         }
-        unsafe { cleanup_locked(&path, &lease, sid_guard.0)? };
+        unsafe { cleanup_locked(path, &lease, sid_guard.0)? };
     }
     Ok(())
+}
+
+/// Move a lease that could not be recovered out of the way, and TELL the
+/// operator, rather than refusing every sandboxed command until a human finds
+/// the file (`#369` c1).
+///
+/// # Why quarantining is right here even though the grants may still stand
+///
+/// This runs after a recovery attempt has already failed, and the attempt that
+/// failed most often is `remove_and_verify_exact_sid`, which re-reads the DACL
+/// and retries three times before giving up -- so by the time this is reached,
+/// transience has been excluded rather than assumed. What is left is a lease
+/// whose ACEs may STILL be applied, and that is exactly what the report says.
+///
+/// Refusing forever did not revoke them either. It left the same ACEs on disk
+/// AND disabled every sandboxed command on the machine, so it is dominated on
+/// both axes; the only thing it bought was silence. The file is MOVED, never
+/// deleted, so the recorded intents remain inspectable and an operator can act
+/// on the named paths.
+///
+/// If the quarantine itself fails there is nothing left to try, and the error
+/// propagates: a lease that can neither be recovered NOR moved aside is a
+/// genuine reason to fail closed.
+fn quarantine_unrecoverable_lease(path: &Path, cause: &SandboxError) -> Result<()> {
+    // Read BEFORE the move, and best-effort: this lease has already defeated
+    // the recovery path, so it may be exactly the file that cannot be parsed.
+    // `None` means the intents are unknown, which the report says rather than
+    // reporting "nothing was left behind". Reading it after `quarantine_lease`
+    // would ALWAYS be `None`, because the file is no longer at `path` -- which
+    // would turn the honest three-case report into a constant.
+    let lease = read_validated_lease(path).ok();
+    let destination = quarantine_lease(path)?;
+    let report = unrecoverable_lease_report(&lease, path, &destination, cause);
+    #[cfg(test)]
+    record_emitted_reclamation(&report);
+    tracing::error!(
+        target: "wcore_sandbox",
+        lease = %path.display(),
+        quarantined_to = %destination.display(),
+        "{report}"
+    );
+    Ok(())
+}
+
+/// What an operator is told when a lease could not be recovered at all.
+///
+/// The residual clause has THREE cases and not two, because "we could not read
+/// it" is not "it granted nothing". Collapsing them is how a report reassures
+/// an operator about state it never inspected.
+fn unrecoverable_lease_report(
+    lease: &Option<LeaseFile>,
+    path: &Path,
+    destination: &Path,
+    cause: &SandboxError,
+) -> String {
+    let residual = match lease {
+        Some(lease) if lease.intents.is_empty() => {
+            "It recorded NO filesystem ACL grant, so nothing was left behind on this machine."
+                .to_string()
+        }
+        Some(lease) => format!(
+            "Its recovery FAILED PART WAY, so the {} filesystem ACL grant(s) it recorded may              still be applied and could NOT be revoked automatically. Review those paths: {}.",
+            lease.intents.len(),
+            lease
+                .intents
+                .iter()
+                .map(|intent| intent.path.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        None => "Its contents could not be read, so WHICH filesystem ACL grants it recorded                  is unknown -- inspect the quarantined file itself rather than assuming it                  granted nothing."
+            .to_string(),
+    };
+    format!(
+        "QUARANTINED an AppContainer ACL lease {} that could not be recovered: {cause}. This          is persistent on-disk state -- NOT a platform limitation, NOT an SSH or session-0          effect, and NOT transient. Until this quarantine landed, a lease in this state          disabled ALL sandboxed execution on this machine for as long as it existed, and the          only symptom was every command refusing. The file has been MOVED (not deleted) to          {} so the cause stays inspectable. {residual}",
+        path.display(),
+        destination.display()
+    )
 }
 
 /// Why a dead-owner lease can never reconcile against its own profile.
