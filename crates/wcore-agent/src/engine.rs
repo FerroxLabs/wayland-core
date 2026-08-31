@@ -5597,6 +5597,37 @@ impl AgentEngine {
         Arc::get_mut(&mut self.tools)
     }
 
+    /// FerroxLabs/wayland#1234 — retire a runtime-added MCP server from every
+    /// structure THIS ENGINE owns, as one operation.
+    ///
+    /// The engine owns both the tool registry and the `McpCatalogRefresh`, and
+    /// a removal has to touch both: drop the server's tools from the registry,
+    /// and withdraw its manager from the refresh so it stops being polled.
+    /// `McpCatalogRefresh` keeps its own `Arc<McpManager>` from
+    /// `register_runtime_server`, so a caller that did only the first left the
+    /// removed server registered for the life of the session — which is what
+    /// #1234 reports on the json-stream `RemoveMcpServer` path, and what the
+    /// TUI's `/mcp remove` did on the same shape until this existed.
+    ///
+    /// The two halves are ordered so a refusal cannot half-perform: the
+    /// registry is claimed FIRST, and nothing is withdrawn if it is busy.
+    /// `None` means a turn holds the registry and the caller must refuse the
+    /// removal rather than complete part of it.
+    pub fn retire_runtime_mcp_server(
+        &mut self,
+        name: &str,
+        defer_cold: &wcore_config::tools::DeferColdConfig,
+    ) -> Option<Vec<String>> {
+        let refresh = self.mcp_catalog_refresh();
+        let registry = self.registry_mut()?;
+        let removed_tools = registry.remove_mcp_server(name);
+        registry.refresh_tool_search_catalog(defer_cold);
+        if let Some(refresh) = refresh {
+            refresh.forget_runtime_server(name);
+        }
+        Some(removed_tools)
+    }
+
     /// Wire the mid-session MCP catalogue refresh (post-construction setter,
     /// matching `set_agent_registry`). Bootstrap calls this once it has both
     /// the connected managers and the `builtin_names` / server-config
@@ -5958,14 +5989,19 @@ impl AgentEngine {
     /// Every `emit_error` in this file goes through here so the tap cannot be
     /// bypassed by a new call site. Forwards verbatim to the sink; the tap is
     /// a side-channel, not a filter.
-    fn emit_error(&self, msg: &str, retryable: bool) {
+    fn emit_error(
+        &self,
+        msg: &str,
+        retryable: bool,
+        category: wcore_protocol::events::FailureCategory,
+    ) {
         if let Some(tap) = self.error_tap.as_ref() {
             match tap.lock() {
                 Ok(mut slot) => *slot = Some(msg.to_string()),
                 Err(poisoned) => *poisoned.into_inner() = Some(msg.to_string()),
             }
         }
-        self.output.emit_error(msg, retryable);
+        self.output.emit_error(msg, retryable, category);
     }
 
     /// CORE-2 — snapshot of the engine's usage counters:
@@ -12945,8 +12981,11 @@ impl AgentEngine {
                 // later `--resume` has something to restore.
                 session.conversation_id = Some(conversation_id);
                 if let Err(e) = mgr.persist_first_message(session) {
-                    self.output
-                        .emit_error(&format!("Failed to persist first message: {}", e), false);
+                    self.output.emit_error(
+                        &format!("Failed to persist first message: {}", e),
+                        false,
+                        wcore_protocol::events::FailureCategory::LocalWayland,
+                    );
                 }
             } else {
                 let user_message = self.messages.last().ok_or_else(|| {
@@ -12955,8 +12994,11 @@ impl AgentEngine {
                     )
                 })?;
                 if let Err(e) = mgr.append_wal_message(session, user_message) {
-                    self.output
-                        .emit_error(&format!("Failed to append WAL: {}", e), false);
+                    self.output.emit_error(
+                        &format!("Failed to append WAL: {}", e),
+                        false,
+                        wcore_protocol::events::FailureCategory::LocalWayland,
+                    );
                 }
             }
         }
@@ -13275,7 +13317,11 @@ impl AgentEngine {
                     // Resumable: the saved history is fine and reopens cleanly
                     // the moment the window is raised.
                     if let Some(refusal) = self.unworkable_window_refusal() {
-                        self.emit_error(&refusal, false);
+                        self.emit_error(
+                            &refusal,
+                            false,
+                            wcore_protocol::events::FailureCategory::ContextLimit,
+                        );
                         return self
                             .finish_run_terminated_inner(
                                 user_input,
@@ -13387,14 +13433,25 @@ impl AgentEngine {
                     let tools = self.apply_tool_deferral(tools);
 
                     // Build system prompt: append plan mode instructions when active
+                    //
+                    // FerroxLabs/wayland#1208: the `Current date:` value is
+                    // baked into `self.system_prompt` once at bootstrap and
+                    // the same text tells the model it is the authoritative
+                    // "today". Refresh it here, on the ONE path that puts the
+                    // prompt on the wire, so a session that outlives the day
+                    // it started in — a channel-gateway engine lives in an
+                    // unevicted per-session pool — stops asserting the day the
+                    // gateway booted. Byte-stable within a day (it borrows),
+                    // so the cached prefix moves once per rollover and not
+                    // once per turn.
+                    let base = crate::context::refresh_current_date_line(
+                        &self.system_prompt,
+                        &crate::context::today_string(),
+                    );
                     let system = if self.plan_state.is_active {
-                        format!(
-                            "{}\n\n{}",
-                            self.system_prompt,
-                            plan_prompt::plan_mode_instructions()
-                        )
+                        format!("{}\n\n{}", base, plan_prompt::plan_mode_instructions())
                     } else {
-                        self.system_prompt.clone()
+                        base.into_owned()
                     };
 
                     // v0.8.1 U1 — the per-turn skill-router hint (when the router is
@@ -13876,6 +13933,7 @@ impl AgentEngine {
                                         request.model,
                                     ),
                                     false,
+                                    wcore_protocol::events::FailureCategory::ContextLimit,
                                 );
                                 // Context ceiling: a bigger budget is needed, not more turns.
                                 return self
@@ -14312,6 +14370,7 @@ impl AgentEngine {
                                  the work in smaller pieces."
                             ),
                             false,
+                            wcore_protocol::events::FailureCategory::ContextLimit,
                         );
                         return self.finish_run_output_truncated(user_input, turn).await;
                     }
@@ -14390,6 +14449,7 @@ impl AgentEngine {
                             request.model,
                         ),
                         false,
+                        wcore_protocol::events::FailureCategory::ContextLimit,
                     );
                     return self
                         .finish_run_terminated(user_input, turn, FinishReason::Length)
@@ -14449,6 +14509,7 @@ impl AgentEngine {
                                  remove the explicit max_cost_usd to use token-only governance."
                             ),
                             false,
+                            wcore_protocol::events::FailureCategory::LocalWayland,
                         );
                         return self
                             .finish_run_terminated(user_input, turn, FinishReason::Length)
@@ -14509,7 +14570,7 @@ impl AgentEngine {
                                      additional budget to authorize more work."
                                 ),
                                 false,
-                            );
+                            wcore_protocol::events::FailureCategory::LocalWayland);
                             return self
                                 .finish_run_terminated(user_input, turn, FinishReason::Length)
                                 .await;
@@ -14544,7 +14605,7 @@ impl AgentEngine {
                                      additional budget to authorize more work."
                                 ),
                                 false,
-                            );
+                            wcore_protocol::events::FailureCategory::LocalWayland);
                             return self
                                 .finish_run_terminated(user_input, turn, FinishReason::Length)
                                 .await;
@@ -14894,6 +14955,7 @@ impl AgentEngine {
                                      {observed})."
                                 ),
                                 false,
+                                wcore_protocol::events::FailureCategory::LocalWayland,
                             );
                         }
                         ConfiguredFallbackAdmissionFailure::Budget(
@@ -14914,6 +14976,7 @@ impl AgentEngine {
                                      managed USD cap cannot be enforced."
                                 ),
                                 false,
+                                wcore_protocol::events::FailureCategory::LocalWayland,
                             );
                         }
                         ConfiguredFallbackAdmissionFailure::SpendGuard(refusal) => {
@@ -14922,7 +14985,13 @@ impl AgentEngine {
                                 &format!("{current_attempt_provider}/{current_attempt_model}"),
                                 "a model this session is permitted to use",
                             );
-                            self.emit_error(&refusal.to_string(), false);
+                            // A spend guard is this process refusing to
+                            // spend, on its own account.
+                            self.emit_error(
+                                &refusal.to_string(),
+                                false,
+                                wcore_protocol::events::FailureCategory::LocalWayland,
+                            );
                         }
                     }
                     return self
@@ -15004,7 +15073,7 @@ impl AgentEngine {
                                              budget cap '{kind}' (limit {limit}, observed {observed})."
                                         ),
                                         false,
-                                    );
+                                    wcore_protocol::events::FailureCategory::LocalWayland);
                                     return self
                                         .finish_run_terminated(
                                             user_input,
@@ -15250,7 +15319,11 @@ impl AgentEngine {
                                  not re-sent, because a second send would be identical.",
                             );
                         }
-                        self.emit_error(&surfaced, false);
+                        self.emit_error(
+                            &surfaced,
+                            false,
+                            wcore_protocol::events::FailureCategory::Unknown,
+                        );
                         // #923(2) — fail the TURN, not the session. The dispatch
                         // left this turn's provider attempt nonterminal, and the
                         // reducer will not let a turn holding one take ANY
@@ -15597,7 +15670,7 @@ impl AgentEngine {
                                          cap '{kind}' (limit {limit}, observed {observed})."
                                     ),
                                     false,
-                                );
+                                wcore_protocol::events::FailureCategory::LocalWayland);
                                 return self
                                     .finish_run_terminated(user_input, turn, FinishReason::Length)
                                     .await;
@@ -15764,6 +15837,7 @@ impl AgentEngine {
                                     request.model,
                                 ),
                                 false,
+                                wcore_protocol::events::FailureCategory::ContextLimit,
                             );
                             return self
                                 .finish_run_terminated_inner(
@@ -15886,6 +15960,7 @@ impl AgentEngine {
                                 )
                             },
                             false,
+                            wcore_protocol::events::FailureCategory::ContextLimit,
                         );
                         return self.finish_run_output_truncated(user_input, turn).await;
                     }
@@ -16099,7 +16174,11 @@ impl AgentEngine {
                                 MonitorDirective::Stop,
                                 MonitorReason::OutputStall,
                             );
-                            self.emit_error(&gate_msg, false);
+                            self.emit_error(
+                                &gate_msg,
+                                false,
+                                wcore_protocol::events::FailureCategory::LocalWayland,
+                            );
                             self.emit_midflight_monitor_occurrence();
                             // #388, Expected-Behavior bullet 3 — "clearly mark
                             // the task as failed/incomplete". This is a TERMINAL
@@ -16242,8 +16321,11 @@ impl AgentEngine {
                     permanent_endpoint,
                     is_auth_failure,
                 );
-                self.output
-                    .emit_error(&final_error, !is_client_error && !permanent_endpoint);
+                self.output.emit_error(
+                    &final_error,
+                    !is_client_error && !permanent_endpoint,
+                    wcore_protocol::events::FailureCategory::Unknown,
+                );
                 self.emit_incomplete_run_admission(&format!(
                     "the provider failed every one of {sends} attempts at this turn"
                 ));
@@ -16567,7 +16649,11 @@ impl AgentEngine {
                      The endpoint or model may be incompatible (verify it speaks the OpenAI \
                      chat-completions streaming format and that the model name is valid)."
                 };
-                self.emit_error(message, false);
+                self.emit_error(
+                    message,
+                    false,
+                    wcore_protocol::events::FailureCategory::Unknown,
+                );
             } else if raw_text_chars > filtered_text_chars {
                 // wayland#1221 c3 — the empty-turn notice above is the ONLY
                 // guard that ever announced an over-strip, and it fires only
@@ -16653,6 +16739,7 @@ impl AgentEngine {
                      its configured spend ceiling."
                     ),
                     false,
+                    wcore_protocol::events::FailureCategory::LocalWayland,
                 );
                 return self
                     .finish_run_terminated(user_input, turn + 1, FinishReason::Length)
@@ -17373,6 +17460,7 @@ impl AgentEngine {
                          disable via WAYLAND_MAX_CONSECUTIVE_TOOL_FAILURES.)"
                     ),
                     false,
+                    wcore_protocol::events::FailureCategory::ToolRuntime,
                 );
                 // #475 + #457: the retry-cap is a budget guardrail, not a hard
                 // failure — surface finish_reason=max_turns so the host offers
@@ -17402,6 +17490,7 @@ impl AgentEngine {
                          same call. (Tune or disable via WAYLAND_MAX_REPEATED_TOOL_CALLS.)"
                     ),
                     false,
+                    wcore_protocol::events::FailureCategory::ToolRuntime,
                 );
                 return self
                     .finish_run_terminated(user_input, turn + 1, FinishReason::Length)
@@ -17431,6 +17520,7 @@ impl AgentEngine {
                          mid-flight monitor required a strategy change. Continue with a \
                          materially different approach or explain the blocker.",
                         false,
+                        wcore_protocol::events::FailureCategory::ToolRuntime,
                     );
                     self.emit_midflight_monitor_occurrence();
                     return self
@@ -17456,6 +17546,7 @@ impl AgentEngine {
                          mid-flight monitor required a strategy change. Continue with a \
                          materially different tool sequence or explain the blocker.",
                         false,
+                        wcore_protocol::events::FailureCategory::ToolRuntime,
                     );
                     self.emit_midflight_monitor_occurrence();
                     return self
@@ -17477,6 +17568,7 @@ impl AgentEngine {
                              (limit {limit}, observed {observed})."
                         ),
                         false,
+                        wcore_protocol::events::FailureCategory::LocalWayland,
                     );
                     self.emit_midflight_monitor_occurrence();
                     return self
@@ -19068,8 +19160,11 @@ impl AgentEngine {
                     return Err(AgentError::SessionAuthority(error.to_string()));
                 }
                 Err(e) => {
-                    self.output
-                        .emit_error(&format!("Autocompact failed: {}", e), false);
+                    self.output.emit_error(
+                        &format!("Autocompact failed: {}", e),
+                        false,
+                        wcore_protocol::events::FailureCategory::Unknown,
+                    );
                     // AUDIT A4 — restore the carved-out live user turn
                     // on failure so the next turn still sees the task.
                     if let Some(turn) = live_user_turn {
@@ -20728,6 +20823,13 @@ impl AgentEngine {
         if defer_cfg.enabled {
             wcore_tools::registry::apply_cold_deferral(&mut tools, &defer_cfg.hot_allowlist);
         }
+        // FerroxLabs/wayland#1209: sink deferred defs to the tail BEFORE
+        // admitting hydrated ones. In catalog mode the deferred defs are
+        // deleted below, so this is a no-op on the result; with the fold off
+        // they survive as per-tool stubs and a mid-array admission rewrote the
+        // whole wire prefix (measured: first differing index 1). Running it
+        // unconditionally is the single ordering discipline both modes share.
+        wcore_tools::registry::sink_deferred_to_tail(&mut tools);
         wcore_tools::registry::admit_hydrated_tools(&mut tools, &self.hydrated_tool_names);
         if defer_cfg.enabled && defer_cfg.catalog {
             tools = wcore_tools::registry::fold_deferred_into_catalog(
@@ -20952,12 +21054,18 @@ impl AgentEngine {
             // unrestorable forever.
             session.conversation_id = Some(conversation_id);
             if let Err(e) = mgr.save_and_clear_wal(session) {
-                self.output
-                    .emit_error(&format!("Failed to save session: {}", e), false);
+                self.output.emit_error(
+                    &format!("Failed to save session: {}", e),
+                    false,
+                    wcore_protocol::events::FailureCategory::LocalWayland,
+                );
             }
             if let Err(e) = mgr.update_index_for(session) {
-                self.output
-                    .emit_error(&format!("Failed to update session index: {}", e), false);
+                self.output.emit_error(
+                    &format!("Failed to update session index: {}", e),
+                    false,
+                    wcore_protocol::events::FailureCategory::LocalWayland,
+                );
             }
         }
     }
@@ -21113,7 +21221,7 @@ mod streaming_context_gate_tests {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
         fn streaming_tools_advertised(&self) -> bool {
             self.advertised
@@ -21403,7 +21511,7 @@ mod tier_routing_e2e_tests {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
         fn emit_trace(&self, _: &str, trace_json: &Value) {
             self.traces
@@ -21615,7 +21723,7 @@ mod set_config_tests {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
     }
 
@@ -22601,6 +22709,218 @@ mod set_config_tests {
         );
     }
 
+    /// FerroxLabs/wayland#1209 probe fixture — the registry order of the
+    /// session the ticket measured, as outbound tool defs.
+    fn prefix_probe_defs() -> Vec<wcore_types::tool::ToolDef> {
+        [
+            "Bash",
+            "Delegate",
+            "Edit",
+            "Forge",
+            "Glob",
+            "Grep",
+            "Read",
+            "Spawn",
+            "ToolSearch",
+            "Workflow",
+            "Write",
+        ]
+        .iter()
+        .map(|name| builtin_tool(name))
+        .collect()
+    }
+
+    /// Everything ahead of the mutable region for that fixture: the eight
+    /// tools of `DeferColdConfig::default_hot_allowlist` it registers.
+    const PREFIX_PROBE_HOT: usize = 8;
+
+    /// An engine in the requested catalog mode whose LIVE registry can
+    /// dispatch the three cold tools — the direct-call hydration recorder
+    /// refuses a name the registry does not hold.
+    fn prefix_probe_engine(catalog: bool) -> super::AgentEngine {
+        let mut engine = make_engine("m");
+        engine.tools = Arc::new(hydration_registry(&["Delegate", "Spawn", "Workflow"]));
+        engine.config.builtin_tools.defer_cold.catalog = catalog;
+        engine
+    }
+
+    /// ONE turn through the engine's OWN per-turn tool pipeline
+    /// (`AgentEngine::apply_tool_deferral`), serialized with the real
+    /// Anthropic wire encoder: the assertion surface is the bytes the
+    /// provider sees, not an internal `Vec` order.
+    fn prefix_probe_wire(engine: &super::AgentEngine) -> Vec<serde_json::Value> {
+        wcore_providers::anthropic_shared::build_tools(
+            &engine.apply_tool_deferral(prefix_probe_defs()),
+        )
+    }
+
+    fn prefix_probe_names(wire: &[serde_json::Value]) -> Vec<String> {
+        wire.iter()
+            .map(|t| t["name"].as_str().unwrap_or_default().to_string())
+            .collect()
+    }
+
+    fn first_differing_wire_index(
+        a: &[serde_json::Value],
+        b: &[serde_json::Value],
+    ) -> Option<usize> {
+        (0..a.len().min(b.len())).find(|&i| a[i] != b[i])
+    }
+
+    /// FerroxLabs/wayland#1209 — with the catalog fold OFF
+    /// (`builtin_tools.defer_cold.catalog = false`, a documented knob) a
+    /// hydration must not rewrite the cached `tools[]` prefix. Turning the
+    /// fold off opts out of a TOKEN optimisation; it must not silently opt
+    /// out of prompt-cache stability.
+    ///
+    /// Measured before the fix, verbatim from the ticket: turn1 `[Bash,
+    /// Delegate, Edit, Forge, Glob, Grep, Read, Spawn, ToolSearch, Workflow,
+    /// Write]` -> turn2 `[Bash, Edit, Forge, Glob, Grep, Read, ToolSearch,
+    /// Write, Delegate, Spawn, Workflow]`, first differing wire index
+    /// `Some(1)`.
+    ///
+    /// Bound to PRODUCTION on purpose: it calls `apply_tool_deferral`, the
+    /// engine's only composition of the ordering helpers, so deleting the
+    /// `sink_deferred_to_tail` step from that call site reddens it. The
+    /// earlier guard re-composed the same helpers in the same order inside
+    /// the test, which graded the helpers and stayed green when the
+    /// production step was removed (verifier arm RA-E).
+    #[test]
+    fn stub_mode_hydration_leaves_the_engine_tools_prefix_byte_identical() {
+        let mut engine = prefix_probe_engine(false);
+        let turn1 = prefix_probe_wire(&engine);
+
+        // The arm is genuinely stub mode, not catalog mode wearing its name:
+        // all eleven tools are on the wire and the cold ones are stubs.
+        assert_eq!(
+            turn1.len(),
+            11,
+            "stub mode must keep every tool on the wire: {:?}",
+            prefix_probe_names(&turn1)
+        );
+        assert!(
+            turn1.iter().any(|t| t["description"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("(Deferred)")),
+            "stub mode must emit per-tool stubs: {:?}",
+            prefix_probe_names(&turn1)
+        );
+
+        // Hydrate through the ENGINE's own recorder — the direct-call path a
+        // lax provider takes — rather than by writing the field.
+        for cold in ["Delegate", "Spawn", "Workflow"] {
+            engine.record_called_deferred_tool(cold);
+        }
+        assert_eq!(
+            engine.hydrated_tool_names,
+            vec![
+                "Delegate".to_string(),
+                "Spawn".to_string(),
+                "Workflow".to_string()
+            ],
+            "the engine must have recorded the hydration it is about to serve"
+        );
+
+        let turn2 = prefix_probe_wire(&engine);
+        assert_eq!(
+            prefix_probe_names(&turn1)[1],
+            prefix_probe_names(&turn2)[1],
+            "wayland#1209: the hydration turn rewrote wire index 1\n \
+             turn 1: {:?}\n turn 2: {:?}",
+            prefix_probe_names(&turn1),
+            prefix_probe_names(&turn2)
+        );
+        assert_eq!(
+            serde_json::to_string(&turn1[..PREFIX_PROBE_HOT]).unwrap(),
+            serde_json::to_string(&turn2[..PREFIX_PROBE_HOT]).unwrap(),
+            "wayland#1209: the hydration turn rewrote the cached tools[] prefix\n \
+             turn 1: {:?}\n turn 2: {:?}",
+            prefix_probe_names(&turn1),
+            prefix_probe_names(&turn2)
+        );
+        assert!(
+            first_differing_wire_index(&turn1, &turn2).is_none_or(|i| i >= PREFIX_PROBE_HOT),
+            "first differing wire index must be inside the tail-mutable region, got {:?}\n \
+             turn 1: {:?}\n turn 2: {:?}",
+            first_differing_wire_index(&turn1, &turn2),
+            prefix_probe_names(&turn1),
+            prefix_probe_names(&turn2)
+        );
+
+        // A PARTIAL hydration is the harder case: two stubs stay behind, so
+        // the admitted one cannot simply be "the whole tail".
+        let mut partial = prefix_probe_engine(false);
+        partial.record_called_deferred_tool("Spawn");
+        let turn_partial = prefix_probe_wire(&partial);
+        assert_eq!(
+            serde_json::to_string(&turn1[..PREFIX_PROBE_HOT]).unwrap(),
+            serde_json::to_string(&turn_partial[..PREFIX_PROBE_HOT]).unwrap(),
+            "a single-tool hydration rewrote the cached prefix: {:?}",
+            prefix_probe_names(&turn_partial)
+        );
+        assert_eq!(
+            prefix_probe_names(&turn_partial).last().map(String::as_str),
+            Some("Spawn"),
+            "the hydrated tool must append at the tail: {:?}",
+            prefix_probe_names(&turn_partial)
+        );
+
+        // Positive control: catalog = true, the path #1171 already fixed. It
+        // holds the same property before and after this change, which is what
+        // proves the arm above measures the mode and not the harness.
+        let mut control = prefix_probe_engine(true);
+        let cat1 = prefix_probe_wire(&control);
+        for cold in ["Delegate", "Spawn", "Workflow"] {
+            control.record_called_deferred_tool(cold);
+        }
+        let cat2 = prefix_probe_wire(&control);
+        assert_eq!(
+            cat1.len(),
+            PREFIX_PROBE_HOT,
+            "control: catalog mode folds the stubs away: {:?}",
+            prefix_probe_names(&cat1)
+        );
+        assert_eq!(
+            serde_json::to_string(&cat1[..PREFIX_PROBE_HOT - 1]).unwrap(),
+            serde_json::to_string(&cat2[..PREFIX_PROBE_HOT - 1]).unwrap(),
+            "control arm broke: catalog mode rewrote its own prefix\n \
+             turn 1: {:?}\n turn 2: {:?}",
+            prefix_probe_names(&cat1),
+            prefix_probe_names(&cat2)
+        );
+    }
+
+    /// The `sink_deferred_to_tail` pass must be invisible to catalog mode —
+    /// the fold deletes exactly the defs the sink moved. Pinning catalog
+    /// mode's wire names against stub mode's hot prefix proves both modes
+    /// share ONE ordering discipline rather than each having its own. Driven
+    /// through `apply_tool_deferral` so it grades the engine, not the helpers.
+    #[test]
+    fn both_catalog_modes_agree_on_the_engine_hot_prefix() {
+        let stub = prefix_probe_wire(&prefix_probe_engine(false));
+        let catalog = prefix_probe_wire(&prefix_probe_engine(true));
+        // Catalog mode carries the deferred inventory on `ToolSearch`, so it
+        // moves that ONE entry to the tail (wayland#1171); stub mode has no
+        // carrier and leaves it in place. Modulo that documented carrier
+        // move, both modes emit the same hot tools in the same registry
+        // order — one discipline, not two.
+        let mut stub_hot = prefix_probe_names(&stub)[..PREFIX_PROBE_HOT].to_vec();
+        let carrier = stub_hot
+            .iter()
+            .position(|name| name == "ToolSearch")
+            .expect("ToolSearch is never deferred, so it is in the hot prefix");
+        let carrier = stub_hot.remove(carrier);
+        stub_hot.push(carrier);
+        assert_eq!(
+            prefix_probe_names(&catalog),
+            stub_hot,
+            "the two modes disagree on the hot prefix\n stub: {:?}\n catalog: {:?}",
+            prefix_probe_names(&stub),
+            prefix_probe_names(&catalog)
+        );
+    }
+
     /// Codex verify finding (catalog fold edge): on lax providers (no
     /// constrained decoding) the model can call a catalog-only tool
     /// DIRECTLY; the engine dispatches it by registry name, leaving a
@@ -23496,7 +23816,7 @@ mod phase6_tests {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
     }
 
@@ -23824,7 +24144,7 @@ mod compact_tests {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
     }
 
@@ -25955,7 +26275,7 @@ mod plan_mode_tests {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
     }
 
@@ -26454,7 +26774,7 @@ mod hook_integration_tests {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
     }
 
@@ -27630,7 +27950,7 @@ mod approval_bridge_engine_tests {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
     }
 
@@ -28881,7 +29201,7 @@ mod approval_bridge_engine_tests {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
         fn emit_compaction(&self, _: &str, reason: &str, tokens_freed: u64, _: Option<u32>) {
             self.events
@@ -29006,6 +29326,43 @@ pub enum AgentError {
     ContextTooLong { input_tokens: u64, limit: usize },
 }
 
+impl AgentError {
+    /// FerroxLabs/wayland#1237 (from wayland#388 c7) — the typed category of
+    /// this terminal exit of the run loop.
+    ///
+    /// The terminal error exits of `AgentEngine::run` ARE the variants of this
+    /// enum, so classifying them exhaustively here is the enumeration #1237 c2
+    /// asks for rather than a sample of call sites. `wildcard_enum_match_arm`
+    /// is DENIED on this function rather than left to a reviewer: a new
+    /// `AgentError` variant is a new terminal exit, and the failure this
+    /// guards is precisely a `_ =>` arm reporting it as something it is not.
+    /// Adding one now costs a compile error and one deliberate decision.
+    #[deny(clippy::wildcard_enum_match_arm)]
+    pub fn failure_category(&self) -> wcore_protocol::events::FailureCategory {
+        use wcore_protocol::events::FailureCategory;
+        match self {
+            // #388's "context/token limit", and the case the ticket was
+            // written for: a long run that dies here used to reach the host as
+            // English prose and nothing else.
+            AgentError::ContextTooLong { .. } => FailureCategory::ContextLimit,
+            // #388's "local Wayland error". The local persistence authority
+            // failed; nothing upstream is implicated.
+            AgentError::SessionAuthority(_) => FailureCategory::LocalWayland,
+            // Also local, and decided here rather than upstream: the operator
+            // stopped the run.
+            AgentError::UserAborted => FailureCategory::LocalWayland,
+            // Both of these are an OPAQUE upstream response, and whether it
+            // was a provider rate limit or a router failure is wayland#1184's
+            // question, not answerable from inside this repo: both arrive as
+            // the same non-2xx from the same host. So this reports `unknown`
+            // instead of choosing one — #1237 c4 is that refusal, and it is a
+            // property of the type, which has no variant for either.
+            AgentError::ApiError(_) => FailureCategory::Unknown,
+            AgentError::Provider(_) => FailureCategory::Unknown,
+        }
+    }
+}
+
 #[cfg(test)]
 mod user_model_writeback_tests {
     //! v0.8.0 Task M — per-turn observation write-back into
@@ -29049,7 +29406,7 @@ mod user_model_writeback_tests {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
     }
 
@@ -29872,7 +30229,7 @@ mod audit_2026_05_22_tests {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
     }
 
@@ -29903,7 +30260,7 @@ mod audit_2026_05_22_tests {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
     }
 
@@ -29970,7 +30327,7 @@ mod audit_2026_05_22_tests {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
     }
 
@@ -36921,7 +37278,7 @@ mod session_start_apply_tests {
             _: wcore_types::message::FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
     }
 
@@ -37497,7 +37854,7 @@ mod ijfw_session_start_e2e_tests {
             _: wcore_types::message::FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
     }
 
@@ -37695,7 +38052,7 @@ mod overflow_retry_tests {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
     }
 
@@ -37846,7 +38203,7 @@ mod retry_wedge_protection_tests {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
     }
 

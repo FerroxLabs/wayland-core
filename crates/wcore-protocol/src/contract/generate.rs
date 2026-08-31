@@ -120,7 +120,15 @@ pub const CONTRACT_MAJOR: u64 = 1;
 // never in. The event is purely additive and nothing existing changes shape, so
 // `major` holds at 1 — but the minor has to move, because an added type is
 // undiscoverable to a host pinned below the version that introduced it.
-// 22 -> 23: wayland-core#314 c5 adds one event, `grant_refused`. Exactly the
+//
+// 22 -> 23: ONE minor move carrying TWO additions, named here together. The
+// pair collided on this exact constant during integration — `integ/f13` had
+// already spent 22 -> 23 on wayland-core#314 c5, `lane/f13-w3-host-protocol`
+// had independently spent it on wayland#1237 — so they ride a single bump
+// (wayland#1266 c4). A host moving 1.22 -> 1.23 gains BOTH capabilities below;
+// neither half is the whole of what 23 added.
+//
+// 22 -> 23 (a): wayland-core#314 c5 adds one event, `grant_refused`. Exactly the
 // same shape as 21 -> 22 and for exactly the same reason, one surface over: a
 // refused `grant_path` / `grant_workspace_capability` announced itself only as
 // an `info` frame of English prose, so the only way a host could branch on a
@@ -132,6 +140,22 @@ pub const CONTRACT_MAJOR: u64 = 1;
 // Purely additive: nothing existing changes shape, so `major` holds at 1, and
 // the minor has to move because an added type is undiscoverable to a host
 // pinned below it.
+//
+// 22 -> 23 (b): wayland#1237 (decomposed from wayland#388 c7) adds one optional
+// field, `category`, to `error`'s `ErrorInfo`. A typed failure category the
+// host can branch on: `context_limit`, `tool_runtime`, `local_wayland`, or
+// `unknown` where core cannot decide. `major` holds at 1 — the field is
+// `serde(default)` and `error` already published `additionalProperties: true`,
+// so a host that has never heard of it validates and renders exactly as
+// before, and a payload written without it still decodes as `unknown`. The
+// wire-shape gate refuses the regeneration under a standing 1.22
+// (`altered=["events/error.json"]`), which is that gate deciding the version
+// question it exists to force. The minor has to move because a host CANNOT
+// feature-detect this by looking: an engine that never classified anything and
+// an engine that classified this failure as unclassifiable both send
+// `unknown`, and before the field they both sent nothing at all. #388's
+// complaint is that a host has to pattern-match English to find out why a long
+// run died; a host pinned below this version still has to.
 pub const CONTRACT_MINOR: u64 = 23;
 pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/23";
 pub const CONTRACT_ROOT: &str = "contracts/desktop/v1";

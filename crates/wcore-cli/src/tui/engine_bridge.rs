@@ -389,13 +389,21 @@ impl OutputSink for ChannelSink {
         });
     }
 
-    fn emit_error(&self, msg: &str, retryable: bool) {
+    fn emit_error(
+        &self,
+        msg: &str,
+        retryable: bool,
+        category: wcore_protocol::events::FailureCategory,
+    ) {
         self.send(ProtocolEvent::Error {
             msg_id: None,
             error: ErrorInfo {
                 code: "engine_error".to_string(),
                 message: msg.to_string(),
                 retryable,
+                // wayland#1266 c1: the engine classified this; the TUI bridge
+                // relays that classification rather than re-deciding it.
+                category,
             },
         });
     }
@@ -703,6 +711,7 @@ impl Drop for TerminalGuard {
                           Please try again."
                     .to_string(),
                 retryable: true,
+                category: wcore_protocol::events::FailureCategory::ToolRuntime,
             },
         });
         let _ = self.tx.send(ProtocolEvent::StreamEnd {
@@ -1250,6 +1259,7 @@ fn emit_recovery_error(
             code: "recovery_refused".to_string(),
             message: error.to_string(),
             retryable: false,
+            category: error.failure_category(),
         },
     });
     let _ = tx.send(ProtocolEvent::StreamEnd {
@@ -1767,6 +1777,7 @@ impl TuiEngine {
                             code: "engine_error".to_string(),
                             message: e.to_string(),
                             retryable: false,
+                            category: e.failure_category(),
                         },
                     });
                     let _ = tx.send(ProtocolEvent::StreamEnd {
@@ -2609,6 +2620,7 @@ impl TuiEngine {
                         code: "mcp_add".to_string(),
                         message: format!("Can't replace MCP server '{name}': {e}"),
                         retryable: false,
+                        category: wcore_protocol::events::FailureCategory::LocalWayland,
                     },
                 });
                 return;
@@ -2647,6 +2659,7 @@ impl TuiEngine {
                         code: "mcp_add".to_string(),
                         message: format!("Can't add MCP server '{name}': {e}"),
                         retryable: false,
+                        category: wcore_protocol::events::FailureCategory::LocalWayland,
                     },
                 });
                 return;
@@ -2692,6 +2705,7 @@ impl TuiEngine {
                         code: "mcp_connect".to_string(),
                         message: e,
                         retryable: false,
+                        category: wcore_protocol::events::FailureCategory::ToolRuntime,
                     },
                 });
             }
@@ -2751,6 +2765,7 @@ impl TuiEngine {
                         code: "mcp_connect".to_string(),
                         message: msg,
                         retryable: false,
+                        category: wcore_protocol::events::FailureCategory::ToolRuntime,
                     },
                 });
             };
@@ -2930,6 +2945,7 @@ impl TuiEngine {
                             code: "mcp_config_conflict".to_string(),
                             message: format!("Can't add MCP server '{name}': {reason}"),
                             retryable: false,
+                            category: wcore_protocol::events::FailureCategory::LocalWayland,
                         },
                     });
                     let _ = tx.send(ProtocolEvent::McpFailed {
@@ -2962,6 +2978,7 @@ impl TuiEngine {
                         code: "mcp_capacity".to_string(),
                         message: "MCP lifecycle capacity exceeded for this session".to_string(),
                         retryable: false,
+                        category: wcore_protocol::events::FailureCategory::LocalWayland,
                     },
                 });
                 return;
@@ -2986,6 +3003,7 @@ impl TuiEngine {
                         "Can't add MCP server '{name}': an existing connection has no matching configuration identity"
                     ),
                     retryable: false,
+                    category: wcore_protocol::events::FailureCategory::LocalWayland,
                 },
             });
             return;
@@ -3028,6 +3046,7 @@ impl TuiEngine {
                         code: "mcp_add".to_string(),
                         message: format!("Couldn't connect MCP server '{name}': {reason}"),
                         retryable: false,
+                        category: wcore_protocol::events::FailureCategory::ToolRuntime,
                     },
                 });
                 return;
@@ -3061,6 +3080,7 @@ impl TuiEngine {
                             code: "mcp_add".to_string(),
                             message: format!("Couldn't connect MCP server '{name}': {reason}"),
                             retryable: false,
+                            category: wcore_protocol::events::FailureCategory::ToolRuntime,
                         },
                     });
                     return;
@@ -3113,6 +3133,7 @@ impl TuiEngine {
                         code: "mcp_add".to_string(),
                         message: format!("MCP server '{name}' failed to connect: {reason}"),
                         retryable: false,
+                        category: wcore_protocol::events::FailureCategory::ToolRuntime,
                     },
                 });
                 return;
@@ -3190,6 +3211,7 @@ impl TuiEngine {
                              once it's idle."
                         ),
                         retryable: true,
+                        category: wcore_protocol::events::FailureCategory::ToolRuntime,
                     },
                 });
                 return;
@@ -5071,7 +5093,11 @@ mod tests {
         let sink = ChannelSink::new(tx);
         // retryable=true asserts the flag is threaded through, not hardcoded
         // false (audit finding: the TUI bridge ChannelSink used to discard it).
-        sink.emit_error("boom", true);
+        sink.emit_error(
+            "boom",
+            true,
+            wcore_protocol::events::FailureCategory::Unknown,
+        );
         match rx.try_recv().expect("event forwarded") {
             ProtocolEvent::Error { error, .. } => {
                 assert_eq!(error.message, "boom");

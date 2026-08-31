@@ -195,7 +195,13 @@ mod tests {
             _finish_reason: FinishReason,
         ) {
         }
-        fn emit_error(&self, _msg: &str, _retryable: bool) {}
+        fn emit_error(
+            &self,
+            _msg: &str,
+            _retryable: bool,
+            _category: wcore_protocol::events::FailureCategory,
+        ) {
+        }
         fn emit_info(&self, msg: &str) {
             self.count.fetch_add(1, Ordering::Relaxed);
             *self.last.lock() = Some(msg.to_string());

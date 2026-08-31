@@ -171,8 +171,21 @@ impl OutputSink for RelaySink {
             )
         });
     }
-    fn emit_error(&self, msg: &str, retryable: bool) {
-        self.with_sink(|s| s.emit_error(msg, retryable));
+    /// wayland#1266 c1 retired the delegation hazard this used to carry.
+    ///
+    /// Under #1237 this sink had to forward BOTH `emit_error` and
+    /// `emit_run_failure`: forwarding only the first took the trait default
+    /// for the second, which routed the typed exit back through `emit_error`
+    /// and handed the wrapped sink prose. There is now ONE method, so a
+    /// wrapper that forwards it cannot flatten a category, and a wrapper that
+    /// forgets to forward it does not compile.
+    fn emit_error(
+        &self,
+        msg: &str,
+        retryable: bool,
+        category: wcore_protocol::events::FailureCategory,
+    ) {
+        self.with_sink(|s| s.emit_error(msg, retryable, category));
     }
     fn emit_info(&self, msg: &str) {
         self.with_sink(|s| s.emit_info(msg));
@@ -351,6 +364,9 @@ impl Drop for TerminalGuard {
                 message: "The turn ended unexpectedly (engine task panicked or was aborted)."
                     .to_string(),
                 retryable: true,
+                // wayland#1237: the engine task itself died. #388's
+                // "tool/runtime failure".
+                category: wcore_protocol::events::FailureCategory::ToolRuntime,
             },
         });
         let _ = self.tx.send(ProtocolEvent::StreamEnd {
@@ -421,6 +437,10 @@ fn error_info_for(e: &AgentError) -> wcore_protocol::events::ErrorInfo {
         // UserAborted / ContextTooLong / ApiError(honest already fired) /
         // Provider => not retryable at this outer arm.
         retryable: false,
+        // wayland#1237: `code` stays "engine_error" — the host-facing code
+        // vocabulary does not widen — and the machine-readable answer rides
+        // the typed category, decided exhaustively from the variant.
+        category: e.failure_category(),
     }
 }
 
@@ -853,6 +873,7 @@ impl EngineSession {
                                     model name and provider."
                                     .to_string(),
                                 retryable: false,
+                                category: wcore_protocol::events::FailureCategory::Unknown,
                             },
                         });
                     }
@@ -1919,6 +1940,7 @@ mod tests {
                 code: "engine_error".into(),
                 message: "kaboom".into(),
                 retryable: true,
+                category: wcore_protocol::events::FailureCategory::Unknown,
             },
         }];
         let out = project_all(events).await;
@@ -1983,6 +2005,7 @@ mod tests {
                     code: "provider_error".into(),
                     message: "upstream 503".into(),
                     retryable: true,
+                    category: wcore_protocol::events::FailureCategory::Unknown,
                 },
             },
         ];
@@ -2014,6 +2037,43 @@ mod tests {
         // The guard emitted Error (terminal) — projection stops there.
         assert_eq!(out.len(), 1);
         assert!(matches!(out[0], MessageEvent::Error { .. }));
+    }
+
+    /// wayland#1266 c1 — a sink that DELEGATES must forward the CATEGORY,
+    /// not just the prose.
+    ///
+    /// #1237's version of this guard asserted a PAIRING: that a file
+    /// delegating `emit_error` also delegated `emit_run_failure`, because
+    /// taking the trait default for the second flattened the category to
+    /// `unknown` on the wrapped sink. #1266's own comment recorded why that
+    /// was the wrong shape of answer -- the guard read this one file's text,
+    /// so a delegating sink added in any OTHER file was invisible to it, and
+    /// the needle was over an open alphabet.
+    ///
+    /// Deleting `emit_run_failure` closed that class by construction: there is
+    /// one method, a wrapper that does not forward it does not compile, and
+    /// there is no default left to fall into. What remains decidable in text
+    /// is the one thing the compiler cannot check -- that this delegation
+    /// passes `category` THROUGH rather than substituting a literal -- and
+    /// that is what this asserts, with a known-positive control that the
+    /// needle can match at all.
+    #[test]
+    fn the_delegating_sink_forwards_the_category_it_was_given() {
+        let src = include_str!("acp_engine.rs");
+        let forwarded = concat!("s.emit_", "error(msg, retryable, category)");
+        assert!(
+            src.contains(forwarded),
+            "RelaySink must forward the category it was handed. Passing a \
+             literal here would make every error this wrapper relays carry \
+             that one value, whatever the engine decided (wayland#1266 c1)"
+        );
+        // Known-positive control: the needle is matched against a file that
+        // really does delegate, so a green here is not a green against a file
+        // with no delegation in it at all.
+        assert!(
+            src.contains(concat!("fn emit_", "error(")),
+            "control: this file defines a delegating emit_error"
+        );
     }
 
     // ── error_info_for (T-A7) ──────────────────────────────────────────

@@ -164,7 +164,12 @@ impl OutputSink for CapSink {
     fn emit_tool_result(&self, _: &str, _: bool, _: &str) {}
     fn emit_stream_start(&self, _: &str) {}
     fn emit_stream_end(&self, _: &str, _: usize, _: u64, _: u64, _: u64, _: u64, _: FinishReason) {}
-    fn emit_error(&self, message: &str, _: bool) {
+    fn emit_error(
+        &self,
+        message: &str,
+        _: bool,
+        _category: wcore_protocol::events::FailureCategory,
+    ) {
         self.errors.lock().unwrap().push(message.to_string());
     }
     fn emit_info(&self, _: &str) {}

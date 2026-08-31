@@ -633,10 +633,31 @@ An error occurred. The agent may or may not continue depending on severity.
   "error": {
     "code": "provider_error",
     "message": "Rate limit exceeded",
-    "retryable": true
+    "retryable": true,
+    "category": "unknown"
   }
 }
 ```
+
+`category` (contract 1.23, FerroxLabs/wayland#1237) is the machine-readable
+answer to "why did this run die". It is additive: a host that does not know the
+key ignores it, and a frame written by a Core older than 1.23 simply does not
+carry it.
+
+| `category` | Meaning |
+|------------|---------|
+| `context_limit` | The context window or an output-token ceiling was reached and could not be reduced. |
+| `tool_runtime` | A tool, a sub-agent, or the engine task itself failed or died. |
+| `local_wayland` | The local process refused, aborted or could not proceed: a session-persistence authority fault, a refused or malformed host command, a startup failure, an operator abort. Nothing upstream is implicated. |
+| `unknown` | Core cannot decide, and says so instead of choosing. |
+
+`unknown` is a claim, not an absence. Every provider non-2xx lands here on
+purpose: whether a 429 or a 503 came from the model provider or from the router
+in front of it is not decidable inside core — both are the same status from the
+same host — and that half of wayland#388 belongs to the router
+(FerroxLabs/wayland#1184). There is deliberately no `rate_limit` or
+`router_failure` value for core to emit, so a host reading `unknown` learns it
+must ask the router rather than that core silently picked a side.
 
 | Error Code | Description |
 |------------|-------------|

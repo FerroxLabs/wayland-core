@@ -529,7 +529,22 @@ impl ProtocolSink {
 
     /// Emit a turn-scoped error when the caller still owns the protocol
     /// command's correlation id (for example, before the engine starts).
-    pub fn emit_correlated_error(&self, msg_id: &str, msg: &str, retryable: bool) {
+    ///
+    /// wayland#1266 c1. `category` is a REQUIRED argument for the same reason
+    /// it is on `OutputSink::emit_error`: this is the pre-engine sibling of
+    /// that seam, so a hardcoded `Unknown` here would be exactly the default
+    /// c1 asks to be a compile error. The caller holds the failure and names
+    /// its category; a caller that genuinely cannot decide passes `Unknown`
+    /// deliberately rather than by omission. (This previously deferred the
+    /// typed answer to `emit_run_failure`; that method no longer exists —
+    /// #1266 c1 deleted it and widened `emit_error` instead.)
+    pub fn emit_correlated_error(
+        &self,
+        msg_id: &str,
+        msg: &str,
+        retryable: bool,
+        category: wcore_protocol::events::FailureCategory,
+    ) {
         let code = auth_error_code(msg).unwrap_or("engine_error");
         let _ = self.writer.emit(&ProtocolEvent::Error {
             msg_id: Some(msg_id.to_string()),
@@ -537,6 +552,7 @@ impl ProtocolSink {
                 code: code.to_string(),
                 message: msg.to_string(),
                 retryable,
+                category,
             },
         });
     }
@@ -1051,7 +1067,12 @@ impl OutputSink for ProtocolSink {
         });
     }
 
-    fn emit_error(&self, msg: &str, retryable: bool) {
+    fn emit_error(
+        &self,
+        msg: &str,
+        retryable: bool,
+        category: wcore_protocol::events::FailureCategory,
+    ) {
         // Distinguish auth failures with a machine-readable code so the host can
         // branch (prompt re-auth, or refresh an OAuth token and re-spawn the
         // turn) instead of string-parsing the message or treating a stale-token
@@ -1065,6 +1086,10 @@ impl OutputSink for ProtocolSink {
                 code: code.to_string(),
                 message: msg.to_string(),
                 retryable,
+                // wayland#1266 c1: the caller names the category now. This
+                // sink no longer decides one, and no longer has a prose-only
+                // sibling to decide it in.
+                category,
             },
         });
         // A startup failure means `ready` is never coming. Release the holding
@@ -1750,7 +1775,11 @@ mod tests {
         let sink = ProtocolSink::with_emitter(emitter.clone()).deferring_info_until_ready();
 
         sink.emit_info("why bootstrap was unhappy");
-        sink.emit_error("Engine failed to start during init", false);
+        sink.emit_error(
+            "Engine failed to start during init",
+            false,
+            wcore_protocol::events::FailureCategory::Unknown,
+        );
 
         assert_eq!(emitter.kinds(), vec!["error", "info"]);
         assert_eq!(emitter.info_messages(), vec!["why bootstrap was unhappy"]);
@@ -1944,7 +1973,12 @@ mod tests {
         use crate::test_utils::TestSink;
 
         let transient = TestSink::new();
-        OutputSink::emit_error(&transient, "provider stream failed (HTTP 503)", true);
+        OutputSink::emit_error(
+            &transient,
+            "provider stream failed (HTTP 503)",
+            true,
+            wcore_protocol::events::FailureCategory::Unknown,
+        );
         let snap = transient.handle().snapshot();
         assert_eq!(snap.len(), 1, "exactly one event expected: {snap:?}");
         assert_eq!(
@@ -1955,7 +1989,12 @@ mod tests {
         );
 
         let hard = TestSink::new();
-        OutputSink::emit_error(&hard, "API 400 invalid_request_error", false);
+        OutputSink::emit_error(
+            &hard,
+            "API 400 invalid_request_error",
+            false,
+            wcore_protocol::events::FailureCategory::Unknown,
+        );
         let snap = hard.handle().snapshot();
         assert_eq!(
             snap[0]["error"]["retryable"],

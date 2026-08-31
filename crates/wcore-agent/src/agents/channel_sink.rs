@@ -219,6 +219,7 @@ impl ChannelSink {
                     code: "sub_agent_error".to_owned(),
                     message: message.to_owned(),
                     retryable: false,
+                    category: wcore_protocol::events::FailureCategory::Unknown,
                 },
             },
         };
@@ -325,7 +326,12 @@ impl OutputSink for ChannelSink {
             agent_run_id: None,
         });
     }
-    fn emit_error(&self, msg: &str, retryable: bool) {
+    fn emit_error(
+        &self,
+        msg: &str,
+        retryable: bool,
+        category: wcore_protocol::events::FailureCategory,
+    ) {
         // W5.5 F1: relay ProtocolEvent::Error so the bridge's "error" arm sets
         // SubAgentStatus::Failed (not Done). Previously relayed Info, causing a
         // crashed sub-agent to appear green/Done in the UI strip.
@@ -338,6 +344,33 @@ impl OutputSink for ChannelSink {
                 code: "sub_agent_error".to_string(),
                 message: msg.to_string(),
                 retryable,
+                // wayland#1266 c3 -- the CHILD's own category, relayed, not
+                // the parent's read of it.
+                //
+                // #1237 hardcoded `ToolRuntime` here and defended it as right
+                // "from the parent turn's point of view": the child is
+                // something the parent invoked. That is true and it is also
+                // lossy, and #1266 c3 says which of the two wins. Under the
+                // hardcode a child that died on a context ceiling and a child
+                // that died on a local authority fault were the same frame to
+                // the host -- the classification the CHILD engine had already
+                // made was thrown away at the relay, which is #1266's whole
+                // complaint one boundary over.
+                //
+                // Passed through verbatim rather than remapped, because c3
+                // asks for both halves and a remap can only serve one: a child
+                // that hit a context limit must arrive as `context_limit`, AND
+                // a child that died on an opaque upstream response must still
+                // arrive as `unknown` rather than being upgraded to a
+                // plausible-looking `tool_runtime`. Substituting `ToolRuntime`
+                // for `Unknown` here would be exactly the guess #1237 c4
+                // forbids, made on the child's behalf.
+                //
+                // The parent still knows this was a child: `code` is
+                // `sub_agent_error` and the frame is relayed inside the
+                // parent's `sub_agent_event` envelope. The category answers
+                // "why did it die", not "whose was it".
+                category,
             },
         });
     }
@@ -516,7 +549,11 @@ mod tests {
 
         // Diagnostics remain on the full best-effort stream.
         sink.emit_info("retrying provider");
-        sink.emit_error("transient provider failure", true);
+        sink.emit_error(
+            "transient provider failure",
+            true,
+            wcore_protocol::events::FailureCategory::Unknown,
+        );
         sink.relay_terminal(
             WorkflowChildTerminalState::Succeeded,
             "sub-agent 'chatty' completed (3 turns)",
@@ -567,7 +604,11 @@ mod tests {
         sink.emit_text_delta("a", "m");
         sink.emit_text_delta("b", "m");
         // A retry diagnostic remains best-effort and is not a terminal.
-        sink.emit_error("engine crashed", true);
+        sink.emit_error(
+            "engine crashed",
+            true,
+            wcore_protocol::events::FailureCategory::Unknown,
+        );
         sink.relay_terminal(WorkflowChildTerminalState::Failed, "engine crashed");
 
         let event = terminal_rx

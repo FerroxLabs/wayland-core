@@ -70,8 +70,13 @@ impl OutputSink for CaptureSink {
             finish,
         );
     }
-    fn emit_error(&self, msg: &str, retryable: bool) {
-        self.inner.emit_error(msg, retryable);
+    fn emit_error(
+        &self,
+        msg: &str,
+        retryable: bool,
+        category: wcore_protocol::events::FailureCategory,
+    ) {
+        self.inner.emit_error(msg, retryable, category);
     }
     fn emit_info(&self, msg: &str) {
         self.inner.emit_info(msg);

@@ -84,7 +84,7 @@ impl OutputSink for CapturingSink {
     }
     fn emit_stream_start(&self, _: &str) {}
     fn emit_stream_end(&self, _: &str, _: usize, _: u64, _: u64, _: u64, _: u64, _: FinishReason) {}
-    fn emit_error(&self, _: &str, _: bool) {}
+    fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
     fn emit_info(&self, _: &str) {}
 }
 

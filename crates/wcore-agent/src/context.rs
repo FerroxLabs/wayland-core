@@ -48,6 +48,68 @@ pub fn current_date_block(today: &str) -> String {
     format!("Current date: {today}")
 }
 
+/// The exact prefix of the line [`current_date_block`] renders, and the only
+/// thing [`refresh_current_date_line`] will rewrite.
+const CURRENT_DATE_PREFIX: &str = "Current date: ";
+
+/// Width of the `YYYY-MM-DD` value [`today_string`] renders.
+const DATE_VALUE_LEN: usize = 10;
+
+/// FerroxLabs/wayland#1208 — re-render the frozen `Current date:` value when
+/// the day has rolled over under a live session.
+///
+/// The intro section is built ONCE (`bootstrap.rs`) into a plain
+/// `system_prompt: String` the engine holds for its whole life, and the same
+/// intro tells the model that value is the authoritative "today" and forbids
+/// substituting a different month or year. The source note at the intro site
+/// accepts a stale date on the grounds that "a new session mints a new
+/// prefix" — which assumes short sessions. `channel_dispatch.rs` breaks that
+/// assumption by design: it keeps one `AgentEngine` per channel session in a
+/// map with no eviction, so a Slack/Discord/Telegram bot running for a week
+/// answers every date-bound question with the day the gateway first saw it.
+///
+/// A session that crosses midnight therefore pays ONE prefix invalidation for
+/// that day — the same daily cost the value already has across sessions, and
+/// the alternative is a prompt that is confidently wrong and says so with
+/// authority. Nothing else in the prefix moves.
+///
+/// Deliberately narrow: it rewrites the ten date bytes that follow the FIRST
+/// `Current date: ` occurrence, and only when they differ from `today`. It is
+/// a pure function of `(prompt, today)`, so within a day it is byte-stable and
+/// borrows rather than allocating — the cached prefix is unperturbed on every
+/// turn but the first one of a new day. A prompt with no date line (a custom
+/// system prompt, a test engine) is returned untouched.
+pub fn refresh_current_date_line<'a>(prompt: &'a str, today: &str) -> std::borrow::Cow<'a, str> {
+    let Some(start) = prompt.find(CURRENT_DATE_PREFIX) else {
+        return std::borrow::Cow::Borrowed(prompt);
+    };
+    let value = start + CURRENT_DATE_PREFIX.len();
+    let end = value + DATE_VALUE_LEN;
+    // Not a date line at all (truncated prompt, or the phrase appearing in
+    // prose): leave it alone rather than corrupt bytes we cannot identify.
+    if !prompt.is_char_boundary(end) {
+        return std::borrow::Cow::Borrowed(prompt);
+    }
+    let baked = &prompt[value..end];
+    if baked == today || today.len() != DATE_VALUE_LEN {
+        return std::borrow::Cow::Borrowed(prompt);
+    }
+    if !baked.bytes().enumerate().all(|(i, b)| {
+        if i == 4 || i == 7 {
+            b == b'-'
+        } else {
+            b.is_ascii_digit()
+        }
+    }) {
+        return std::borrow::Cow::Borrowed(prompt);
+    }
+    let mut refreshed = String::with_capacity(prompt.len());
+    refreshed.push_str(&prompt[..value]);
+    refreshed.push_str(today);
+    refreshed.push_str(&prompt[end..]);
+    std::borrow::Cow::Owned(refreshed)
+}
+
 /// Session-scoped cache for system prompt sections.
 ///
 /// Each section (intro, tool guidance, AGENTS.md, memory, skills) is cached
@@ -1714,7 +1776,7 @@ mod tests {
     /// catches a sub-day volatile value (a timestamp, a turn counter) being
     /// added to the prefix, which would be the #174 failure for real.
     #[test]
-    fn current_date_present_and_stable_in_cached_system_prefix() {
+    fn current_date_in_the_cached_prefix_is_stable_within_a_day_not_forever() {
         let build = || {
             build_system_prompt(
                 &mut SystemPromptCache::new(),
@@ -1744,9 +1806,19 @@ mod tests {
             first.contains(&current_date_block(&today)),
             "cached system prefix must carry the current date; prefix was: {first}"
         );
-        // Frozen for the session: repeated reads through ONE cache return the
-        // same bytes, so a session crossing midnight cannot shift its own
-        // prefix mid-flight.
+        // Stable WITHIN A DAY, not forever (FerroxLabs#1208). Repeated reads
+        // through ONE cache return the same bytes, so nothing perturbs the
+        // prefix turn-to-turn — that is the whole point of the section cache
+        // and it is unchanged. What this test used to assert, and no longer
+        // does, is that the value is authoritative for the LIFE of the
+        // session: the builder is called once at bootstrap, so on a session
+        // that crosses midnight this cache is exactly the mechanism that
+        // freezes a wrong date behind a sentence forbidding the model to
+        // correct it. The day-rollover answer is NOT here — it is
+        // `refresh_current_date_line`, applied on the one path that puts the
+        // prompt on the wire, and graded by
+        // `a_stale_baked_date_is_refreshed_on_the_wire` (unit) and
+        // `a_session_that_outlives_its_day_dispatches_todays_date` (engine).
         let mut cache = SystemPromptCache::new();
         let a = build_system_prompt(
             &mut cache,
@@ -1774,12 +1846,97 @@ mod tests {
             &[],
             false,
         );
-        assert_eq!(a, b, "the session-scoped prefix must be frozen once built");
+        assert_eq!(
+            a, b,
+            "the section cache must not perturb the prefix between turns"
+        );
         // The authoritative-date instruction stays in the cached prefix.
         assert!(
             first.contains("authoritative"),
             "authoritative-date instruction must remain in the cached prefix"
         );
+    }
+
+    /// FerroxLabs/wayland#1208 c3 — drive a day rollover against the prompt
+    /// the builder produced and assert the outcome.
+    ///
+    /// The rollover is simulated by building the prefix and then asking for a
+    /// DIFFERENT today, which is what a live engine sees at 00:00: the same
+    /// baked string, a clock that has moved on.
+    #[test]
+    fn a_stale_baked_date_is_refreshed_on_the_wire() {
+        let baked = build_system_prompt(
+            &mut SystemPromptCache::new(),
+            None,
+            "/tmp",
+            "test-model",
+            &[],
+            None,
+            None,
+            false,
+            false,
+            &[],
+            false,
+        );
+        let today = today_string();
+        assert!(baked.contains(&current_date_block(&today)), "precondition");
+
+        // Midnight passes. The engine's held String has not changed.
+        let tomorrow = "2999-12-31";
+        let refreshed = refresh_current_date_line(&baked, tomorrow);
+        assert!(
+            refreshed.contains(&current_date_block(tomorrow)),
+            "a rolled-over session must carry the real date; got: {refreshed}"
+        );
+        assert!(
+            !refreshed.contains(&current_date_block(&today)),
+            "the stale date must be gone, not merely joined: {refreshed}"
+        );
+        // Exactly ten bytes moved: the authority sentence, and everything
+        // else in the prefix, is untouched.
+        assert_eq!(
+            refreshed.len(),
+            baked.len(),
+            "only the date VALUE may be rewritten"
+        );
+        assert!(refreshed.contains("authoritative"));
+        assert_eq!(
+            baked.replacen(&today, tomorrow, 1),
+            refreshed.to_string(),
+            "the refresh must rewrite the FIRST date occurrence and nothing else"
+        );
+
+        // Same day: byte-identical AND not reallocated, so the cached prefix
+        // is untouched on every turn but the first one of a new day.
+        let same = refresh_current_date_line(&baked, &today);
+        assert!(
+            matches!(same, std::borrow::Cow::Borrowed(_)),
+            "a same-day refresh must not rebuild the prefix"
+        );
+        assert_eq!(same, baked);
+    }
+
+    /// The refresh must not rewrite bytes it cannot identify as a date line.
+    /// A custom system prompt has no `Current date:` at all; a truncated or
+    /// non-date value must be left alone rather than corrupted.
+    #[test]
+    fn refresh_leaves_a_prompt_without_a_recognisable_date_untouched() {
+        for prompt in [
+            "You are a helpful assistant.",
+            "Current date: not-a-date-at-all",
+            "Current date: 2026",
+            "trailing Current date: ",
+        ] {
+            let out = refresh_current_date_line(prompt, "2999-12-31");
+            assert!(
+                matches!(out, std::borrow::Cow::Borrowed(_)),
+                "must not rewrite: {prompt}"
+            );
+            assert_eq!(out, prompt);
+        }
+        // …and a real line IS rewritten, so the guard above is not vacuous.
+        let real = refresh_current_date_line("Current date: 2026-01-01\nrest", "2999-12-31");
+        assert_eq!(real, "Current date: 2999-12-31\nrest");
     }
 
     /// `current_date_block` is the renderer, and two different "today" dates

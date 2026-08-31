@@ -244,6 +244,7 @@ pub fn diagnostics() -> Vec<ProtocolEvent> {
                 code: "rate_limit".into(),
                 message: "Too many requests; retrying.".into(),
                 retryable: true,
+                category: wcore_protocol::events::FailureCategory::Unknown,
             },
         },
         ProtocolEvent::Info {
