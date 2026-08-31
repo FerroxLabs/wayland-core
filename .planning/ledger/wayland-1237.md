@@ -9,9 +9,9 @@ criteria:
   - id: c1
     text: "ErrorInfo carries a typed failure category covering the three #388 names core can decide: context/token limit, tool/runtime failure, local Wayland error"
     state: met
-    evidence: "symbol:crates/wcore-protocol/src/events.rs::FailureCategory"
+    evidence: "symbol:crates/wcore-types/src/failure.rs::FailureCategory"
     owner: core
-    note: "MET. `ErrorInfo` carries `category: FailureCategory` -- an enum with exactly the three decidable #388 names (ContextLimit, ToolRuntime, LocalWayland) plus Unknown, and no `Default`, so a construction site cannot omit it. Re-read in this tree. The one stale pointer this row left behind is now gone too: `ProtocolSink::emit_correlated_error`'s comment still directed readers to `emit_run_failure` for the typed answer, a method #1266 deleted -- see #1266 c1."
+    note: "MET. `ErrorInfo` carries `category: FailureCategory` -- an enum with exactly the three decidable #388 names (ContextLimit, ToolRuntime, LocalWayland) plus Unknown, and no `Default`, so a construction site cannot omit it. Re-read in this tree. The one stale pointer this row left behind is now gone too: `ProtocolSink::emit_correlated_error`'s comment still directed readers to `emit_run_failure` for the typed answer, a method #1266 deleted -- see #1266 c1. RE-VERIFIED 2026-08-31, not repointed on trust: the gate reported this anchor GONE rather than MOVED (events.rs declares no FailureCategory), which means re-check the claim before touching the pointer. The claim HOLDS -- the type simply moved crate: FailureCategory is now declared at crates/wcore-types/src/failure.rs:38, ErrorInfo still carries it (events.rs:2388 pub category: FailureCategory), and the enum still names exactly the three #388 categories core can decide -- ContextLimit, ToolRuntime, LocalWayland -- plus Unknown for the case it cannot. Anchor moved to the new declaration."
   - id: c2
     text: "Every terminal error exit of the run loop sets the category, and the set of exits is enumerated rather than sampled"
     state: met
