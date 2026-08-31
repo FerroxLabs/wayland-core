@@ -104,6 +104,22 @@ fn recorded_authorization(rt: &tokio::runtime::Runtime, server: &MockServer) -> 
     })
 }
 
+/// Every request PATH the mock received, in order. The bearer helper above
+/// cannot see this: a run that posts to `/v1/v1/chat/completions` is refused by
+/// the mock before any header is recorded, so "no request arrived" and "the
+/// request arrived at the wrong path" would be the same observation.
+fn recorded_paths(rt: &tokio::runtime::Runtime, server: &MockServer) -> Vec<String> {
+    rt.block_on(async {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|req| req.url.path().to_string())
+            .collect()
+    })
+}
+
 struct Capture {
     stdout: String,
     stderr: String,
@@ -226,6 +242,71 @@ fn keyless_local_endpoint_starts_and_dispatches_with_the_placeholder_bearer() {
         cap.stdout,
         cap.stderr
     );
+    assert!(
+        seen.iter().all(|v| v == PLACEHOLDER_BEARER),
+        "every dispatch must carry the self-hosted placeholder bearer -- not an \
+         empty credential and not one harvested elsewhere. Got: {seen:?}"
+    );
+    assert!(
+        cap.stdout.contains("ok from the local model"),
+        "the model's answer must reach the user. stdout:\n{}\nstderr:\n{}",
+        cap.stdout,
+        cap.stderr
+    );
+}
+
+/// #1173 c3 — THE TICKET'S REPRO VERBATIM, `/v1` suffix and all.
+///
+/// The positive above drives the bare root, which is the invocation that
+/// already worked: `openai_defaults()` appends `/v1/chat/completions` itself,
+/// so a bare root can never produce the doubled path. The ticket body types
+/// `--base-url http://127.0.0.1:11434/v1`, and c3's two halves — keyless AND
+/// `/v1`-suffixed — therefore only meet here. Nothing else in the tree drives
+/// them jointly: `compat.rs::join_endpoint_collapses_a_duplicated_v1_segment`
+/// is a pure string test in a crate that cannot observe the CLI's startup
+/// credential gate at all, so no regression in "the invocation works" can
+/// redden it.
+///
+/// Before wayland#1178's `join_endpoint` this posted to
+/// `/v1/v1/chat/completions`. The mock serves ONLY `/v1/chat/completions`, so
+/// the doubled path is answered 404 and the run fails — the criterion is
+/// graded by a request path a server had to accept, not by a join read on its
+/// own. The path is also asserted explicitly, so a future mock that answered
+/// everything could not turn this green by accident.
+#[test]
+fn the_verbatim_repro_starts_and_dispatches_with_the_v1_suffix() {
+    let (rt, server) = start_mock("ok from the local model");
+    let dir = case_dir("local-v1");
+    let base_url = format!("{}/v1", server.uri());
+    let cap = run_headless(&dir, &base_url);
+
+    assert!(
+        !cap.stderr.contains("No API key found"),
+        "the keyless half of the repro regressed: {base_url} was refused for a \
+         missing credential. rc={:?}\nstderr:\n{}\nstdout:\n{}",
+        cap.status,
+        cap.stderr,
+        cap.stdout
+    );
+    assert_eq!(
+        cap.status,
+        Some(0),
+        "the verbatim repro must complete. stderr:\n{}\nstdout:\n{}",
+        cap.stderr,
+        cap.stdout
+    );
+
+    let paths = recorded_paths(&rt, &server);
+    assert_eq!(
+        paths,
+        vec!["/v1/chat/completions".to_string()],
+        "the `/v1` the user typed was not collapsed against the provider's own \
+         api_path. stdout:\n{}\nstderr:\n{}",
+        cap.stdout,
+        cap.stderr
+    );
+
+    let seen = recorded_authorization(&rt, &server);
     assert!(
         seen.iter().all(|v| v == PLACEHOLDER_BEARER),
         "every dispatch must carry the self-hosted placeholder bearer -- not an \

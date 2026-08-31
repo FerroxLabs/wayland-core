@@ -692,9 +692,10 @@ mod tests {
     /// render off SEPARATE match arms, and the Edit arm does not even
     /// destructure the outcome today.
     ///
-    /// Gated to Linux/macOS for the reason the Write test's doc gives: no
-    /// Windows executor here, not an unreachable path (FerroxLabs/wayland#1268).
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    /// Ungated for the reason the Write test's doc gives in full
+    /// (FerroxLabs/wayland#1268 c2): the gate was an absent Windows executor,
+    /// never an unreachable path, and `intercepted_save: Some(..)` is reached
+    /// on Windows through `ReplaceFileW`'s `lpBackupFileName`.
     #[tokio::test]
     async fn the_vfs_edit_path_names_a_save_the_refusal_displaced() {
         const ORIGINAL: &str = "the only copy of the user's bytes\n";

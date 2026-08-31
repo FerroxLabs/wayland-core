@@ -423,9 +423,23 @@ const MINIMUM_KNOWN_SITES: usize = 40;
 
 /// Sites that genuinely may not be owned, each with the reason.
 ///
-/// Empty, and that is the point: #352 left no remainder. An entry here is a
-/// deliberate, reviewed exception, not a place to park a failing scan.
-const ALLOWED_UNOWNED: &[(&str, u32, &str)] = &[];
+/// #352 left no remainder, and an entry here is a deliberate, reviewed
+/// exception, not a place to park a failing scan. The bar an entry must clear
+/// is that owning the child would DESTROY what the test measures — not that
+/// owning it is inconvenient.
+const ALLOWED_UNOWNED: &[(&str, u32, &str)] = &[(
+    "quarantine_process_tree_windows.rs",
+    115,
+    "FerroxLabs/wayland-core#393. This spawn is not in a test body: it runs in \
+     the re-executed `alias` ROLE, which is the fixture standing in for a `git` \
+     credential helper, and the descendant it starts MUST outlive it — that \
+     survival is the whole thing #393 is about. `OwnedTree` would kill the \
+     descendant as the alias returned and every arm would then assert a death \
+     the product did not cause. The lifetime is bounded instead: the descendant \
+     sleeps `DESCENDANT_LIFETIME` (300 s) and exits, the liveness control \
+     `taskkill /T /F`s the pid it measured, and both graded arms are ASSERTING \
+     that the production teardown already killed it.",
+)];
 
 /// Replace every comment and string/char literal with spaces, preserving byte
 /// offsets and line breaks so reported line numbers stay true.

@@ -98,6 +98,14 @@ impl WriteTool {
     /// Test-only. See [`WriteTool::publish_window_probe`] for why the window
     /// has no other entrance.
     #[cfg(test)]
+    // Its only caller, `execute_reports_a_refusal_it_could_not_roll_back`, is
+    // gated to the exchange platforms (see that test's doc for why the
+    // `RollbackFailed` state it drives is unix-only), so on every other target
+    // this setter is genuinely unused rather than dead.
+    #[cfg_attr(
+        not(any(target_os = "linux", target_os = "macos")),
+        allow(dead_code, reason = "only caller is gated to the exchange platforms")
+    )]
     pub(crate) fn with_publish_window_probe(mut self, probe: PublishWindowProbe) -> Self {
         self.publish_window_probe = Some(probe);
         self
@@ -720,10 +728,16 @@ mod tests {
     /// ordering that places the unlink inside the window — and is then handed
     /// to the very function the direct Write path's `Err` arm calls.
     ///
-    /// Unix only: `Swap::Displaced` on the exchange platforms is
-    /// `RENAME_EXCHANGE` / `RENAME_SWAP`, and Windows restores with
-    /// `ReplaceFileW`, which succeeds against an absent destination and so
-    /// cannot reach this state.
+    /// Unix only, and for a reason about THIS state and not about what
+    /// Windows can observe (wayland#1268): `Swap::Displaced` on the exchange
+    /// platforms is `RENAME_EXCHANGE` / `RENAME_SWAP`, whose restore FAILS
+    /// against a destination that has gone. On Windows `ReplaceFileW` answers
+    /// `ERROR_FILE_NOT_FOUND` there, `publish_displacing` maps that to
+    /// `Swap::Vacant`, and `restore`'s documented fallback -- a plain
+    /// replacing rename -- puts the pre-image back and succeeds, so no
+    /// `RollbackFailed` is produced. Nothing here says a DISPLACED save is
+    /// unobservable on Windows; that claim was false and is corrected at
+    /// `the_vfs_path_names_a_save_the_refusal_displaced`.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn a_refusal_that_could_not_be_rolled_back_is_not_a_fallback() {
@@ -793,10 +807,13 @@ mod tests {
     /// this runs, even outside a repository (`unsaved_work_no_git_test`), and
     /// the test would then grade nothing.
     ///
-    /// Unix exchange platforms only: `Swap::Displaced` is
-    /// `RENAME_EXCHANGE` / `RENAME_SWAP` there, and Windows restores with
-    /// `ReplaceFileW`, which succeeds against an absent destination and so
-    /// cannot reach this state at all.
+    /// Unix exchange platforms only, for the reason
+    /// `a_refusal_that_could_not_be_rolled_back_is_not_a_fallback` gives:
+    /// `ReplaceFileW` answers `ERROR_FILE_NOT_FOUND` against a destination
+    /// that has gone, `publish_displacing` maps that to `Swap::Vacant`, and
+    /// `restore`'s plain-rename fallback succeeds, so `RollbackFailed` is not
+    /// produced on Windows. That is a statement about ROLLBACK FAILURE, not
+    /// about whether a displaced save is observable there (wayland#1268).
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[tokio::test]
     async fn execute_reports_a_refusal_it_could_not_roll_back() {
@@ -899,15 +916,37 @@ mod tests {
     /// that drops a line is refused by the unsaved-work guard before any of
     /// this runs, and the test would then grade nothing.
     ///
-    /// Gated to Linux/macOS because this workspace has no Windows executor,
-    /// NOT because the path is unreachable there. On Windows
-    /// `publish_displacing` returns `Swap::Displaced(backup)` via
-    /// `ReplaceFileW`'s `lpBackupFileName` and `restore` returns
-    /// `Ok(Some(exchanged_out))`, so `intercepted_save` is reachable -- see
-    /// `wcore_config::atomic_io`, which corrects the earlier reading that
-    /// `ReplaceFile` hands nothing back. Windows coverage is
-    /// FerroxLabs/wayland#1268.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    /// NO LONGER GATED TO UNIX (FerroxLabs/wayland#1268 c2). It ran on
+    /// Linux/macOS only because this workspace had no Windows executor, and an
+    /// earlier version of this comment gave a STRUCTURAL reason instead --
+    /// that `ReplaceFileW` "hands nothing back to judge, so no save can be
+    /// intercepted there at all". That was false, and
+    /// `wcore_config::atomic_io` already recorded the correction in its own
+    /// words: the earlier reading "was simply wrong about `lpBackupFileName`".
+    ///
+    /// On Windows `publish_displacing` returns `Swap::Displaced(backup)` via
+    /// `ReplaceFileW`'s `lpBackupFileName`, `restore` publishes with
+    /// `ReplaceFileW` again and returns `Ok(Some(exchanged_out))`, and
+    /// `holds_exactly` then keeps a save that is not ours -- so
+    /// `intercepted_save: Some(..)` is reachable there.
+    ///
+    /// That paragraph is READ OFF `wcore_config::atomic_io`, not measured, and
+    /// this doc claims nothing stronger. What has actually been established is
+    /// that the test is COMPILE-VALID for the Windows target: `cargo check -p
+    /// wcore-tools --all-targets --target x86_64-pc-windows-gnu` is clean, and
+    /// it only became clean with "fix(atomic-io): compile the non-unix restore
+    /// arm, and ungate the intercepted-save tests" -- before that commit
+    /// `atomic_io`'s own non-unix `restore` arm failed E0532, measured by
+    /// reverting that one line and watching the same check go back to
+    /// `error[E0532]`. So no Windows measurement of this path was even
+    /// POSSIBLE on this branch until then.
+    ///
+    /// It has NEVER been executed on a Windows host. The name the preserved
+    /// file takes there is therefore unverified -- the assertions below find
+    /// it by CONTENT rather than by name, which is why they are portable --
+    /// and the ledger for FerroxLabs/wayland#1268 records c2, the Windows
+    /// execution, as not-met. Do not read this comment as evidence that it
+    /// was run.
     #[tokio::test]
     async fn the_vfs_path_names_a_save_the_refusal_displaced() {
         const ORIGINAL: &str = "the only copy of the user's bytes\n";
