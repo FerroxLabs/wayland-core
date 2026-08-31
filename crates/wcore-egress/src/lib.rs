@@ -57,7 +57,7 @@ pub use observer::{
     SharedEgressObserver, global_observer_installed, install_global_observer,
 };
 pub use policy::{
-    AllowAllPolicy, EgressDecision, EgressPolicy, GlobalDefaultPolicy, SharedPolicy,
+    AllowAllPolicy, EgressDecision, EgressOrigin, EgressPolicy, GlobalDefaultPolicy, SharedPolicy,
     default_policy, global_policy_installed, install_global_policy, with_default_policy,
     with_default_policy_sync,
 };
@@ -111,7 +111,11 @@ mod tests {
     struct DenyAll;
     #[async_trait::async_trait]
     impl EgressPolicy for DenyAll {
-        async fn check(&self, _request: &reqwest::Request) -> EgressDecision {
+        async fn check(
+            &self,
+            _request: &reqwest::Request,
+            _origin: EgressOrigin,
+        ) -> EgressDecision {
             EgressDecision::Deny {
                 reason: "denied by test policy".into(),
             }
@@ -125,7 +129,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl EgressPolicy for PendingPolicy {
-        async fn check(&self, _request: &reqwest::Request) -> EgressDecision {
+        async fn check(
+            &self,
+            _request: &reqwest::Request,
+            _origin: EgressOrigin,
+        ) -> EgressDecision {
             self.entered.notify_one();
             std::future::pending().await
         }
@@ -156,7 +164,7 @@ mod tests {
         let url = "http://127.0.0.1:1/".parse::<reqwest::Url>().unwrap();
         let req = reqwest::Request::new(reqwest::Method::GET, url);
         assert!(matches!(
-            client.policy().check(&req).await,
+            client.policy().check(&req, EgressOrigin::Product).await,
             EgressDecision::Allow
         ));
     }
@@ -333,7 +341,11 @@ mod tests {
 
         #[async_trait::async_trait]
         impl EgressPolicy for OrderedAllow {
-            async fn check(&self, _request: &reqwest::Request) -> EgressDecision {
+            async fn check(
+                &self,
+                _request: &reqwest::Request,
+                _origin: EgressOrigin,
+            ) -> EgressDecision {
                 assert_eq!(
                     self.stage
                         .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst),

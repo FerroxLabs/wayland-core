@@ -208,7 +208,9 @@ fn exfil_request() -> reqwest::Request {
 /// Run the real installed-policy check for a body-bearing POST to a
 /// non-allowlisted host.
 async fn decide(config: &Config) -> EgressDecision {
-    policy_from_config(config).check(&exfil_request()).await
+    policy_from_config(config)
+        .check(&exfil_request(), wcore_egress::EgressOrigin::Product)
+        .await
 }
 
 fn is_deny(decision: &EgressDecision) -> bool {

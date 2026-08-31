@@ -1224,6 +1224,7 @@ mod tests {
             async fn check(
                 &self,
                 _request: &wcore_egress::reqwest::Request,
+                _origin: wcore_egress::EgressOrigin,
             ) -> wcore_egress::EgressDecision {
                 wcore_egress::EgressDecision::Deny {
                     reason: "session denied".to_string(),

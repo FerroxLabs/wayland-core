@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use crate::error::EgressError;
 use crate::observer::{SharedEgressObserver, default_observer};
-use crate::policy::{SharedPolicy, default_policy};
+use crate::policy::{EgressOrigin, SharedPolicy, default_policy};
 use crate::request::EgressRequestBuilder;
 
 /// A policy-gated HTTP client wrapping [`reqwest::Client`].
@@ -26,6 +26,12 @@ use crate::request::EgressRequestBuilder;
 pub struct EgressClient {
     inner: reqwest::Client,
     policy: SharedPolicy,
+    /// wayland#1264 — stamped on every request this client issues, so the
+    /// policy can tell a product-chosen destination from a model-chosen one.
+    /// Defaults to [`EgressOrigin::Product`]; only a client that explicitly
+    /// declares `.origin(EgressOrigin::ModelDirected)` is shape-checked on an
+    /// allowlisted host.
+    origin: EgressOrigin,
     observer: SharedEgressObserver,
     next_attempt_id: Arc<AtomicU64>,
 }
@@ -127,6 +133,16 @@ impl EgressClient {
         &self.policy
     }
 
+    /// The origin stamped on every request this client issues (wayland#1264).
+    ///
+    /// Public so the wiring itself is gradeable: without it, "the WebFetch
+    /// backend is model-directed" is an unobservable claim about a private
+    /// field, and a future refactor could drop the stamp with every test still
+    /// green.
+    pub fn origin(&self) -> EgressOrigin {
+        self.origin
+    }
+
     /// Start a `GET` request.
     pub fn get<U: reqwest::IntoUrl>(&self, url: U) -> EgressRequestBuilder {
         self.request(reqwest::Method::GET, url)
@@ -169,6 +185,7 @@ impl EgressClient {
             self.observer.clone(),
             self.next_attempt_id.clone(),
             self.inner.request(method, url),
+            self.origin,
         )
     }
 }
@@ -185,6 +202,7 @@ pub struct EgressClientBuilder {
     inner: reqwest::ClientBuilder,
     policy: Option<SharedPolicy>,
     observer: Option<SharedEgressObserver>,
+    origin: EgressOrigin,
 }
 
 impl EgressClientBuilder {
@@ -205,6 +223,7 @@ impl EgressClientBuilder {
                 .tcp_keepalive(Some(Duration::from_secs(15))),
             policy: None,
             observer: None,
+            origin: EgressOrigin::Product,
         }
     }
 
@@ -300,6 +319,16 @@ impl EgressClientBuilder {
         self
     }
 
+    /// Declare who chooses this client's destinations (wayland#1264).
+    ///
+    /// Omitted ⇒ [`EgressOrigin::Product`], which is the behaviour every client
+    /// had before the flag existed. Set [`EgressOrigin::ModelDirected`] on a
+    /// client whose URL comes verbatim out of tool input.
+    pub fn origin(mut self, origin: EgressOrigin) -> Self {
+        self.origin = origin;
+        self
+    }
+
     /// Build the [`EgressClient`].
     pub fn build(self) -> Result<EgressClient, EgressError> {
         let inner = self.inner.build()?;
@@ -308,6 +337,7 @@ impl EgressClientBuilder {
             policy: self.policy.unwrap_or_else(default_policy),
             observer: self.observer.unwrap_or_else(default_observer),
             next_attempt_id: Arc::new(AtomicU64::new(1)),
+            origin: self.origin,
         })
     }
 }

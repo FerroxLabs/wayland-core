@@ -142,10 +142,12 @@ async fn an_egress_ask_on_the_json_stream_path_reaches_the_host() {
         })
     };
 
-    let decision =
-        tokio::time::timeout(Duration::from_secs(20), policy.check(&ask_shaped_request()))
-            .await
-            .expect("the turn stalled instead of prompting — wayland#1219's five minutes");
+    let decision = tokio::time::timeout(
+        Duration::from_secs(20),
+        policy.check(&ask_shaped_request(), wcore_egress::EgressOrigin::Product),
+    )
+    .await
+    .expect("the turn stalled instead of prompting — wayland#1219's five minutes");
 
     let frame = host
         .await
@@ -252,10 +254,12 @@ async fn a_consent_never_shown_is_not_reported_as_declined() {
         mute,
     )));
 
-    let decision =
-        tokio::time::timeout(Duration::from_secs(10), policy.check(&ask_shaped_request()))
-            .await
-            .expect("the turn stalled on a prompt that can never be shown");
+    let decision = tokio::time::timeout(
+        Duration::from_secs(10),
+        policy.check(&ask_shaped_request(), wcore_egress::EgressOrigin::Product),
+    )
+    .await
+    .expect("the turn stalled on a prompt that can never be shown");
 
     let EgressDecision::Deny { reason } = decision else {
         panic!("expected a fail-closed deny, got {decision:?}");
@@ -306,10 +310,12 @@ async fn an_unanswered_consent_is_not_reported_as_declined_either() {
         })
     };
 
-    let decision =
-        tokio::time::timeout(Duration::from_secs(20), policy.check(&ask_shaped_request()))
-            .await
-            .expect("stalled");
+    let decision = tokio::time::timeout(
+        Duration::from_secs(20),
+        policy.check(&ask_shaped_request(), wcore_egress::EgressOrigin::Product),
+    )
+    .await
+    .expect("stalled");
     reaper.await.expect("reaper task");
 
     let EgressDecision::Deny { reason } = decision else {
@@ -367,10 +373,12 @@ async fn an_actual_decline_is_still_reported_as_a_decline() {
         })
     };
 
-    let decision =
-        tokio::time::timeout(Duration::from_secs(20), policy.check(&ask_shaped_request()))
-            .await
-            .expect("stalled");
+    let decision = tokio::time::timeout(
+        Duration::from_secs(20),
+        policy.check(&ask_shaped_request(), wcore_egress::EgressOrigin::Product),
+    )
+    .await
+    .expect("stalled");
     operator.await.expect("operator task");
 
     let EgressDecision::Deny { reason } = decision else {

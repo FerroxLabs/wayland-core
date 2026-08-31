@@ -141,7 +141,27 @@ pub(crate) fn error_message(payload: &Value, fallback: &str) -> String {
 /// route through this single helper so the redirect policy is one edit,
 /// not five.
 pub(crate) fn build_ssrf_safe_tool_client() -> Client {
+    build_ssrf_safe_tool_client_with_origin(wcore_egress::EgressOrigin::Product)
+}
+
+/// `build_ssrf_safe_tool_client`, but declaring who chose the destination.
+///
+/// wayland#1264. Almost every backend here is [`EgressOrigin::Product`]: its URL
+/// is built by `format!` against a fixed API host with encoded path segments, so
+/// the operator's allowlist entry for that host authorises exactly the traffic
+/// that follows. `WebFetch` is not — its URL, host and query string included, is
+/// taken verbatim out of tool input, so an allowlist entry for `github.com`
+/// would otherwise authorise `https://github.com/?leak=<secret>`.
+///
+/// A new backend that fetches a model-supplied URL must pass
+/// [`EgressOrigin::ModelDirected`] here. That is a deliberate opt-in and not
+/// self-enforcing; `web_fetch_is_model_directed` pins the one call site that
+/// exists today so a refactor cannot silently drop it.
+pub(crate) fn build_ssrf_safe_tool_client_with_origin(
+    origin: wcore_egress::EgressOrigin,
+) -> Client {
     Client::builder()
+        .origin(origin)
         .connect_timeout(wcore_providers::http_client::CONNECT_TIMEOUT)
         .read_timeout(wcore_providers::http_client::READ_TIMEOUT)
         .timeout(wcore_providers::http_client::TOOL_REQUEST_TIMEOUT)

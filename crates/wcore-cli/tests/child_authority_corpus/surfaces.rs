@@ -1811,13 +1811,16 @@ pub fn egress_probe() -> ProbeResult {
     let same_object = Arc::ptr_eq(&parent, &inherited);
 
     let rt = runtime();
-    let parent_permits = matches!(rt.block_on(parent.check(&request)), EgressDecision::Allow);
+    let parent_permits = matches!(
+        rt.block_on(parent.check(&request, wcore_egress::EgressOrigin::Product)),
+        EgressDecision::Allow
+    );
     let child_permits = matches!(
-        rt.block_on(inherited.check(&request)),
+        rt.block_on(inherited.check(&request, wcore_egress::EgressOrigin::Product)),
         EgressDecision::Allow
     );
     let parent_permits_ask = matches!(
-        rt.block_on(parent.check(&ask_request)),
+        rt.block_on(parent.check(&ask_request, wcore_egress::EgressOrigin::Product)),
         EgressDecision::Allow
     );
 

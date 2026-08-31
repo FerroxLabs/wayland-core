@@ -357,7 +357,11 @@ async fn egress_denial_terminalizes_prepared_identity_as_not_started() {
 
     #[async_trait]
     impl EgressPolicy for DenyPolicy {
-        async fn check(&self, _request: &reqwest::Request) -> EgressDecision {
+        async fn check(
+            &self,
+            _request: &reqwest::Request,
+            _origin: wcore_egress::EgressOrigin,
+        ) -> EgressDecision {
             EgressDecision::Deny {
                 reason: "fixture policy denied egress".into(),
             }
