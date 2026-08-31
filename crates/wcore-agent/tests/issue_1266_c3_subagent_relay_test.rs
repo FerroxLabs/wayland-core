@@ -22,14 +22,20 @@
 //!     upgraded to a plausible-looking `tool_runtime` — the guess #1237 c4
 //!     forbids, made on the child's behalf.
 //!
-//! RED ARM (recorded, re-runnable): in
+//! RED ARM (re-runnable, and now MEASURED rather than only described): in
 //! `crates/wcore-agent/src/agents/channel_sink.rs`, replace the `category`
 //! pass-through in `impl OutputSink for ChannelSink :: emit_error` with
 //! `category: wcore_protocol::events::FailureCategory::ToolRuntime` (the
 //! #1237 hardcode this criterion replaced), `touch` the file and rebuild.
-//! `a_child_that_died_on_a_context_ceiling_reaches_the_parent_as_context_limit`
-//! goes RED, and so does the opaque control — which is the point of keeping
-//! both: the hardcode is wrong in two directions at once.
+//!
+//! Run with the mutation asserted to have landed on the line and
+//! `cargo check -p wcore-agent --tests` RC=0 first: 0 passed, 3 FAILED --
+//! every test in this file. The context arm relayed
+//! `["tool_runtime", "unknown"]` where it needs `context_limit`; the opaque
+//! control got `tool_runtime` where `unknown` is the only honest answer; and
+//! the differ-guard saw `tool_runtime` on both sides. That is why all three
+//! are kept: the hardcode is wrong in two directions at once and neither
+//! direction alone would have caught it. Restored and `touch`ed: 3 passed.
 
 mod common;
 
