@@ -25133,6 +25133,150 @@ mod compact_tests {
         );
     }
 
+    /// #1218 c2, at the PRODUCTION path.
+    ///
+    /// `the_output_ask_never_outgrows_the_reserve_the_ceiling_withheld` sweeps
+    /// the same range, but it calls `size_output_cap` directly and hands it the
+    /// window itself, so it grades the arithmetic and cannot see which window
+    /// production supplies. c2's words are "the max_tokens that will be SENT",
+    /// and that is this: `AgentEngine::turn_output_cap`, the function the turn
+    /// loop assigns to `request.max_tokens`, with the window resolved the way
+    /// production resolves it.
+    #[test]
+    fn the_production_ask_never_outgrows_the_reserve_across_the_window_range() {
+        let cfg = CompactConfig::default();
+        for window in (4_096usize..=49_152).step_by(256) {
+            let mut state = CompactState::new();
+            state
+                .served_window
+                .observe("test/test-model", (window * 4) as u64, window as u64)
+                .unwrap_or_else(|| panic!("window {window}: a 4x shortfall must produce evidence"));
+            assert_eq!(
+                state.served_window.sizing_window(),
+                Some(window as u64),
+                "window {window}: the evidence must be CORROBORATED, or this \
+                 iteration grades the un-narrowed path"
+            );
+            let mut engine = make_compact_engine(cfg.clone(), state, vec![]);
+            engine.max_tokens = 64_000;
+            assert!(
+                wcore_config::limits::model_output_ceiling(
+                    engine.compat.provider_type(),
+                    &engine.model
+                )
+                .is_none(),
+                "control: this test is about the UNLISTED arm; if the fixture \
+                 model is ever catalogued the case it grades has moved"
+            );
+
+            let r = cfg.scaled_reserves(window);
+            let withheld = r.output_reserve + r.emergency_buffer;
+            let ceiling = cfg.input_ceiling_for_window(window);
+            assert_eq!(
+                ceiling,
+                window - withheld,
+                "window {window}: the ceiling is exactly what the reserves left"
+            );
+            assert_eq!(
+                engine
+                    .resolve_preflight_window(ceiling as u64, &engine.model)
+                    .window,
+                Some(window as u64),
+                "window {window}: production must resolve the LEARNED window, or \
+                 this test grades a window nothing sends against"
+            );
+
+            let ask = engine.turn_output_cap(ceiling, false, &engine.model) as usize;
+            assert!(
+                ask <= withheld,
+                "window {window}: the guard admits {ceiling} input tokens having \
+                 withheld {withheld} for the output, and the ask actually SENT is \
+                 {ask} — the ceiling certified a request that cannot fit"
+            );
+            // The property the ticket's title is about, over every input the
+            // guard admits rather than only the worst one.
+            for est in [0, 1, ceiling / 2, ceiling.saturating_sub(1), ceiling] {
+                let ask = engine.turn_output_cap(est, false, &engine.model) as usize;
+                assert!(
+                    est + ask <= window,
+                    "window {window}: input {est} + ask {ask} exceeds the window \
+                     actually in force"
+                );
+                assert!(ask > 0, "window {window}: an ask of zero sends nothing");
+            }
+        }
+    }
+
+    /// #1218 c3, at the PRODUCTION path — both measured cases, in the ticket's
+    /// own figures, against the value `request.max_tokens` is actually assigned.
+    ///
+    /// The two the ticket recorded: a LEARNED/narrowed 8,192 window (ceiling
+    /// 5,053, reserve 2,730, max_tokens sent 8,192, total ask 13,245) and a
+    /// CONFIGURED 16,384 window (ceiling 10,104, reserve 5,461, max_tokens
+    /// 8,192, total 18,296). Both arrive at `turn_output_cap` by a DIFFERENT
+    /// route — one through `narrow_to_served_window`, one through
+    /// `[compact] context_window` — so both are graded here rather than only
+    /// the learned one.
+    #[test]
+    fn the_measured_1218_overflows_no_longer_hold_at_the_production_path() {
+        // -- measured case 1: the LEARNED 8,192 window --
+        {
+            const WINDOW: usize = 8_192;
+            let cfg = CompactConfig::default();
+            let mut state = CompactState::new();
+            state
+                .served_window
+                .observe("test/test-model", 20_000, WINDOW as u64)
+                .expect("a gross shortfall must produce evidence");
+            let mut engine = make_compact_engine(cfg.clone(), state, vec![]);
+            engine.max_tokens = 64_000;
+            let ceiling = cfg.input_ceiling_for_window(WINDOW);
+            assert_eq!(ceiling, 5_053, "the ticket's measured ceiling");
+            assert_eq!(
+                cfg.scaled_reserves(WINDOW).output_reserve,
+                2_730,
+                "the ticket's measured reserve"
+            );
+            let ask = engine.turn_output_cap(ceiling, false, &engine.model) as usize;
+            assert_ne!(ask, 8_192, "8,192 is the max_tokens the ticket measured");
+            assert!(
+                ceiling + ask <= WINDOW,
+                "total ask {} on an {WINDOW}-token slot; the ticket measured 13,245",
+                ceiling + ask
+            );
+        }
+        // -- measured case 2: the CONFIGURED 16,384 window --
+        {
+            const WINDOW: usize = 16_384;
+            let mut cfg = CompactConfig::default();
+            cfg.context_window = Some(WINDOW);
+            let mut engine = make_compact_engine(cfg.clone(), CompactState::new(), vec![]);
+            engine.max_tokens = 64_000;
+            let ceiling = cfg.input_ceiling_for_window(WINDOW);
+            assert_eq!(ceiling, 10_104, "the ticket's measured ceiling");
+            assert_eq!(
+                cfg.scaled_reserves(WINDOW).output_reserve,
+                5_461,
+                "the ticket's measured reserve"
+            );
+            assert_eq!(
+                engine
+                    .resolve_preflight_window(ceiling as u64, &engine.model)
+                    .window,
+                Some(WINDOW as u64),
+                "precondition: the operator's `[compact] context_window` must be \
+                 the window in force, with no learned narrowing involved"
+            );
+            let ask = engine.turn_output_cap(ceiling, false, &engine.model) as usize;
+            assert_ne!(ask, 8_192, "8,192 is the max_tokens the ticket measured");
+            assert!(
+                ceiling + ask <= WINDOW,
+                "total ask {} on a {WINDOW}-token slot; the ticket measured 18,296",
+                ceiling + ask
+            );
+        }
+    }
+
     // -- Emergency check fires when at limit --
 
     /// FerroxLabs/wayland#1210 c2 - on a CORROBORATED 8,192-token learned
