@@ -149,12 +149,27 @@ async fn real_fs_preflight_conflict_still_renders_todays_wording() {
     );
 }
 
+/// The in-memory backend's file, absolute ON THE HOST THIS RUNS ON.
+///
+/// `WriteTool` calls `is_absolute()` before it reaches any backend, so a
+/// hardcoded `/w/f.txt` is refused on Windows with `path must be absolute`
+/// long before the conflict this test grades can happen -- the refusal then
+/// arrives for the WRONG reason and the assertion on today's wording fails.
+/// Measured on Windows 10.0.26200.9168 the first time this crate was ever
+/// built for Windows (the workspace did not compile for that target between
+/// 727ea921f and FerroxLabs/wayland#1268's fix), so this had never been able
+/// to run there and nothing said so.
+#[cfg(windows)]
+const IN_MEMORY_PATH: &str = r"C:\w\f.txt";
+#[cfg(not(windows))]
+const IN_MEMORY_PATH: &str = "/w/f.txt";
+
 /// The `InMemoryFs` backend, through the same surface. A different producer,
 /// on a backend with no `atomic_write_checked` anywhere in it.
 #[tokio::test]
 async fn in_memory_backend_conflict_still_renders_todays_wording() {
     let mem = Arc::new(InMemoryFs::new());
-    let p = PathBuf::from("/w/f.txt");
+    let p = PathBuf::from(IN_MEMORY_PATH);
     mem.write(&p, b"the only copy of the user's bytes\n")
         .await
         .unwrap();
@@ -170,7 +185,7 @@ async fn in_memory_backend_conflict_still_renders_todays_wording() {
     let result = write_tool()
         .execute_with_ctx(
             json!({
-                "file_path": "/w/f.txt",
+                "file_path": IN_MEMORY_PATH,
                 "content": "the only copy of the user's bytes\nand a line the agent added\n",
             }),
             &ctx,
@@ -178,7 +193,11 @@ async fn in_memory_backend_conflict_still_renders_todays_wording() {
         .await;
 
     assert!(result.is_error, "not refused at all: {}", result.content);
-    assert_unchanged_wording(&result.content, "/w/f.txt", "its contents changed on disk");
+    assert_unchanged_wording(
+        &result.content,
+        IN_MEMORY_PATH,
+        "its contents changed on disk",
+    );
     assert_eq!(
         mem.read(&p).await.unwrap(),
         b"what the user saved before the exchange\n"

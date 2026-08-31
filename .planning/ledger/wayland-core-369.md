@@ -32,9 +32,20 @@ criteria:
     note: "MET 2026-08-30, lane w3-windows-honesty -- the criterion asks for a DECISION and the decision is recorded. .planning/DECISIONS.md Q-369c4: TELL THE OPERATOR WHERE TO LOOK; do not auto-revoke. Reasoning, recorded so it can be argued with rather than re-litigated: an unattended privileged sweep of `S-1-15-2-*` aces across a user home directory has the whole profile as its blast radius and was written for a defect measured exactly once, and the leaked ace grants a package SID whose profile no longer exists, so it is inert until an AppContainer with that same SID is recreated. What the product does instead is name the lease directory in the declared limitation so an operator can find the recorded intents themselves. This is a DECISION criterion, so `met` means the decision exists with its cost stated -- it does not mean the aces are gone, and the note says so rather than letting `met` imply it."
 ---
 
-GRADED 2026-08-30 by lane w3-windows-honesty. c2 and c4 are closed; c1 and c3
-are open by a recorded decision (.planning/DECISIONS.md Q-369-lease, Q-369c4)
-and stay owned by core so they count against the release.
+GRADED 2026-08-30 by lane w3-windows-honesty; c1 and c3 CLOSED 2026-08-31 by
+lane f13-windows, which REVERSED the disposition they were carrying. All four
+criteria are now met.
+
+The reversal is recorded as `.planning/DECISIONS.md` Q-369-lease-R with its
+reasoning and its product cost, not buried in a note here. Q-369-lease had read
+c1 as AppContainer MECHANISM work and declined it under the standing containment
+decision; that reading was too wide. Q-368-honesty is UNCHANGED, `#368` c1-c5
+stay not-met, and Q-369-lease-R says in its own obliges clause that no lane may
+cite it to reopen the AppContainer ACL containment fix.
+
+READY FOR MAINTAINER CLOSE, with the same caveat the #1268 ledger records: the
+online gate reports DIVERGENCE for an all-met open issue, which is the handoff
+signal rather than a defect.
 
 Do not read c2's closure as the wedge being fixed. It is not. What changed is
 that a wedged backend now SAYS why it is wedged on the surface an operator

@@ -32,7 +32,50 @@ criteria:
     note: "MET 2026-08-31, lane/f13-windows. `crates/wcore-config/tests/issue_1268_windows_impossibility_guard.rs` sweeps every `//` comment under `crates/wcore-tools` and `crates/wcore-config` -- src and tests -- and fails on any SENTENCE that is about Windows or `ReplaceFile`, about the displaced-save subject `atomic_io.rs:442-451` governs, and asserts an impossibility, unless that sentence is itself correcting such a claim. Sentence granularity, not block: an earlier version graded blocks, and re-injecting the historical claim directly ABOVE its own correction did not redden it, because the two `//` runs joined and the correction's exemption covered the offence. That case is now a control inside the test. Three more controls run before the sweep -- the historical sentence must be flagged, the corrected sentence must not be, an ordinary unrelated Windows comment must not be -- and the sweep refuses a run that saw fewer than 20 files or 500 comment lines, so an empty offender list off an empty scan cannot read as a clean tree. The one exclusion is the guard file itself, and the count is asserted to be exactly 1 so a second exclusion cannot launder a real offender. RED ARM: see c1's note -- same mutation, CHECK_EXIT=0, RED_TESTS_EXIT=100, blob-verified restore. GREEN on real Windows 10.0.26200.9168 as well (1 test run, 1 passed), because a source guard that only ever ran on Linux would be the same class of gap this issue is about."
 ---
 
-Created 2026-08-31 to close a COVERAGE gap. It records no work as done.
+Created 2026-08-31 to close a COVERAGE gap; GRADED the same day by lane
+`lane/f13-windows`, and all four criteria are now met.
+
+READY FOR MAINTAINER CLOSE, and the gate will say so LOUDLY until it happens:
+`check-criteria-ledger.py` (online) reports DIVERGENCE for a ledger whose every
+criterion is met while the issue is still open. That is the intended handoff
+signal, not a defect in this file -- closing an issue is a maintainer action and
+this lane does not take it. CI runs the gate with `--offline`, which does not
+consult GitHub state, so no required check is red meanwhile.
+
+## Found on the way in, and bigger than this issue: `integ/f13` DOES NOT BUILD
+## FOR WINDOWS
+
+Measured, not inferred. On `integ/f13` at `3847cb788`:
+
+```
+cargo check -p wcore-config --target x86_64-pc-windows-gnu
+  error[E0532]: ... crates/wcore-config/src/atomic_io.rs:467
+  Swap::Vacant | Swap::Unsupported => std::fs::rename(displaced, dest).map(|()| None),
+  error: could not compile `wcore-config` (lib) due to 1 previous error
+```
+
+`git log -S "Swap::Unsupported("` names one commit: `727ea921f`, "Make the
+Windows publish degrade observable and declare the weaker guarantee"
+(2026-08-30). It gave `Swap::Unsupported` a payload and updated the
+`cfg(windows)` sites, but not `restore`'s `cfg(not(any(linux, macos)))` arm --
+the one arm a Linux `cargo check` cannot see. That is the shared-type change
+shape: verify with `--workspace --all-targets` AND the Windows target, never
+`-p` on Linux alone.
+
+Consequences, stated because they are larger than one ledger row:
+
+* `wcore-config` is at the bottom of the graph, so NOTHING in the workspace
+  built for Windows between 2026-08-30 and this branch. Every Windows verdict
+  taken from `integ/f13` in that window is a verdict about a build that does
+  not exist, and `integ/f13` CI has been failing.
+* `wayland-core#350` c5 (a green nightly-windows-soak) cannot be met on
+  `integ/f13` at all; the soak fails at compile, not at the AppContainer race
+  its ledger names as the sole remaining blocker.
+
+The fix is this branch's `fix(atomic-io): compile the non-unix restore arm`,
+which is also what made `#1268` c2 possible: the tests could not have been run
+on Windows without it.
+
 
 `scripts/check-criteria-ledger.py` scopes every open `area:core` issue on
 wayland and EVERY open issue on wayland-core. This issue was in scope from
