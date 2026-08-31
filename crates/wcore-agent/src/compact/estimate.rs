@@ -45,12 +45,6 @@ pub fn estimate_tokens_from_messages_with_thinking(
 }
 
 fn estimate_tokens_from_messages_inner(messages: &[Message], count_thinking: bool) -> u64 {
-    let __t = std::time::Instant::now();
-    let __r = estimate_tokens_from_messages_inner2(messages, count_thinking);
-    crate::perfcount::record(&crate::perfcount::ESTIMATE_TOKENS, __t, 0);
-    __r
-}
-fn estimate_tokens_from_messages_inner2(messages: &[Message], count_thinking: bool) -> u64 {
     let mut total_chars: usize = 0;
     let mut json_chars: usize = 0;
     let mut image_tokens: usize = 0;

@@ -145,7 +145,6 @@ async fn timing_probe() {
         read_bytes = bytes.len();
     }
     let t_end = t0.elapsed();
-    wcore_agent::perfcount::dump("probe");
     eprintln!(
         "PHASE bytes={payload} ceiling={ceiling} shed={shed} read={read_bytes} setup_s={:.3} run_s={:.3} readback_s={:.3} total_s={:.3}",
         t_setup.as_secs_f64(),
