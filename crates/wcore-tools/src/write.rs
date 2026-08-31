@@ -98,6 +98,14 @@ impl WriteTool {
     /// Test-only. See [`WriteTool::publish_window_probe`] for why the window
     /// has no other entrance.
     #[cfg(test)]
+    // Its only caller, `execute_reports_a_refusal_it_could_not_roll_back`, is
+    // gated to the exchange platforms (see that test's doc for why the
+    // `RollbackFailed` state it drives is unix-only), so on every other target
+    // this setter is genuinely unused rather than dead.
+    #[cfg_attr(
+        not(any(target_os = "linux", target_os = "macos")),
+        allow(dead_code, reason = "only caller is gated to the exchange platforms")
+    )]
     pub(crate) fn with_publish_window_probe(mut self, probe: PublishWindowProbe) -> Self {
         self.publish_window_probe = Some(probe);
         self

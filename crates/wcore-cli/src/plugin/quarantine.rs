@@ -782,7 +782,10 @@ pub fn run_hardened(
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(PluginCliError::Git(format!(
-                    "could not take ownership of the quarantine process tree for {label}: {e}.                      Refusing to run it unowned: an abort would then reap the leaf and leave                      every helper git spawned running (FerroxLabs/wayland-core#393)"
+                    "could not take ownership of the quarantine process tree for \
+                     {label}: {e}. Refusing to run it unowned: an abort would then \
+                     reap the leaf and leave every helper git spawned running \
+                     (FerroxLabs/wayland-core#393)"
                 )));
             }
         }

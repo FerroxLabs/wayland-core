@@ -741,7 +741,12 @@ fn refuse_over_broad_allow_root(
 ) -> Result<()> {
     let too_broad = |reason: &str| {
         Err(exec_error(format!(
-            "refusing to grant the AppContainer package read/write on {}: {reason}. A single              inheritable ALLOW there confers the whole subtree, and the per-secret denies              that would claw it back are an enumeration taken at one instant              (FerroxLabs/wayland-core#369, and #368 for why that enumeration is not              reliable). Start wayland-core in a project directory, or use the default              Windows backend, which does not write ACLs at all.",
+            "refusing to grant the AppContainer package read/write on {}: {reason}. A single \
+             inheritable ALLOW there confers the whole subtree, and the per-secret denies that \
+             would claw it back are an enumeration taken at one instant \
+             (FerroxLabs/wayland-core#369, and #368 for why that enumeration is not reliable). \
+             Start wayland-core in a project directory, or use the default Windows backend, \
+             which does not write ACLs at all.",
             canonical.display()
         )))
     };
@@ -1060,7 +1065,8 @@ fn unrecoverable_lease_report(
                 .to_string()
         }
         Some(lease) => format!(
-            "Its recovery FAILED PART WAY, so the {} filesystem ACL grant(s) it recorded may              still be applied and could NOT be revoked automatically. Review those paths: {}.",
+            "Its recovery FAILED PART WAY, so the {} filesystem ACL grant(s) it recorded may \
+             still be applied and could NOT be revoked automatically. Review those paths: {}.",
             lease.intents.len(),
             lease
                 .intents
@@ -1069,11 +1075,19 @@ fn unrecoverable_lease_report(
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        None => "Its contents could not be read, so WHICH filesystem ACL grants it recorded                  is unknown -- inspect the quarantined file itself rather than assuming it                  granted nothing."
-            .to_string(),
+        None => {
+            "Its contents could not be read, so WHICH filesystem ACL grants it recorded is unknown \
+         -- inspect the quarantined file itself rather than assuming it granted nothing."
+                .to_string()
+        }
     };
     format!(
-        "QUARANTINED an AppContainer ACL lease {} that could not be recovered: {cause}. This          is persistent on-disk state -- NOT a platform limitation, NOT an SSH or session-0          effect, and NOT transient. Until this quarantine landed, a lease in this state          disabled ALL sandboxed execution on this machine for as long as it existed, and the          only symptom was every command refusing. The file has been MOVED (not deleted) to          {} so the cause stays inspectable. {residual}",
+        "QUARANTINED an AppContainer ACL lease {} that could not be recovered: {cause}. This is \
+         persistent on-disk state -- NOT a platform limitation, NOT an SSH or session-0 effect, \
+         and NOT transient. Until this quarantine landed, a lease in this state disabled ALL \
+         sandboxed execution on this machine for as long as it existed, and the only symptom \
+         was every command refusing. The file has been MOVED (not deleted) to {} so the cause \
+         stays inspectable. {residual}",
         path.display(),
         destination.display()
     )
