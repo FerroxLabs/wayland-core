@@ -4974,6 +4974,26 @@ fn install_spend_guard(
     (wrapped, guard)
 }
 
+/// wayland#1231 c2 — the label that marks a reply recovered from a model's own
+/// reasoning tags.
+///
+/// A recovered answer is the model's REASONING, handed to the user because
+/// there was nothing else. It must never read as an ordinary answer: the user
+/// is entitled to know they are looking at working-out rather than a composed
+/// reply, and the next turn (which now carries it, per c3) is entitled to the
+/// same. Kept as a const so the guard test and the production path cannot
+/// drift apart into two different strings.
+pub const REASONING_RECOVERY_LABEL: &str =
+    "[recovered from this model's reasoning — it emitted no answer outside its own tags]";
+
+/// Internal sentinel: the empty-turn branch took the wayland#1231 c2 recovery
+/// path and already spoke on the answer stream, so no error is owed.
+///
+/// A sentinel rather than a second `bool` because the surrounding expression
+/// yields ONE `&str` down every arm and adding a parallel flag is how two
+/// arms drift out of agreement.
+const RECOVERED_FROM_REASONING: &str = "\u{0}wayland-1231-recovered";
+
 impl AgentEngine {
     pub fn new(config: Config, tools: ToolRegistry, output: Arc<dyn OutputSink>) -> Self {
         let provider = create_provider(&config);
@@ -16620,22 +16640,74 @@ impl AgentEngine {
                      a wire-format mismatch — check the provider's own error detail (and any \
                      content filter or safety stop) for it."
                 } else if raw_text_chars > 0 {
-                    // #908. The provider streamed text and the reasoning filter
-                    // removed all of it, so `assistant_text` is empty for a
-                    // reason that has nothing to do with the endpoint. This is
-                    // the inline-tag twin of the branch below: `<think>` /
-                    // `<thought>` / `<reasoning>` arrive as ordinary text
-                    // deltas, never as `assistant_content`, so without this
-                    // count the turn falls through to the incompatibility
-                    // diagnosis and the user is sent to verify a wire format
-                    // that is working perfectly. Reported here rather than
-                    // logged: RUST_LOG is unset on a default install, so a
-                    // `warn!` would reach nobody.
-                    "This model's entire reply arrived inside reasoning tags \
-                     (<think>, <thought>, <reasoning>), so once they were stripped there was no \
-                     answer left to show. The endpoint and the wire format are working — this \
-                     model emitted no answer text outside its own reasoning. Ask again, or use \
-                     a model that emits its answer outside its reasoning tags."
+                    // #908 diagnosed this branch; wayland#1231 c2 makes it
+                    // produce an ANSWER instead of only an accurate report of
+                    // there not being one.
+                    //
+                    // #908's own ledger conceded the limit in as many words:
+                    // "this makes the empty turn HONEST, it does not restore an
+                    // answer". The reported symptom was "not producing any
+                    // response at all", so a correct explanation is not the
+                    // property. This is the recovery.
+                    //
+                    // WHICH RECOVERY, and why. The issue names two candidates:
+                    // surface the captured reasoning as a clearly-labelled
+                    // answer, or take one automatic retry telling the model to
+                    // answer outside its tags. Surfacing wins on measurement,
+                    // not on taste. A retry costs a second full billed
+                    // round-trip and a second wait EVERY time this fires, and
+                    // buys no guarantee: capturing the c1 fixture took four
+                    // temperature-0 attempts against qwen3:8b to get one reply
+                    // that honoured an explicit instruction about where to put
+                    // its tags, so instruction-following on tag PLACEMENT is
+                    // exactly the thing that is unreliable here. A retry that
+                    // fails leaves the user with two empty turns instead of
+                    // one, at twice the cost. Surfacing is deterministic, free,
+                    // and the content is genuinely there -- the model DID
+                    // answer, our filter removed it. Labelling it is the honest
+                    // way to hand it back.
+                    //
+                    // c4's negative control survives by construction: this arm
+                    // is inside `raw_text_chars > 0`, so a turn that produced
+                    // nothing has nothing to recover and falls through to the
+                    // diagnosis below with no fabricated answer.
+                    let recovered = assistant_reasoning.take_captured();
+                    let recovered = recovered.trim();
+                    if !recovered.is_empty() {
+                        let labelled = format!("{REASONING_RECOVERY_LABEL}\n\n{recovered}");
+                        // The user reads it, and — wayland#1231 c3 — the
+                        // conversation keeps it. Pushing a Text block makes
+                        // `assistant_content` non-empty, so the commit below
+                        // fires and the next turn, a resumed session and the
+                        // next provider request all see the answer. Today the
+                        // empty turn is deliberately dropped, which is why c3
+                        // is a separate criterion from c2.
+                        self.output.emit_text_delta(&labelled, &self.current_msg_id);
+                        assistant_content.push(ContentBlock::Text {
+                            text: labelled.clone(),
+                        });
+                        assistant_text = labelled;
+                        self.output.emit_info(
+                            "The reply above was recovered from this model's reasoning tags \
+                             (<think>, <thought>, <reasoning>): it emitted no answer text \
+                             outside them, so there was nothing else to show. Use a model \
+                             that answers outside its reasoning tags to avoid this.",
+                        );
+                        RECOVERED_FROM_REASONING
+                    } else {
+                        // Raw text arrived and the filter removed all of it,
+                        // but nothing was CAPTURED to hand back — the stray
+                        // closing-tag shape (wayland#1231 c5), where the whole
+                        // reply is unmatched `</thought>` tags with no body
+                        // between them. There is no answer in there to
+                        // recover, so this stays the #908 diagnosis rather
+                        // than inventing one.
+                        "This model's entire reply arrived inside reasoning tags \
+                         (<think>, <thought>, <reasoning>), so once they were stripped there was no \
+                         answer left to show. The endpoint and the wire format are working — this \
+                         model emitted no answer text outside its own reasoning. Ask again, or use \
+                         a model that emits its answer outside its reasoning tags."
+                    }
                 } else if !assistant_content.is_empty() {
                     // Reasoning, and nothing else. The model thought and then
                     // said nothing; the thinking is not an answer and on most
@@ -16649,11 +16721,16 @@ impl AgentEngine {
                      The endpoint or model may be incompatible (verify it speaks the OpenAI \
                      chat-completions streaming format and that the model name is valid)."
                 };
-                self.emit_error(
-                    message,
-                    false,
-                    wcore_protocol::events::FailureCategory::Unknown,
-                );
+                // wayland#1231 c2: the recovery arm above already spoke on
+                // the ANSWER stream. Emitting an error beside a delivered
+                // answer would tell the user the turn failed when it did not.
+                if message != RECOVERED_FROM_REASONING {
+                    self.emit_error(
+                        message,
+                        false,
+                        wcore_protocol::events::FailureCategory::Unknown,
+                    );
+                }
             } else if raw_text_chars > filtered_text_chars {
                 // wayland#1221 c3 — the empty-turn notice above is the ONLY
                 // guard that ever announced an over-strip, and it fires only
