@@ -2768,10 +2768,29 @@ fn single_path_returning_fns(source: &str) -> (Vec<SinglePathFn>, usize) {
             continue;
         };
         let ret = head[arrow + 2..].trim().trim_end_matches(',').trim();
-        let single_path = ret == "PathBuf"
-            || ret == "Option<PathBuf>"
-            || ret == "Result<PathBuf>"
-            || ret.starts_with("Result<PathBuf,");
+        // Return-type SPELLINGS are not a closed alphabet. This was a list of
+        // four, and `std::io::Result<PathBuf>` -- the shape `std::fs::canonicalize`
+        // itself returns, already used in workspace_policy.rs -- was not on it, so
+        // a third resolver spelled the ordinary way passed the gate in silence
+        // (core#402 c1, refuted on its first grading). A gate keyed to a finite
+        // list of type spellings is the same defect as the gate keyed to a finite
+        // list of NAMES that this issue exists to close, one level along.
+        //
+        // Structural instead: any return type that mentions `PathBuf` as a whole
+        // token returns a path, unless it is plainly a COLLECTION of paths, which
+        // is a different thing from a resolver. Guessing wrong on the collection
+        // list fails CLOSED -- the function joins the inventory and has to be
+        // documented -- and that is the only direction this gate may err in.
+        let mentions_path = ret
+            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .any(|tok| tok == "PathBuf");
+        let is_collection = [
+            "Vec<", "VecDeque<", "HashSet<", "BTreeSet<", "HashMap<", "BTreeMap<",
+            "&[", "Box<[",
+        ]
+        .iter()
+        .any(|p| ret.contains(p));
+        let single_path = mentions_path && !is_collection;
         if !single_path {
             continue;
         }

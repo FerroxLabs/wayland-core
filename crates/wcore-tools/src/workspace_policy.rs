@@ -3980,9 +3980,13 @@ impl StoreScan {
 // ===========================================================================
 // RESOLVER INVENTORY -- FerroxLabs/wayland-core#402
 //
-// Every function in THIS FILE whose return type is a single path
-// (`PathBuf`, `Option<PathBuf>` or `Result<PathBuf, _>`) has exactly one
-// `INVENTORY:` row below, classified with the reason.
+// Every function in THIS FILE whose return type MENTIONS `PathBuf` and is not
+// a collection of paths has exactly one `INVENTORY:` row below, classified
+// with the reason. That is a structural test, not a list of spellings: the
+// first version of this gate accepted four literal spellings and was blind to
+// `std::io::Result<PathBuf>` -- the shape `std::fs::canonicalize` returns and
+// one this file already uses -- and to a path carried inside a tuple. Both let
+// a third resolver through in silence, which is the very defect below.
 //
 // It exists because core#356 c4's call-site gate is keyed to two literal
 // resolver names, so a THIRD path resolver arrived ungated: its call sites
@@ -4005,6 +4009,14 @@ impl StoreScan {
 //   already owns, or a constructor of a fixed location. No choice is offered
 //   at its call sites, so no call-site note is owed -- and the reason it is
 //   owed nothing is on the row rather than in a reviewer's head.
+//
+// INVENTORY: dir_stamp = helper: it resolves nothing. The path it returns is
+//   the one the directory walk already produced -- it neither canonicalizes,
+//   joins, nor re-attaches anything -- and its only job is to read that
+//   directory's mtime with the SAME instrument revalidation uses. No caller is
+//   offered a choice, so no call-site note is owed. It was invisible to the
+//   first gate because its path rides inside `Option<(PathBuf, SystemTime)>`,
+//   and a whitelist of four return-type spellings could not see a tuple.
 //
 // INVENTORY: canon_for_scope = resolver: the WEAK one. Canonicalizes what
 //   exists and re-attaches one missing leaf, so it answers where a path's
