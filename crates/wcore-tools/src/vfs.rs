@@ -661,13 +661,23 @@ pub(crate) mod publish_window {
     }
 
     /// Install `probe` for `dest` until the returned guard is dropped.
+    // Gated to the platforms its only callers are gated to. Those tests
+    // carry `#[cfg(any(target_os = "linux", target_os = "macos"))]` for
+    // reasons their own docs give (FerroxLabs/wayland#1268), so on Windows
+    // this is dead code and `clippy --all-targets -- -D warnings` -- which
+    // the Windows CI leg runs -- refuses to compile the test build. Matching
+    // the gate says WHERE the seam is used; an `allow(dead_code)` would only
+    // say that nobody is to ask.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) fn install(dest: &Path, probe: Probe) -> Guard {
         probes().lock().unwrap().insert(dest.to_path_buf(), probe);
         Guard(dest.to_path_buf())
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) struct Guard(PathBuf);
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     impl Drop for Guard {
         fn drop(&mut self) {
             probes().lock().unwrap().remove(&self.0);

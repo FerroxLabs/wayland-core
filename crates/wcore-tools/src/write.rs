@@ -97,7 +97,16 @@ impl WriteTool {
     ///
     /// Test-only. See [`WriteTool::publish_window_probe`] for why the window
     /// has no other entrance.
+    ///
+    /// Gated to the platforms its only callers are gated to. Those tests
+    /// carry `#[cfg(any(target_os = "linux", target_os = "macos"))]` for
+    /// reasons their own docs give (FerroxLabs/wayland#1268), so on Windows
+    /// this is dead code and `clippy --all-targets -- -D warnings` -- which
+    /// the Windows CI leg runs -- refuses to compile the test build. Matching
+    /// the gate says WHERE the seam is used; an `allow(dead_code)` would only
+    /// say that nobody is to ask.
     #[cfg(test)]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) fn with_publish_window_probe(mut self, probe: PublishWindowProbe) -> Self {
         self.publish_window_probe = Some(probe);
         self
