@@ -312,6 +312,36 @@ retries = 0
 filter = 'binary(walk_parallel_identity_test)'
 slow-timeout = { period = "60s", terminate-after = 3 }
 
+# `packaged_f04_run_is_repeatable_and_content_addressed` drives the sealed F04
+# artifact through two complete packaged runs. `[[profile.ci.overrides]]` below
+# already names it explicitly and gives it 120s x 4 = 480s. `[profile.default]`
+# had NO matching override, so locally it got 30s x 2 = a 60s hard kill against
+# a measured 58.7s best case -- a 1.9% margin -- and every lane running the
+# release brief's own gate command (`cargo nextest run -p <crate>`) uses the
+# default profile.
+#
+# MEASURED, and the measurement is why this is a mirror and not a guess. On
+# hetzner-dsm at origin/integ/f13, recorded on wayland-core#378: four
+# consecutive runs on a quiet host (load 27-34) under `default` PASS at 58.868 /
+# 58.922 / 58.676 / 58.989 s; the same tree on a busy host (load 57-104) is
+# KILLED at 60.006 s twice, including run-alone; the same tree under `ci` PASSES
+# at 67.08 s. The spread across the same host is at least 58.7 s -> 85.6 s, i.e.
+# it can exceed the default budget by 43% while remaining perfectly correct.
+# It killed THIS lane's own gate run on 2026-08-30: `TRY 1 TMT [60.005s]`,
+# `TRY 2 TMT [60.005s]`, `Summary [135.783s] 7657 tests run: 7656 passed, 1
+# timed out`.
+#
+# The four tight 58.9s samples were all taken inside one quiet window and were
+# first read as evidence that a branch had regressed the test. That reading is
+# RETRACTED on #378: a commit touching no production source at all measured
+# 72.47 s on the same host. The spread is the host, not the tree.
+#
+# Mirrors the ci override exactly rather than inventing a third number, so the
+# two profiles cannot drift apart again.
+[[profile.default.overrides]]
+filter = 'test(=packaged_f04_run_is_repeatable_and_content_addressed)'
+slow-timeout = { period = "120s", terminate-after = 4 }
+
 # ── CI profile ─────────────────────────────────────────────────────────────
 [profile.ci]
 # In CI: always show output for failed tests, machine-readable JUnit

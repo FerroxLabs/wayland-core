@@ -238,6 +238,105 @@ want_grep "the preserved attempts are uploaded with the JUnit artifact" \
 want_grep "the retry-flake grader is still invoked from the shared evidence gate" \
   "$ROOT/.github/scripts/assert-test-evidence.sh" "grade-retry-flakes.sh"
 
+# ...and the step that RUNS that gate must not be able to exclude itself at all.
+# Measured on run 33303418632: the wrapper preserved outer-attempt-1.xml, the
+# report job downloaded it, and `report` still concluded SUCCESS because this
+# step's `if:` named only `needs.ci`, which was `skipped` on that push.
+#
+# TWO FORMS OF THIS ASSERTION HAVE ALREADY BEEN REFUTED, AND BOTH FAILED THE
+# SAME WAY -- a NEGATIVE test over an OPEN alphabet:
+#
+#   v1  "the condition also names ci-linux" -- passes for any list of job
+#       names, including one that omits the next producing leg. Retracted.
+#   v2  "the condition contains no `needs` reference AT ALL" -- refuted by a
+#       verifier with two conditions that name no job and still switch the gate
+#       off: `${{ hashFiles('junit-reports/**/*.xml') != '' }}` goes inert
+#       precisely when there is no evidence, and `${{ success() }}` goes inert
+#       once any earlier step in the job has failed. `needs`-absence is
+#       NECESSARY, NEVER SUFFICIENT.
+#
+# v3 asks the POSITIVE, closed question instead: is the condition EXACTLY one
+# of {always(), !cancelled()}? That is decidable by string equality over a
+# two-element set, and those two are the only GitHub expressions that both
+# survive an earlier failed step and cannot be falsified by an upstream job.
+# Every other condition -- named, unnamed, or invented next year -- is rejected
+# without this test having to know what it is.
+#
+# The repository-wide form of this sweep, over every workflow and every gate
+# script, lives in report-gate-wiring.test.sh (it is what caught the SECOND
+# call site of the same gate, in e2e.yml). This arm stays here because it is
+# wayland#1177 c1's own anchor.
+#
+# This is a WIRING check and says so: it proves the condition cannot exclude
+# itself, not that the report check reds -- that is Part E's job, and a live
+# runner's.
+gate_condition() { # the `if:` of the evidence-gate step, up to its `env:`
+  awk '/^      - name: Assert test evidence exists/ {f=1; next}
+       f && /^        env:/ {exit}
+       f {print}' "$CI"
+}
+GATE_COND=$(gate_condition)
+# ANTI-VACUITY: if the step is renamed or its shape changes the extraction goes
+# empty, and an empty string is not in the allowlist either -- but this arm
+# names the real cause instead of letting the assertion below blame the
+# condition.
+if printf '%s' "$GATE_COND" | grep -q 'if:'; then
+  ok "the evidence gate's condition can be located (anti-vacuity)"
+else
+  bad "the evidence gate's condition can be located (anti-vacuity)"
+  printf '       | extracted: [%s]\n' "$GATE_COND"
+fi
+
+# Normalise `        if: ${{ !cancelled() }}` down to `!cancelled()`: drop the
+# key, the expression wrapper and all whitespace, then compare for equality.
+admits_unconditionally() { # admits_unconditionally <raw `if:` line(s)>
+  local norm
+  norm=$(printf '%s' "$1" | tr -d '\n' | sed -e 's/^ *if: *//' \
+           -e 's/^\${{//' -e 's/}}$//' -e 's/[[:space:]]//g')
+  case "$norm" in
+    'always()'|'!cancelled()') return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+if admits_unconditionally "$GATE_COND"; then
+  ok "the evidence gate is admitted by a status-check function, nothing else"
+else
+  bad "the evidence gate is admitted by a status-check function, nothing else"
+  printf '       | %s\n' "$GATE_COND"
+fi
+
+# POLARITY, in the same run. An allowlist read backwards accepts everything and
+# reports a clean tree, which is indistinguishable from a correct one. These are
+# the verifier's own refuting mutations plus the two retracted forms: every one
+# of them must be REJECTED, and the two sanctioned forms must be ACCEPTED.
+polarity_fail=0
+while IFS= read -r cond; do
+  [ -z "$cond" ] && continue
+  if admits_unconditionally "        if: $cond"; then
+    polarity_fail=1
+    printf '       | wrongly accepted: %s\n' "$cond"
+  fi
+done <<'BADCONDS'
+${{ hashFiles('junit-reports/**/*.xml') != '' }}
+${{ success() }}
+${{ needs.ci.result != 'cancelled' }}
+${{ needs.ci.result != 'skipped' || needs['ci-linux'].result != 'skipped' }}
+${{ always() && needs.ci.result != 'skipped' }}
+${{ failure() }}
+BADCONDS
+if [ "$polarity_fail" -eq 0 ]; then
+  ok "the admission test rejects every condition that can go inert (polarity)"
+else
+  bad "the admission test rejects every condition that can go inert (polarity)"
+fi
+if admits_unconditionally "        if: \${{ always() }}" &&
+   admits_unconditionally "        if: !cancelled()"; then
+  ok "the admission test still accepts the two sanctioned forms (anti-vacuity)"
+else
+  bad "the admission test still accepts the two sanctioned forms (anti-vacuity)"
+fi
+
 # ── PART D — a setup failure must not masquerade as a test failure ─────────
 #
 # wayland#1177 c1. On run 33227927478 the wrapper died at `mkdir -p
@@ -289,6 +388,85 @@ rm -rf "$D"
 want_grep "the evidence tree is reserved before any root-owned target/ exists" \
   "$CI" "mkdir -p target/nextest/ci/outer-attempts"
 
+
+# ── PART E — the COMPOSED report check, not a grep for its name ────────────
+#
+# wayland#1177 c2 asks for "a test demonstrating that a failure on attempt 1
+# followed by a pass on attempt 2 is still visible to the REQUIRED `report`
+# CHECK". Parts A-D grade the wrapper and the grader as separate programs, and
+# Part C then greps ci.yml for the string that wires them together. A grep for
+# a filename is not a demonstration that the report check sees anything: the
+# 0.13.12 close-sweep refuted the earlier revision of this suite on exactly
+# that point, and the proof it gave is that all 19 cases were GREEN on a tree
+# where the mechanism was 100% inoperative on the real runner.
+#
+# This part removes the substitution. It builds the artifact tree the `report`
+# job actually downloads -- attempt 2's clean junit.xml beside the preserved
+# outer-attempts/ directory -- and then RUNS `.github/scripts/assert-test-
+# evidence.sh`, which IS the entry point the required check invokes, rather
+# than asserting that its name appears somewhere. The composed stack is what
+# is graded, because a trait-level pass through each half separately is what
+# let the break ship.
+ASSERT_GATE="$ROOT/.github/scripts/assert-test-evidence.sh"
+
+# report_gate <label> <evidence-dir> <want-exit>
+report_gate() {
+  local label="$1" dir="$2" want="$3" out rc
+  out=$(cd "$ROOT" && EVIDENCE_DIR="$dir" FLAKE_ALLOWLIST="$EMPTY_ALLOWLIST" \
+    FLAKE_GATE_TODAY="2026-08-29" UPSTREAM_RESULT="success" MIN_TESTS=1 \
+    EXPECTED_MIN=1 LABEL="outer-retry-evidence self-test" \
+    bash "$ASSERT_GATE" 2>&1)
+  rc=$?
+  if [ "$rc" = "$want" ]; then
+    ok "$label"
+  else
+    bad "$label (want exit=$want, got exit=$rc)"
+    printf '%s\n' "$out" | sed 's/^/       | /'
+  fi
+  LAST_REPORT_OUT="$out"
+}
+
+E_PASS="$TMP/report-composed"
+clean_junit "$E_PASS/junit.xml"
+failing_junit "$E_PASS/outer-attempts/outer-attempt-1.xml" "races_under_load"
+printf 'success\n' >"$E_PASS/outer-attempts/final-status.txt"
+
+# THE CRITERION ITSELF: attempt 1 failed, attempt 2 passed, and the required
+# check reds the run over it.
+report_gate "attempt-1 failure retried into a pass REDS the required report check" \
+  "$E_PASS" 1
+
+case "$LAST_REPORT_OUT" in
+  *"wayland#1177"*)
+    ok "the required check names the erased failure and the ticket" ;;
+  *)
+    bad "the required check names the erased failure and the ticket (got: $LAST_REPORT_OUT)" ;;
+esac
+case "$LAST_REPORT_OUT" in
+  *"races_under_load"*)
+    ok "the required check names WHICH test was erased" ;;
+  *)
+    bad "the required check names WHICH test was erased (got: $LAST_REPORT_OUT)" ;;
+esac
+
+# NEGATIVE CONTROL 1 — without the preserved attempt the very same tree is
+# GREEN. Without this arm the case above is satisfied by a gate that reds
+# everything, which is worth nothing.
+E_CLEAN="$TMP/report-composed-clean"
+clean_junit "$E_CLEAN/junit.xml"
+report_gate "the same evidence set with NO preserved attempt stays green" \
+  "$E_CLEAN" 0
+
+# NEGATIVE CONTROL 2 — a step that failed on its FINAL attempt is already red
+# on its own account and its junit.xml still describes the failure. Reporting
+# it here as well would turn every ordinary red into a second, misleading
+# complaint about retries, so this must stay green.
+E_FINAL="$TMP/report-composed-final-failure"
+clean_junit "$E_FINAL/junit.xml"
+failing_junit "$E_FINAL/outer-attempts/outer-attempt-1.xml" "races_under_load"
+printf 'failure\n' >"$E_FINAL/outer-attempts/final-status.txt"
+report_gate "a step that failed on its FINAL attempt is not double-reported" \
+  "$E_FINAL" 0
 echo ""
 echo "outer-retry-evidence: ${PASS} passed, ${FAIL} failed"
 [ "$FAIL" -eq 0 ]

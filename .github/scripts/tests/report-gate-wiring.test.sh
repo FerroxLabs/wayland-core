@@ -55,6 +55,42 @@ want_grep "ci.yml report job runs the shared evidence gate" \
 want_grep "e2e.yml report job runs the shared evidence gate" \
   "$E2E" "run: bash .github/scripts/assert-test-evidence.sh"
 
+# ── ADMISSION: the sweep, over every workflow and every gate script ──────────
+#
+# Calling the gate is not enough; the step that calls it has to actually RUN.
+# ci.yml's caller switched itself off for months while the evidence sat in the
+# artifact it had just downloaded (wayland#1177 c1), and e2e.yml's caller still
+# carried the same shape after ci.yml's was fixed -- which is the whole reason
+# this is a SWEEP and not two more `want_grep`s. gate-admission.py discovers the
+# gates from their own `ADMISSION:` declarations and the call sites by parsing
+# .github/workflows/, so neither a third caller nor a fourth gate can be missed
+# by omission. It proves its own polarity in the same run.
+ADMISSION="$HERE/gate-admission.py"
+if [ ! -f "$ADMISSION" ]; then
+  bad "the admission sweep exists ($ADMISSION)"
+elif ! python3 -c "import yaml" 2>/dev/null && ! pip install --quiet pyyaml 2>/dev/null; then
+  bad "PyYAML is available to read the workflows (install it; do not skip the sweep)"
+else
+  sweep_out=$(python3 "$ADMISSION" 2>&1) || true
+  sweep_seen=0
+  while IFS= read -r line; do
+    case "$line" in
+      "PASS "*) ok "${line#PASS }"; sweep_seen=$((sweep_seen + 1)) ;;
+      "FAIL "*) bad "${line#FAIL }"; sweep_seen=$((sweep_seen + 1)) ;;
+      "INFO "*) printf '       | %s\n' "${line#INFO }" ;;
+      *) printf '       | %s\n' "$line" ;;
+    esac
+  done <<SWEEP
+$sweep_out
+SWEEP
+  # The sweep reporting NOTHING must not read as the sweep passing.
+  if [ "$sweep_seen" -ge 10 ]; then
+    ok "the admission sweep reported its assertions (anti-vacuity)"
+  else
+    bad "the admission sweep reported its assertions (anti-vacuity; got $sweep_seen)"
+  fi
+fi
+
 # `report` is a REQUIRED status context on main. Exactly one job may emit it,
 # and it must be pinned by an explicit name rather than by a job id.
 want_grep "ci.yml pins the required check name" "$CI" "    name: report"
@@ -67,8 +103,14 @@ fi
 
 # The e2e gate must NOT be skipped when the e2e job itself was skipped: "no leg
 # ran at all" is the failure it exists to catch, not a reason to stand down.
-want_grep "e2e gate runs unless the suite was cancelled" \
-  "$E2E" "if: \${{ needs.e2e.result != 'cancelled' }}"
+#
+# THE FORM OF THIS ASSERTION IS THE DEFECT IT NOW GUARDS. Until 2026-08-31 it
+# pinned the literal `if: ${{ needs.e2e.result != 'cancelled' }}` -- so it
+# REQUIRED the shape that wayland#1177 c1 had just been fixed for in ci.yml,
+# and would have reddened the fix. Which exact string a condition is, is not
+# what matters; whether the condition can go inert is. The admission sweep
+# above decides that for every gate call site in the repository, so all that is
+# left here is the one e2e-specific half: `skipped` must not stand it down.
 want_no_grep "e2e gate does not stand down on a skipped suite" \
   "$E2E" "needs.e2e.result != 'skipped'"
 

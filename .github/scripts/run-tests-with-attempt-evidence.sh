@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# ADMISSION: caller-decides -- this is the test RUNNER, not a gate over its
+# output. Running the suite after the job has already failed its setup would
+# produce evidence about a broken environment and cost an hour doing it.
+#
 # PER-ATTEMPT EVIDENCE UNDER AN OUTER RETRY. FerroxLabs/wayland#1177.
 #
 # ── THE DEFECT THIS CLOSES ─────────────────────────────────────────────────

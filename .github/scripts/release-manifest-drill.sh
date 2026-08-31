@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# ADMISSION: unconditional -- a supply-chain drill that only runs when the
+# rest of the job is healthy proves nothing about the runs that matter.
+#
 # End-to-end drill for the signed release manifest (SR-29-9 / SR-29-11).
 #
 # Mints a corpus with the REAL `wayland-release` binary — using the exact

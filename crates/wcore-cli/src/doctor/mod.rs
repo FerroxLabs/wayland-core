@@ -1570,7 +1570,21 @@ mod tests {
         }
     }
 
+    // #[serial], because these two READ a process-global that a sibling test
+    // WRITES. FerroxLabs/wayland-core#373 c5: measured red on run 6 of a
+    // 10-run `cargo test --workspace --lib --no-fail-fast` loop on hetzner-dsm
+    // -- "expected `which sh` to resolve on Unix". The window is
+    // `the_browser_row_recommends_the_compiled_backend_not_chromium` above,
+    // which replaces PATH with a temp dir for the duration of one call. That
+    // test already carries `/bin/sh` across (18e59e85f), which is why the
+    // `goal_cmd` worker failures it was written for stopped -- but `which()`
+    // does not need `sh`: it SPAWNS THE EXTERNAL `which` BINARY off PATH, and
+    // that binary is not carried across, so the lookup returns None while the
+    // window is open. Serialising the readers is the fix rather than adding a
+    // second symlink, because the next global this test needs would need a
+    // third.
     #[tokio::test]
+    #[serial]
     async fn which_returns_some_for_known_binary() {
         // `sh` is virtually guaranteed on Unix CI; on Windows we
         // skip the assertion because the doctor doesn't probe `sh`.
@@ -1581,6 +1595,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn which_returns_none_for_unlikely_binary() {
         let r = which("definitely-not-a-real-binary-w5-doctor").await;
         assert!(r.is_none());

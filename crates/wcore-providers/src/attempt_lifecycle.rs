@@ -560,11 +560,14 @@ mod tests {
 
     #[tokio::test]
     async fn transport_failure_is_finished_before_the_error_escapes() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind fixture port");
-        let address = listener.local_addr().expect("fixture address");
-        drop(listener);
+        // Reserved, not dropped: see `wcore_egress::refused_port`. The
+        // dropped-listener form of this fixture reddened this exact test on a
+        // shared build host, because another process took the port between the
+        // drop and the connect and the assertion below then graded a live
+        // server. The guard must outlive the assertion.
+        let refused =
+            wcore_egress::refused_port::RefusedPort::reserve().expect("bind fixture port");
+        let address = refused.addr();
         let lifecycle = Arc::new(RecordingLifecycle::default());
         let lifecycle_object: Arc<dyn ProviderAttemptLifecycle> = lifecycle.clone();
         let client =

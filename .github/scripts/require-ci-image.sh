@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# ADMISSION: unconditional -- by construction: this file exists to be the
+# precondition for steps carrying `if: ${{ !cancelled() }}` (see below).
+#
 # Precondition for steps that carry `if: ${{ !cancelled() }}` and therefore run
 # even when an earlier step in the job failed.
 #
