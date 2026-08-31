@@ -864,17 +864,36 @@ fn zero_length_lease_is_reclaimed_not_refused_forever() {
     fs::remove_file(&quarantined[0]).unwrap();
 }
 
+/// A non-empty unparseable lease is QUARANTINED and reported, not refused
+/// forever — the guard rail on the 0-byte fix above, restated by `#369` c1.
+///
+/// # This test used to assert the opposite, and the reversal is deliberate
+///
+/// It read: "a non-empty lease that will not parse is indistinguishable from a
+/// tampered one -- it may carry real ACL grants -- so it must keep refusing."
+/// The premise is true; the conclusion does not follow, and `#369` is the
+/// measurement that shows why. **Refusing revokes nothing.** It leaves exactly
+/// the same ACEs on disk as quarantining does, and adds a permanent, total
+/// outage of sandboxed execution on the machine — twelve days on SEANDESKTOP,
+/// with `is_available()` returning a bare `false` and the cause visible only
+/// to someone who provoked an `execute()` and read the error. So the old
+/// disposition was dominated on both axes: same grants, worse availability.
+///
+/// What the old test was really protecting is kept in full, and is what this
+/// one asserts:
+///
+/// * the file is MOVED, never deleted, so a tampered or truncated lease stays
+///   inspectable and the recorded grants are not destroyed;
+/// * the operator is TOLD, loudly, at `ERROR` — this is not the silent
+///   conversion into a reclaim the old comment warned about;
+/// * and the residual is reported as UNKNOWN. A lease that could not be parsed
+///   must never be described as having granted nothing, which is the one way
+///   this reversal could actually lose something.
 #[test]
-fn a_non_empty_unreadable_lease_still_fails_closed() {
-    // The guard rail on the fix above. Reclamation is keyed on zero LENGTH
-    // only. A non-empty lease that will not parse is indistinguishable from a
-    // tampered one -- it may carry real ACL grants -- so it must keep refusing.
-    // Widening the 0-byte reclamation to "anything unreadable" would silently
-    // convert this deliberate fail-closed into a reclaim, which is why this
-    // test sits next to it rather than in the existing ignore-gated suite.
-    // No reclamation-sink lock: this sweep fails closed before it reclaims
-    // anything, so it can never emit a report.
+fn a_non_empty_unreadable_lease_is_quarantined_and_reported() {
+    let _lock = reclamation_sink_lock();
     let (_local, directory) = private_lease_root();
+    let _ = take_emitted_reclamations();
     let path = write_raw_lease(
         &directory,
         "malformed",
@@ -882,17 +901,45 @@ fn a_non_empty_unreadable_lease_still_fails_closed() {
     );
     assert!(fs::metadata(&path).unwrap().len() > 0);
 
-    let result = unsafe { recover_dead_leases_locked(&directory) };
+    unsafe { recover_dead_leases_locked(&directory) }
+        .expect("one unparseable lease must not disable the whole backend (#369 c1)");
 
     assert!(
-        result.is_err(),
-        "a non-empty unparseable lease must still fail closed, not be reclaimed"
+        !path.exists(),
+        "the unparseable lease is still in the lease directory, so the next acquisition meets \
+         it again and the backend stays down"
+    );
+    let quarantined = quarantined_for(&path);
+    assert_eq!(
+        quarantined.len(),
+        1,
+        "it must be MOVED to quarantine, not deleted -- a tampered or truncated lease has to \
+         stay inspectable: {quarantined:?}"
+    );
+
+    let reports = take_emitted_reclamations();
+    assert_eq!(
+        reports.len(),
+        1,
+        "the quarantine must be reported; a silent conversion into a reclaim is exactly what \
+         the previous disposition warned about: {reports:?}"
     );
     assert!(
-        path.exists(),
-        "a non-empty unparseable lease must NOT be quarantined: it may hold real grants"
+        reports[0].contains("could not be read"),
+        "the report must say the contents could not be read: {}",
+        reports[0]
     );
-    fs::remove_file(&path).unwrap();
+    assert!(
+        !reports[0].contains("nothing was left behind"),
+        "a lease that could not be parsed must NEVER be reported as having granted nothing: \
+         {}",
+        reports[0]
+    );
+
+    // Permanence was the finding, so prove the SECOND pass is clean too.
+    unsafe { recover_dead_leases_locked(&directory) }
+        .expect("recovery must stay clean after quarantining an unparseable lease");
+    fs::remove_file(&quarantined[0]).unwrap();
 }
 
 #[test]
