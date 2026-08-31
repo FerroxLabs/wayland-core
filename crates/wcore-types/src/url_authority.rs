@@ -118,9 +118,58 @@ pub fn publishable_endpoint(raw: &str) -> Option<String> {
     Some(parsed.to_string())
 }
 
+/// `raw` with any userinfo REMOVED, and whether there was any to remove.
+///
+/// `None` when `raw` is not a URL carrying a host — the caller then knows
+/// nothing about where an authority begins or ends, and must leave the string
+/// alone rather than guess.
+///
+/// For a redaction surface. The boundary between userinfo and host is the
+/// parser's, never a `find('@')` before the first `/`:
+/// `https://evil.example\@github.com/x` carries NO userinfo at all — it is a
+/// request to `evil.example` with the path `/@github.com/x` — and a hand cut
+/// that reports one there renders the SMUGGLED host as the surviving one,
+/// making it indistinguishable from an honestly credential-bearing
+/// `github.com` URL. That is FerroxLabs/wayland#1252 site C.
+#[must_use]
+pub fn strip_userinfo(raw: &str) -> Option<(bool, String)> {
+    let mut parsed = Url::parse(raw.trim()).ok()?;
+    parsed.host()?;
+    let had_userinfo = !parsed.username().is_empty() || parsed.password().is_some();
+    // set_username / set_password return Err only for a cannot-be-a-base URL,
+    // which cannot have reached here: it would have no host.
+    let _ = parsed.set_username("");
+    let _ = parsed.set_password(None);
+    Some((had_userinfo, parsed.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #1252 site C, at the parser. The smuggled spelling has no userinfo to
+    /// strip; the honest one does, and the two must not converge.
+    #[test]
+    fn strip_userinfo_reports_only_userinfo_the_parser_sees() {
+        assert_eq!(
+            strip_userinfo(r"https://evil.example\@github.com/x"),
+            Some((false, "https://evil.example/@github.com/x".to_string()))
+        );
+        assert_eq!(
+            strip_userinfo("https://user:pw@github.com/x"),
+            Some((true, "https://github.com/x".to_string()))
+        );
+        // A query string is NOT dropped here — this strips userinfo and only
+        // userinfo; `publishable_endpoint` is the function that drops both.
+        assert_eq!(
+            strip_userinfo("https://github.com/x?token=t"),
+            Some((false, "https://github.com/x?token=t".to_string()))
+        );
+        // Not a URL with a host: the caller is told nothing rather than a
+        // guess it would render as fact.
+        assert_eq!(strip_userinfo("not-a-url"), None);
+        assert_eq!(strip_userinfo("mailto:someone@example.com"), None);
+    }
 
     /// The two spellings that defeated the hand cuts, side by side with the
     /// plain URL they were disguised as. `\` and `?` are read by the parser as

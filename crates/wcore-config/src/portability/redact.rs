@@ -153,18 +153,53 @@ pub fn scrub_detail(value: &str) -> String {
 }
 
 /// `scheme://user:pass@host/…` ⇒ `scheme://<redacted>@host/…`
+///
+/// Whitespace-delimited, because a `details` value is as often a command line
+/// carrying a URL (`srv --url https://u:p@h/x`) as it is a bare URL, and a
+/// token is the largest unit the URL parser can read. Every token that is not
+/// a host-bearing URL is copied through byte for byte, whitespace included.
 fn strip_url_userinfo(v: &str) -> String {
-    let Some(scheme_end) = v.find("://") else {
-        return v.to_string();
+    let mut out = String::with_capacity(v.len());
+    let mut token_start: Option<usize> = None;
+    for (i, c) in v.char_indices() {
+        if c.is_whitespace() {
+            if let Some(start) = token_start.take() {
+                out.push_str(&redact_token_userinfo(&v[start..i]));
+            }
+            out.push(c);
+        } else if token_start.is_none() {
+            token_start = Some(i);
+        }
+    }
+    if let Some(start) = token_start {
+        out.push_str(&redact_token_userinfo(&v[start..]));
+    }
+    out
+}
+
+/// One whitespace-free token.
+///
+/// The userinfo/host boundary comes from [`wcore_types::url_authority`] — the
+/// one authority parser — and never from a `find('@')` before the first `/`.
+/// That cut reported userinfo where the parser sees none, so
+/// `https://evil.example\@github.com/x` (a request to `evil.example`, path
+/// `/@github.com/x`) rendered as `https://<redacted>@github.com/x` — the same
+/// string an honestly credential-bearing `github.com` URL produces, leaving a
+/// reader unable to tell that the first one dials somewhere else entirely.
+/// FerroxLabs/wayland#1252 site C.
+fn redact_token_userinfo(token: &str) -> String {
+    let Some((had_userinfo, cleaned)) = wcore_types::url_authority::strip_userinfo(token) else {
+        return token.to_string();
     };
-    let rest_start = scheme_end + 3;
-    let rest = &v[rest_start..];
-    // Userinfo ends at the first `@` that precedes the first `/`.
-    let authority_end = rest.find('/').unwrap_or(rest.len());
-    let Some(at) = rest[..authority_end].find('@') else {
-        return v.to_string();
-    };
-    format!("{}<redacted>@{}", &v[..rest_start], &rest[at + 1..])
+    if !had_userinfo {
+        return token.to_string();
+    }
+    // The only splice here is on OUR OWN parser output, where a host-bearing
+    // URL always serialises as `scheme://host…`.
+    match cleaned.split_once("://") {
+        Some((scheme, rest)) => format!("{scheme}://<redacted>@{rest}"),
+        None => cleaned,
+    }
 }
 
 /// `?token=abc&x=1` ⇒ `?token=<redacted>&x=1`

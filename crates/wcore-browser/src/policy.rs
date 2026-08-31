@@ -1139,14 +1139,6 @@ fn parse_legacy_octet(s: &str) -> Option<u64> {
 /// nothing — the fail-closed answer on the allow side, and on the deny side
 /// no worse than the status quo for an entry that was never a host.
 fn normalize_origin_pattern(pattern: &str) -> Option<(bool, String)> {
-    let (wildcard, host) = strip_pattern_decorations(pattern)?;
-    canonical_host(host).map(|host| (wildcard, host))
-}
-
-/// Textual half of [`normalize_origin_pattern`]: peel the decorations a
-/// URL-shaped spelling carries down to `(is_wildcard, bare_host_text)`.
-/// Borrows rather than allocating — every step is a prefix/suffix trim.
-fn strip_pattern_decorations(pattern: &str) -> Option<(bool, &str)> {
     let rest = pattern.trim();
     let rest = strip_scheme_ci(rest, "https://")
         .or_else(|| strip_scheme_ci(rest, "http://"))
@@ -1159,43 +1151,19 @@ fn strip_pattern_decorations(pattern: &str) -> Option<(bool, &str)> {
     if rest.contains("://") {
         return None;
     }
-    // Path next: a host never contains `/`.
-    let rest = rest.split('/').next().unwrap_or(rest);
-    // Userinfo. WHATWG takes the LAST `@` as the delimiter, so a userinfo
-    // field containing `@` cannot smuggle a different host past this.
-    let rest = match rest.rsplit_once('@') {
-        Some((_userinfo, host)) => host,
-        None => rest,
-    };
-    // Then the port.
-    let host = if rest.starts_with('[') {
-        // An IPv6 literal keeps its brackets, which is the form
-        // `Url::host_str()` hands the matcher.
-        match rest.find(']') {
-            Some(close) => &rest[..=close],
-            None => rest,
-        }
-    } else if rest.matches(':').count() >= 2 {
-        // Two or more colons and no brackets: an IPv6 literal written the way
-        // an operator writes one. `canonical_host` re-adds the brackets.
-        rest
-    } else {
-        match rest.split_once(':') {
-            // A single colon is a port only if what follows it IS a port.
-            // `data:text/html,...` reaches here as `data:text`, and must not
-            // become a working entry for the host `data`.
-            Some((host, port)) if port.chars().all(|c| c.is_ascii_digit()) => host,
-            Some(_) => return None,
-            None => rest,
-        }
-    };
-    Some(match host.strip_prefix("*.") {
+    // `*.` is OUR glob syntax, not URL syntax, and `*` is a forbidden host
+    // code point — so it comes off before the parser sees the rest. It is the
+    // ONLY thing peeled here. Userinfo, port, path, and the `\` a special
+    // scheme reads as a path separator are all the parser's to resolve; see
+    // [`canonical_host`].
+    let (wildcard, rest) = match rest.strip_prefix("*.") {
         Some(suffix) => (true, suffix),
-        None => (false, host),
-    })
+        None => (false, rest),
+    };
+    canonical_host(rest).map(|host| (wildcard, host))
 }
 
-/// Canonicalise a bare host through the same parser that produced the
+/// Canonicalise an origin pattern through the same parser that produced the
 /// request's host, so both sides of the comparison arrive in one spelling.
 ///
 /// This is the whole point of the function: ASCII case folding, IDN →
@@ -1203,21 +1171,39 @@ fn strip_pattern_decorations(pattern: &str) -> Option<(bool, &str)> {
 /// WHATWG host parser's rules, and reproducing them by hand here would only
 /// produce a second, subtly different set of spellings that never match.
 ///
-/// An unbracketed IPv6 literal is bracketed first — `Url` requires the
-/// brackets, `host_str()` returns them, and an operator writes neither.
-fn canonical_host(host: &str) -> Option<String> {
-    if host.is_empty() {
+/// An unbracketed IPv6 literal is bracketed on a RETRY — `Url` requires the
+/// brackets, `host_str()` returns them, and an operator writes neither. The
+/// retry is second rather than first so that a pattern which already parses
+/// (`user:pw@[::1]`, whose two colons are not an IPv6 literal at all) is read
+/// as written.
+///
+/// The pattern arrives here with its scheme and any `*.` removed and NOTHING
+/// else: userinfo, port, path and the `\` that a special scheme reads as a
+/// path separator are resolved by [`wcore_types::url_authority`], the one
+/// authority parser. The hand cut that stood in front of this function stopped
+/// at `/ ? #` and took the last `@`-separated part, so an entry spelled
+/// `https://evil.example\@github.com` normalised to `github.com` and admitted
+/// a host other than the one written — FerroxLabs/wayland#1252 site B.
+fn canonical_host(pattern: &str) -> Option<String> {
+    if pattern.is_empty() {
         return None;
     }
-    let bracketed;
-    let host = if !host.starts_with('[') && host.matches(':').count() >= 2 {
-        bracketed = format!("[{host}]");
-        bracketed.as_str()
-    } else {
-        host
-    };
-    let url = Url::parse(&format!("https://{host}/")).ok()?;
-    Some(strip_root_dot(url.host_str()?).to_string())
+    host_via_parser(pattern).or_else(|| {
+        (!pattern.starts_with('[')).then(|| host_via_parser(&format!("[{pattern}]")))?
+    })
+}
+
+/// The host `pattern` names, in the exact spelling `Url::host_str()` hands the
+/// matcher — IPv6 bracketed, domain lowercased and IDNA-folded, legacy IPv4
+/// canonicalised.
+fn host_via_parser(pattern: &str) -> Option<String> {
+    match wcore_types::url_authority::dialed_host(&format!("https://{pattern}/"))? {
+        wcore_types::url_authority::Host::Domain(domain) => {
+            Some(strip_root_dot(&domain).to_string())
+        }
+        wcore_types::url_authority::Host::Ipv4(addr) => Some(addr.to_string()),
+        wcore_types::url_authority::Host::Ipv6(addr) => Some(format!("[{addr}]")),
+    }
 }
 
 /// Drop one trailing DNS root label.

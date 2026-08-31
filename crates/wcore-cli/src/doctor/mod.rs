@@ -996,28 +996,29 @@ fn base_url_caveat(cfg: &wcore_config::config::Config) -> Vec<String> {
         Some(p) => crate::provider_keys::validation_endpoint(p, ""),
         None => return Vec::new(),
     };
-    let vendor_host = host_of(&url);
-    if vendor_host.is_empty() || vendor_host == host_of(&cfg.base_url) {
+    // Both hosts come from `wcore_types::url_authority` — the ONE authority
+    // parser — rather than from a cut of our own (wayland#1252 site A). The
+    // cut that stood here stopped at `/ ? #` and took the last `@`-separated
+    // part, so `https://evil.example\@api.openai.com/v1` read as the vendor's
+    // own host and suppressed this caveat on a request that reaches
+    // `evil.example`.
+    //
+    // A `base_url` the parser cannot read is `None`, which is NOT equal to the
+    // vendor host, so the caveat PRINTS. That is the safe direction for a
+    // diagnostic: saying the verdict may not cover the configured endpoint
+    // costs two lines, and staying silent is the #1079 defect itself.
+    let Some(vendor_host) = wcore_types::url_authority::dialed_host_str(&url) else {
+        return Vec::new();
+    };
+    if wcore_types::url_authority::dialed_host_str(&cfg.base_url).as_deref()
+        == Some(vendor_host.as_str())
+    {
         return Vec::new();
     }
     vec![
         format!("           checked against {vendor_host}, NOT the base url above —"),
         "           a proxy or gateway there is not covered by this verdict".to_string(),
     ]
-}
-
-/// Host portion of a URL, without pulling in a URL parser for one comparison.
-/// Returns `""` when there is no `//` authority to read.
-fn host_of(url: &str) -> &str {
-    let after_scheme = match url.split_once("//") {
-        Some((_, rest)) => rest,
-        None => return "",
-    };
-    let host = after_scheme
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or_default();
-    host.rsplit_once('@').map_or(host, |(_, h)| h)
 }
 
 /// **Printed, deliberately NOT a `CheckResult` row** — the same reason
@@ -1916,19 +1917,6 @@ mod tests {
             credential_verdict(&cfg, true, &|_, _| KeyVerdict::Accepted),
             CredentialVerdict::NoCredential
         );
-    }
-
-    #[test]
-    fn host_of_reads_the_authority_and_nothing_else() {
-        assert_eq!(
-            host_of("https://api.anthropic.com/v1/models"),
-            "api.anthropic.com"
-        );
-        assert_eq!(host_of("https://api.openai.com"), "api.openai.com");
-        assert_eq!(host_of("https://h.example/v1?key=secret"), "h.example");
-        // Credentials in the authority must not be mistaken for the host.
-        assert_eq!(host_of("https://user:pw@h.example/v1"), "h.example");
-        assert_eq!(host_of("not-a-url"), "");
     }
 
     #[test]
