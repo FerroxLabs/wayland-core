@@ -917,8 +917,53 @@ jobs:
     # self-hosted boxes ever die, Windows work QUEUES rather than passing
     # vacuously — visible as a pending required check, never a false green —
     # and this leg is one `[ci-windows]` commit tag away from covering it.
+    #
+    # 2026-08-31 (`lane/f13-s2-win-proc`, FerroxLabs/wayland-core#409 c6). A
+    # `lane/**` push now reaches this leg WITHOUT a commit marker. #409 is the
+    # measurement that forced it: five tests were red on real Windows on
+    # `lane/f13-windows`, none of them a regression from `main`, and no gate on
+    # that branch could say so. Verbatim from run 33384055203 on a sibling lane
+    # — `CI (windows-latest, hosted)` **skipped**, `CI (${{ matrix.os }})`
+    # **skipped** (the matrix job's `if:` fired before `matrix.os` could even
+    # resolve, which is why that check has an unexpanded name) — while the
+    # Linux legs ran. The one Windows job a lane DID get, `Build
+    # (x86_64-pc-windows-msvc)`, is `cargo build`: it never compiles a test
+    # target, so a test-target defect is structurally unreachable on a lane.
+    #
+    # WHY THIS LEG AND NOT THE SELF-HOSTED ONE, which stays marker-gated. The
+    # two legs were rationed for two DIFFERENT measured harms, and only one of
+    # them applies to a lane:
+    #   * the self-hosted matrix entry (2026-08-02): there is exactly ONE
+    #     self-hosted Windows runner and it serves one job at a time, so six
+    #     concurrent lanes kept it saturated and the INTEGRATION branch's own
+    #     `CI (Array)` queued behind them for ninety minutes. That harm is
+    #     real and unchanged, so lanes still do not get the self-hosted box
+    #     without `[ci-windows]`.
+    #   * this hosted leg (2026-08-04): it was DUPLICATION — "a SECOND full
+    #     Windows compile+test on top of the self-hosted one, on every commit"
+    #     — on `main`, PRs and `integ/**`. On a `lane/**` push the self-hosted
+    #     leg does not run at all, so on a lane there is nothing to duplicate:
+    #     this is the only Windows test signal that exists. The stated reason
+    #     for switching it off does not reach the case being switched back on.
+    # `windows-latest` is an elastic hosted pool, so a lane taking it cannot
+    # queue the integration branch behind it. That is the whole trade.
+    #
+    # PRICE, stated rather than buried: a lane push now costs one cold hosted
+    # Windows compile+test (measured at 39+ min on this image, `timeout-minutes:
+    # 180` below), billed at the 2x Windows rate, and this workflow's
+    # `concurrency:` deliberately does NOT cancel branch pushes, so successive
+    # pushes to one lane stack rather than supersede. A lane that wants no
+    # Windows leg should say so by not being a `lane/**` branch; there is no
+    # opt-OUT marker, because an opt-out is the same hand-pushed-marker failure
+    # mode as the opt-in, pointed the other way.
+    #
+    # Enforced, both ways, by `scripts/check-windows-attribution.py` R4: it
+    # EVALUATES these `if:` expressions under a synthetic markerless lane push
+    # and asserts a Windows leg that actually runs tests is admitted — and, so
+    # the gate can still fail, asserts an unrelated markerless branch is NOT.
     if: >-
-      contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-windows]')
+      startsWith(github.ref_name, 'lane/')
+      || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-windows]')
     # Bounded on purpose. The matrix job is unbounded (GHA default 6h), which is
     # tolerable on a box whose target/ is warm; a cold hosted compile that wedges
     # would otherwise burn six hours of hosted minutes per run. Sized from the

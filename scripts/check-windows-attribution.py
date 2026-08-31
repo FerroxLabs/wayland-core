@@ -37,6 +37,17 @@ Two things have to hold before a Windows red means anything:
       BEHAVIOUR (the annotation script is executed against five fixture states,
       because a script that always said "exercised" would satisfy every grep).
 
+  R4  A `lane/**` push REACHES a Windows job that actually runs tests, with no
+      commit-message marker. R3 makes an absent Windows verdict audible; it
+      does not make one obtainable, and those are different properties.
+      FerroxLabs/wayland-core#409 is the measurement of the difference: five
+      tests were red on real Windows on `lane/f13-windows`, none of them a
+      regression from `main`, and no gate on that branch could say so --
+      because on a `lane/**` push the whole `ci` job is skipped without
+      `[ci-windows]`, and the one Windows job a lane does get is `cargo
+      build`, which never compiles a test target. A rule a human has to
+      remember to satisfy with a marker commit is not a pipeline property.
+
 R3 is enforced on LINUX on purpose. A coverage check that itself runs on the
 Windows leg would be skipped by the same mechanism that produced the unearned
 green, so it could never fire in the case it exists for. It also ANNOTATES
@@ -84,6 +95,7 @@ Live (needs cargo + a built workspace):
 from __future__ import annotations
 
 import os
+import ast
 import re
 import subprocess
 import sys
@@ -420,6 +432,180 @@ def check_report_coverage(path: str, text: str) -> list[str]:
     return violations
 
 
+# ── R4: is a markerless lane push admitted to a Windows TEST leg? ──────────
+#
+# This EVALUATES the `if:` expressions rather than grepping them. A grep for
+# `lane/` would pass on a job that merely names the branch in a comment, and
+# would pass just as happily on `!startsWith(github.ref_name, 'lane/')` — the
+# exact inversion of the property. The evaluator understands only the four
+# atoms this workflow actually uses and REFUSES anything else, so an
+# expression it cannot read is reported as a violation rather than silently
+# treated as `True`.
+
+# `contains(format('{0}{1}', toJSON(<a>), toJSON(<b>)), '<marker>')` — the only
+# shape the commit-message markers are written in.
+_MARKER_RE = re.compile(
+    r"contains\(\s*format\(\s*'\{0\}\{1\}'\s*,\s*toJSON\([^()]*\)\s*,"
+    r"\s*toJSON\([^()]*\)\s*\)\s*,\s*'([^']*)'\s*\)"
+)
+_STARTSWITH_RE = re.compile(r"startsWith\(\s*github\.ref_name\s*,\s*'([^']*)'\s*\)")
+_REF_EQ_RE = re.compile(r"github\.ref_name\s*==\s*'([^']*)'")
+_EVENT_EQ_RE = re.compile(r"github\.event_name\s*==\s*'([^']*)'")
+
+# Once every atom is substituted, all that may remain is a boolean skeleton.
+# It is folded by walking an `ast.parse` tree under a node ALLOWLIST rather
+# than by `eval`: a workflow file is input to this gate, and an evaluator that
+# could run whatever a workflow file spelled would be a worse defect than the
+# one being closed. Anything outside the allowlist raises and the expression is
+# reported as unreadable.
+_ALLOWED_NODES = (ast.Expression, ast.BoolOp, ast.UnaryOp, ast.And, ast.Or, ast.Not, ast.Constant)
+
+
+def _fold_bool(node: ast.AST) -> bool:
+    if not isinstance(node, _ALLOWED_NODES):
+        raise ValueError(f"disallowed node {type(node).__name__}")
+    if isinstance(node, ast.Expression):
+        return _fold_bool(node.body)
+    if isinstance(node, ast.Constant):
+        if not isinstance(node.value, bool):
+            raise ValueError(f"non-boolean constant {node.value!r}")
+        return node.value
+    if isinstance(node, ast.UnaryOp):
+        if not isinstance(node.op, ast.Not):
+            raise ValueError("disallowed unary operator")
+        return not _fold_bool(node.operand)
+    values = [_fold_bool(v) for v in node.values]
+    return all(values) if isinstance(node.op, ast.And) else any(values)
+
+
+def eval_gha_if(block: str, ctx: dict) -> "bool | None":
+    """Evaluate a job's `if:` under `ctx`, or None when it is not readable.
+
+    `ctx` carries `event_name`, `ref_name` and `commit_messages`. An absent
+    `if:` is GHA's "no condition", i.e. the job always runs.
+    """
+    body = block
+    if body.lstrip().startswith("if:"):
+        body = body.split(":", 1)[1]
+    body = body.replace(">-", " ").replace("|-", " ").strip()
+    if not body:
+        return True
+    body = _MARKER_RE.sub(lambda m: str(m.group(1) in ctx["commit_messages"]), body)
+    body = _STARTSWITH_RE.sub(lambda m: str(ctx["ref_name"].startswith(m.group(1))), body)
+    body = _REF_EQ_RE.sub(lambda m: str(ctx["ref_name"] == m.group(1)), body)
+    body = _EVENT_EQ_RE.sub(lambda m: str(ctx["event_name"] == m.group(1)), body)
+    body = body.replace("||", " or ").replace("&&", " and ").replace("!", " not ")
+    # A folded YAML scalar keeps its newlines, and `ast.parse(..., mode="eval")`
+    # rejects a multi-line expression. Collapse to one line before parsing.
+    body = " ".join(body.split())
+    try:
+        return _fold_bool(ast.parse(body, mode="eval"))
+    except (SyntaxError, ValueError):
+        return None
+
+
+def job_runs_tests(job_lines: "list[str]") -> bool:
+    """Does this job draw a TEST verdict, as opposed to producing a binary?
+
+    `just test-ci` is the shared recipe both Windows test legs invoke. The
+    `Build (...)` legs run `cargo build`, which compiles no test target — which
+    is exactly why a lane receiving one of those is not Windows test coverage,
+    and why #409's five reds were unreachable on the branch they arrived on.
+    """
+    return "test-ci" in "\n".join(job_lines)
+
+
+# (label, context, must a Windows TEST leg be admitted?)
+#
+# The lane row is the fix. The other two are what keep this gate able to FAIL:
+# an `if:` deleted outright, or relaxed to every branch, satisfies the lane row
+# and violates the third — and the second pins that the marker still works for
+# a branch outside the lane namespace, so the fix added a route instead of
+# replacing one.
+_LANE_CASES = (
+    (
+        "markerless lane push — wayland-core#409 c6, the case this rule exists for",
+        {
+            "event_name": "push",
+            "ref_name": "lane/f13-example",
+            "commit_messages": "fix: an ordinary lane commit",
+        },
+        True,
+    ),
+    (
+        "non-lane branch push that ASKED for Windows with the marker",
+        {
+            "event_name": "push",
+            "ref_name": "wip/whatever",
+            "commit_messages": "chore: poke [ci-windows]",
+        },
+        True,
+    ),
+    (
+        "non-lane markerless branch push — must NOT be admitted",
+        {
+            "event_name": "push",
+            "ref_name": "wip/whatever",
+            "commit_messages": "chore: poke",
+        },
+        False,
+    ),
+)
+
+
+def check_lane_reachability(path: str, text: str) -> "list[str]":
+    """R4 over one workflow, by evaluating its Windows jobs' `if:` conditions.
+
+    Scope, stated rather than assumed: `CI_WORKFLOW` only. That is where lane
+    routing is decided and where #409 measured the absence; the sibling Windows
+    workflows carry their own `on:` filters and are not a substitute for it.
+    """
+    violations: "list[str]" = []
+    windows_test_jobs = [
+        (name, lines)
+        for name, lines in split_jobs(text)
+        if is_windows_job(lines) and job_runs_tests(lines)
+    ]
+    if not windows_test_jobs:
+        return [
+            f"{path}: no Windows job runs tests at all — there is nothing for a "
+            f"lane to reach, however the `if:` conditions are written "
+            f"(wayland-core#409 c6)"
+        ]
+    unreadable: "set[str]" = set()
+    for label, ctx, want in _LANE_CASES:
+        admitted: "list[str]" = []
+        for name, lines in windows_test_jobs:
+            verdict = eval_gha_if(key_block(lines, "if"), ctx)
+            if verdict is None:
+                unreadable.add(name)
+                continue
+            if verdict:
+                admitted.append(name)
+        if want and not admitted:
+            violations.append(
+                f"{path}: {label}: NO Windows test leg is admitted, so a "
+                f"test-target defect on that branch is unreachable by the "
+                f"pipeline and can only be found by a hand-pushed marker "
+                f"commit (wayland-core#409 c6)"
+            )
+        if not want and admitted:
+            violations.append(
+                f"{path}: {label}: {admitted} admitted — the marker gate has "
+                f"been relaxed to every branch rather than to `lane/**`, which "
+                f"is the ninety-minute self-hosted saturation this workflow "
+                f"already recorded once (wayland-core#409 c6)"
+            )
+    for name in sorted(unreadable):
+        violations.append(
+            f"{path}: job `{name}`'s `if:` uses an expression this gate cannot "
+            f"evaluate, so R4 cannot claim to have checked it — teach "
+            f"`eval_gha_if` the new atom rather than dropping the job "
+            f"(wayland-core#409 c6)"
+        )
+    return violations
+
+
 # A junit that certifies something, and the one nextest writes for a filterset
 # that matched nothing — the same tests=0 file .github/scripts/assert-test-evidence.sh
 # documents. A Windows artifact holding zero test cases is not Windows coverage.
@@ -629,6 +815,10 @@ def scan(root: str) -> int:
     violations += check_report_coverage(CI_WORKFLOW, ci_text)
     violations += check_annotate_behaviour(os.path.join(root, ANNOTATE_SCRIPT))
 
+    # R4 -- a markerless lane push must REACH a Windows test leg. R3 above only
+    # makes its absence audible; audible absence is still absence.
+    violations += check_lane_reachability(CI_WORKFLOW, ci_text)
+
     if violations:
         print()
         for v in violations:
@@ -639,7 +829,9 @@ def scan(root: str) -> int:
         f"OK: {seen} Windows job(s) record their executor; "
         f"{len(QUARANTINED_TESTS)} churning test(s) at retries=0; "
         f"`{REPORT_JOB}` states Windows coverage over "
-        f"{len(_ANNOTATE_CASES)} fixture state(s)"
+        f"{len(_ANNOTATE_CASES)} fixture state(s); "
+        f"a markerless lane push reaches a Windows test leg over "
+        f"{len(_LANE_CASES)} routing case(s)"
     )
     return 0
 
