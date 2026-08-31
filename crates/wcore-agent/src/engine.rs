@@ -1338,6 +1338,118 @@ mod output_sizing_tests {
         );
     }
 
+    /// FerroxLabs/wayland#1218 c2 — the ask and the reserve the ceiling
+    /// withheld must AGREE, across the whole band where #1179's scaling made
+    /// them disagree.
+    ///
+    /// The band is the ticket's own: 4,096..49,152. Below 24,576 the scaled
+    /// `output_reserve` is under `UNKNOWN_CAP` = 8,192, and below 49,152 it is
+    /// under gpt-4o's 16,384 output ceiling, so in that band the pre-flight
+    /// guard could certify an input while this function asked for more output
+    /// than the ceiling had held back for it.
+    ///
+    /// Graded at the input the guard ACTUALLY admits — `input_ceiling_for_window`
+    /// — because that is where the ticket's own arithmetic evaluated it: its
+    /// "total ask 13,245 on an 8,192 slot" is ceiling 5,053 + ask 8,192. A
+    /// smaller input leaves more room and is allowed to use it; clamping the
+    /// ask to the reserve at EVERY input would cut a 200k-window Claude turn
+    /// from its real 64,000-token output ceiling to the 23,000-token
+    /// compaction reserve, which is a regression, not a fix. See
+    /// `.planning/DECISIONS.md` Q-1218.
+    #[test]
+    fn the_output_ask_never_outgrows_the_reserve_the_ceiling_withheld() {
+        let cfg = wcore_config::compact::CompactConfig::default();
+        // An unlisted model: the arm with no catalogued output ceiling, which
+        // is the one the ticket measured.
+        let (provider, model) = ("openai-compat", "qwen3:8b");
+        assert!(
+            wcore_config::limits::model_output_ceiling(provider, model).is_none(),
+            "control: this test is about the UNLISTED arm; {model} is now catalogued \
+             and the case it grades has moved"
+        );
+        for window in (4_096usize..=49_152).step_by(64) {
+            let r = cfg.scaled_reserves(window);
+            let withheld = r.output_reserve + r.emergency_buffer;
+            let ceiling = cfg.input_ceiling_for_window(window);
+            assert_eq!(
+                ceiling,
+                window - withheld,
+                "window {window}: the ceiling is exactly what the reserves left"
+            );
+            let ask = size_output_cap(
+                64_000,
+                provider,
+                model,
+                ceiling,
+                false,
+                Some(u32::try_from(window).unwrap()),
+            ) as usize;
+            assert!(
+                ask <= withheld,
+                "window {window}: the guard admits {ceiling} input tokens having \
+                 withheld {withheld} for the output, and the ask is {ask} — the \
+                 ceiling certified a request that cannot fit"
+            );
+            // The property the ticket's TITLE is about, over every input the
+            // guard admits rather than only the worst one.
+            for est in [0, 1, ceiling / 2, ceiling.saturating_sub(1), ceiling] {
+                let ask = size_output_cap(
+                    64_000,
+                    provider,
+                    model,
+                    est,
+                    false,
+                    Some(u32::try_from(window).unwrap()),
+                ) as usize;
+                assert!(
+                    est + ask <= window,
+                    "window {window}, input {est}: total ask {} exceeds the whole \
+                     window",
+                    est + ask
+                );
+            }
+        }
+    }
+
+    /// #1218 c3 — the two cases the ticket MEASURED, stated as the figures it
+    /// stated them in, so a re-grade reads the same arithmetic.
+    #[test]
+    fn the_measured_1218_overflows_no_longer_hold() {
+        let cfg = wcore_config::compact::CompactConfig::default();
+        for (window, ceiling, reserve) in [
+            (8_192usize, 5_053usize, 2_730usize),
+            (16_384, 10_104, 5_461),
+        ] {
+            assert_eq!(
+                cfg.input_ceiling_for_window(window),
+                ceiling,
+                "window {window}"
+            );
+            assert_eq!(
+                cfg.scaled_reserves(window).output_reserve,
+                reserve,
+                "window {window}"
+            );
+            let ask = size_output_cap(
+                64_000,
+                "openai-compat",
+                "qwen3:8b",
+                ceiling,
+                false,
+                Some(u32::try_from(window).unwrap()),
+            ) as usize;
+            assert_ne!(
+                ask, 8_192,
+                "window {window}: this is the ticket's measured ask, on the input \
+                 its measurement used"
+            );
+            assert!(
+                ceiling + ask <= window,
+                "window {window}: {ceiling} + {ask} must fit"
+            );
+        }
+    }
+
     /// The clamp is IDENTITY wherever the window in force is the catalogued
     /// one, which is every registry model absent a narrowing. Without this the
     /// fix would silently cut a 128k-output model to its 20,000-token compaction
@@ -7125,8 +7237,15 @@ impl AgentEngine {
         let args_result = micro::compact_tool_call_args(&mut self.messages, &self.compact_config);
         // #1150 c4: the accumulated tool-RESULT ceiling, mirroring
         // `run_compaction` step 0b.
-        let results_result =
-            micro::bound_accumulated_tool_results(&mut self.messages, &self.compact_config);
+        // #1200 — the SAME resolved window every other boundary uses,
+        // learned narrowing included. Resolved BEFORE the mutable borrow of
+        // self.messages below, not inlined into the call.
+        let result_window = Some(self.compaction_window_now());
+        let results_result = micro::bound_accumulated_tool_results(
+            &mut self.messages,
+            &self.compact_config,
+            result_window,
+        );
         let result = micro::microcompact(&mut self.messages, &self.compact_config);
         if result.cleared_count + results_result.cleared_count > 0 {
             // Token-opt (diff-resend): clearing a tool-result body can remove
@@ -18608,15 +18727,16 @@ impl AgentEngine {
         self.autocompact_threshold_now() as u64
     }
 
-    /// The emergency hard-stop limit, as tokens, for this engine's config and
-    /// currently-active model (GH#635). Same `self.model` reasoning as
-    /// [`Self::autocompact_threshold_tokens`].
+    /// The emergency hard-stop limit, as tokens, on the window that will
+    /// actually serve this turn (GH#635, FerroxLabs/wayland#1210).
+    ///
+    /// #1210: this was the fourth window-derived boundary and the only one that
+    /// re-resolved the window from config + model alone, so the figure reported
+    /// to operators beside the NARROWED autocompact threshold could be 8x it.
+    /// It now shares `compaction_window_now` with the threshold, the pre-flight
+    /// ceiling and the smart-compact fraction, so the four cannot disagree.
     fn emergency_limit_tokens(&self) -> u64 {
-        emergency::emergency_limit(
-            &self.compact_config,
-            self.compat.provider_type(),
-            &self.model,
-        ) as u64
+        emergency::emergency_limit(&self.compact_config, self.compaction_window_now()) as u64
     }
 
     /// Record one completed LLM round-trip into the cache/compaction ledger.
@@ -18893,8 +19013,15 @@ impl AgentEngine {
         // bounds their SUM. Monotone + epoch-quantized like step 0, so a
         // bounded result never changes bytes again and the boundary advances
         // in batches rather than once per turn inside the cached prefix.
-        let results_result =
-            micro::bound_accumulated_tool_results(&mut self.messages, &self.compact_config);
+        // #1200 — the SAME resolved window every other boundary uses,
+        // learned narrowing included. Resolved BEFORE the mutable borrow of
+        // self.messages below, not inlined into the call.
+        let result_window = Some(self.compaction_window_now());
+        let results_result = micro::bound_accumulated_tool_results(
+            &mut self.messages,
+            &self.compact_config,
+            result_window,
+        );
         if results_result.cleared_count > 0 {
             self.output.emit_info(&format!(
                 "Dropped {} tool result(s) over the accumulated budget (~{} tokens freed)",
@@ -19284,23 +19411,17 @@ impl AgentEngine {
         }
 
         // 3. Emergency check (skip if autocompact just succeeded)
-        if !compacted
-            && emergency::is_at_emergency_limit(
-                self.compact_state.last_input_tokens,
-                &self.compact_config,
-                self.compat.provider_type(),
-                &self.model,
-            )
-        {
+        //
+        // #1210 — ONE window for the test and for the number the user is shown,
+        // and it is the narrowed one `emergency_limit_tokens` reports. Two
+        // calls used to resolve it independently from config + model; both were
+        // blind to a learned served window, so this backstop sat 8x above the
+        // ceiling that had already fired.
+        let emergency_limit = self.emergency_limit_tokens();
+        if !compacted && self.compact_state.last_input_tokens >= emergency_limit {
             return Err(AgentError::ContextTooLong {
                 input_tokens: self.compact_state.last_input_tokens,
-                // GH#635 — the reported limit comes from the SAME extracted
-                // function that just fired, not an inline re-derivation.
-                limit: emergency::emergency_limit(
-                    &self.compact_config,
-                    self.compat.provider_type(),
-                    &self.model,
-                ),
+                limit: emergency_limit as usize,
             });
         }
 
@@ -24823,6 +24944,75 @@ mod compact_tests {
 
     // -- Emergency check fires when at limit --
 
+    /// FerroxLabs/wayland#1210 c2 - on a CORROBORATED 8,192-token learned
+    /// window the reported emergency limit and the autocompact threshold must
+    /// derive from the SAME window.
+    ///
+    /// The defect was that they did not. `emergency_limit` re-resolved the
+    /// window itself from `config` + `provider` + `model`, so it was the one
+    /// window-derived boundary that never reached `narrow_to_served_window`.
+    /// The ticket measured the gap on exactly this configuration: an unlisted
+    /// model whose `effective_context_window` is `UNVERIFIED_CONTEXT_WINDOW` =
+    /// 32,768, with a corroborated 8,192 served window. Everything else
+    /// narrowed - autocompact threshold 3,688, pre-flight ceiling 5,053 - while
+    /// the emergency limit stayed at 29,768, the unnarrowed 32,768 minus its
+    /// buffer, and 29,768 is the figure operators are SHOWN.
+    ///
+    /// Graded as an IDENTITY against the window, not as an inequality: the
+    /// criterion says "derive from the same window", and any number of wrong
+    /// windows satisfy "smaller than 29,768".
+    #[test]
+    fn the_emergency_limit_and_the_autocompact_threshold_share_one_window() {
+        const LEARNED: usize = 8_192;
+        let config = CompactConfig::default();
+        let mut state = CompactState::new();
+        // Corroborate through the tracker rather than by poking a field: the
+        // Shortfall arm carries its own corroboration, so one qualifying
+        // observation is enough and no private state is reached into.
+        state
+            .served_window
+            .observe("test/test-model", 20_000, LEARNED as u64)
+            .expect("precondition: a gross shortfall must produce evidence");
+        assert_eq!(
+            state.served_window.sizing_window(),
+            Some(LEARNED as u64),
+            "precondition: the evidence must be CORROBORATED, or this test \
+             grades the un-narrowed path and passes for the wrong reason"
+        );
+
+        let engine = make_compact_engine(config.clone(), state, vec![]);
+        let base = config.effective_context_window(engine.compat.provider_type(), &engine.model);
+        assert_eq!(
+            base,
+            wcore_config::compact::UNVERIFIED_CONTEXT_WINDOW,
+            "precondition: an unlisted model, which is the arm #1210 measured"
+        );
+        assert!(
+            base > LEARNED,
+            "precondition: the learned window must actually narrow something"
+        );
+
+        assert_eq!(
+            engine.emergency_limit_tokens() as usize,
+            config.emergency_limit_for_window(LEARNED),
+            "the emergency limit must be derived from the LEARNED window"
+        );
+        assert_eq!(
+            engine.autocompact_threshold_now(),
+            config.autocompact_threshold_for_window(LEARNED),
+            "and so must the threshold - the same window, not merely a smaller \
+             number"
+        );
+        // The measured figure the ticket reported, stated so a re-grade reads
+        // the same arithmetic it did.
+        assert_ne!(
+            engine.emergency_limit_tokens() as usize,
+            config.emergency_limit_for_window(base),
+            "29,768 was the reported and ENFORCED limit while every other \
+             boundary had narrowed to 8,192"
+        );
+    }
+
     #[tokio::test]
     async fn emergency_fires_when_at_limit() {
         let config = CompactConfig {
@@ -25099,6 +25289,158 @@ mod compact_tests {
         messages
     }
 
+    // ── wayland#1200 — the resolved window must reach the accumulated
+    //    tool-result ceiling on the PRODUCTION path ─────────────────────────
+    //
+    // Both production call sites of `micro::bound_accumulated_tool_results`
+    // (`compact_now` and `run_compaction`) pass
+    // `Some(self.compaction_window_now())`. Every test in `compact/micro.rs`
+    // drives the HELPER and hand-supplies that argument, so the whole suite
+    // stayed green with BOTH sites changed to `None` — the window was passed
+    // but nothing bound it. These two tests grade the engine methods, one per
+    // site, so `None` at either site reddens.
+
+    /// Ten `WebFetch` results of 6,000 bytes: 60,000 bytes carried.
+    ///
+    /// Sized to sit BETWEEN the two bounds, which is what makes the assertions
+    /// discriminating — 60,000 fits the flat `total_budget_bytes` (120,000)
+    /// untouched, and breaks the 32,768-token window's budget (30,832).
+    ///
+    /// `WebFetch` is deliberately NOT in `compactable_tools`, so `microcompact`
+    /// cannot touch these bodies at all: `bound_accumulated_tool_results` is
+    /// the only pass in either pipeline that can mutate them, and any byte
+    /// moved is therefore attributable to it.
+    fn results_over_a_32k_window_but_under_the_flat_budget() -> Vec<Message> {
+        let mut messages = Vec::new();
+        for i in 0..10 {
+            let id = format!("wf{i}");
+            messages.push(tool_use_msg(&id, "WebFetch"));
+            messages.push(tool_result_msg(&id, &"y".repeat(6_000)));
+        }
+        messages
+    }
+
+    fn carried_tool_result_bytes(engine: &super::AgentEngine) -> usize {
+        engine
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter_map(|b| match b {
+                ContentBlock::ToolResult { content, .. } => Some(content.len()),
+                _ => None,
+            })
+            .sum()
+    }
+
+    fn bounded_tool_results(engine: &super::AgentEngine) -> usize {
+        engine
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter(|b| {
+                matches!(b, ContentBlock::ToolResult { content, .. }
+                    if content.starts_with(super::micro::BOUNDED_TOOL_RESULT_PREFIX))
+            })
+            .count()
+    }
+
+    /// The property both #1200 tests assert: the ceiling the pass enforced was
+    /// derived from the engine's window, not from the flat constants.
+    fn assert_the_window_bound_reached_the_pass(
+        engine: &super::AgentEngine,
+        carried_before: usize,
+    ) {
+        let flat = CompactConfig::default().tool_results.total_budget_bytes;
+        let windowed = engine
+            .compact_config
+            .tool_result_bounds(Some(32_768))
+            .total_budget_bytes;
+
+        // Anti-vacuity, checked rather than assumed: at this size the flat
+        // constants alone would have moved NOTHING, and the window's budget is
+        // genuinely exceeded. If a future default breaks either half, this
+        // fails here instead of passing for the wrong reason.
+        assert!(
+            carried_before <= flat,
+            "fixture must fit the flat budget untouched ({carried_before} B vs {flat} B), \
+             or a pass that never saw the window could satisfy the assertions below"
+        );
+        assert!(
+            windowed < carried_before,
+            "fixture must exceed the window budget ({carried_before} B vs {windowed} B)"
+        );
+
+        assert!(
+            bounded_tool_results(engine) > 0,
+            "no result carries the accumulated-ceiling stub: the pass ran with the flat \
+             {flat} B budget, so the window never reached it"
+        );
+        assert!(
+            carried_tool_result_bytes(engine) <= windowed,
+            "carried tool-result bytes ({} B) still exceed the budget the engine's own \
+             32,768-token window allows ({windowed} B)",
+            carried_tool_result_bytes(engine)
+        );
+
+        // The newest result is protected whatever the window says — a stubbed
+        // working set is how #1172's re-read loop starts.
+        let newest = engine
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter_map(|b| match b {
+                ContentBlock::ToolResult { content, .. } => Some(content),
+                _ => None,
+            })
+            .next_back()
+            .expect("fixture carries tool results");
+        assert_eq!(
+            newest.len(),
+            6_000,
+            "the newest tool result must survive the ceiling whole"
+        );
+    }
+
+    /// Site 1 — `compact_now` (the TUI `/compact` command).
+    #[test]
+    fn compact_now_bounds_tool_results_against_the_engines_own_window() {
+        let config = CompactConfig {
+            context_window: Some(32_768),
+            ..Default::default()
+        };
+        let mut engine = make_compact_engine(
+            config,
+            CompactState::new(),
+            results_over_a_32k_window_but_under_the_flat_budget(),
+        );
+        let carried_before = carried_tool_result_bytes(&engine);
+
+        engine.compact_now();
+
+        assert_the_window_bound_reached_the_pass(&engine, carried_before);
+    }
+
+    /// Site 2 — the automatic `run_compaction` pipeline. `last_real_input_tokens`
+    /// stays at zero so the pressure-gated microcompact below step 0b cannot
+    /// fire: the accumulated ceiling is ungated, and it is the only pass under
+    /// test here.
+    #[tokio::test]
+    async fn run_compaction_bounds_tool_results_against_the_engines_own_window() {
+        let config = CompactConfig {
+            context_window: Some(32_768),
+            ..Default::default()
+        };
+        let mut engine = make_compact_engine(
+            config,
+            CompactState::new(),
+            results_over_a_32k_window_but_under_the_flat_budget(),
+        );
+        let carried_before = carried_tool_result_bytes(&engine);
+
+        engine.run_compaction().await.unwrap();
+
+        assert_the_window_bound_reached_the_pass(&engine, carried_before);
+    }
     fn cleared_results(engine: &super::AgentEngine) -> usize {
         engine
             .messages

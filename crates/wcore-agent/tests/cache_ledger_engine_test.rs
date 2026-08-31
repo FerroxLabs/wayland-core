@@ -588,7 +588,12 @@ async fn gh635_ledger_reports_the_active_models_boundaries_not_the_200k_default(
 
     // The buffers stay at their defaults; snapshot them for the expected math.
     let expected_threshold = autocompact_threshold(&config.compact, "anthropic", &config.model);
-    let expected_limit = emergency_limit(&config.compact, "anthropic", &config.model);
+    let expected_limit = emergency_limit(
+        &config.compact,
+        config
+            .compact
+            .effective_context_window("anthropic", &config.model),
+    );
     assert_eq!(expected_threshold, 967_000, "1_000_000 - 20_000 - 13_000");
     assert_eq!(expected_limit, 997_000, "1_000_000 - 3_000");
 

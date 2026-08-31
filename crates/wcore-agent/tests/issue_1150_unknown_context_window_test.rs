@@ -117,29 +117,32 @@ fn config(model: &str) -> Config {
 const SKILL_DESC: &str = "ISSUE_1150_DESCRIPTION_MARKER a description long enough that a \
 tight character budget must drop it entirely rather than merely trim a word";
 
-/// How many filler skills `plant_skill` writes alongside the marker one, and
-/// the reason this file supplies its own catalogue instead of reading the
-/// operator's.
+/// How many FILLER skills the fixture plants beside the marker one, and how
+/// long each description is.
 ///
-/// The window-sensitivity asserted below is only OBSERVABLE once the listing
-/// budget BINDS. With the single marker skill and nothing else,
-/// `format_skills_within_budget` renders full entries under every budget, so a
-/// 200,000-token window and a 32,768-token one produce byte-identical listings
-/// and `an_unknown_window_sizes_the_skill_listing_like_the_window_it_assumes`
-/// fails its own anti-vacuity precondition. Whether it binds was decided by
-/// whatever skills the HOST happened to have installed under `$HOME`, so the
-/// test passed on developer boxes and failed everywhere else: measured red on
-/// the Windows self-hosted runner (whose `HOME` is
-/// `C:\WINDOWS\ServiceProfiles\NetworkService`), red on macOS CI, and
-/// reproduced on Linux by running it with `HOME` pointed at an empty
-/// directory. Not a platform property — a non-hermetic one.
+/// These are not decoration. Both budget arms under test render a listing that
+/// is CLIPPED to a character budget, so a test that compares two budgets can
+/// only measure anything if the catalogue overflows the LARGER of them. The
+/// budget is 1% of the window in characters (`window x CHARS_PER_TOKEN / 100`),
+/// so the largest arm here — the old fabricated 200,000-token window — buys
+/// 8,000 characters. `FILLER_SKILLS x FILLER_DESC_LEN` is comfortably over
+/// that, and `the_fixture_overflows_every_budget_under_test` asserts it rather
+/// than trusting the arithmetic to stay true.
 ///
-/// `FILLER_SKILLS` non-bundled entries at the `MAX_LISTING_DESC_CHARS` cap put
-/// the full listing above 11,000 characters: over the 8,000 a 200,000-token
-/// window buys and far over the 1,310 an unlisted model's assumed 32,768-token
-/// window buys. Both budgets therefore bind on every host, and the two
-/// listings cannot coincide no matter what else is installed.
-const FILLER_SKILLS: usize = 40;
+/// Before this, the fixture planted ONE skill and the overflow came from
+/// whatever skills happened to be installed on the host. On a developer box or
+/// hetzner there are plenty and the test passed; in a clean CI container there
+/// are none, both arms rendered the identical 4,890 bytes, and the
+/// non-vacuity precondition in
+/// `an_unknown_window_sizes_the_skill_listing_like_the_window_it_assumes`
+/// fired 3/3 — so wayland#1199 c2 and c3 were graded `met` on evidence that was
+/// RED in CI. The sibling test above already carries a comment diagnosing
+/// exactly this ("that composition differs between a developer box with skills
+/// installed and a clean CI container"); the lesson was written down and then
+/// not applied one test over. The fixture now supplies its own overflow, so
+/// what the host has installed cannot decide whether this file grades anything.
+const FILLER_SKILLS: usize = 30;
+const FILLER_DESC_LEN: usize = 400;
 
 fn plant_skill(root: &std::path::Path) {
     let skills = root.join(".wayland-core").join("skills");
@@ -151,16 +154,17 @@ fn plant_skill(root: &std::path::Path) {
     )
     .expect("write SKILL.md");
 
-    // Descriptions at the listing cap, so each entry costs the most the
-    // formatter will ever spend on it and the arithmetic above is a floor.
-    let filler_desc = "d".repeat(wcore_skills::prompt::MAX_LISTING_DESC_CHARS);
     for i in 0..FILLER_SKILLS {
-        let name = format!("issue-1150-filler-{i:02}");
-        let dir = skills.join(&name);
+        let dir = skills.join(format!("issue-1150-filler-{i:03}"));
         std::fs::create_dir_all(&dir).expect("filler skill dir");
+        // Unique per skill so nothing can dedupe them, and long enough that the
+        // catalogue overflows the largest budget under test.
+        let desc = format!("filler {i:03} ")
+            + &"describes a distinct capability so the listing cannot dedupe it "
+                .repeat(FILLER_DESC_LEN / 63 + 1)[..FILLER_DESC_LEN];
         std::fs::write(
             dir.join("SKILL.md"),
-            format!("---\nname: {name}\ndescription: {filler_desc}\n---\n\nbody\n"),
+            format!("---\nname: issue-1150-filler-{i:03}\ndescription: {desc}\n---\n\nbody\n"),
         )
         .expect("write filler SKILL.md");
     }
@@ -421,8 +425,71 @@ async fn an_unknown_window_sizes_the_skill_listing_like_the_window_it_assumes() 
         old_fabrication.len() > unknown.len(),
         "precondition: a 200,000-token window really does buy a longer listing \
          here, or this test could pass on a catalogue with no skills in it \
-         (200k = {} bytes, unknown = {} bytes)",
+         (200k = {} bytes, unknown = {} bytes). The fixture plants \
+         {FILLER_SKILLS} filler skills precisely so this cannot depend on what \
+         the host happens to have installed -- see \
+         the_fixture_overflows_every_budget_under_test",
         old_fabrication.len(),
         unknown.len(),
+    );
+}
+
+/// The guard on the guard: the FIXTURE, not the host, must be what overflows
+/// the budgets the tests above compare.
+///
+/// Both arms of `an_unknown_window_sizes_the_skill_listing_like_the_window_it_assumes`
+/// render a listing clipped to `window x CHARS_PER_TOKEN / 100` characters, so
+/// the comparison is only meaningful when the catalogue is bigger than the
+/// LARGER budget. That used to be supplied by whatever skills were installed on
+/// the machine, which is why the file passed on hetzner and failed 3/3 in the
+/// clean CI container. This asserts the planted skills alone exceed the largest
+/// budget any test in this file uses, so the property is decided here rather
+/// than by the host.
+#[tokio::test]
+async fn the_fixture_overflows_every_budget_under_test() {
+    use wcore_config::compact::CHARS_PER_TOKEN;
+
+    // The window whose budget MUST be overflowed for
+    // `an_unknown_window_sizes_the_skill_listing_like_the_window_it_assumes`
+    // to grade anything: its larger arm, the old fabricated 200,000. The
+    // 1,000,000 arm below is deliberately NOT the bound — it exists to show the
+    // clipping is monotone, and its 40,000-character budget is meant to hold the
+    // whole fixture.
+    const HEADROOM_WINDOW: usize = 1_000_000;
+    let must_overflow = wcore_config::compact::DEFAULT_CONTEXT_WINDOW * CHARS_PER_TOKEN / 100;
+
+    let planted = FILLER_SKILLS * FILLER_DESC_LEN;
+    assert!(
+        planted > must_overflow,
+        "the fixture plants {planted} characters of skill description and the \
+         budget it must overflow is {must_overflow}; if the fixture does not \
+         overflow it, the length comparisons in this file measure the host's \
+         installed skills instead of the product"
+    );
+
+    // And the clipping is real, measured through the production bootstrap
+    // rather than asserted from the arithmetic: a 1,000,000-token window must
+    // render strictly more than the fabricated 200,000-token one, which must in
+    // turn render strictly more than the 32,768 the session assumes.
+    let (_i, huge) = boot(UNLISTED_MODEL, Some(HEADROOM_WINDOW)).await;
+    let (_i, fabricated) = boot(
+        UNLISTED_MODEL,
+        Some(wcore_config::compact::DEFAULT_CONTEXT_WINDOW),
+    )
+    .await;
+    let (_i, assumed) = boot(
+        UNLISTED_MODEL,
+        Some(wcore_config::compact::UNVERIFIED_CONTEXT_WINDOW),
+    )
+    .await;
+    assert!(
+        huge.len() > fabricated.len() && fabricated.len() > assumed.len(),
+        "the three budgets must render three strictly decreasing listings, or \
+         the catalogue is not overflowing them: 1M = {} bytes, 200k = {} bytes, \
+         {} = {} bytes",
+        huge.len(),
+        fabricated.len(),
+        wcore_config::compact::UNVERIFIED_CONTEXT_WINDOW,
+        assumed.len()
     );
 }

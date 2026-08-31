@@ -261,16 +261,28 @@ fn emergency_truncation_detection() {
     };
 
     assert!(
-        is_at_emergency_limit(999, &config, UNKNOWN_PROVIDER, UNKNOWN_MODEL),
+        is_at_emergency_limit(
+            999,
+            &config,
+            config.effective_context_window(UNKNOWN_PROVIDER, UNKNOWN_MODEL)
+        ),
         "a 1,000-token window must still have a reachable emergency limit"
     );
     assert!(
-        !is_at_emergency_limit(950, &config, UNKNOWN_PROVIDER, UNKNOWN_MODEL),
+        !is_at_emergency_limit(
+            950,
+            &config,
+            config.effective_context_window(UNKNOWN_PROVIDER, UNKNOWN_MODEL)
+        ),
         "950 is below the scaled limit of 999"
     );
 
     assert!(
-        !is_at_emergency_limit(800, &config, UNKNOWN_PROVIDER, UNKNOWN_MODEL),
+        !is_at_emergency_limit(
+            800,
+            &config,
+            config.effective_context_window(UNKNOWN_PROVIDER, UNKNOWN_MODEL)
+        ),
         "800 tokens should be below the emergency limit"
     );
 
@@ -283,11 +295,19 @@ fn emergency_truncation_detection() {
     };
 
     assert!(
-        is_at_emergency_limit(999, &disabled_config, UNKNOWN_PROVIDER, UNKNOWN_MODEL),
+        is_at_emergency_limit(
+            999,
+            &disabled_config,
+            disabled_config.effective_context_window(UNKNOWN_PROVIDER, UNKNOWN_MODEL)
+        ),
         "emergency limit should apply even when compact is disabled"
     );
     assert!(
-        !is_at_emergency_limit(800, &disabled_config, UNKNOWN_PROVIDER, UNKNOWN_MODEL),
+        !is_at_emergency_limit(
+            800,
+            &disabled_config,
+            disabled_config.effective_context_window(UNKNOWN_PROVIDER, UNKNOWN_MODEL)
+        ),
         "below-limit should still return false when compact is disabled"
     );
 }

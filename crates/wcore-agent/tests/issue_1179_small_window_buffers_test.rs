@@ -68,7 +68,10 @@ fn boundaries(window: usize) -> (usize, usize, usize) {
     }
     .input_ceiling(&cfg)
     .expect("a pinned window always yields a ceiling") as usize;
-    let emergency = emergency_limit(&cfg, UNKNOWN_PROVIDER, UNKNOWN_MODEL);
+    let emergency = emergency_limit(
+        &cfg,
+        cfg.effective_context_window(UNKNOWN_PROVIDER, UNKNOWN_MODEL),
+    );
     (threshold, ceiling, emergency)
 }
 
