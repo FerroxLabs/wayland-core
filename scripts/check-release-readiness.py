@@ -472,6 +472,16 @@ def run(root, offline=False, injected=None):
                     % (rec["path"], repo, num,
                        "/".join(sorted(got & FEATURE_LABELS))))
 
+        def _ledger_for(recs, target):
+            """Criterion ids the carrier still owes, [] if none, None if unledgered."""
+            for r in recs:
+                if "%s#%s" % (r.get("repo"), r.get("issue")) != target:
+                    continue
+                return [c.get("id") for c in r.get("criteria", [])
+                        if c.get("state") in ("not-met", "blocked")]
+            return None
+
+        discharged = []
         for ho in sorted(handoffs):
             st = ho_state.get(ho)
             if st is None:
@@ -480,14 +490,35 @@ def run(root, offline=False, injected=None):
                     "issue nobody can open is not decomposed, it is deleted."
                     % ho)
             elif st == "closed":
-                problems.append(
-                    "HANDOFF: %s is CLOSED. A residual carried by a closed "
-                    "issue is untracked with extra steps." % ho)
+                # A carrier closed BECAUSE it is finished is not a hole. Ask the
+                # carrier's own ledger, not just the tracker: still owing work
+                # (any not-met or blocked criterion) means the residual really
+                # did go nowhere; owing nothing means the decomposition
+                # completed. No ledger at all still fails -- an untracked
+                # carrier is precisely what this rule exists to catch.
+                carrier = _ledger_for(records, ho)
+                if carrier is None:
+                    problems.append(
+                        "HANDOFF: %s is CLOSED and has no ledger, so nothing "
+                        "records whether the residual was finished or dropped."
+                        % ho)
+                elif carrier:
+                    problems.append(
+                        "HANDOFF: %s is CLOSED while its own ledger still owes "
+                        "work (%s). A residual carried by a closed issue that "
+                        "is not finished is untracked with extra steps."
+                        % (ho, ", ".join(carrier)))
+                else:
+                    discharged.append(ho)
 
         say("corroborated `kind:` against tracker labels for %d issue(s) "
             "across %s" % (sum(len(v) for v in labels.values()),
                            ", ".join(repos) or "no trackers"))
         say("resolved %d handoff target(s)" % len(handoffs))
+        if discharged:
+            say("%d handoff target(s) are CLOSED and owe nothing on their own "
+                "ledger -- the residual completed rather than went missing: %s"
+                % (len(discharged), ", ".join(sorted(discharged))))
         if uncorroborated:
             # Not a failure: most of the second tracker carries no labels at
             # all. But a `feature` is the classification that removes work
@@ -748,6 +779,27 @@ def self_test():
     # The default `_DEFECT` is the clean control and goes green for reasons
     # unrelated to milestones -- these arms were written against it once
     # and all three failed, the control included.
+    # ── a CLOSED handoff carrier: finished vs abandoned vs unledgered ───
+    # The rule used to fail on ANY closed carrier, which reds a correctly
+    # completed decomposition forever. These three fix the polarity and pin it.
+    case("a CLOSED carrier that still owes work on its own ledger", True,
+         defect=_DEFECT.replace('    handoff: "FerroxLabs/wayland#11"',
+                               '    handoff: "FerroxLabs/wayland#8"'),
+         inj={"labels": _INJ["labels"],
+              "issues": {"FerroxLabs/wayland#8": "closed"}},
+         expect="still owes work")
+    case("a CLOSED carrier that owes NOTHING is a finished residual", False,
+         defect=_DEFECT.replace('    handoff: "FerroxLabs/wayland#11"',
+                               '    handoff: "FerroxLabs/wayland#8"'),
+         feature=_FEATURE.replace("    state: not-met\n",
+                                  '    state: met\n    evidence: "file:src/t.rs"\n'),
+         inj={"labels": _INJ["labels"],
+              "issues": {"FerroxLabs/wayland#8": "closed"}})
+    case("a CLOSED carrier with NO ledger is still a hole", True,
+         inj={"labels": _INJ["labels"],
+              "issues": {"FerroxLabs/wayland#11": "closed"}},
+         expect="has no ledger")
+
     case("an OPEN defect owing work with NO milestone", True,
          defect=_DEFECT.replace(
              '    state: met\n    evidence: '
