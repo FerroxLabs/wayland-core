@@ -626,12 +626,35 @@ fn subagent_ok_result(
         ),
         _ => (is_error, result.text),
     };
+    // #1266 c3 -- the run returned `Ok`, so there is no `AgentError` here to
+    // ask. The finish reason is the only classification evidence this path
+    // holds, and it is read rather than guessed at:
+    //   * `Length`   -- "the context window or an output-token ceiling was
+    //                  reached", which is `ContextLimit`s own definition.
+    //   * `MaxTurns` -- OUR configured turn cap stopped it. Local, nothing
+    //                  upstream implicated, so `LocalWayland`.
+    //   * `Error` / `Stop` -- opaque, or not a failure at all. `Unknown`, and
+    //                  deliberately NOT upgraded to a plausible `ToolRuntime`:
+    //                  the child`s real diagnostic reached its OWN sink, and
+    //                  this path only has prose.
+    let failure_category = if !is_error {
+        wcore_protocol::events::FailureCategory::Unknown
+    } else {
+        match result.finish_reason {
+            FinishReason::Length => wcore_protocol::events::FailureCategory::ContextLimit,
+            FinishReason::MaxTurns => wcore_protocol::events::FailureCategory::LocalWayland,
+            FinishReason::Error | FinishReason::Stop => {
+                wcore_protocol::events::FailureCategory::Unknown
+            }
+        }
+    };
     SubAgentResult {
         name,
         text,
         usage: result.usage,
         turns: result.turns,
         is_error,
+        failure_category,
     }
 }
 
@@ -652,7 +675,7 @@ fn relay_subagent_terminal(sink: Option<&ChannelSink>, result: &SubAgentResult) 
             result.name, result.turns
         )
     };
-    sink.relay_terminal(terminal_state, &terminal_message);
+    sink.relay_terminal(terminal_state, &terminal_message, result.failure_category);
 }
 
 /// Human-readable cause for an abnormal sub-agent termination.
@@ -1615,10 +1638,19 @@ impl AgentSpawner {
                         model,
                     }
                 })
-                .map_err(|e| SubAgentResult::error(&sub.name, &format!("provider '{spec}': {e}"))),
+                .map_err(|e| {
+                    SubAgentResult::error(
+                        &sub.name,
+                        &format!("provider '{spec}': {e}"),
+                        // Local: the pin could not be resolved here. No
+                        // request ever reached a provider.
+                        wcore_protocol::events::FailureCategory::LocalWayland,
+                    )
+                }),
             (Some(spec), None) => Err(SubAgentResult::error(
                 &sub.name,
                 &format!("provider '{spec}' pinned but no provider resolver is attached"),
+                wcore_protocol::events::FailureCategory::LocalWayland,
             )),
         }
     }
@@ -2059,6 +2091,8 @@ impl AgentSpawner {
                     usage: TokenUsage::default(),
                     turns: 0,
                     is_error: true,
+                    // "the engine task itself failed or died" -- ToolRuntime.
+                    failure_category: wcore_protocol::events::FailureCategory::ToolRuntime,
                 }),
             }
         }
@@ -2173,6 +2207,8 @@ impl AgentSpawner {
                     usage: TokenUsage::default(),
                     turns: 0,
                     is_error: true,
+                    // Cap-exceeded or a shard join failure: our own runtime.
+                    failure_category: wcore_protocol::events::FailureCategory::ToolRuntime,
                 }]
             }
         }
@@ -2221,6 +2257,7 @@ impl AgentSpawner {
                         usage: TokenUsage::default(),
                         turns: 0,
                         is_error: true,
+                        failure_category: wcore_protocol::events::FailureCategory::ToolRuntime,
                     };
                     relay_subagent_terminal(terminal_sink.as_deref(), &result);
                     results.push(result);
@@ -2258,6 +2295,7 @@ impl AgentSpawner {
                 let result = SubAgentResult::error(
                     &name,
                     "parent cancelled before child concurrency admission",
+                    wcore_protocol::events::FailureCategory::LocalWayland,
                 );
                 relay_subagent_terminal(terminal_sink.as_deref(), &result);
                 return result;
@@ -2269,6 +2307,7 @@ impl AgentSpawner {
                         let result = SubAgentResult::error(
                             &name,
                             "child concurrency admission is unavailable",
+                            wcore_protocol::events::FailureCategory::LocalWayland,
                         );
                         relay_subagent_terminal(terminal_sink.as_deref(), &result);
                         return result;
@@ -2293,7 +2332,11 @@ impl AgentSpawner {
         let launch = match self.prepare_durable_launch(sub_config, overrides).await {
             Ok(launch) => launch,
             Err(error) => {
-                let result = SubAgentResult::error(&name, &error.to_string());
+                let result = SubAgentResult::error(
+                    &name,
+                    &error.to_string(),
+                    wcore_protocol::events::FailureCategory::LocalWayland,
+                );
                 relay_subagent_terminal(terminal_sink.as_deref(), &result);
                 return result;
             }
@@ -2312,7 +2355,11 @@ impl AgentSpawner {
         let record = match launch.durable_record(origin, extras.parent_call_id.clone()) {
             Ok(record) => record,
             Err(error) => {
-                let result = SubAgentResult::error(&name, &error.to_string());
+                let result = SubAgentResult::error(
+                    &name,
+                    &error.to_string(),
+                    wcore_protocol::events::FailureCategory::LocalWayland,
+                );
                 relay_subagent_terminal(terminal_sink.as_deref(), &result);
                 return result;
             }
@@ -2330,7 +2377,11 @@ impl AgentSpawner {
         ) {
             Ok(admitted) => admitted,
             Err(error) => {
-                let result = SubAgentResult::error(&name, &error.to_string());
+                let result = SubAgentResult::error(
+                    &name,
+                    &error.to_string(),
+                    wcore_protocol::events::FailureCategory::LocalWayland,
+                );
                 relay_subagent_terminal(terminal_sink.as_deref(), &result);
                 return result;
             }
@@ -2351,7 +2402,11 @@ impl AgentSpawner {
                 result
             }
             Err(error) => {
-                let result = SubAgentResult::error(&name, &error.to_string());
+                let result = SubAgentResult::error(
+                    &name,
+                    &error.to_string(),
+                    wcore_protocol::events::FailureCategory::LocalWayland,
+                );
                 relay_subagent_terminal(terminal_sink.as_deref(), &result);
                 result
             }
@@ -2376,7 +2431,13 @@ impl AgentSpawner {
         let (child_budget, _agent_guard) = match self.enter_child_budget(requested_budget) {
             Ok(budget) => budget,
             Err(error) => {
-                return SubAgentResult::error(&launch.request.name, &error);
+                return SubAgentResult::error(
+                    &launch.request.name,
+                    &error,
+                    // A budget/spend-guard refusal is local, exactly as the
+                    // engine's own budget exits classify themselves.
+                    wcore_protocol::events::FailureCategory::LocalWayland,
+                );
             }
         };
         // F21-02-01 + F21-02-03 — ONE read of the parent authority feeds BOTH
@@ -2401,7 +2462,11 @@ impl AgentSpawner {
         if let Err(error) =
             self.bind_child_budget(&mut engine, child_budget, requested_budget.is_some())
         {
-            return SubAgentResult::error(&launch.request.name, &error);
+            return SubAgentResult::error(
+                &launch.request.name,
+                &error,
+                wcore_protocol::events::FailureCategory::LocalWayland,
+            );
         }
         // #1140 — the child's real diagnostic goes to the CHILD's sink
         // (`NullSink` here, or a `ChannelSink` feeding `--json-stream`), never
@@ -2524,6 +2589,12 @@ impl AgentSpawner {
                 // accumulated instead; a run that failed on its first request
                 // still reports the honest zero.
                 let (usage, _) = engine.usage_snapshot();
+                // #1266 c3 -- ask the CHILD's own classifier. This is the
+                // seam the issue names: the category existed here and was
+                // thrown away one frame later, so a child that died on a
+                // context limit and one that died on a local authority fault
+                // reached the parent's host indistinguishable.
+                let failure_category = error.failure_category();
                 SubAgentResult {
                     name: launch.request.name,
                     text: match diagnostic {
@@ -2533,6 +2604,7 @@ impl AgentSpawner {
                     usage,
                     turns: engine.run_turns(),
                     is_error: true,
+                    failure_category,
                 }
             }
         };
@@ -2835,6 +2907,9 @@ fn sub_agent_result_to_payload(r: &SubAgentResult) -> serde_json::Value {
         "output_tokens": r.usage.output_tokens,
         "cache_creation_tokens": r.usage.cache_creation_tokens,
         "cache_read_tokens": r.usage.cache_read_tokens,
+        // #1266 c3 -- the shard round trip must not be a place the category
+        // is dropped.
+        "failure_category": r.failure_category,
         // `None` serializes as `null`, which the reader maps straight back to
         // `None` — "the provider said nothing", never a zero.
         "reported_cost_usd": r.usage.reported_cost_usd,
@@ -2881,12 +2956,18 @@ fn payload_to_sub_agent_result(v: serde_json::Value) -> SubAgentResult {
     };
     let turns = v.get("turns").and_then(|n| n.as_u64()).unwrap_or(0) as usize;
     let is_error = v.get("is_error").and_then(|b| b.as_bool()).unwrap_or(true);
+    // Absent or unrecognised -> Unknown, never a plausible-looking guess.
+    let failure_category = v
+        .get("failure_category")
+        .and_then(|c| serde_json::from_value(c.clone()).ok())
+        .unwrap_or(wcore_protocol::events::FailureCategory::Unknown);
     SubAgentResult {
         name,
         text,
         usage,
         turns,
         is_error,
+        failure_category,
     }
 }
 
@@ -3108,7 +3189,11 @@ mod spawn_task_set_tests {
             let _drop_notify = DropNotify(Some(dropped_tx));
             let _ = started_tx.send(());
             std::future::pending::<()>().await;
-            SubAgentResult::error("unreachable", "unreachable")
+            SubAgentResult::error(
+                "unreachable",
+                "unreachable",
+                wcore_protocol::events::FailureCategory::Unknown,
+            )
         });
         let tasks = SpawnTaskSet(vec![child]);
         started_rx.await.expect("child must start");

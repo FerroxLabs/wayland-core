@@ -1541,6 +1541,7 @@ mod phase7_tests {
             *self.captured_config.lock().unwrap() = Some(config.clone());
             *self.captured_overrides.lock().unwrap() = Some(overrides.clone());
             SubAgentResult {
+                failure_category: wcore_protocol::events::FailureCategory::Unknown,
                 name: config.name.clone(),
                 text: self.text.clone(),
                 usage: TokenUsage::default(),
@@ -1902,6 +1903,7 @@ mod phase7_tests {
         ) -> SubAgentResult {
             tokio::time::sleep(self.delay).await;
             SubAgentResult {
+                failure_category: wcore_protocol::events::FailureCategory::Unknown,
                 name: config.name,
                 text: "slow fork finished".to_string(),
                 usage: TokenUsage::default(),

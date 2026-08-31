@@ -6,6 +6,7 @@ pub mod child_transaction;
 pub mod compact;
 pub mod crucible;
 pub mod execution_policy;
+pub mod failure;
 pub mod file_state;
 pub mod goal;
 // Windows kill-on-close Job Object — the only kernel-backed way to own a

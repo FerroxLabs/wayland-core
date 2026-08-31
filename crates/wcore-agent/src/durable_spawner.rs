@@ -823,6 +823,9 @@ impl AdmittedDurableSpawn {
         Ok(SubAgentResult::error(
             &self.name,
             "durable child cancelled before completion",
+            // The parent stopped it. Nothing upstream is implicated, which is
+            // the same reading `AgentError::UserAborted` already gets.
+            wcore_protocol::events::FailureCategory::LocalWayland,
         ))
     }
 }
@@ -1105,6 +1108,15 @@ struct DurableResultPayload {
     usage: TokenUsage,
     turns: u64,
     is_error: bool,
+    /// #1266 c3 -- the child`s own failure category, so the durable round trip
+    /// is not itself a place the classification is dropped.
+    ///
+    /// `serde(default)` and NO schema bump: a payload written before this
+    /// field existed still decodes (as `Unknown`, which is what it in fact
+    /// carried), and bumping the version would instead reject it outright --
+    /// `decode_result_payload` compares the version for exact equality.
+    #[serde(default)]
+    failure_category: wcore_protocol::events::FailureCategory,
 }
 
 fn encode_result_payload(
@@ -1118,6 +1130,7 @@ fn encode_result_payload(
         usage: result.usage.clone(),
         turns,
         is_error: result.is_error,
+        failure_category: result.failure_category,
     };
     let bytes = serde_json::to_vec(&payload).map_err(|error| {
         DurableSpawnerError::InvalidResultPayload(format!("cannot encode payload: {error}"))
@@ -1152,6 +1165,7 @@ fn decode_result_payload(
         turns: usize::try_from(payload.turns)
             .map_err(|_| DurableSpawnerError::TurnCountOverflow)?,
         is_error: payload.is_error,
+        failure_category: payload.failure_category,
     };
     let (_, actual) = encode_result_payload(&result)?;
     if &actual != expected {
@@ -1217,6 +1231,7 @@ mod tests {
             SubAgentResult::error(
                 &config.name,
                 "executor must not run while authority is poisoned",
+                wcore_protocol::events::FailureCategory::LocalWayland,
             )
         }
     }

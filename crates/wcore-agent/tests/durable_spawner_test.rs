@@ -37,6 +37,7 @@ impl Spawner for ImmediateSpawner {
             },
             turns: 2,
             is_error: false,
+            failure_category: wcore_protocol::events::FailureCategory::Unknown,
         }
     }
 }
@@ -57,7 +58,11 @@ impl Spawner for CountingSpawner {
         _overrides: ForkOverrides,
     ) -> SubAgentResult {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        SubAgentResult::error(&config.name, "must not execute")
+        SubAgentResult::error(
+            &config.name,
+            "must not execute",
+            wcore_protocol::events::FailureCategory::Unknown,
+        )
     }
 }
 

@@ -204,7 +204,22 @@ impl ChannelSink {
     /// Emit the single authoritative terminal after the child result is known.
     /// There is deliberately no stream fallback: a terminal that can reorder
     /// behind diagnostics is not authoritative evidence.
-    pub fn relay_terminal(&self, terminal_state: WorkflowChildTerminalState, message: &str) {
+    ///
+    /// `category` is the CHILD`s own failure category (#1266 c3). It is a
+    /// required argument rather than a field with a default: this frame is the
+    /// authoritative terminal, and the previous hardcoded
+    /// `FailureCategory::Unknown` here is precisely the drop #1266 reports --
+    /// a child that died on a context limit and one that died on a local
+    /// authority fault reached the parent`s host indistinguishable. It is
+    /// passed THROUGH rather than remapped: a child whose upstream response
+    /// was opaque must still arrive as `unknown`, never be upgraded to a
+    /// plausible-looking `tool_runtime` on the child`s behalf.
+    pub fn relay_terminal(
+        &self,
+        terminal_state: WorkflowChildTerminalState,
+        message: &str,
+        category: wcore_protocol::events::FailureCategory,
+    ) {
         if self.terminal_sent.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -219,7 +234,7 @@ impl ChannelSink {
                     code: "sub_agent_error".to_owned(),
                     message: message.to_owned(),
                     retryable: false,
-                    category: wcore_protocol::events::FailureCategory::Unknown,
+                    category,
                 },
             },
         };
@@ -557,6 +572,7 @@ mod tests {
         sink.relay_terminal(
             WorkflowChildTerminalState::Succeeded,
             "sub-agent 'chatty' completed (3 turns)",
+            wcore_protocol::events::FailureCategory::Unknown,
         );
 
         let event = terminal_rx
@@ -568,7 +584,11 @@ mod tests {
         assert_eq!(event.relay.inner["msg_id"], "spawn:0:chatty:terminal");
         assert_eq!(event.relay.parent_call_id, "spawn:0:chatty");
 
-        sink.relay_terminal(WorkflowChildTerminalState::Failed, "late contradiction");
+        sink.relay_terminal(
+            WorkflowChildTerminalState::Failed,
+            "late contradiction",
+            wcore_protocol::events::FailureCategory::ToolRuntime,
+        );
         assert!(terminal_rx.try_recv().is_err());
     }
 
@@ -576,7 +596,11 @@ mod tests {
     async fn legacy_constructor_relays_terminal_on_stream() {
         let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
         let sink = ChannelSink::new("spawn:0:legacy".into(), "legacy".into(), tx);
-        sink.relay_terminal(WorkflowChildTerminalState::Succeeded, "completed");
+        sink.relay_terminal(
+            WorkflowChildTerminalState::Succeeded,
+            "completed",
+            wcore_protocol::events::FailureCategory::Unknown,
+        );
 
         let relay = rx
             .recv()
@@ -609,7 +633,11 @@ mod tests {
             true,
             wcore_protocol::events::FailureCategory::Unknown,
         );
-        sink.relay_terminal(WorkflowChildTerminalState::Failed, "engine crashed");
+        sink.relay_terminal(
+            WorkflowChildTerminalState::Failed,
+            "engine crashed",
+            wcore_protocol::events::FailureCategory::ToolRuntime,
+        );
 
         let event = terminal_rx
             .recv()
