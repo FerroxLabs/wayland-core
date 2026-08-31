@@ -169,7 +169,15 @@ fn host_of(base_url: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::egress::classify::{EgressVerdict, classify};
+    use crate::egress::classify::{EgressOrigin, EgressVerdict, classify as classify_with_origin};
+
+    /// Provider-origin classification — see the shim of the same name in
+    /// `classify.rs`. These tests assert what the SHIPPED DEFAULT allowlist
+    /// admits, which is a question about the allowlist and not about
+    /// wayland#1264's origin split.
+    fn classify(method: &Method, url: &url::Url, allow: &AllowList) -> EgressVerdict {
+        classify_with_origin(method, url, allow, EgressOrigin::Provider)
+    }
     use reqwest::Method;
 
     fn cfg(base_url: &str, allow: &[&str]) -> Config {

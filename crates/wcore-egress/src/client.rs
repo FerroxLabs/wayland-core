@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use crate::error::EgressError;
 use crate::observer::{SharedEgressObserver, default_observer};
+use crate::origin::EgressOrigin;
 use crate::policy::{SharedPolicy, default_policy};
 use crate::request::EgressRequestBuilder;
 
@@ -28,6 +29,14 @@ pub struct EgressClient {
     policy: SharedPolicy,
     observer: SharedEgressObserver,
     next_attempt_id: Arc<AtomicU64>,
+    /// wayland#1264 — the origin every request from this client carries unless
+    /// the call site overrides it. `None` means unmarked, which the policy
+    /// reads as [`EgressOrigin::Provider`].
+    ///
+    /// This is a LABEL, not a policy. The client does not get its own rules —
+    /// that shape was refuted as a bypass factory — it only says on whose
+    /// behalf it is asking, and the one policy decides.
+    origin: Option<EgressOrigin>,
 }
 
 impl std::fmt::Debug for EgressClient {
@@ -110,6 +119,18 @@ impl EgressClient {
             .expect("reqwest TLS backend must initialize at startup")
     }
 
+    /// Stamp every request from this client with `origin` (wayland#1264).
+    pub fn with_origin(mut self, origin: EgressOrigin) -> Self {
+        self.origin = Some(origin);
+        self
+    }
+
+    /// The origin this client stamps, if any.
+    #[must_use]
+    pub fn origin(&self) -> Option<EgressOrigin> {
+        self.origin
+    }
+
     /// Replace this client's egress policy, returning the updated client.
     pub fn with_policy(mut self, policy: SharedPolicy) -> Self {
         self.policy = policy;
@@ -163,13 +184,17 @@ impl EgressClient {
         method: reqwest::Method,
         url: U,
     ) -> EgressRequestBuilder {
-        EgressRequestBuilder::new(
+        let builder = EgressRequestBuilder::new(
             self.inner.clone(),
             self.policy.clone(),
             self.observer.clone(),
             self.next_attempt_id.clone(),
             self.inner.request(method, url),
-        )
+        );
+        match self.origin {
+            Some(origin) => builder.origin(origin),
+            None => builder,
+        }
     }
 }
 
@@ -185,6 +210,7 @@ pub struct EgressClientBuilder {
     inner: reqwest::ClientBuilder,
     policy: Option<SharedPolicy>,
     observer: Option<SharedEgressObserver>,
+    origin: Option<EgressOrigin>,
 }
 
 impl EgressClientBuilder {
@@ -205,6 +231,7 @@ impl EgressClientBuilder {
                 .tcp_keepalive(Some(Duration::from_secs(15))),
             policy: None,
             observer: None,
+            origin: None,
         }
     }
 
@@ -300,6 +327,18 @@ impl EgressClientBuilder {
         self
     }
 
+    /// Stamp every request built by this client with `origin` (wayland#1264).
+    ///
+    /// This is where the TOOL surface is labelled: `build_ssrf_safe_tool_client`
+    /// sets it once, so every request WebFetch and the API tool backends make
+    /// arrives at the policy already saying the model chose its URL. Stamping
+    /// per call site instead would put the label's completeness in the hands of
+    /// whoever adds the next tool.
+    pub fn origin(mut self, origin: EgressOrigin) -> Self {
+        self.origin = Some(origin);
+        self
+    }
+
     /// Build the [`EgressClient`].
     pub fn build(self) -> Result<EgressClient, EgressError> {
         let inner = self.inner.build()?;
@@ -308,6 +347,7 @@ impl EgressClientBuilder {
             policy: self.policy.unwrap_or_else(default_policy),
             observer: self.observer.unwrap_or_else(default_observer),
             next_attempt_id: Arc::new(AtomicU64::new(1)),
+            origin: self.origin,
         })
     }
 }

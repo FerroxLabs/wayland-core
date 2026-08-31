@@ -21,6 +21,7 @@
 use std::collections::HashSet;
 
 use reqwest::Method;
+pub use wcore_egress::EgressOrigin;
 
 /// Suffixes of "shared-platform" hosts where many mutually-untrusted tenants
 /// live under one registrable domain. Allowlisting the registrable apex would
@@ -96,6 +97,26 @@ pub enum EgressVerdict {
         /// The registrable domain (what "always" persists for ordinary hosts).
         registrable: String,
         /// Short human reason for the prompt.
+        reason: String,
+    },
+    /// wayland#1264 — a TOOL-originated, DATA-BEARING request to a host that
+    /// IS on the allowlist.
+    ///
+    /// Distinct from [`Self::Ask`] in exactly one way, and it is the way that
+    /// matters: an unattended session (no consent doorbell) resolves `Ask` to
+    /// ALLOW, because nothing sensitive leaves on a data-less read to a new
+    /// host. That reasoning does not transfer here — the payload is the point
+    /// — so this variant resolves to DENY when there is nobody to ask.
+    ///
+    /// Not [`Self::Exfil`] either: the host is allowlisted, so with an
+    /// approval surface present the operator gets a prompt rather than a hard
+    /// refusal, and the tool keeps working in an interactive session.
+    ToolData {
+        /// The exact request host.
+        host: String,
+        /// The registrable domain, for the prompt.
+        registrable: String,
+        /// Short human reason.
         reason: String,
     },
     /// Exfil-class — must be gated even in YOLO. The operator still decides, but
@@ -204,8 +225,34 @@ pub fn is_shared_platform(host: &str) -> bool {
         .any(|s| h == *s || h.ends_with(&format!(".{s}")))
 }
 
-/// Classify an outbound request against the current allow state.
-pub fn classify(method: &Method, url: &url::Url, allow: &AllowList) -> EgressVerdict {
+/// Classify an outbound request against the current allow state and the
+/// request's [`EgressOrigin`].
+///
+/// ## wayland#1264 — why the origin is a parameter
+///
+/// This function receives method + URL and nothing else (headers and body are
+/// never read), and it returned `Allow` on the host match ALONE. Because
+/// `get_carries_data` had exactly one call site, on the non-allowlisted
+/// branch, the shape check was unreachable for any host on the 38-entry
+/// shipped default: an unattended `WebFetch` of
+/// `https://<allowlisted-apex>/?leak=<secret>` was admitted with no approval
+/// in any mode.
+///
+/// Narrowing the allowlist was not available — it would deny the agent's own
+/// LLM POSTs, and two tests pin that as intended. The grant is therefore split
+/// by ORIGIN, not by host: provider traffic to an allowlisted apex keeps its
+/// unconditional `Allow`, and tool-driven traffic to the same apex is
+/// shape-checked. Nothing about provider semantics changes.
+///
+/// Two other shapes were considered and refuted; see
+/// `wcore_egress::origin` for both, and `.planning/DECISIONS.md` for the
+/// recorded decision.
+pub fn classify(
+    method: &Method,
+    url: &url::Url,
+    allow: &AllowList,
+    origin: EgressOrigin,
+) -> EgressVerdict {
     let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
 
     // Local destinations are not exfiltration — loopback, RFC1918, link-local,
@@ -229,6 +276,18 @@ pub fn classify(method: &Method, url: &url::Url, allow: &AllowList) -> EgressVer
         allow.domain_allowed(&registrable) || allow.host_allowed(&host)
     };
     if allowed {
+        // wayland#1264. The allowlist is the operator saying "this agent may
+        // reach GitHub". It is not the operator saying "the model may choose
+        // a query string against GitHub", and those are different grants.
+        if origin == EgressOrigin::Tool && request_carries_data(method, url) {
+            return EgressVerdict::ToolData {
+                host,
+                registrable,
+                reason: format!(
+                    "{method} to an allowlisted host, carrying data the model                      chose (a body, or a long/high-entropy path or query)"
+                ),
+            };
+        }
         return EgressVerdict::Allow;
     }
 
@@ -267,6 +326,18 @@ pub fn classify(method: &Method, url: &url::Url, allow: &AllowList) -> EgressVer
     }
 }
 
+/// Does this request carry data OUT, by either of the two shapes the exfil
+/// boundary already recognises — a body-bearing method, or a GET/HEAD whose
+/// path/query is long or high-entropy?
+///
+/// wayland#1264: this is the predicate the non-allowlisted branch below has
+/// always applied in two separate steps. It is factored out so the allowlisted
+/// tool-origin branch asks the SAME question rather than a second, drifting
+/// copy of it — and so `get_carries_data` stops having exactly one call site.
+fn request_carries_data(method: &Method, url: &url::Url) -> bool {
+    matches!(*method, Method::POST | Method::PUT | Method::PATCH) || get_carries_data(url)
+}
+
 /// Heuristic: does this GET/HEAD URL carry data in its path or query? True when
 /// the combined path+query is long, or when it contains a high-entropy token
 /// (a base64/hex-ish run) that looks like encoded/secret data.
@@ -303,6 +374,16 @@ mod tests {
 
     fn url(s: &str) -> url::Url {
         url::Url::parse(s).unwrap()
+    }
+
+    /// Provider-origin classification — the three-argument shape every test
+    /// below predates wayland#1264 with, so those tests keep asserting exactly
+    /// what they always asserted. Tool-origin behaviour has its own tests at
+    /// the end of this module; the production caller
+    /// (`AgentEgressPolicy::check`) passes the origin it read off the request
+    /// and never this shim.
+    fn classify(method: &Method, url: &url::Url, allow: &AllowList) -> EgressVerdict {
+        super::classify(method, url, allow, EgressOrigin::Provider)
     }
 
     #[test]
@@ -457,6 +538,140 @@ mod tests {
         match classify(&Method::GET, &url("https://example.org/docs"), &allow) {
             EgressVerdict::Ask { .. } => {}
             other => panic!("expected Ask, got {other:?}"),
+        }
+    }
+
+    // =======================================================================
+    // wayland#1264 — the allowlist grant is split by traffic ORIGIN.
+    // =======================================================================
+
+    /// THE DEFECT. A tool-driven, data-bearing request to an allowlisted apex
+    /// was admitted on the host match alone: `classify` returned `Allow`
+    /// BEFORE the method check and before the path/query check, and
+    /// `get_carries_data` had its only call site on the non-allowlisted
+    /// branch, so for any of the 38 shipped default domains the shape check
+    /// was unreachable.
+    #[test]
+    fn tool_driven_data_to_an_allowlisted_apex_is_not_allowed_on_the_host_match() {
+        let mut allow = AllowList::default();
+        allow.allow_domain("github.com");
+
+        // A query payload the model chose. The token run is base64url, which
+        // is why `-` must stay IN the alphabet: excluding it would blind the
+        // check to the shape it exists to see.
+        let leak = url("https://github.com/?leak=aG93LW11Y2gtc2VjcmV0LWRhdGEtZml0cy1oZXJl");
+        assert!(
+            matches!(
+                super::classify(&Method::GET, &leak, &allow, EgressOrigin::Tool),
+                EgressVerdict::ToolData { .. }
+            ),
+            "a tool-chosen query payload to an allowlisted apex must be gated"
+        );
+
+        // Every data-bearing shape, not just the one in the ticket.
+        for (method, raw) in [
+            (Method::POST, "https://github.com/collect"),
+            (Method::PUT, "https://github.com/collect"),
+            (Method::PATCH, "https://github.com/collect"),
+            (
+                Method::GET,
+                "https://api.github.com/?q=c2VjcmV0LXZhbHVlLWJhc2U2NHVybC1lbmNvZGVk",
+            ),
+            (
+                Method::HEAD,
+                "https://github.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+        ] {
+            assert!(
+                matches!(
+                    super::classify(&method, &url(raw), &allow, EgressOrigin::Tool),
+                    EgressVerdict::ToolData { .. }
+                ),
+                "tool-origin {method} {raw} must be gated"
+            );
+        }
+    }
+
+    /// THE WRONG-REFUSAL CONTROL, and the one the ticket's c3 names: provider
+    /// traffic to the SAME apex keeps its unconditional `Allow`. A fix that
+    /// applied the new check to provider traffic would deny the agent's own
+    /// LLM POSTs — which is precisely why narrowing the allowlist was not an
+    /// available fix.
+    #[test]
+    fn provider_traffic_to_the_same_apex_is_still_unconditionally_allowed() {
+        let mut allow = AllowList::default();
+        allow.allow_domain("anthropic.com");
+        allow.allow_domain("github.com");
+
+        for (method, raw) in [
+            // The agent's own streaming call: a POST with a large body.
+            (Method::POST, "https://api.anthropic.com/v1/messages"),
+            // A provider GET with a long, high-entropy path — a model id, a
+            // signed URL, a resource token. Data-bearing BY SHAPE, and still
+            // allowed, because the origin is not the model.
+            (
+                Method::GET,
+                "https://api.anthropic.com/v1/models/claude-opus-4-1-20250805-v1-0-thinking",
+            ),
+            (
+                Method::POST,
+                "https://github.com/?leak=aG93LW11Y2gtc2VjcmV0LWRhdGEtZml0cy1oZXJl",
+            ),
+        ] {
+            assert_eq!(
+                super::classify(&method, &url(raw), &allow, EgressOrigin::Provider),
+                EgressVerdict::Allow,
+                "provider-origin {method} {raw} must keep its unconditional Allow"
+            );
+        }
+    }
+
+    /// The split narrows nothing else. A tool request that carries NO data to
+    /// an allowlisted host is still allowed silently — WebFetch of a docs page
+    /// on an allowlisted domain must not start prompting.
+    #[test]
+    fn a_data_less_tool_read_of_an_allowlisted_host_is_still_allowed() {
+        let mut allow = AllowList::default();
+        allow.allow_domain("github.com");
+        for raw in [
+            "https://github.com/",
+            "https://github.com/rust-lang/rust",
+            "https://api.github.com/repos/o/r",
+        ] {
+            assert_eq!(
+                super::classify(&Method::GET, &url(raw), &allow, EgressOrigin::Tool),
+                EgressVerdict::Allow,
+                "a data-less tool read of an allowlisted host must stay silent: {raw}"
+            );
+        }
+        // ...and a tool read of a LOCAL destination is untouched by any of
+        // this: the local short-circuit runs before the allowlist.
+        assert_eq!(
+            super::classify(
+                &Method::POST,
+                &url("http://127.0.0.1:8080/collect"),
+                &allow,
+                EgressOrigin::Tool
+            ),
+            EgressVerdict::Allow
+        );
+    }
+
+    /// A NON-allowlisted host is unaffected in both directions: it was already
+    /// `Exfil` for a data-bearing request and `Ask` for a data-less one, and
+    /// the origin split must not have reclassified either.
+    #[test]
+    fn the_non_allowlisted_branch_is_unchanged_by_the_origin_split() {
+        let allow = AllowList::default();
+        for origin in [EgressOrigin::Provider, EgressOrigin::Tool] {
+            assert!(matches!(
+                super::classify(&Method::POST, &url("https://evil.test/c"), &allow, origin),
+                EgressVerdict::Exfil { .. }
+            ));
+            assert!(matches!(
+                super::classify(&Method::GET, &url("https://evil.test/docs"), &allow, origin),
+                EgressVerdict::Ask { .. }
+            ));
         }
     }
 }

@@ -6,7 +6,7 @@
 use async_trait::async_trait;
 use wcore_egress::EgressClient as Client;
 
-use super::build_ssrf_safe_tool_client;
+use super::build_ssrf_safe_tool_client_manual_redirects;
 use wcore_tools::web_fetch::{
     FetchBackend, FetchOutcome, FetchRequest, WEB_FETCH_MAX_RESPONSE_BYTES,
 };
@@ -27,6 +27,32 @@ use wcore_tools::web_fetch::{
 /// to [`WEB_FETCH_MAX_RESPONSE_BYTES`], so its worst-case duration is bounded.
 /// "Falls back" means the fetch responds fast, NOT that the extraction stops.
 const READABILITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12);
+
+/// Redirect hops WebFetch will follow. Ten, the same bound
+/// `ssrf_safe_redirect_policy` enforced before wayland#1264 moved the follow
+/// into this file — the change is where each hop is CHECKED, not how many
+/// there may be.
+const MAX_REDIRECT_HOPS: usize = 10;
+
+/// The absolute URL a 3xx response redirects to, or `None` when the response
+/// is not a redirect or names no usable `Location`.
+///
+/// Resolved against `base` because `Location` is allowed to be relative, and a
+/// relative hop that failed to resolve would silently end the follow — turning
+/// a redirect into a bare 3xx body, which is a wrong answer rather than a
+/// refusal.
+fn redirect_target(response: &reqwest::Response, base: &str) -> Option<String> {
+    if !response.status().is_redirection() {
+        return None;
+    }
+    let location = response
+        .headers()
+        .get(reqwest::header::LOCATION)?
+        .to_str()
+        .ok()?;
+    let base = reqwest::Url::parse(base).ok()?;
+    Some(base.join(location).ok()?.to_string())
+}
 
 /// Run the CPU-bound readability extraction on a blocking thread, racing it
 /// against `deadline`. On overrun or task-join failure, return the raw
@@ -105,7 +131,11 @@ impl HttpFetchBackend {
             // and the github_api / linear / notion / gitlab backends all
             // share the same `build_ssrf_safe_tool_client` constructor so
             // the policy is one edit, not five.
-            client: build_ssrf_safe_tool_client(),
+            // wayland#1264: redirects are followed by `fetch_inner`, one hop
+            // at a time, so every hop passes the egress policy. Transparent
+            // following inside `Client::execute` reaches the network on hops
+            // the policy never sees.
+            client: build_ssrf_safe_tool_client_manual_redirects(),
         }
     }
 }
@@ -151,24 +181,57 @@ impl HttpFetchBackend {
         req: &FetchRequest,
         per_call_timeout: std::time::Duration,
     ) -> FetchOutcome {
-        let response = match self
-            .client
-            .get(&req.url)
-            .timeout(per_call_timeout)
-            // Identify ourselves so origin servers don't 403 us as a
-            // suspicious empty-UA bot. Plain enough to be honest, not
-            // pretending to be a browser.
-            .header(
-                reqwest::header::USER_AGENT,
-                "wayland-core/WebFetch (https://github.com/FerroxLabs/wayland-core)",
-            )
-            .header(
-                reqwest::header::ACCEPT,
-                "text/html,application/xhtml+xml,text/plain,application/json;q=0.9,*/*;q=0.5",
-            )
-            .send()
-            .await
-        {
+        let mut target = req.url.clone();
+        let mut hops = 0usize;
+        let send_outcome = loop {
+            let attempt = self
+                .client
+                .get(&target)
+                .timeout(per_call_timeout)
+                // Identify ourselves so origin servers don't 403 us as a
+                // suspicious empty-UA bot. Plain enough to be honest, not
+                // pretending to be a browser.
+                .header(
+                    reqwest::header::USER_AGENT,
+                    "wayland-core/WebFetch (https://github.com/FerroxLabs/wayland-core)",
+                )
+                .header(
+                    reqwest::header::ACCEPT,
+                    "text/html,application/xhtml+xml,text/plain,application/json;q=0.9,*/*;q=0.5",
+                )
+                .send()
+                .await;
+            let response = match attempt {
+                Ok(response) => response,
+                Err(error) => break Err(error),
+            };
+            // wayland#1264 — the redirect hop is a NEW request and it is
+            // re-issued through the same gate, so the egress policy classifies
+            // it exactly as it classified the first one. `Policy::none()` on
+            // this client is what makes that possible: reqwest would otherwise
+            // follow the hop inside `execute`, where no policy runs.
+            let Some(next) = redirect_target(&response, &target) else {
+                break Ok(response);
+            };
+            hops += 1;
+            if hops > MAX_REDIRECT_HOPS {
+                return FetchOutcome::Err {
+                    message: format!("too many redirects: more than {MAX_REDIRECT_HOPS} hops"),
+                };
+            }
+            // The SSRF floor, unchanged: the same `is_safe_url` check
+            // `ssrf_safe_redirect_policy` applied to each hop.
+            if !wcore_tools::url_safety::is_safe_url(&next) {
+                return FetchOutcome::Err {
+                    message: format!(
+                        "redirect blocked — target URL is a private or internal \
+                         network address: {next}"
+                    ),
+                };
+            }
+            target = next;
+        };
+        let response = match send_outcome {
             Ok(r) => r,
             Err(e) => {
                 // Map reqwest's typed errors to user-actionable strings.

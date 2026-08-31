@@ -158,3 +158,88 @@ than it delivers. #244 c4's text now states the scope at which the property hold
 so the day it closes, someone re-grades instead of quietly agreeing. Scope of the "no": Linux (bwrap)
 and macOS (sandbox-exec) both enforce read-deny at their shipping default, so the exemption is inert
 there, and every non-local principal on Windows is still refused.
+
+
+## Egress: split the allowlist grant by traffic origin (FerroxLabs/wayland#1264)
+
+**Decision: SPLIT.** Provider/LLM traffic to an allowlisted host keeps its unconditional `Allow`.
+Tool-driven traffic to the SAME host is shape-checked, and a data-bearing tool request is DENIED when
+the session has no approval surface to ask.
+
+### What was measured
+
+`classify()` receives method + URL only (headers and body are never read) and returned `Allow` on the
+host match, BEFORE the method check and before the path/query check. `get_carries_data` had exactly
+one call site, on the non-allowlisted branch, so for any of the 38 hosts on the shipped
+`WELL_KNOWN_DOMAINS` default the shape check was UNREACHABLE. `WebFetch` is GET-only but takes an
+unrestricted URL, so the query string is model-chosen. Net: in an unattended run a `WebFetch` of
+`https://<allowlisted-apex>/?leak=<secret>` was admitted with no approval in any mode.
+
+Filed from source reading. It has since been issued: `crates/wcore-agent/tests/egress_tool_origin_test.rs`
+drives the real `HttpFetchBackend` against the real `AgentEgressPolicy`.
+
+### Why not the two obvious alternatives
+
+Both were put to independent external review and both were refuted.
+
+* **A per-client policy** — give tool clients a stricter `EgressPolicy`. The boundary would then
+  depend on WHO CONSTRUCTED THE CLIENT, so every code path able to build a client becomes a bypass
+  factory. There is one policy; only the request is labelled.
+* **Excluding `-` from the data-bearing token run** to cut false positives. `-` is in the alphabet of
+  every base64url secret, so dropping it blinds the check to exactly the payload it exists to see.
+
+Narrowing the allowlist was never available: it would deny the agent's own LLM POSTs, and
+`classify::tests::post_to_allowlisted_host_is_allowed` + `policy::tests::allowlisted_post_is_allowed`
+pin that as intended. Both now carry a comment naming this decision.
+
+### The shape taken
+
+Request ORIGIN is stamped centrally and the one policy is keyed on it.
+
+1. `wcore_egress::EgressOrigin` (`Provider` / `Tool`) travels in the `x-wayland-egress-origin` header,
+   because `reqwest::Request::extensions` is `pub(crate)` in 0.12 and a header is the only per-request
+   channel a caller can write and a policy can read. `EgressRequestBuilder::send` REMOVES it after the
+   policy has read it and before dispatch, at the one seam every outbound request passes through, so
+   it never goes on the wire.
+2. `build_ssrf_safe_tool_client` stamps `Tool` once for the whole tool surface (WebFetch + the github
+   / gitlab / linear / notion backends), so the label's completeness is a property of that constructor
+   and not of whoever adds the next tool. An ABSENT marker reads as `Provider`: the opposite default
+   would refuse the agent's own traffic on every unmarked path.
+3. `classify` gains an origin parameter and a fourth verdict, `ToolData`, returned only for a
+   tool-originated, data-bearing request to an ALLOWLISTED host.
+
+### Why `ToolData` is not `Ask`
+
+`egress/policy.rs`'s `resolve_ask` FAILS OPEN when no consent doorbell is wired — `return
+EgressDecision::Allow` — and that is deliberate and correct: nothing sensitive leaves on a data-less
+read to a new host. A shape check resolved through it would therefore classify the leak correctly and
+allow it anyway. Theatre.
+
+Blanket-denying every `Ask` in an unattended session is not the fix either: it breaks legitimate
+unattended traffic, which is a wrong-refusal shipped in the name of a hardening. So the deny is scoped
+to `ToolData`, a verdict provider traffic can never reach. With an approval surface present the
+operator gets a prompt and the tool keeps working; an "always" answer allows that request only,
+because the host was already allowlisted and the question asked was about the payload.
+
+### Redirects
+
+`reqwest` follows a redirect INSIDE `Client::execute`, so every hop after the first never reached the
+egress chokepoint — the shape check would have been correct on the request and absent on the hop that
+carried the payload. `ssrf_safe_redirect_policy` cannot close this: its per-hop callback is
+synchronous and the egress policy is async over shared state, so it can answer an SSRF question and
+not an egress one. `HttpFetchBackend` now follows redirects itself, one hop at a time, re-issuing each
+through `EgressRequestBuilder::send`. Same 10-hop bound, same `is_safe_url` floor per hop; what
+changed is where each hop is CHECKED.
+
+### What an operator sees
+
+The refusal text names the host and says plainly that being on the egress allow list permits the agent
+to REACH a host and does not permit a tool to choose what to send to it. The reasoning is here, and
+`classify`'s own doc comment points at it.
+
+### Known bound, stated rather than implied
+
+This is a cooperative label. A tool that built its own `EgressClient` without the stamp would be
+classified as provider-origin. That is strictly better than the per-client alternative — where the
+same tool would simply get the weaker POLICY — but it is not a hard boundary, and calling it one would
+be the overclaim this ticket was split out of #1195 to avoid.

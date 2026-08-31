@@ -43,6 +43,7 @@
 mod client;
 mod error;
 mod observer;
+mod origin;
 mod policy;
 mod request;
 mod url_allow;
@@ -56,6 +57,7 @@ pub use observer::{
     EgressRecorderSnapshot, EgressTransportErrorClass, GlobalDefaultObserver, NoopEgressObserver,
     SharedEgressObserver, global_observer_installed, install_global_observer,
 };
+pub use origin::{EGRESS_ORIGIN_HEADER, EgressOrigin};
 pub use policy::{
     AllowAllPolicy, EgressDecision, EgressPolicy, GlobalDefaultPolicy, SharedPolicy,
     default_policy, global_policy_installed, install_global_policy, with_default_policy,

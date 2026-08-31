@@ -25,7 +25,7 @@ use std::sync::RwLock as StdRwLock;
 use tokio::sync::RwLock;
 use wcore_egress::{EgressDecision, EgressPolicy};
 
-use super::classify::{AllowList, EgressVerdict, classify};
+use super::classify::{AllowList, EgressOrigin, EgressVerdict, classify};
 use super::consent::{ConsentDecision, ConsentDoorbell};
 
 /// Whether the egress boundary is enforced or disabled.
@@ -157,6 +157,66 @@ impl AgentEgressPolicy {
         }
     }
 
+    /// Resolve a `ToolData` verdict — a tool-driven, data-bearing request to an
+    /// ALLOWLISTED host (wayland#1264).
+    ///
+    /// The whole point of the variant is that its unattended answer is the
+    /// OPPOSITE of [`Self::resolve_ask`]'s. `Ask` fails OPEN with no doorbell
+    /// (`policy.rs`'s `return EgressDecision::Allow`) and that is deliberate:
+    /// nothing sensitive leaves on a data-less read. A shape check that
+    /// resolved through `resolve_ask` would therefore be theatre — it would
+    /// classify the leak correctly and then allow it anyway.
+    ///
+    /// Blanket-denying every `Ask` instead is not available: it would refuse
+    /// legitimate unattended provider traffic, which is the wrong-refusal this
+    /// change must not introduce. So the deny is scoped to exactly this
+    /// verdict, which provider traffic can never reach.
+    ///
+    /// An "always" answer allows THIS request only. The host is already
+    /// allowlisted, so persisting the domain would change nothing — and
+    /// persisting a standing permission for "the model may put a payload in a
+    /// query string against this host" is not what the operator is being asked.
+    async fn resolve_tool_data(
+        &self,
+        host: &str,
+        registrable: &str,
+        reason: &str,
+    ) -> EgressDecision {
+        let doorbell = self.doorbell.read().ok().and_then(|slot| slot.clone());
+        let Some(doorbell) = doorbell else {
+            return EgressDecision::Deny {
+                reason: format!(
+                    "A tool tried to send data to `{host}` — {reason} — and this \
+                     session has no way to ask you about it, so it was refused. \
+                     `{host}` being on the egress allow list permits the agent to \
+                     REACH it; it does not permit a tool to choose what to send. \
+                     Run this in a session with an approval surface, or narrow \
+                     what the tool is asked to fetch."
+                ),
+            };
+        };
+        match doorbell.ask(host, registrable, reason).await {
+            ConsentDecision::Once | ConsentDecision::Always => EgressDecision::Allow,
+            ConsentDecision::No => EgressDecision::Deny {
+                reason: format!(
+                    "Sending tool data to `{host}` was declined at the consent prompt."
+                ),
+            },
+            ConsentDecision::Unanswered => EgressDecision::Deny {
+                reason: format!(
+                    "A tool tried to send data to `{host}` and no answer to the \
+                     consent prompt came back before it timed out, so it was refused."
+                ),
+            },
+            ConsentDecision::Unavailable => EgressDecision::Deny {
+                reason: format!(
+                    "A tool tried to send data to `{host}` and the consent prompt \
+                     could not be shown, so it was refused without asking you."
+                ),
+            },
+        }
+    }
+
     /// Resolve an `Exfil` verdict — deny with an actionable message.
     fn resolve_exfil(&self, host: &str, reason: &str) -> EgressDecision {
         EgressDecision::Deny {
@@ -178,9 +238,12 @@ impl EgressPolicy for AgentEgressPolicy {
         }
         // reqwest carries a `url::Url` directly — no re-parse.
         let url = request.url();
+        // wayland#1264 — the origin is read off the request here, at the ONE
+        // policy, rather than being decided by which client constructed it.
+        let origin = EgressOrigin::of(request);
         let verdict = {
             let allow = self.allow.read().await;
-            classify(request.method(), url, &allow)
+            classify(request.method(), url, &allow, origin)
         };
         match verdict {
             EgressVerdict::Allow => EgressDecision::Allow,
@@ -189,6 +252,11 @@ impl EgressPolicy for AgentEgressPolicy {
                 registrable,
                 reason,
             } => self.resolve_ask(&host, &registrable, &reason).await,
+            EgressVerdict::ToolData {
+                host,
+                registrable,
+                reason,
+            } => self.resolve_tool_data(&host, &registrable, &reason).await,
             EgressVerdict::Exfil { host, reason, .. } => self.resolve_exfil(&host, &reason),
         }
     }
@@ -221,6 +289,16 @@ mod tests {
     }
 
     #[tokio::test]
+    /// PINNED BEHAVIOUR, and wayland#1264 c3's wrong-refusal control.
+    ///
+    /// This test and its sibling `classify::tests::post_to_allowlisted_host_is_allowed`
+    /// are why narrowing the allowlist was never an available fix for #1264:
+    /// they pin the agent's own LLM POST to an allowlisted apex as an
+    /// unconditional `Allow`, and a change that broke them would deny every
+    /// provider call. The recorded decision (`.planning/DECISIONS.md`,
+    /// "Egress: split the allowlist grant by traffic origin") splits the grant
+    /// by ORIGIN instead, which is why this request — unmarked, therefore
+    /// provider-origin — still passes unchanged.
     async fn allowlisted_post_is_allowed() {
         let p = AgentEgressPolicy::enforcing(allow_with(&["anthropic.com"]));
         let d = p
@@ -391,5 +469,128 @@ mod tests {
             bell.asked.lock().unwrap().is_empty(),
             "doorbell must only be rung for the Ask verdict"
         );
+    }
+
+    // =======================================================================
+    // wayland#1264 — tool-driven egress to an allowlisted apex.
+    // =======================================================================
+
+    /// A tool-marked request. The marker is what the production tool client
+    /// (`build_ssrf_safe_tool_client`) sets on every request it makes.
+    fn tool_req(method: reqwest::Method, url: &str) -> reqwest::Request {
+        let mut request = req(method, url);
+        request.headers_mut().insert(
+            wcore_egress::EGRESS_ORIGIN_HEADER,
+            reqwest::header::HeaderValue::from_static("tool"),
+        );
+        request
+    }
+
+    /// THE DEFECT, at the policy rather than the classifier: an UNATTENDED
+    /// session (no consent doorbell — headless, one-shot, CI) admitted a
+    /// tool-driven payload to an allowlisted apex with no approval in any mode.
+    ///
+    /// The deny has to live here and not in `resolve_ask`, because `resolve_ask`
+    /// fails OPEN by design when no doorbell is wired. A shape check that
+    /// resolved through it would classify the leak correctly and allow it
+    /// anyway — theatre.
+    #[tokio::test]
+    async fn unattended_tool_data_to_an_allowlisted_apex_is_denied() {
+        let p = AgentEgressPolicy::enforcing(allow_with(&["github.com"]));
+        assert!(!p.has_doorbell(), "this arm IS the no-doorbell case");
+
+        let decision = p
+            .check(&tool_req(
+                reqwest::Method::GET,
+                "https://github.com/?leak=aG93LW11Y2gtc2VjcmV0LWRhdGEtZml0cy1oZXJl",
+            ))
+            .await;
+        let EgressDecision::Deny { reason } = decision else {
+            panic!("expected a deny for unattended tool data, got {decision:?}");
+        };
+        assert!(
+            reason.contains("github.com"),
+            "the refusal must name the host: {reason}"
+        );
+
+        // WRONG-REFUSAL CONTROLS, in the same unattended session.
+        // 1. Provider traffic to the same apex is untouched.
+        assert!(matches!(
+            p.check(&req(reqwest::Method::POST, "https://github.com/collect"))
+                .await,
+            EgressDecision::Allow
+        ));
+        // 2. A data-less tool read of the same apex still goes through
+        //    silently — WebFetch of a docs page must not start failing.
+        assert!(matches!(
+            p.check(&tool_req(
+                reqwest::Method::GET,
+                "https://github.com/rust-lang/rust"
+            ))
+            .await,
+            EgressDecision::Allow
+        ));
+        // 3. A data-less GET to a NEW host still fails open, as it always has.
+        //    Blanket-denying every `Ask` in an unattended run is the change
+        //    this must not be mistaken for.
+        assert!(matches!(
+            p.check(&req(reqwest::Method::GET, "https://react.dev/learn"))
+                .await,
+            EgressDecision::Allow
+        ));
+    }
+
+    /// With an approval surface the operator gets a prompt, not a refusal —
+    /// the tool keeps working in an interactive session. Both answers are
+    /// asserted, or a doorbell that always denied would pass the first.
+    #[tokio::test]
+    async fn attended_tool_data_asks_the_operator_and_honours_both_answers() {
+        let approving = AgentEgressPolicy::enforcing(allow_with(&["github.com"]));
+        approving.set_doorbell(FixedDoorbell::new(ConsentDecision::Once));
+        assert!(matches!(
+            approving
+                .check(&tool_req(
+                    reqwest::Method::POST,
+                    "https://github.com/collect"
+                ))
+                .await,
+            EgressDecision::Allow
+        ));
+
+        let declining = AgentEgressPolicy::enforcing(allow_with(&["github.com"]));
+        declining.set_doorbell(FixedDoorbell::new(ConsentDecision::No));
+        assert!(matches!(
+            declining
+                .check(&tool_req(
+                    reqwest::Method::POST,
+                    "https://github.com/collect"
+                ))
+                .await,
+            EgressDecision::Deny { .. }
+        ));
+
+        // An "always" answer allows THIS request and does not persist a
+        // standing permission: the host was already allowlisted, and the
+        // question asked was about the payload, not the host.
+        let always = AgentEgressPolicy::enforcing(allow_with(&["github.com"]));
+        always.set_doorbell(FixedDoorbell::new(ConsentDecision::Always));
+        assert!(matches!(
+            always
+                .check(&tool_req(
+                    reqwest::Method::POST,
+                    "https://github.com/collect"
+                ))
+                .await,
+            EgressDecision::Allow
+        ));
+        assert!(matches!(
+            always
+                .check(&tool_req(
+                    reqwest::Method::POST,
+                    "https://github.com/collect-again"
+                ))
+                .await,
+            EgressDecision::Allow
+        ));
     }
 }

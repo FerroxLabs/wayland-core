@@ -142,6 +142,18 @@ pub(crate) fn error_message(payload: &Value, fallback: &str) -> String {
 /// not five.
 pub(crate) fn build_ssrf_safe_tool_client() -> Client {
     Client::builder()
+        // wayland#1264 — THE central origin stamp for the whole tool surface.
+        // Every request WebFetch and the github / gitlab / linear / notion
+        // backends make arrives at the egress policy already saying the model
+        // chose its URL, so a data-bearing request to an ALLOWLISTED apex is
+        // shape-checked instead of admitted on the host match alone.
+        //
+        // Stamped once, here, rather than at each call site: the label's
+        // completeness is then a property of this constructor and not of
+        // whoever adds the next tool. It is a LABEL, not a policy — this
+        // client gets no rules of its own, which is the shape external review
+        // refuted as a bypass factory.
+        .origin(wcore_egress::EgressOrigin::Tool)
         .connect_timeout(wcore_providers::http_client::CONNECT_TIMEOUT)
         .read_timeout(wcore_providers::http_client::READ_TIMEOUT)
         .timeout(wcore_providers::http_client::TOOL_REQUEST_TIMEOUT)
@@ -152,6 +164,40 @@ pub(crate) fn build_ssrf_safe_tool_client() -> Client {
         // validated public IPs (initial request AND every redirect hop), with
         // no separate check→connect resolution — closing the rebind for this
         // long-lived, multi-host client (WebFetch + the API backends).
+        .dns_resolver(Arc::new(SsrfSafeResolver))
+        .build()
+        .expect("reqwest TLS backend must initialize at startup")
+}
+
+/// [`build_ssrf_safe_tool_client`] with transparent redirect-following turned
+/// OFF, for a caller that follows redirects ITSELF one hop at a time.
+///
+/// wayland#1264. `reqwest` follows a redirect inside a single
+/// `Client::execute`, so every hop after the first never reaches the egress
+/// chokepoint: the policy sees the request the caller built and nothing else.
+/// A tool request admitted to an allowlisted apex could therefore be handed a
+/// `302` to anywhere, and the shape check the origin split just added would
+/// never run on the hop that actually carries the payload.
+///
+/// `ssrf_safe_redirect_policy` cannot close this. Its per-hop callback is
+/// SYNCHRONOUS and the egress policy is `async` over shared state, so the
+/// answer it can give is an SSRF answer (is this a private/internal address?)
+/// and not an egress answer (is this destination allowed to receive tool data
+/// from me?). Those are different questions and Layer 0 was only ever asked
+/// the first.
+///
+/// The caller re-issues each hop through [`EgressRequestBuilder::send`]
+/// instead, which is the one seam the policy runs on. The SSRF floor is
+/// unchanged and unmoved: `SsrfSafeResolver` still dials only validated public
+/// IPs, and the caller applies `is_safe_url` to each hop target exactly as the
+/// redirect policy did.
+pub(crate) fn build_ssrf_safe_tool_client_manual_redirects() -> Client {
+    Client::builder()
+        .origin(wcore_egress::EgressOrigin::Tool)
+        .connect_timeout(wcore_providers::http_client::CONNECT_TIMEOUT)
+        .read_timeout(wcore_providers::http_client::READ_TIMEOUT)
+        .timeout(wcore_providers::http_client::TOOL_REQUEST_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
         .dns_resolver(Arc::new(SsrfSafeResolver))
         .build()
         .expect("reqwest TLS backend must initialize at startup")

@@ -19,6 +19,7 @@ use crate::error::{BeforeDispatchError, EgressError};
 use crate::observer::{
     EgressAttemptGuard, EgressOutcome, SharedEgressObserver, classify_transport_error,
 };
+use crate::origin::{EGRESS_ORIGIN_HEADER, EgressOrigin};
 use crate::policy::{EgressDecision, SharedPolicy};
 
 type BeforeDispatchFuture =
@@ -68,6 +69,24 @@ impl EgressRequestBuilder {
     {
         self.inner = self.inner.header(key, value);
         self
+    }
+
+    /// Stamp this request's ORIGIN so the egress policy can tell the agent's
+    /// own traffic from a request whose URL the model chose (wayland#1264).
+    ///
+    /// The marker is removed again in [`Self::send`], after the policy has read
+    /// it and before the request is dispatched, so it never goes on the wire.
+    #[must_use]
+    pub fn origin(mut self, origin: EgressOrigin) -> Self {
+        self.inner = self.inner.header(EGRESS_ORIGIN_HEADER, origin.as_marker());
+        self
+    }
+
+    /// Build the request without sending it. Test-only: the policy gate lives
+    /// in [`Self::send`], and this deliberately does not consult it.
+    #[cfg(test)]
+    pub(crate) fn build_for_test(self) -> Result<reqwest::Request, EgressError> {
+        Ok(self.inner.build()?)
     }
 
     /// Add a whole [`reqwest::header::HeaderMap`].
@@ -171,7 +190,7 @@ impl EgressRequestBuilder {
     /// [`reqwest::Request`] (method, URL, headers, body) and a `Deny` short-
     /// circuits the network call entirely.
     pub async fn send(self) -> Result<reqwest::Response, EgressError> {
-        let request = self.inner.build()?;
+        let mut request = self.inner.build()?;
         let attempt_id = self.next_attempt_id.fetch_add(1, Ordering::Relaxed);
         let mut observation = EgressAttemptGuard::new(self.observer.clone(), attempt_id, &request);
         match self.policy.check(&request).await {
@@ -183,6 +202,11 @@ impl EgressRequestBuilder {
                     observation.finish(EgressOutcome::BeforeDispatchFailed);
                     return Err(error.into());
                 }
+                // wayland#1264 — the origin marker is an INTERNAL label. It
+                // has been read by the policy above; strip it here, at the one
+                // seam every outbound request passes through, so it is never
+                // transmitted to the destination.
+                request.headers_mut().remove(EGRESS_ORIGIN_HEADER);
                 match self.client.execute(request).await {
                     Ok(response) => {
                         observation.finish(EgressOutcome::HttpResponse {
