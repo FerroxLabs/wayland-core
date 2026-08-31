@@ -29017,6 +29017,158 @@ mod approval_bridge_engine_tests {
              observed NOT to serve"
         );
     }
+    /// wayland-core#382 c3 — the notice's WORDING, graded against the sizing
+    /// state it describes, in the same body.
+    ///
+    /// The existing wording tests in `output_sizing_tests` hand
+    /// `truncation_notice` a `ServedWindowEvidence` they built themselves, so
+    /// they grade the sentence against a `corroborated` flag they chose. That
+    /// cannot see either half of what #382 reported: whether the corroborated
+    /// arm is ever REACHED (the once-per-figure suppression in
+    /// `context_window.rs` used to swallow the second regression, which is the
+    /// only turn the resize claim is true on), or whether the sentence agrees
+    /// with what core is actually sizing against.
+    ///
+    /// So this drives the production pair — `ServedWindowTracker::observe`
+    /// then `truncation_notice`, the two calls the turn loop makes back to
+    /// back — over the real observation sequence, and asserts each notice
+    /// against `sizing_window()` AND `compaction_window_now()` at the moment
+    /// it would be emitted.
+    #[test]
+    fn the_truncation_notice_wording_matches_the_sizing_state_when_it_is_emitted() {
+        let mut engine = make_engine();
+        engine.model = "gpt-4o".into();
+        let route = "openai/gpt-4o";
+        let catalogued = engine.compaction_window_now();
+        assert_eq!(catalogued, 128_000, "the catalogued window for gpt-4o");
+        // 8,192 is a window core CAN work in, so nothing below is explained by
+        // the #1179 unworkable-window arm.
+        assert!(
+            engine.compact_config.supports_compaction(8_192),
+            "8,192 must be workable, or the third arm would explain the wording"
+        );
+
+        // A baseline turn. Not evidence, and no notice.
+        assert_eq!(
+            engine
+                .compact_state
+                .served_window
+                .observe(route, 10_000, 8_192),
+            None,
+            "the baseline turn is not evidence"
+        );
+
+        // FIRST regression: the notice fires on one observation (#1172 keeps
+        // its one-observation sensitivity), and sizing has NOT moved.
+        let first = engine
+            .compact_state
+            .served_window
+            .observe(route, 11_000, 7_000)
+            .expect("the notice must still fire on one observation");
+        let text = super::truncation_notice(&first, &engine.model, &engine.compact_config);
+        assert_eq!(
+            engine.compact_state.served_window.sizing_window(),
+            None,
+            "one observation must not size the session"
+        );
+        assert_eq!(
+            engine.compaction_window_now(),
+            catalogued,
+            "nothing has been resized on this turn, so the notice must not say \
+             it has"
+        );
+        assert!(
+            !text.contains("is now sizing"),
+            "core is still sizing against {catalogued}: {text}"
+        );
+        assert!(
+            text.contains("has NOT changed how it sizes"),
+            "and the user must be told that plainly: {text}"
+        );
+
+        // SECOND regression, at an UNCHANGED figure. This is the turn that
+        // corroborates, and the turn the once-per-figure suppression used to
+        // swallow — leaving the resize claim emitted only on the turn it was
+        // false, and never on the turn it became true.
+        let second = engine
+            .compact_state
+            .served_window
+            .observe(route, 12_000, 6_500)
+            .expect(
+                "corroboration is the state change the user must be told about; \
+                 the once-per-figure suppression must not swallow it",
+            );
+        let text = super::truncation_notice(&second, &engine.model, &engine.compact_config);
+        assert_eq!(
+            engine.compact_state.served_window.sizing_window(),
+            Some(8_192),
+            "the second regression corroborates the figure"
+        );
+        assert_eq!(
+            engine.compaction_window_now(),
+            8_192,
+            "and the session really is sized against it now"
+        );
+        assert!(
+            text.contains("Core is now sizing this session against the 8192-token"),
+            "the claim is true on this turn, so it must be made on this turn: {text}"
+        );
+        assert!(
+            !text.contains("has NOT changed how it sizes"),
+            "and the not-yet wording must be gone: {text}"
+        );
+
+        // THIRD regression: the control. The figure is unchanged and already
+        // announced, so a fix that simply deleted the suppression would notify
+        // on every turn and fail here.
+        assert_eq!(
+            engine
+                .compact_state
+                .served_window
+                .observe(route, 13_000, 6_000),
+            None,
+            "the user has already been told about this figure"
+        );
+    }
+
+    /// wayland-core#382 c3, third arm — when the served window is one core
+    /// cannot work in, "this run will stop" is a claim about a DIFFERENT
+    /// production predicate, so it is graded against that predicate.
+    #[test]
+    fn an_unworkable_notice_says_the_run_will_stop_only_when_it_will() {
+        let mut engine = make_engine();
+        engine.model = "gpt-4o".into();
+        // 4,096 — the slot #1172 measured a stock Ollama serving. A gross
+        // shortfall corroborates on its own turn.
+        let evidence = engine
+            .compact_state
+            .served_window
+            .observe("openai/gpt-4o", 12_000, 4_096)
+            .expect("a 0.34 shortfall is evidence");
+        let text = super::truncation_notice(&evidence, &engine.model, &engine.compact_config);
+        assert_eq!(
+            engine.compact_state.served_window.sizing_window(),
+            Some(4_096),
+            "corroborated, or this arm measures nothing"
+        );
+        assert!(
+            !engine.compact_config.supports_compaction(4_096),
+            "4,096 must be unworkable, or this test is the second arm again"
+        );
+        assert!(
+            !text.contains("is now sizing"),
+            "promising a resize core will not perform: {text}"
+        );
+        assert!(
+            text.contains("cannot size a session against 4096"),
+            "{text}"
+        );
+        assert!(text.contains("run will stop"), "{text}");
+        assert!(
+            engine.unworkable_window_refusal().is_some(),
+            "and the run really does stop, or the notice lies the other way"
+        );
+    }
 
     /// REPRO #1179 / D36 — a CONFIGURED window below the minimum workable one
     /// must not summarize an empty conversation at the top of every turn.
