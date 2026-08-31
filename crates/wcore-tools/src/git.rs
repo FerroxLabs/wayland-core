@@ -45,7 +45,8 @@
 //! deny-list), so this tool is the ONLY route a contained session has to a
 //! branch, a push or a pull request.
 
-use std::path::PathBuf;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -57,6 +58,7 @@ use wcore_types::tool::{JsonSchema, ToolResult};
 
 use crate::Tool;
 use crate::context::ToolContext;
+use crate::workspace_policy::WorkspacePolicy;
 use crate::unsaved_work::{Staging, staging_verdict, stash_refusal};
 
 /// Typed git op variants — not consumed directly by the LLM (the tool input
@@ -114,6 +116,128 @@ pub struct GitTool;
 /// leave every path un-attributable and the guard silent.
 fn resolved_cwd(cwd: &str) -> PathBuf {
     std::fs::canonicalize(cwd).unwrap_or_else(|_| PathBuf::from(cwd))
+}
+
+/// FerroxLabs/wayland-core#388 — **`git diff` reconstructs committed content
+/// from the object store, and the object store is exactly what a `Contained`
+/// workspace refuses to read.**
+///
+/// `SecretDenyFs` refuses `<root>/.env` and `<root>/.git/objects/...`, and the
+/// read-deny sandbox shadows the store from `Bash`. `GitTool` spawns `git`
+/// through `shell_command_argv`, OUTSIDE both layers, and `git diff HEAD~1`
+/// hands back the deleted `.env`'s plaintext with no path argument required at
+/// all. MEASURED on #388 before this: `leaked=true is_error=false`.
+///
+/// The filter is per-FILE section, not per-line: a diff is `git`'s own
+/// stable machine format, one `diff --git` header per file, and the paths are
+/// named in it. Every candidate spelling in a section is asked — `--- a/X`,
+/// `+++ b/Y` and the header's own pair — so a rename that touches a denied
+/// path on either side is withheld from both sides.
+///
+/// The hunks go; the header STAYS. "This file changed and you may not see how"
+/// and "this file did not change" are different answers and a model acts on
+/// them differently — the same rule `grep_policy`'s footer exists for.
+struct WithheldDiff {
+    body: String,
+    files: BTreeSet<String>,
+}
+
+impl WithheldDiff {
+    /// Append the footer, in the shape `grep_policy::Filtered::footer` uses.
+    fn render(self) -> String {
+        if self.files.is_empty() {
+            return self.body;
+        }
+        let named: Vec<&str> = self.files.iter().map(String::as_str).collect();
+        format!(
+            "{}\n[Git] {} file(s)' hunks withheld ({})",
+            self.body.trim_end(),
+            self.files.len(),
+            named.join(", ")
+        )
+    }
+}
+
+/// Split a unified diff into per-file sections and drop the body of every
+/// section naming a path this policy refuses to hand back as content.
+fn withhold_denied_hunks(diff: &str, cwd: &Path, policy: &WorkspacePolicy) -> WithheldDiff {
+    let mut out: Vec<String> = Vec::new();
+    let mut files: BTreeSet<String> = BTreeSet::new();
+    // Sections are delimited by the header line, so the whole diff is walked
+    // once and buffered one file at a time.
+    let mut section: Vec<&str> = Vec::new();
+    let flush = |section: &mut Vec<&str>, out: &mut Vec<String>, files: &mut BTreeSet<String>| {
+        if section.is_empty() {
+            return;
+        }
+        let denied = diff_section_paths(section)
+            .into_iter()
+            .find(|rel| policy.denies_read_content(&cwd.join(rel)));
+        match denied {
+            Some(rel) => {
+                out.push(section[0].to_string());
+                out.push(format!(
+                    "[Git] hunks withheld: {rel} is denied for content reads in this workspace posture"
+                ));
+                files.insert(rel);
+            }
+            None => out.extend(section.iter().map(|line| (*line).to_string())),
+        }
+        section.clear();
+    };
+    for line in diff.lines() {
+        if line.starts_with("diff --git ") {
+            flush(&mut section, &mut out, &mut files);
+        }
+        section.push(line);
+    }
+    flush(&mut section, &mut out, &mut files);
+    WithheldDiff {
+        body: out.join("\n"),
+        files,
+    }
+}
+
+/// Every workspace-relative path a diff section names.
+///
+/// All three spellings, because any one of them can be missing: a pure mode
+/// change has no `---`/`+++` pair at all, and a create/delete puts `/dev/null`
+/// on one side. Over-collecting is the safe direction — an extra candidate can
+/// only add a refusal, and a missed one is a leak.
+fn diff_section_paths(section: &[&str]) -> Vec<String> {
+    let mut paths: Vec<String> = Vec::new();
+    let mut push = |raw: &str| {
+        let raw = raw.trim();
+        if raw.is_empty() || raw == "/dev/null" {
+            return;
+        }
+        // `git` quotes a path containing unusual bytes; the quotes are not part
+        // of the name and a quoted name must still be matched.
+        let raw = raw.trim_matches('"');
+        let rel = raw
+            .strip_prefix("a/")
+            .or_else(|| raw.strip_prefix("b/"))
+            .unwrap_or(raw);
+        if !paths.iter().any(|seen| seen == rel) {
+            paths.push(rel.to_string());
+        }
+    };
+    for line in section {
+        if let Some(rest) = line.strip_prefix("--- ") {
+            push(rest);
+        } else if let Some(rest) = line.strip_prefix("+++ ") {
+            push(rest);
+        }
+    }
+    // The header names both sides even when the `---`/`+++` pair is absent.
+    // Split on " b/" rather than on whitespace: a path may contain spaces.
+    if let Some(header) = section.first().and_then(|l| l.strip_prefix("diff --git "))
+        && let Some((left, right)) = header.rsplit_once(" b/")
+    {
+        push(left);
+        push(&format!("b/{right}"));
+    }
+    paths
 }
 
 /// Turn a guard refusal into the tool's error result.
@@ -603,7 +727,62 @@ impl Tool for GitTool {
                 is_error: true,
             };
         }
-        self.execute(input).await
+        // FerroxLabs/wayland-core#388 — the content-emitting verbs, filtered
+        // against THIS session's read-deny boundary.
+        //
+        // `denies_read_content` is the whole conjunction `SecretDenyFs::guard`
+        // asks, so the posture boundary needs no second opinion here: a
+        // `Contained` workspace requires the project-secret deny and withholds,
+        // while a genuinely-local `Trusted` session does not require it, the
+        // predicate answers false, and Sean's #667 carve-out is preserved
+        // untouched. Pinned in both directions by
+        // `crates/wcore-tools/tests/git_content_store_deny.rs`.
+        let op = input
+            .get("op")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        // The POSTURE gate, and it is `secret_read_deny_required` rather than
+        // `denies_read_content` alone. That predicate is unconditional on
+        // posture — `is_project_secret_resolved` matches `.env` under the root
+        // for EVERY policy — because #667's carve-out is expressed by NOT
+        // INSTALLING `SecretDenyFs` for a genuinely-local session, not by the
+        // predicate answering differently. `GitTool` has no such installation
+        // switch, so it asks the flag that decides one: the same
+        // `secret_read_deny_required` #667 (F2) minted for exactly this
+        // question — true for `contained` and for a Full/remote session, false
+        // for `trusted_local`. Pinned in BOTH directions by
+        // `tests/git_content_store_deny.rs::the_posture_decides_and_trusted_local_is_left_alone`;
+        // a filter that withheld everywhere would overturn Sean's ruling
+        // silently.
+        let Some(policy) = ctx.workspace.clone().filter(|p| p.secret_read_deny_required()) else {
+            return self.execute(input).await;
+        };
+        let repo = resolved_cwd(cwd);
+        if op == "blame" {
+            // `blame` prints the committed line itself. There is no hunk to
+            // strip, so the refusal is taken BEFORE `git` runs.
+            if let Some(path) = input.get("path").and_then(|v| v.as_str())
+                && policy.denies_read_content(&repo.join(path))
+            {
+                return ToolResult {
+                    content: format!(
+                        "[Git] blame withheld: {path} is denied for content reads in this \
+                         workspace posture"
+                    ),
+                    is_error: true,
+                };
+            }
+            return self.execute(input).await;
+        }
+        let result = self.execute(input).await;
+        if op != "diff" || result.is_error {
+            return result;
+        }
+        ToolResult {
+            content: withhold_denied_hunks(&result.content, &repo, &policy).render(),
+            is_error: result.is_error,
+        }
     }
 
     fn category(&self) -> ToolCategory {
