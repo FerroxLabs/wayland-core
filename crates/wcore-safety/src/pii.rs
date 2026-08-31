@@ -140,18 +140,17 @@ fn scrub_direct<'a>(input: &'a str) -> Cow<'a, str> {
         let label = PATTERNS[idx].0;
         let replacement = format!("[REDACTED:{label}]");
         if label == "SECRET_ASSIGNMENT" {
-            let replaced = rx
-                .replace_all(&result, |captures: &regex::Captures<'_>| {
-                    let matched = captures
-                        .get(0)
-                        .expect("wcore-safety: replacement capture must exist")
-                        .as_str();
-                    if matched.contains("[REDACTED:") {
-                        matched.to_owned()
-                    } else {
-                        replacement.clone()
-                    }
-                });
+            let replaced = rx.replace_all(&result, |captures: &regex::Captures<'_>| {
+                let matched = captures
+                    .get(0)
+                    .expect("wcore-safety: replacement capture must exist")
+                    .as_str();
+                if matched.contains("[REDACTED:") {
+                    matched.to_owned()
+                } else {
+                    replacement.clone()
+                }
+            });
             if let Cow::Owned(replaced) = replaced {
                 result = replaced;
             }

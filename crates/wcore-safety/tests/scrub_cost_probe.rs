@@ -53,7 +53,11 @@ fn dotted(bytes: usize) -> String {
 #[test]
 #[ignore = "measurement instrument for wayland-core#395; run with --run-ignored all"]
 fn scrub_cost_probe() {
-    let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
     for bytes in [60_000usize, 120_000, 240_000, 480_000] {
         for (shape, make) in [
             ("solid", solid as fn(usize) -> String),
