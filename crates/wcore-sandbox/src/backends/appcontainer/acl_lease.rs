@@ -563,6 +563,12 @@ fn validate_profile_name(name: &str) -> Result<()> {
 
 fn canonical_intents(manifest: &SandboxManifest) -> Result<Vec<AclIntent>> {
     let mut intents: BTreeMap<(String, IntentKind), u32> = BTreeMap::new();
+    // Resolved ONCE. Two `canonicalize` syscalls per ALLOW intent is not
+    // free at the scale this actually runs at -- the lease #369 was filed
+    // about carries 4367 intents -- and per-intent latency here also shifts
+    // the interleaving `#368`'s live concurrency test turns on, which would
+    // make this guard a variable in a race it has nothing to do with.
+    let over_broad_roots = over_broad_allow_roots();
     for (paths, kind, mask) in [
         (&manifest.fs_read_allow, IntentKind::Allow, ACL_READ_MASK),
         (&manifest.fs_write_allow, IntentKind::Allow, ACL_WRITE_MASK),
@@ -585,7 +591,7 @@ fn canonical_intents(manifest: &SandboxManifest) -> Result<Vec<AclIntent>> {
             })?;
             validate_local_canonical_path(&canonical)?;
             if kind == IntentKind::Allow {
-                refuse_over_broad_allow_root(&canonical)?;
+                refuse_over_broad_allow_root(&canonical, &over_broad_roots)?;
             }
             let canonical = canonical.to_str().ok_or_else(|| {
                 exec_error(format!(
@@ -693,7 +699,46 @@ fn validate_local_canonical_path(path: &Path) -> Result<()> {
 /// The three roots below are the observed one plus the two that strictly
 /// contain it. Nothing speculative is added: a project directory at any depth,
 /// including `C:\src`, is still granted.
-fn refuse_over_broad_allow_root(canonical: &Path) -> Result<()> {
+/// The roots a package ALLOW may never be written on, resolved once.
+///
+/// Returned as owned pairs rather than read from the environment at each
+/// comparison so that the answer cannot change between two intents in the same
+/// manifest, and so the syscalls happen once per manifest instead of twice per
+/// intent. A variable that is unset, or a path that will not canonicalize, is
+/// simply absent from the list: this guard is a bound on breadth, and it must
+/// not turn a missing environment variable into a refusal to run.
+fn over_broad_allow_roots() -> Vec<(PathBuf, &'static str)> {
+    let mut roots = Vec::new();
+    for (variable, description) in [
+        ("USERPROFILE", "it is this user's entire profile directory"),
+        ("PUBLIC", "it is the machine's shared public profile"),
+    ] {
+        let Ok(value) = std::env::var(variable) else {
+            continue;
+        };
+        let Ok(root) = fs::canonicalize(&value) else {
+            continue;
+        };
+        // The parent of every profile (`C:\Users`) is broader still, and is
+        // added from whichever of the two resolved.
+        if let Some(parent) = root.parent() {
+            let parent = parent.to_path_buf();
+            if !roots.iter().any(|(known, _)| *known == parent) {
+                roots.push((
+                    parent,
+                    "it is the directory holding every user profile on this machine",
+                ));
+            }
+        }
+        roots.push((root, description));
+    }
+    roots
+}
+
+fn refuse_over_broad_allow_root(
+    canonical: &Path,
+    over_broad_roots: &[(PathBuf, &'static str)],
+) -> Result<()> {
     let too_broad = |reason: &str| {
         Err(exec_error(format!(
             "refusing to grant the AppContainer package read/write on {}: {reason}. A single              inheritable ALLOW there confers the whole subtree, and the per-secret denies              that would claw it back are an enumeration taken at one instant              (FerroxLabs/wayland-core#369, and #368 for why that enumeration is not              reliable). Start wayland-core in a project directory, or use the default              Windows backend, which does not write ACLs at all.",
@@ -708,28 +753,13 @@ fn refuse_over_broad_allow_root(canonical: &Path) -> Result<()> {
     {
         return too_broad("it is a drive root");
     }
-    // The user's own profile directory, and the directory holding every
-    // profile on the machine. Compared through the same canonicalization the
-    // intent went through, so `C:\Users\seand` and `\\?\C:\Users\seand`
-    // are the same answer.
-    for (variable, description) in [
-        ("USERPROFILE", "it is this user's entire profile directory"),
-        ("PUBLIC", "it is the machine's shared public profile"),
-    ] {
-        let Ok(value) = std::env::var(variable) else {
-            continue;
-        };
-        let Ok(root) = fs::canonicalize(&value) else {
-            continue;
-        };
-        if same_windows_path(canonical, &root) {
+    // The user's own profile directory, the shared public profile, and the
+    // directory holding every profile on the machine. Compared through the
+    // same canonicalization the intent went through, so a short path and its
+    // verbatim form are the same answer.
+    for (root, description) in over_broad_roots {
+        if same_windows_path(canonical, root) {
             return too_broad(description);
-        }
-        // The parent of every profile (`C:\Users`), which is broader still.
-        if let Some(parent) = root.parent()
-            && same_windows_path(canonical, parent)
-        {
-            return too_broad("it is the directory holding every user profile on this machine");
         }
     }
     Ok(())
