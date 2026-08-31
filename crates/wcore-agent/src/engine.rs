@@ -9120,6 +9120,233 @@ impl AgentEngine {
         ))
     }
 
+    /// FerroxLabs/wayland#1230 c1 - assemble the two UN-COMPACTABLE parts of
+    /// the next request: the system prompt and the tool array that will go on
+    /// the wire.
+    ///
+    /// Extracted from the turn loop, which is its only production caller, so
+    /// that anything grading the floor grades THE SAME OBJECT the loop sends.
+    /// Inline, the two were unreachable from a test, and the only floor a test
+    /// could compute was over the RAW registry - measured on this tree at
+    /// 19,101 tokens across 49 schemas, against 3,619 for the array the loop
+    /// actually assembles after deferral. A guard built on the first number
+    /// would have been wrong by 5x and confidently so.
+    ///
+    /// Pure with respect to the conversation: it reads the tool registry, the
+    /// plan state, the curation policy and the deferral config, and touches no
+    /// message. Callers that need the MCP catalogue to be current must
+    /// `refresh_mcp_catalog().await` first, exactly as the loop does.
+    fn assemble_turn_prelude(&mut self) -> (String, Vec<wcore_types::tool::ToolDef>) {
+        // Build tool list: filter based on plan mode state
+        let tools = if self.plan_state.is_active {
+            // Plan mode: only Info-category tools (excluding EnterPlanMode)
+            self.tools.to_tool_defs_filtered(|t| {
+                t.category() == ToolCategory::Info && t.name() != "EnterPlanMode"
+            })
+        } else {
+            // Normal mode: all tools except ExitPlanMode
+            self.tools
+                .to_tool_defs_filtered(|t| t.name() != "ExitPlanMode")
+        };
+
+        // W6 F17: trim MCP tools to a curated top-K. MCP tools are
+        // identified by real provenance (`ToolDef::server.is_some()`), not
+        // the `mcp__` name prefix — a non-colliding MCP tool keeps its bare
+        // name (wcore-mcp/src/tool_proxy.rs). Non-MCP tools (builtins,
+        // skills, spawn, plan tools) are always kept. Off-policy is a no-op.
+        // Audit-log recency degrades to empty/keyword-only when
+        // self.audit_log is None.
+        let tools = self.apply_mcp_curation(tools);
+
+        // #344/#359: enforce the provider's HARD tool-array cap (OpenAI =
+        // 128). MCP servers can push the total past the limit even after
+        // curation; this is the correctness guarantee, separate from the
+        // relevance trim above.
+        let tools = self.apply_provider_tool_cap(tools);
+
+        // Layer D1 (token-opt): defer cold tools to name-only stubs —
+        // only the configured hot allowlist (plus ToolSearch-hydrated
+        // tools) ships full schemas; the model hydrates a stub on demand
+        // via ToolSearch (the system prompt states that rule once,
+        // `tool_usage_guidance`). The hot/stub split is a pure function
+        // of static config + the monotonic hydrated set, so the
+        // serialized tools[] array stays byte-identical across turns
+        // (cache guard: `tools_array_byte_stable_across_roundtrips`);
+        // a hydration changes it once.
+        let tools = self.apply_tool_deferral(tools);
+
+        // Build system prompt: append plan mode instructions when active
+        //
+        // FerroxLabs/wayland#1208: the `Current date:` value is
+        // baked into `self.system_prompt` once at bootstrap and
+        // the same text tells the model it is the authoritative
+        // "today". Refresh it here, on the ONE path that puts the
+        // prompt on the wire, so a session that outlives the day
+        // it started in — a channel-gateway engine lives in an
+        // unevicted per-session pool — stops asserting the day the
+        // gateway booted. Byte-stable within a day (it borrows),
+        // so the cached prefix moves once per rollover and not
+        // once per turn.
+        let base = crate::context::refresh_current_date_line(
+            &self.system_prompt,
+            &crate::context::today_string(),
+        );
+        let system = if self.plan_state.is_active {
+            format!("{}\n\n{}", base, plan_prompt::plan_mode_instructions())
+        } else {
+            base.into_owned()
+        };
+        (system, tools)
+    }
+
+    /// #1230 c1 - the un-compactable floor of the turn this engine would
+    /// assemble right now, in estimated tokens.
+    ///
+    /// The public grading surface for the floor. It runs the real assembly
+    /// above and hands the result to the same
+    /// [`crate::compact::estimate::uncompactable_floor_tokens`] the turn loop
+    /// calls, so a test cannot drift onto a different tool array than the
+    /// product uses.
+    pub fn uncompactable_turn_floor(&mut self) -> u64 {
+        let (system, tools) = self.assemble_turn_prelude();
+        crate::compact::estimate::uncompactable_floor_tokens(&system, &tools)
+    }
+
+    /// FerroxLabs/wayland#1230 c3 - how many times one session will ask an
+    /// endpoint what slot it is serving before giving up on the question.
+    ///
+    /// Two, and the two are not interchangeable. A stock Ollama unloads an
+    /// idle model and then reports NOTHING, so the answer on turn 1 against a
+    /// cold server is legitimately absent and the answer on turn 2 -- after
+    /// core has itself caused the model to load -- is legitimately present.
+    /// One attempt would miss every cold start. Unbounded attempts would put
+    /// a round trip on every turn, forever, against any endpoint that never
+    /// answers, which is most of them.
+    const STATED_WINDOW_PROBE_ATTEMPTS: u32 = 2;
+
+    /// #1230 c3 - learn the context slot the endpoint STATES it is serving,
+    /// before core sends it a request that would be silently truncated.
+    ///
+    /// # Why a probe is admissible here
+    ///
+    /// [`wcore_config::context_window::ServedWindowTracker`] records that
+    /// reaching for this figure was tried and backed out twice, because
+    /// "probing the endpoint means deciding WHICH endpoints to probe" and
+    /// every mock server in this workspace binds `127.0.0.1`, so loopback
+    /// cannot separate a real self-hosted server from a test fixture. That
+    /// objection is about SNIFFING an endpoint, and this does not sniff: the
+    /// gate is `ProviderCompat::provider_type() == "ollama"`, which is what
+    /// the OPERATOR declared their endpoint to be. It is the same gate
+    /// `wcore_providers::ollama_probe::probe_ollama_tool_support` has shipped
+    /// behind since before #1172, on the same endpoint, for the same reason.
+    ///
+    /// The tracker keeps its job unchanged. It remains the only thing allowed
+    /// to SIZE the session, and this figure is deliberately NOT fed into
+    /// `narrow_to_served_window`: a stated slot answers "may this request be
+    /// sent at all", not "how should the conversation be divided". It reaches
+    /// exactly one decision, [`Self::context_floor_refusal`].
+    ///
+    /// Fail-open in every direction. A non-Ollama provider never issues a
+    /// request; an Ollama that does not answer leaves `stated_window` at
+    /// `None`, which means unknown and can never by itself refuse a run.
+    async fn refresh_stated_served_window(&mut self) {
+        if self.compact_state.stated_window.is_some()
+            || self.compact_state.stated_window_probes >= Self::STATED_WINDOW_PROBE_ATTEMPTS
+            || self.compat.provider_type() != "ollama"
+        {
+            return;
+        }
+        self.compact_state.stated_window_probes += 1;
+        let client = wcore_egress::EgressClient::tool().with_policy(self.egress_policy.clone());
+        self.compact_state.stated_window =
+            wcore_providers::ollama_probe::probe_ollama_served_window(
+                &client,
+                &self.config.base_url,
+                &self.model,
+            )
+            .await;
+        if let Some(slot) = self.compact_state.stated_window {
+            tracing::debug!(
+                slot,
+                model = %self.model,
+                "endpoint stated its served context slot"
+            );
+        }
+    }
+
+    /// #1230 c1/c3 - THE NAMED DECISION at a served window below core's own
+    /// un-compactable floor: REFUSE THE TURN, naming both numbers.
+    ///
+    /// `floor` is computed by
+    /// [`crate::compact::estimate::uncompactable_floor_tokens`] from the
+    /// request this turn has just assembled - the system prompt plus the tool
+    /// schemas actually about to go on the wire - not read off
+    /// `BASELINE_TURN_TOKENS`, which is a snapshot of some other session.
+    ///
+    /// # Why refusal, and not the other two options #1230 c3 offered
+    ///
+    /// * **Negotiate the slot upward.** MEASURED and refuted, hetzner-dsm
+    ///   2026-08-31, Ollama 0.30.7 on a private port: a ~5,000-token prompt
+    ///   sent to `/v1/chat/completions` reported `prompt_tokens = 4095` with
+    ///   no `num_ctx`, with a top-level `num_ctx`, AND with an
+    ///   `options.num_ctx` - byte-identical in all three arms. The
+    ///   OpenAI-compatible surface core speaks does not carry the field at
+    ///   all, so there is nothing to negotiate with. It is reachable only on
+    ///   the native `/api/chat` wire, which core does not use.
+    /// * **Shed the tool schemas.** The floor is 2,457 of a 4,096 slot in the
+    ///   configuration #1230 measured, so dropping it does buy room. It also
+    ///   turns the agent into a chatbot: every tool-shaped task then fails
+    ///   with a wrong answer rather than an honest stop, which is the same
+    ///   silent-wrong-answer failure this ticket exists to end, moved one
+    ///   layer up. A user who wants that can already have it by configuring
+    ///   fewer tools; core should not choose it for them behind their back.
+    ///
+    /// So: refuse, out loud, once, naming the slot, the floor, and the number
+    /// to raise the slot to. The tradeoff is accepted and stated - a session
+    /// that would have produced fluent wrong answers now produces none, and
+    /// the operator is told exactly which knob fixes it.
+    ///
+    /// # Scope
+    ///
+    /// Only the STATED window reaches this gate. The configured and
+    /// corroborated-learned windows are already answered, earlier in the turn
+    /// and before the summarizer runs, by
+    /// [`Self::unworkable_window_refusal`]; routing them here as well would
+    /// give the same condition two different messages.
+    ///
+    /// The boundary is the INPUT CEILING alone, not
+    /// [`wcore_config::compact::CompactConfig::supports_compaction`]. The
+    /// question this gate asks is whether the request in hand can be sent;
+    /// whether compaction would additionally thrash inside the window is the
+    /// other gate's question.
+    fn context_floor_refusal(&self, floor: u64, tool_count: usize) -> Option<String> {
+        let window = self.compact_state.stated_window?;
+        let ceiling = self
+            .compact_config
+            .input_ceiling_for_window(window as usize) as u64;
+        if ceiling > floor {
+            return None;
+        }
+        let needed = self
+            .compact_config
+            .minimum_window_for_input_floor(floor as usize);
+        Some(format!(
+            "Run stopped: this endpoint states it is serving `{model}` with a \
+             {window}-token context slot, and the floor of this turn is {floor} \
+             tokens - the system prompt plus {tool_count} tool schemas, which no \
+             compaction rung can shrink. Inside a {window}-token slot that \
+             leaves an input ceiling of {ceiling} tokens, below the floor, so \
+             the very first request would overflow and the server would discard \
+             the head of it without saying so. Core refuses the turn instead of \
+             sending a prompt it can predict will be truncated. Raise the \
+             context length of the server to at least {needed} tokens (on \
+             llama.cpp-based servers, including Ollama, that is `num_ctx` / \
+             `OLLAMA_CONTEXT_LENGTH`), or point core at an endpoint that serves \
+             one.",
+            model = self.model,
+        ))
+    }
+
     /// THE one reconciliation of every window source, for the #255 pre-flight
     /// guard and everything that must agree with it.
     ///
@@ -13579,65 +13806,13 @@ impl AgentEngine {
                     // offered on this one.
                     self.refresh_mcp_catalog().await;
 
-                    // Build tool list: filter based on plan mode state
-                    let tools = if self.plan_state.is_active {
-                        // Plan mode: only Info-category tools (excluding EnterPlanMode)
-                        self.tools.to_tool_defs_filtered(|t| {
-                            t.category() == ToolCategory::Info && t.name() != "EnterPlanMode"
-                        })
-                    } else {
-                        // Normal mode: all tools except ExitPlanMode
-                        self.tools
-                            .to_tool_defs_filtered(|t| t.name() != "ExitPlanMode")
-                    };
+                    // #1230 c3 - ask the endpoint what slot it is serving,
+                    // BEFORE assembling a request for it. A no-op for every
+                    // provider but an operator-declared Ollama, and a no-op
+                    // once answered or once the attempt budget is spent.
+                    self.refresh_stated_served_window().await;
 
-                    // W6 F17: trim MCP tools to a curated top-K. MCP tools are
-                    // identified by real provenance (`ToolDef::server.is_some()`), not
-                    // the `mcp__` name prefix — a non-colliding MCP tool keeps its bare
-                    // name (wcore-mcp/src/tool_proxy.rs). Non-MCP tools (builtins,
-                    // skills, spawn, plan tools) are always kept. Off-policy is a no-op.
-                    // Audit-log recency degrades to empty/keyword-only when
-                    // self.audit_log is None.
-                    let tools = self.apply_mcp_curation(tools);
-
-                    // #344/#359: enforce the provider's HARD tool-array cap (OpenAI =
-                    // 128). MCP servers can push the total past the limit even after
-                    // curation; this is the correctness guarantee, separate from the
-                    // relevance trim above.
-                    let tools = self.apply_provider_tool_cap(tools);
-
-                    // Layer D1 (token-opt): defer cold tools to name-only stubs —
-                    // only the configured hot allowlist (plus ToolSearch-hydrated
-                    // tools) ships full schemas; the model hydrates a stub on demand
-                    // via ToolSearch (the system prompt states that rule once,
-                    // `tool_usage_guidance`). The hot/stub split is a pure function
-                    // of static config + the monotonic hydrated set, so the
-                    // serialized tools[] array stays byte-identical across turns
-                    // (cache guard: `tools_array_byte_stable_across_roundtrips`);
-                    // a hydration changes it once.
-                    let tools = self.apply_tool_deferral(tools);
-
-                    // Build system prompt: append plan mode instructions when active
-                    //
-                    // FerroxLabs/wayland#1208: the `Current date:` value is
-                    // baked into `self.system_prompt` once at bootstrap and
-                    // the same text tells the model it is the authoritative
-                    // "today". Refresh it here, on the ONE path that puts the
-                    // prompt on the wire, so a session that outlives the day
-                    // it started in — a channel-gateway engine lives in an
-                    // unevicted per-session pool — stops asserting the day the
-                    // gateway booted. Byte-stable within a day (it borrows),
-                    // so the cached prefix moves once per rollover and not
-                    // once per turn.
-                    let base = crate::context::refresh_current_date_line(
-                        &self.system_prompt,
-                        &crate::context::today_string(),
-                    );
-                    let system = if self.plan_state.is_active {
-                        format!("{}\n\n{}", base, plan_prompt::plan_mode_instructions())
-                    } else {
-                        base.into_owned()
-                    };
+                    let (system, tools) = self.assemble_turn_prelude();
 
                     // v0.8.1 U1 — the per-turn skill-router hint (when the router is
                     // installed and picked a visible catalog skill). Cache-stability
@@ -13665,6 +13840,38 @@ impl AgentEngine {
                     // configs).
                     let mut input_token_estimate =
                         estimate::estimate_request_tokens(&self.messages, &system, &tools) as usize;
+
+                    // #1230 c1/c3 - THE FLOOR GATE. Placed here, and not up
+                    // beside `unworkable_window_refusal`, for one reason: the
+                    // floor has to be COMPUTED from the request, and `system`
+                    // and `tools` above are that request. Everything the
+                    // degradation rungs can reach lives in `self.messages`;
+                    // what is left is charged on every turn this session will
+                    // ever send, and is what a slot below it cannot hold.
+                    //
+                    // Still before dispatch: nothing has gone on the wire at
+                    // this point, so a refusal here is a refusal BEFORE the
+                    // first truncated request rather than an explanation
+                    // after it.
+                    let uncompactable_floor = estimate::uncompactable_floor_tokens(&system, &tools);
+                    if let Some(refusal) =
+                        self.context_floor_refusal(uncompactable_floor, tools.len())
+                    {
+                        self.emit_error(
+                            &refusal,
+                            false,
+                            wcore_protocol::events::FailureCategory::ContextLimit,
+                        );
+                        return self
+                            .finish_run_terminated_inner(
+                                user_input,
+                                turn,
+                                FinishReason::Length,
+                                StopReason::MaxTurns,
+                                true,
+                            )
+                            .await;
+                    }
                     // AUDIT A1 / #255 — context-token overflow guard MOVED below, to
                     // immediately AFTER the smart-routing tier swap (so it measures the
                     // POST-swap effective model's REAL window via the wcore-config
@@ -31518,6 +31725,261 @@ mod audit_2026_05_22_tests {
             !emitted.contains("  "),
             "the operator-facing refusal must not carry a run of spaces from a \
              wrapped string literal: {emitted:?}"
+        );
+    }
+
+    // --- #1230: the computed floor, and the decision taken below it -------
+
+    /// A system prompt big enough that core's own floor cannot fit inside a
+    /// 4,096-token slot, which is the condition #1230 is about. 16,000 chars
+    /// is 4,000 estimated tokens against an input ceiling of 2,527 at that
+    /// window -- the same shape as the real measurement (4,091 against 2,527)
+    /// without depending on the production prompt, which the integration test
+    /// `issue_1230_context_floor_test` grades separately and for real.
+    fn engine_with_a_real_floor(provider: Arc<dyn LlmProvider>) -> super::AgentEngine {
+        let mut engine = engine_with(provider);
+        engine.system_prompt = "x".repeat(16_000);
+        engine
+    }
+
+    /// #1230 c1/c3 -- the gate answers on the FLOOR and the STATED slot, and
+    /// it answers both ways.
+    ///
+    /// Swept, not spot-checked. A gate written as "refuse below 4,096" and a
+    /// gate written as "refuse when the ceiling cannot hold the floor" agree
+    /// at 4,096 and disagree everywhere else; only the sweep separates them.
+    /// The sweep is also the WRONG-REFUSAL control: every window above the
+    /// boundary must be allowed, and the count of allowed windows is asserted
+    /// non-zero so a gate that refused everything could not pass.
+    #[test]
+    fn the_floor_gate_refuses_exactly_the_windows_that_cannot_hold_the_floor() {
+        let provider = Arc::new(ScriptedProvider::new(vec![]));
+        let mut engine = engine_with_a_real_floor(provider);
+        let floor = crate::compact::estimate::uncompactable_floor_tokens(
+            &engine.system_prompt,
+            &engine.tools().to_tool_defs(),
+        );
+        assert!(floor > 0, "fixture guard: the floor must be a real number");
+
+        let mut refused = 0usize;
+        let mut allowed = 0usize;
+        for window in (1_024u64..=65_536).step_by(64) {
+            engine.compact_state.stated_window = Some(window);
+            let ceiling = engine
+                .compact_config
+                .input_ceiling_for_window(window as usize) as u64;
+            let refusal = engine.context_floor_refusal(floor, 8);
+            if ceiling <= floor {
+                refused += 1;
+                let text = refusal.unwrap_or_else(|| {
+                    panic!(
+                        "window {window}: ceiling {ceiling} cannot hold the floor \
+                         {floor}, but the gate allowed the turn"
+                    )
+                });
+                assert!(
+                    text.contains(&window.to_string()) && text.contains(&floor.to_string()),
+                    "the refusal must name BOTH numbers ({window} and {floor}): {text:?}"
+                );
+            } else {
+                allowed += 1;
+                assert!(
+                    refusal.is_none(),
+                    "window {window}: ceiling {ceiling} holds the floor {floor}, \
+                     but the turn was refused -- a wrong refusal is worse than \
+                     the truncation it prevents"
+                );
+            }
+        }
+        assert!(refused > 0, "the sweep never exercised the refusing arm");
+        assert!(allowed > 0, "the sweep never exercised the allowing arm");
+
+        // FAIL-OPEN: an endpoint that did not state a slot can never be the
+        // reason a run stops, however large the floor.
+        engine.compact_state.stated_window = None;
+        assert!(
+            engine.context_floor_refusal(u64::MAX, 8).is_none(),
+            "an unknown slot must not refuse anything"
+        );
+    }
+
+    /// #1230 c3/c4 -- the criterion is that the RUN STOPS before the first
+    /// truncated request, and stopping is the turn loop's job, not
+    /// `context_floor_refusal`'s.
+    ///
+    /// Modelled on `an_unworkable_window_stops_the_run_and_the_refusal_reaches_
+    /// the_user`, and for the same reason: a test that asserts the helper
+    /// returns `Some` grades a function that builds a string. Deleting the
+    /// production call site would leave it green. This drives `run()` and
+    /// asserts (1) the run terminates, (2) THE PROVIDER IS NEVER CALLED --
+    /// which is what "before the first truncated request" means in code, and
+    /// (3) the text reaches the user naming both numbers and the remedy.
+    #[tokio::test]
+    async fn a_slot_below_the_computed_floor_stops_the_run_before_any_request() {
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![
+            LlmEvent::TextDelta("this must never be produced".into()),
+            done_endturn(),
+        ]]));
+        let counter = provider.call_counter();
+        let mut engine = engine_with_a_real_floor(provider);
+        // The slot #1230 measured a stock Ollama serving.
+        engine.compact_state.stated_window = Some(4_096);
+        engine.model = "qwen3:8b".to_string();
+
+        let floor = crate::compact::estimate::uncompactable_floor_tokens(
+            &engine.system_prompt,
+            &engine.tools().to_tool_defs(),
+        );
+        assert!(
+            engine.compact_config.input_ceiling_for_window(4_096) < floor as usize,
+            "fixture guard: 4096 must be unable to hold this floor, or the test \
+             proves nothing"
+        );
+
+        let tap: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+        engine.set_error_tap(Arc::clone(&tap));
+
+        let result = engine
+            .run("read big.txt and tell me how many lines it has", "m-floor")
+            .await
+            .expect("a slot below the floor is a clean stop, not an engine error");
+
+        assert_eq!(
+            result.finish_reason,
+            FinishReason::Length,
+            "the run must TERMINATE below the floor; got {result:?}"
+        );
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "core must not send a prompt it can predict the server will \
+             truncate - sending it and explaining afterwards is the data loss \
+             #1230 names"
+        );
+
+        let emitted = tap
+            .lock()
+            .expect("error tap")
+            .clone()
+            .expect("the refusal must reach the user's error surface");
+        assert!(
+            emitted.starts_with("Run stopped:"),
+            "the refusal, not some other error, must stop the run: {emitted:?}"
+        );
+        for expected in ["4096", &floor.to_string(), "num_ctx", "qwen3:8b"] {
+            assert!(
+                emitted.contains(expected),
+                "the refusal must name {expected}: {emitted:?}"
+            );
+        }
+        let needed = engine
+            .compact_config
+            .minimum_window_for_input_floor(floor as usize);
+        assert!(
+            emitted.contains(&needed.to_string()),
+            "the refusal must name the figure to reach ({needed}): {emitted:?}"
+        );
+        assert!(
+            !emitted.contains("  "),
+            "the operator-facing refusal must not carry a run of spaces: {emitted:?}"
+        );
+    }
+
+    /// THE WRONG-REFUSAL CONTROL for the test above, in the same shape and on
+    /// the same engine: a slot that CAN hold the floor must still complete the
+    /// turn. Without this half, a gate that refused every session would pass
+    /// the test above perfectly.
+    ///
+    /// 8,192 is the figure #1230 c5 names, and #1179 measured it as the first
+    /// workable window.
+    #[tokio::test]
+    async fn a_slot_that_can_hold_the_floor_still_completes_the_turn() {
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![
+            LlmEvent::TextDelta("eight thousand tokens is enough".into()),
+            done_endturn(),
+        ]]));
+        let counter = provider.call_counter();
+        let mut engine = engine_with_a_real_floor(provider);
+        engine.compact_state.stated_window = Some(8_192);
+
+        let tap: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+        engine.set_error_tap(Arc::clone(&tap));
+
+        let result = engine
+            .run(
+                "read big.txt and tell me how many lines it has",
+                "m-control",
+            )
+            .await
+            .expect("a workable slot must run");
+
+        assert_ne!(
+            result.finish_reason,
+            FinishReason::Length,
+            "a slot that holds the floor must not be refused: {result:?}"
+        );
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the control must actually reach the provider, or it proves nothing"
+        );
+        assert!(
+            tap.lock().expect("error tap").is_none(),
+            "no error may be emitted for a workable slot: {:?}",
+            tap.lock().expect("error tap")
+        );
+    }
+
+    /// #1230 c3 -- the probe is BOUNDED and FAIL-OPEN.
+    ///
+    /// Pointed at a closed port, so every attempt genuinely fails. Two things
+    /// must hold: the attempt count stops at the budget (an endpoint that will
+    /// never answer must not be asked once per turn forever), and a failed
+    /// probe leaves the slot unknown rather than refusing anything.
+    #[tokio::test]
+    async fn the_stated_window_probe_is_bounded_and_fails_open() {
+        let provider = Arc::new(ScriptedProvider::new(vec![]));
+        let mut engine = engine_with(provider);
+        engine.compat = wcore_config::compat::ProviderCompat::ollama_defaults();
+        // Port 1 is not listening; the connection is refused immediately.
+        engine.config.base_url = "http://127.0.0.1:1/v1".to_string();
+
+        for _ in 0..5 {
+            engine.refresh_stated_served_window().await;
+        }
+        assert_eq!(
+            engine.compact_state.stated_window_probes,
+            super::AgentEngine::STATED_WINDOW_PROBE_ATTEMPTS,
+            "the probe budget must bound the attempts"
+        );
+        assert_eq!(
+            engine.compact_state.stated_window, None,
+            "a failed probe must leave the slot UNKNOWN"
+        );
+        assert!(
+            engine.context_floor_refusal(u64::MAX, 8).is_none(),
+            "an unreachable endpoint must not be refused"
+        );
+    }
+
+    /// A provider the operator did NOT declare as Ollama is never probed at
+    /// all -- not even once. This is the half of the gate that keeps the probe
+    /// from being endpoint sniffing: the decision is read off configuration,
+    /// so a mock server on 127.0.0.1 (which is every mock server in this
+    /// workspace) is never contacted.
+    #[tokio::test]
+    async fn a_non_ollama_provider_is_never_probed() {
+        let provider = Arc::new(ScriptedProvider::new(vec![]));
+        let mut engine = engine_with(provider);
+        engine.compat = wcore_config::compat::ProviderCompat::openai_defaults();
+        engine.config.base_url = "http://127.0.0.1:1/v1".to_string();
+
+        for _ in 0..5 {
+            engine.refresh_stated_served_window().await;
+        }
+        assert_eq!(
+            engine.compact_state.stated_window_probes, 0,
+            "a non-Ollama endpoint must not be probed even once"
         );
     }
 

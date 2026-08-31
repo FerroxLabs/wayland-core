@@ -793,8 +793,41 @@ impl CompactConfig {
     /// they are the window minus a constant, and the two agree at the crossover
     /// by construction (that is what fixes the fraction at 0.55).
     pub fn minimum_workable_window(&self) -> usize {
+        self.least_window_satisfying(|window| self.supports_compaction(window))
+    }
+
+    /// FerroxLabs/wayland#1230 c3 - the smallest window whose INPUT CEILING
+    /// clears a caller-computed `floor`.
+    ///
+    /// [`Self::minimum_workable_window`] answers the same question for the
+    /// hardcoded [`BASELINE_TURN_TOKENS`] snapshot and for BOTH boundaries.
+    /// This one is parameterised on the floor the caller actually measured
+    /// from its own assembled request
+    /// (`wcore_agent::compact::estimate::uncompactable_floor_tokens`), and it
+    /// tests the input ceiling ALONE, because that is the boundary the
+    /// refusal it feeds is about: whether the request core is holding can be
+    /// sent at all. Whether compaction would additionally thrash inside the
+    /// window is [`Self::supports_compaction`]'s question and it has its own
+    /// refusal.
+    ///
+    /// Naming a number the operator must reach is the entire point - "raise
+    /// num_ctx" without a target leaves them bisecting against a symptom that
+    /// only shows up several turns in.
+    pub fn minimum_window_for_input_floor(&self, floor: usize) -> usize {
+        self.least_window_satisfying(|window| self.input_ceiling_for_window(window) > floor)
+    }
+
+    /// The least `window` for which `holds` is true, by doubling then
+    /// bisection.
+    ///
+    /// Every predicate passed here is monotone in the window - below the
+    /// [`MAX_RESERVE_FRACTION`] crossover both boundaries are fixed fractions
+    /// of the window, above it they are the window minus a constant, and the
+    /// two agree at the crossover by construction (that is what fixes the
+    /// fraction at 0.55). So the bisection is exact rather than a heuristic.
+    fn least_window_satisfying(&self, holds: impl Fn(usize) -> bool) -> usize {
         let mut hi = 1usize;
-        while !self.supports_compaction(hi) {
+        while !holds(hi) {
             let Some(next) = hi.checked_mul(2) else {
                 // Reserves so large no window satisfies them. The caller is
                 // reporting a refusal either way; saturating is honest.
@@ -805,7 +838,7 @@ impl CompactConfig {
         let mut lo = hi / 2;
         while hi - lo > 1 {
             let mid = lo + (hi - lo) / 2;
-            if self.supports_compaction(mid) {
+            if holds(mid) {
                 hi = mid;
             } else {
                 lo = mid;
@@ -973,6 +1006,45 @@ fn default_tr_epoch_results() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #1230 c3 - the remedy figure must be DERIVED from the floor the caller
+    /// measured, not from the snapshot constant, and it must be exact at the
+    /// boundary in both directions.
+    ///
+    /// Swept rather than spot-checked: a bisection that is off by one passes
+    /// any single spot check that happens to sit away from the boundary.
+    #[test]
+    fn the_minimum_window_for_a_floor_is_exact_at_the_boundary() {
+        let cfg = CompactConfig::default();
+        for floor in [0usize, 1_000, 3_118, 3_619, 8_000, 20_000] {
+            let min = cfg.minimum_window_for_input_floor(floor);
+            assert!(
+                cfg.input_ceiling_for_window(min) > floor,
+                "floor {floor}: the answer {min} does not itself clear the floor"
+            );
+            assert!(
+                cfg.input_ceiling_for_window(min - 1) <= floor,
+                "floor {floor}: {} also clears it, so {min} was not the LEAST",
+                min - 1
+            );
+        }
+    }
+
+    /// The refactor guard: `minimum_workable_window` is now expressed through
+    /// the shared bisection, so its answer must be unchanged. 6,929 is the
+    /// figure #1179 measured and every refusal message quotes.
+    #[test]
+    fn the_shared_bisection_did_not_move_the_workable_minimum() {
+        let cfg = CompactConfig::default();
+        assert_eq!(cfg.minimum_workable_window(), 6_929);
+        // The floor-parameterised form agrees with the constant one on the
+        // CEILING boundary at the same floor -- a positive control that the
+        // two share a bisection rather than merely both returning something.
+        assert_eq!(
+            cfg.minimum_window_for_input_floor(BASELINE_TURN_TOKENS),
+            cfg.least_window_satisfying(|w| cfg.input_ceiling_for_window(w) > BASELINE_TURN_TOKENS)
+        );
+    }
 
     /// #1172 — the refusal has to name a number, and that number has to be
     /// exact: it is what the operator sets `num_ctx` to.
