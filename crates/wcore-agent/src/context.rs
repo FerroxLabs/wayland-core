@@ -48,6 +48,61 @@ pub fn current_date_block(today: &str) -> String {
     format!("Current date: {today}")
 }
 
+/// True when `line` is EXACTLY a line [`current_date_block`] rendered — the
+/// literal prefix followed by a `YYYY-MM-DD` day and nothing else.
+///
+/// Deliberately narrow: prose that merely mentions a date, or a sentence that
+/// happens to start with the words, is not a date declaration and is not
+/// rewritten by [`refresh_current_date`].
+fn is_current_date_line(line: &str) -> bool {
+    let Some(day) = line.trim().strip_prefix("Current date: ") else {
+        return false;
+    };
+    day.len() == 10
+        && day.as_bytes().iter().enumerate().all(|(i, b)| match i {
+            4 | 7 => *b == b'-',
+            _ => b.is_ascii_digit(),
+        })
+}
+
+/// Re-render every `Current date:` line in `prompt` that names a day other
+/// than `today`, or `None` when none of them does.
+///
+/// #1208. #559 moved the date INTO the session-permanent cached prefix, which
+/// is the right place for it — but the prefix is built once, into a plain
+/// `String`, and the very same prefix tells the model to "use the current date
+/// given above as the authoritative today" and not to substitute a
+/// different month or year. A session that outlives midnight therefore states
+/// a false date and forbids the model correcting it. The source comment at the
+/// intro site waved that off as a short-session cost; the channel gateway
+/// breaks the assumption by design, pooling one `AgentEngine` per conversation
+/// with no eviction, so a bot running for a week answers every date-bound
+/// question with the day the gateway started.
+///
+/// Rewriting costs one prefix invalidation per DAY per long-lived session —
+/// the same daily cost #559 already priced in and accepted, since the day is
+/// what the value is keyed by.
+pub fn refresh_current_date(prompt: &str, today: &str) -> Option<String> {
+    let fresh = current_date_block(today);
+    let mut changed = false;
+    let mut out = String::with_capacity(prompt.len());
+    for (i, line) in prompt.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        if is_current_date_line(line) && line.trim() != fresh {
+            // Keep the line's own indentation; only the declaration changes.
+            let indent = &line[..line.len() - line.trim_start().len()];
+            out.push_str(indent);
+            out.push_str(&fresh);
+            changed = true;
+        } else {
+            out.push_str(line);
+        }
+    }
+    changed.then_some(out)
+}
+
 /// Session-scoped cache for system prompt sections.
 ///
 /// Each section (intro, tool guidance, AGENTS.md, memory, skills) is cached
@@ -64,6 +119,9 @@ pub struct SystemPromptCache {
     pub(crate) last_toon_enabled: bool,
     /// Track last terse_enabled value to detect changes (Part B route gate).
     pub(crate) last_terse: bool,
+    /// #1208 — the day the cached `intro` section's `Current date:` line was
+    /// rendered for. `None` until the section is first built.
+    pub(crate) intro_day: Option<String>,
 }
 
 impl SystemPromptCache {
@@ -74,7 +132,27 @@ impl SystemPromptCache {
             last_plan_mode: false,
             last_toon_enabled: false,
             last_terse: false,
+            intro_day: None,
         }
+    }
+
+    /// #1208 — drop the cached `intro` section when it was rendered for a day
+    /// other than `today`, so the next build re-renders its `Current date:`
+    /// line. Returns true when a stale section was actually dropped.
+    ///
+    /// The first call on a fresh cache only RECORDS the day: there is nothing
+    /// cached yet, so nothing is stale and no invalidation is reported.
+    pub fn refresh_for_day(&mut self, today: &str) -> bool {
+        if self.intro_day.as_deref() == Some(today) {
+            return false;
+        }
+        let was_stale = self.intro_day.is_some();
+        self.intro_day = Some(today.to_string());
+        if was_stale {
+            self.sections.remove("intro");
+            self.joined = None;
+        }
+        was_stale
     }
 
     /// Invalidate a specific section by name.
@@ -267,12 +345,16 @@ pub fn build_system_prompt(
     // shared by every session started that day; in the tail it cost one wasted
     // write per SESSION, and there are many sessions per day.
     //
-    // Freezing it for the session is correctness, not a compromise: a value
-    // that re-rendered at midnight mid-session would bust the prefix
-    // mid-session, which is the failure #174 set out to avoid. A long session
-    // crossing midnight therefore sees a stale date; a new session mints a new
-    // prefix carrying the right one, so a one-shot time-bound query is always
-    // correct.
+    // #1208 CORRECTED THIS. The paragraph that stood here argued that freezing
+    // the value for the whole SESSION was correctness, because a value that
+    // re-rendered at midnight busts the prefix mid-session. It was reasoning
+    // about the CLI, where a session is minutes long. The channel gateway
+    // pools one engine per conversation with no eviction, so a bot running for
+    // a week asserted the day it started, every turn, while the same prefix
+    // told the model not to substitute a different month or year. The prefix
+    // is now re-rendered when the DAY changes and only then: within a day it
+    // stays byte-identical, and the day is what the value is keyed by, so the
+    // cost is the one cold start per day #559 already priced in.
     //
     // SECURITY (#559). This also removes `Current date:` from the set of
     // product strings that appear INSIDE a user turn. On a channel session a
@@ -281,6 +363,13 @@ pub fn build_system_prompt(
     // were reaching for. The system field is not reachable from a user turn,
     // so moving the date here shrinks that surface by one string, and
     // `UNTRUSTED_CHANNEL_SESSION_DIRECTIVE` no longer names it.
+    // #1208: the date below is frozen for the life of this cache. A session
+    // that crosses midnight must re-render it rather than keep asserting a day
+    // that has passed — the same prefix forbids the model correcting it. The
+    // cost is one invalidation per DAY, which is what the value is keyed by
+    // anyway; within a day the prefix stays byte-stable.
+    let today = today_string();
+    cache.refresh_for_day(&today);
     let intro = cache.sections.entry("intro").or_insert_with(|| {
         format!(
             "You are an AI assistant that can use tools to help with tasks.\n\
@@ -293,7 +382,7 @@ pub fn build_system_prompt(
              different month or year — your training cutoff is older than \
              the current date, and guessing a future month produces wrong \
              queries.",
-            date = current_date_block(&today_string())
+            date = current_date_block(&today)
         )
     });
     parts.push(intro.clone());
@@ -1744,9 +1833,17 @@ mod tests {
             first.contains(&current_date_block(&today)),
             "cached system prefix must carry the current date; prefix was: {first}"
         );
-        // Frozen for the session: repeated reads through ONE cache return the
-        // same bytes, so a session crossing midnight cannot shift its own
-        // prefix mid-flight.
+        // Stable WITHIN the day: repeated reads through ONE cache return the
+        // same bytes, so the prompt cache is not perturbed turn to turn.
+        //
+        // #1208 RESTATED THIS. It used to read "a session crossing midnight
+        // cannot shift its own prefix mid-flight", which asserted the defect:
+        // the prefix stayed frozen ACROSS days too, so a long session went on
+        // declaring a day that had passed while the same prefix forbade the
+        // model correcting it. The decision is that the day is the ONE thing
+        // allowed to move the prefix — see
+        // `a_day_rollover_re_renders_the_date_in_the_cached_prefix`, which
+        // grades the other side of the same rule.
         let mut cache = SystemPromptCache::new();
         let a = build_system_prompt(
             &mut cache,
@@ -1774,11 +1871,147 @@ mod tests {
             &[],
             false,
         );
-        assert_eq!(a, b, "the session-scoped prefix must be frozen once built");
+        assert_eq!(
+            a, b,
+            "the cached prefix must be byte-identical across builds within one day"
+        );
         // The authoritative-date instruction stays in the cached prefix.
         assert!(
             first.contains("authoritative"),
             "authoritative-date instruction must remain in the cached prefix"
+        );
+    }
+
+    /// wayland#1208 c3 — a DAY ROLLOVER re-renders the date, driven through
+    /// the prompt builder itself rather than through the renderer.
+    ///
+    /// The cache is put into exactly the state a session started yesterday
+    /// holds: an `intro` section whose `Current date:` line names another day,
+    /// and an `intro_day` recording that day. `build_system_prompt` is then
+    /// called again — the same entry point `bootstrap.rs` calls — and must
+    /// return a prefix carrying TODAY.
+    ///
+    /// Red arm: deleting `cache.refresh_for_day(&today);` from
+    /// `build_system_prompt` leaves the stale section in place and turns this
+    /// test red, while `current_date_present_and_stable_in_cached_system_prefix`
+    /// stays green — which is what makes this the load-bearing assertion.
+    #[test]
+    fn a_day_rollover_re_renders_the_date_in_the_cached_prefix() {
+        const YESTERYEAR: &str = "2020-01-01";
+        let mut cache = SystemPromptCache::new();
+        let build = |cache: &mut SystemPromptCache| {
+            build_system_prompt(
+                cache,
+                None,
+                "/tmp",
+                "test-model",
+                &[],
+                None,
+                None,
+                false,
+                false,
+                &[],
+                false,
+            )
+        };
+
+        let today = today_string();
+        let first = build(&mut cache);
+        assert!(
+            first.contains(&current_date_block(&today)),
+            "precondition: the first build must carry today. prefix was: {first}"
+        );
+        assert_ne!(
+            today, YESTERYEAR,
+            "the fixture day must differ from today or the rollover is a no-op"
+        );
+
+        // Age the cache: this is the exact state of a session that built its
+        // prefix on an earlier day and is still running.
+        let aged = cache.sections["intro"]
+            .replace(&current_date_block(&today), &current_date_block(YESTERYEAR));
+        assert!(
+            aged.contains(&current_date_block(YESTERYEAR)),
+            "the fixture failed to age the intro section"
+        );
+        cache.sections.insert("intro", aged);
+        cache.joined = None;
+        cache.intro_day = Some(YESTERYEAR.to_string());
+
+        let second = build(&mut cache);
+        assert!(
+            !second.contains(&current_date_block(YESTERYEAR)),
+            "the prefix still declares {YESTERYEAR} as the authoritative today \
+             after the day rolled over. prefix was: {second}"
+        );
+        assert!(
+            second.contains(&current_date_block(&today)),
+            "the prefix does not declare today after the rollover. prefix was: {second}"
+        );
+        assert!(
+            second.contains("authoritative"),
+            "the re-rendered intro dropped the authoritative-date instruction"
+        );
+    }
+
+    /// The rollover is the ONLY thing that moves the intro: a second build on
+    /// the same day must not invalidate the section, or #559's cache win is
+    /// spent every turn instead of once a day.
+    #[test]
+    fn the_same_day_never_invalidates_the_intro_section() {
+        let mut cache = SystemPromptCache::new();
+        let today = today_string();
+        assert!(
+            !cache.refresh_for_day(&today),
+            "a fresh cache has nothing cached, so nothing can be stale"
+        );
+        cache.sections.insert("intro", "sentinel".to_string());
+        assert!(
+            !cache.refresh_for_day(&today),
+            "the same day must not invalidate the intro section"
+        );
+        assert_eq!(
+            cache.sections.get("intro").map(String::as_str),
+            Some("sentinel"),
+            "the intro section was dropped without the day changing"
+        );
+        assert!(
+            cache.refresh_for_day("2020-01-01"),
+            "a different day must invalidate the intro section"
+        );
+        assert!(
+            !cache.sections.contains_key("intro"),
+            "a day change must drop the cached intro section"
+        );
+    }
+
+    /// `refresh_current_date` is what the engine applies to the prompt it
+    /// already holds. It must rewrite a product-rendered declaration and leave
+    /// prose that merely mentions a date alone.
+    #[test]
+    fn refresh_current_date_rewrites_only_a_date_declaration_line() {
+        let prompt = format!(
+            "{stale}\nThe release shipped on Current date: not-a-day.\nCurrent dates matter.",
+            stale = current_date_block("2020-01-01")
+        );
+        let updated =
+            refresh_current_date(&prompt, "2026-08-31").expect("a stale declaration must rewrite");
+        assert!(updated.starts_with(&current_date_block("2026-08-31")));
+        assert!(
+            updated.contains("The release shipped on Current date: not-a-day."),
+            "a line that is not a bare declaration must be untouched: {updated}"
+        );
+        assert!(
+            updated.contains("Current dates matter."),
+            "prose mentioning the words must be untouched: {updated}"
+        );
+        assert!(
+            refresh_current_date(&prompt, "2020-01-01").is_none(),
+            "a prompt already naming the day must report no change"
+        );
+        assert!(
+            refresh_current_date("no date here", "2026-08-31").is_none(),
+            "a prompt with no declaration must report no change"
         );
     }
 

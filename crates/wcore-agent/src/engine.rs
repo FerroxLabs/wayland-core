@@ -7034,6 +7034,32 @@ impl AgentEngine {
     /// prompt) loses nothing they can change. A future surface that edits the
     /// base prompt in-session must refresh the retained base via
     /// [`inject_history`] or a dedicated capture, not rely on this overlay.
+    /// #1208 — re-render the `Current date:` line this engine's system prompt
+    /// carries when the day has rolled over since it was baked.
+    ///
+    /// `build_system_prompt` renders the date into the session-permanent
+    /// cached prefix (#559) and the engine keeps the result as a plain
+    /// `String`, so nothing refreshed it for the life of the engine. That is
+    /// tolerable for a CLI session measured in minutes and false for the
+    /// channel gateway, which pools one `AgentEngine` per conversation and
+    /// never evicts it.
+    ///
+    /// The retained rebind base moves in lockstep: it is what
+    /// [`set_system_prompt`](Self::set_system_prompt) re-prepends on a
+    /// `/model` switch, so leaving it behind would reinstate yesterday's date
+    /// on the next rebind.
+    fn refresh_current_date_line(&mut self) {
+        let today = crate::context::today_string();
+        if let Some(updated) = crate::context::refresh_current_date(&self.system_prompt, &today) {
+            self.system_prompt = updated;
+        }
+        if let Some(base) = self.rebind_system_prefix.as_deref()
+            && let Some(updated) = crate::context::refresh_current_date(base, &today)
+        {
+            self.rebind_system_prefix = Some(updated);
+        }
+    }
+
     pub fn set_system_prompt(&mut self, prompt: String) {
         match self.rebind_system_prefix.as_deref() {
             Some(base) => {
@@ -12758,6 +12784,14 @@ impl AgentEngine {
     ) -> Result<AgentResult, AgentError> {
         self.unserved_resends = 0;
         self.admitted_incomplete_this_turn = false;
+        // #1208 — every turn entry funnels through here, so this is the one
+        // place a day rollover has to be noticed. The system prompt was built
+        // once, at bootstrap, into this plain `String`; nothing re-rendered it
+        // and the same prefix forbids the model correcting the date. The
+        // channel gateway pools one engine per conversation with NO eviction
+        // (`channel_dispatch.rs` TODO(phase) 1), so a long-lived bot asserted
+        // the day the gateway started on every turn it ever served.
+        self.refresh_current_date_line();
         let result = self
             .run_inner_impl(
                 user_turn,
