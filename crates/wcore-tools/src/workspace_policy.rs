@@ -307,6 +307,11 @@ pub(crate) struct GuardCounters {
     /// Filesystem probes (`exists` / `canonicalize` / `symlink_metadata` /
     /// `read_to_string`) charged by scans AND by cache revalidations.
     probes: AtomicU64,
+    /// Arm-4 nested-discovery walks. Counted APART from `scans` because the two
+    /// mean different things: `scans` is the arm-2 rebuild whose return to the
+    /// common path is core#376's regression, while this one is a per-policy
+    /// one-off by construction and asserting it stays at 1 is what proves that.
+    nested_walks: AtomicU64,
 }
 
 /// #376 — one memoised store list plus everything needed to decide whether it
@@ -1185,7 +1190,9 @@ impl WorkspacePolicy {
     fn nested_content_stores(&self) -> &[PathBuf] {
         self.nested_stores.get_or_init(|| {
             let scan = discover_nested_content_stores(&self.root);
-            self.guard_counters.scans.fetch_add(1, Ordering::Relaxed);
+            self.guard_counters
+                .nested_walks
+                .fetch_add(1, Ordering::Relaxed);
             self.guard_counters
                 .probes
                 .fetch_add(scan.probes, Ordering::Relaxed);
@@ -1295,6 +1302,16 @@ impl WorkspacePolicy {
     /// fast one, and the regression this guards against (a rebuild returning to
     /// the common path) is invisible in a timing that is dominated by
     /// scheduling noise.
+    /// FerroxLabs/wayland-core#398 — how many times arm 4's nested-store
+    /// discovery walk has run for this policy. One, for the life of the
+    /// policy; the assertion that it stays at one is what makes arm 4's
+    /// per-guard cost independent of the workspace size a fact rather than a
+    /// claim.
+    #[doc(hidden)]
+    pub fn nested_walk_count(&self) -> u64 {
+        self.guard_counters.nested_walks.load(Ordering::Relaxed)
+    }
+
     #[doc(hidden)]
     pub fn guard_cost(&self) -> (u64, u64, u64) {
         (

@@ -89,10 +89,19 @@ async fn one_ordinary_path_guard_resolves_once_and_does_not_rescan() {
     assert_eq!(resolves, 1, "one guard must resolve the path exactly once");
     assert_eq!(scans, 1, "the first guard scans");
     assert_eq!(
-        first_probes, 17,
+        first_probes, 41,
         "the store scan's filesystem probe count moved; if that is intended, \
          update this number and re-measure the syscall figures in this file's \
          header"
+    );
+    // FerroxLabs/wayland-core#398 — arm 4's discovery walk is a per-policy
+    // ONE-OFF. 41 is 17 (the arm-2 scan) + 24 for one walk of this fixture;
+    // the whole point of the design is that the second number is paid once and
+    // never revalidated, which the steady-state assertion below is what proves.
+    assert_eq!(
+        policy.nested_walk_count(),
+        1,
+        "the nested-store walk must run at most once for the life of a policy"
     );
 
     const N: u64 = 50;
@@ -111,6 +120,87 @@ async fn one_ordinary_path_guard_resolves_once_and_does_not_rescan() {
         N * 3,
         "an ordinary-path guard must cost exactly three filesystem probes once \
          the scan is warm"
+    );
+    assert_eq!(
+        policy.nested_walk_count(),
+        1,
+        "core#398: the nested-store walk came back on the common path — a \
+         whole-tree walk per guard is the regression this file exists to catch"
+    );
+}
+
+/// FerroxLabs/wayland-core#398 c1 — **the warm per-guard cost of a path that
+/// carries a store LEAF NAME does not scale with the workspace.**
+///
+/// `objects`, `modules`, `store` and `lfs` are ordinary project directory
+/// names: a Terraform `modules/`, a Redux store, an asset pipeline. #398
+/// measured a tree at which such a path cost one filesystem probe per
+/// workspace DIRECTORY — slope 1.000 across an 8-directory and a 48-directory
+/// workspace — because a whole-tree walk had been gated on that spelling and
+/// its witness set was re-`stat`ed on every guard.
+///
+/// The slope assertion is INVERTED here rather than deleted, as #398 c1 asks:
+/// the same two workspace sizes, the same admitted path, and the difference
+/// must now be ZERO. It is zero by construction and not by tuning — arm 4
+/// answers from a set built once and never revalidated, so there is nothing
+/// per-directory left to pay, and arm 3 probes only the ancestors of the path
+/// in hand.
+///
+/// **Red arm:** make `WorkspacePolicy::nested_content_stores` call
+/// `discover_nested_content_stores` on every invocation instead of through the
+/// `OnceLock`, and this goes red with a slope of one probe per workspace
+/// directory — the exact shape #398 reports.
+#[tokio::test]
+async fn a_store_named_path_costs_the_same_at_any_workspace_size() {
+    async fn warm_probes_per_guard(extra_dirs: usize) -> u64 {
+        let dir = tempfile::tempdir().expect("workspace");
+        let root = std::fs::canonicalize(dir.path()).expect("canonical root");
+        std::fs::create_dir_all(root.join(".git/objects/ab")).unwrap();
+        std::fs::write(root.join(".git/objects/ab/cdef"), b"x").unwrap();
+        // The admitted path: a `modules` component, and no control directory,
+        // gitfile, bare repository or store anywhere beneath it.
+        std::fs::create_dir_all(root.join("modules/vpc")).unwrap();
+        std::fs::write(root.join("modules/vpc/main.tf"), b"# tf\n").unwrap();
+        for i in 0..extra_dirs {
+            std::fs::create_dir_all(root.join(format!("pkg{i}/src"))).unwrap();
+        }
+        let policy = Arc::new(WorkspacePolicy::contained(&root));
+        let fs = stack(&policy, &root);
+        let admitted = root.join("modules/vpc/main.tf");
+        tokio::time::sleep(SETTLE).await;
+
+        // Reach the steady state FIRST: the cold walk is a one-off and this
+        // measures what a session actually spends, not its first instant.
+        fs.exists(&admitted).await.expect("admitted path readable");
+        let (_, _, before) = policy.guard_cost();
+        const N: u64 = 20;
+        for _ in 0..N {
+            fs.exists(&admitted).await.expect("admitted path readable");
+        }
+        let (_, _, after) = policy.guard_cost();
+        assert_eq!(
+            policy.nested_walk_count(),
+            1,
+            "the walk must stay a one-off for this measurement to be about the \
+             warm state"
+        );
+        (after - before) / N
+    }
+
+    let small = warm_probes_per_guard(4).await;
+    let large = warm_probes_per_guard(44).await;
+    assert_eq!(
+        large, small,
+        "core#398 c1: a guard on `modules/vpc/main.tf` cost {small} probes in a \
+         small workspace and {large} in one with 40 more directories — the \
+         per-guard cost is scaling with the tree again"
+    );
+    assert_eq!(
+        small, 4,
+        "core#398 c1/c2 state this as a NUMBER: three arm-2 revalidation \
+         probes plus one arm-3 repository probe (`<root>/HEAD`, absent). If \
+         this moved, re-measure and re-state it on the ticket rather than \
+         editing it here"
     );
 }
 
