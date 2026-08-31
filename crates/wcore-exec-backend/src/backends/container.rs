@@ -867,7 +867,7 @@ impl ExecutionBackend for ContainerBackend {
                 found: rows
                     .into_iter()
                     .map(|(handle, nonce)| UnscopedOrphan {
-                        known_to_this_process: live.iter().any(|n| *n == nonce),
+                        known_to_this_process: live.contains(&nonce),
                         handle,
                         nonce,
                     })
