@@ -153,18 +153,68 @@ pub fn scrub_detail(value: &str) -> String {
 }
 
 /// `scheme://user:pass@host/…` ⇒ `scheme://<redacted>@host/…`
+///
+/// ## FerroxLabs/wayland#1252 c5 — why the URL parser answers, not a cut
+///
+/// This used to locate the userinfo by hand: `find("://")`, then the first
+/// `/`, then the first `@` before it. For a special scheme the WHATWG parser
+/// maps `\` to a path separator, so `https://evil.example\@github.com/x` has
+/// NO userinfo at all — it is a request to `evil.example` with the path
+/// `/@github.com/x`. The cut rewrote it to `https://<redacted>@github.com/x`,
+/// which is byte-identical to the redaction of a genuinely credential-bearing
+/// `https://user:pw@github.com/x`. A reader of the redacted detail could not
+/// tell that the first one dials `evil.example`; the redaction ITSELF
+/// manufactured the deception it exists to prevent.
+///
+/// So the question "does this URL carry userinfo, and what survives when it is
+/// removed?" is asked of `url::Url` — the parser `reqwest` builds requests
+/// with — and a string that carries no userinfo is returned UNCHANGED, which
+/// leaves the smuggled spelling visible for what it is.
+///
+/// Scope is deliberately the first URL-shaped token in the string, matching
+/// what the cut did: `details` values are free-form (an MCP `url`, a command
+/// line, a `base_url`), and the token runs from the scheme to the first ASCII
+/// whitespace.
 fn strip_url_userinfo(v: &str) -> String {
     let Some(scheme_end) = v.find("://") else {
         return v.to_string();
     };
-    let rest_start = scheme_end + 3;
-    let rest = &v[rest_start..];
-    // Userinfo ends at the first `@` that precedes the first `/`.
-    let authority_end = rest.find('/').unwrap_or(rest.len());
-    let Some(at) = rest[..authority_end].find('@') else {
+    // Walk back over the scheme's own characters to find where the URL token
+    // starts, so a `url=https://…` or `--endpoint https://…` detail is parsed
+    // as the URL it contains rather than from the middle of a word.
+    let token_start = v[..scheme_end]
+        .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.'))
+        .map_or(0, |at| at + 1);
+    let token_end = v[token_start..]
+        .find(char::is_whitespace)
+        .map_or(v.len(), |at| token_start + at);
+    let token = &v[token_start..token_end];
+
+    let Ok(mut parsed) = url::Url::parse(token) else {
         return v.to_string();
     };
-    format!("{}<redacted>@{}", &v[..rest_start], &rest[at + 1..])
+    // No userinfo means nothing to redact HERE. The smuggled spelling lands
+    // in this branch, and must: rewriting it would name a host it never
+    // reaches.
+    if parsed.username().is_empty() && parsed.password().is_none() {
+        return v.to_string();
+    }
+    // Rebuild from the parse rather than splicing at a byte offset: the
+    // placeholder is not a legal username and `set_username` would
+    // percent-encode it.
+    let _ = parsed.set_username("");
+    let _ = parsed.set_password(None);
+    let cleaned = parsed.to_string();
+    let Some(authority_at) = cleaned.find("://").map(|at| at + 3) else {
+        return v.to_string();
+    };
+    format!(
+        "{}{}<redacted>@{}{}",
+        &v[..token_start],
+        &cleaned[..authority_at],
+        &cleaned[authority_at..],
+        &v[token_end..]
+    )
 }
 
 /// `?token=abc&x=1` ⇒ `?token=<redacted>&x=1`
@@ -253,6 +303,45 @@ mod tests {
             scrub_detail("srv --max_tokens 8192"),
             "srv --max_tokens 8192",
             "max_tokens is a structural look-alike, not a secret"
+        );
+    }
+
+    /// FerroxLabs/wayland#1252 c5 — a smuggled authority must not be rendered
+    /// as though the allowlisted name were the host that survives.
+    ///
+    /// The criterion is an INEQUALITY between two outputs, because the defect
+    /// was that they were equal: the redaction of a URL that dials
+    /// `evil.example` was byte-identical to the redaction of a genuinely
+    /// credential-bearing `github.com` URL.
+    #[test]
+    fn a_smuggled_authority_does_not_redact_into_the_allowlisted_host() {
+        let smuggled = scrub_detail(r"https://evil.example\@github.com/x");
+        let credentialed = scrub_detail("https://user:pw@github.com/x");
+
+        assert_ne!(
+            smuggled, credentialed,
+            "the smuggled URL and a credential-bearing github.com URL must not \
+             render identically — that is the whole defect"
+        );
+        assert!(
+            smuggled.contains("evil.example"),
+            "the host actually dialed must survive the redaction: {smuggled}"
+        );
+
+        // CONTROL, the direction a blanket "leave every URL alone" mutation
+        // destroys: an ordinary credential-bearing URL is still redacted.
+        assert_eq!(credentialed, "https://<redacted>@github.com/x");
+        assert_eq!(
+            scrub_detail("https://alice:hunter2@example.com/mcp"),
+            "https://<redacted>@example.com/mcp"
+        );
+        // CONTROL: a URL with no credentials is returned untouched.
+        assert_eq!(scrub_detail("https://github.com/x"), "https://github.com/x");
+        // CONTROL: the URL embedded in a longer detail string is still found,
+        // and the surrounding text survives.
+        assert_eq!(
+            scrub_detail("endpoint=https://user:pw@example.com/mcp (probed)"),
+            "endpoint=https://<redacted>@example.com/mcp (probed)"
         );
     }
 
