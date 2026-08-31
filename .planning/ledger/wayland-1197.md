@@ -21,7 +21,7 @@ criteria:
   - id: c3
     text: "Removing #[serial_test::serial] from the caller of PinnedRetryBudget::pin at engine.rs:29581 makes the lint exit non-zero -- or #1134 c3's text is restated to what the lint actually catches"
     state: met
-    evidence: "file:crates/wcore-agent/src/engine.rs:31045:async fn stream_error_exhausts_retries_then_fails_the_turn()"
+    evidence: "file:crates/wcore-agent/src/engine.rs:31122:async fn stream_error_exhausts_retries_then_fails_the_turn()"
     owner: core
     note: "MET AS WRITTEN, by direct measurement, first branch. LINE DRIFT: the caller the issue records at engine.rs:29581 is now at engine.rs:30635 (`stream_error_exhausts_retries_then_fails_the_turn`, its `#[serial_test::serial]` on :30634); the n-window merge moved engine.rs and the criterion text was written before it. It is the same caller -- the sole `PinnedRetryBudget::pin` call in engine.rs. RED ARM, exit codes captured directly, not through a pipe: baseline `python3 scripts/check-test-env-globals.py` exits 0; deleting line 30634 and re-running exits 1, naming 'crates/wcore-agent/src/test_utils/mod.rs:387  fn pin  [helper write, reached from an unserialized test; caller kinds seen: UNSERIALIZED-TEST,serial-attr]' plus both Drop sites, under 'WAYLAND_MAX_STREAM_RETRIES written by test binary wcore-agent (2587 tests in that process)'. Restored with `git checkout --` and `touch`; the restored run exits 0 again."
 ---
