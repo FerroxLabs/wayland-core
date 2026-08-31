@@ -106,11 +106,132 @@ pub fn estimate_request_tokens(messages: &[Message], system: &str, tools: &[Tool
     messages_tokens + system_tokens + tool_tokens
 }
 
+/// The UN-COMPACTABLE FLOOR of a turn: the system prompt plus the tool
+/// schemas, computed from THIS assembled request rather than assumed --
+/// FerroxLabs/wayland#1230 c1.
+///
+/// # What un-compactable means, precisely
+///
+/// The degradation rungs the engine can pull shrink the CONVERSATION and
+/// nothing else: rung 1 sheds tool RESULTS, rung 2 truncates or drops
+/// MESSAGES. Neither can touch the system prompt or the tool array, so
+/// whatever those two cost is charged on every request the session will ever
+/// send -- including the one before the user has typed anything. That is the
+/// floor, and it is exactly [`estimate_request_tokens`] evaluated at an empty
+/// message list. The identity
+///
+/// ```text
+/// estimate_request_tokens(msgs, sys, tools) >= uncompactable_floor_tokens(sys, tools)
+/// ```
+///
+/// holds for EVERY `msgs`, which is what makes this a floor rather than an
+/// estimate of one; `floor_is_a_floor_for_every_message_list` pins it.
+///
+/// # Why it is computed and not read off a constant
+///
+/// [`wcore_config::compact::BASELINE_TURN_TOKENS`] is a MEASURED SNAPSHOT of
+/// this quantity (3,118 real prompt tokens; #1172 drove a real qwen3:8b
+/// through a logging proxy and read it off the usage block the endpoint
+/// returned). It moves whenever the system prompt is edited, a built-in tool
+/// is added, an MCP server registers, or a skill lands in the index -- and
+/// nothing regrades it. #1230 c2 pins that drift with a test; this function
+/// is what a caller uses when it needs the floor of the session in hand
+/// rather than a snapshot of some other one.
+///
+/// # Live figure
+///
+/// Measured 2026-08-31 on hetzner-dsm, against a private Ollama on port 21434
+/// serving qwen3:8b at CONTEXT 4096: this function returned 3,619 tokens for
+/// the default turn, against 3,207 real prompt tokens reported for the same
+/// turn on the wire. The char/4 estimator therefore runs about 13% HIGH, i.e.
+/// conservative for a floor -- it refuses slightly early rather than slightly
+/// late, which is the correct direction for a guard whose failure mode is
+/// silent truncation.
+pub fn uncompactable_floor_tokens(system: &str, tools: &[ToolDef]) -> u64 {
+    estimate_request_tokens(&[], system, tools)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
     use wcore_types::message::{Message, Role};
+
+    fn tool(name: &str, description: &str) -> ToolDef {
+        ToolDef {
+            name: name.to_string(),
+            description: description.to_string(),
+            input_schema: json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+            deferred: false,
+            server: None,
+        }
+    }
+
+    /// #1230 c1 -- the floor is the part of a request no degradation rung can
+    /// reach, so it must be a LOWER BOUND on every request the session sends,
+    /// not merely the size of one particular turn.
+    ///
+    /// The failure this catches is the substituted property: a floor that is
+    /// really the estimate of turn 1 passes any test written against turn 1
+    /// and is wrong on turn 2. Sweeping message lists -- empty, one small user
+    /// turn, and a 26,054-character tool result (the exact payload #1230
+    /// measured Ollama discarding) -- is what separates them.
+    #[test]
+    fn floor_is_a_floor_for_every_message_list() {
+        let system = "You are a helpful agent.".repeat(40);
+        let tools = [tool("Read", "Read a file"), tool("Bash", "Run a command")];
+        let floor = uncompactable_floor_tokens(&system, &tools);
+        assert!(
+            floor > 0,
+            "a real system prompt plus tools cannot cost nothing"
+        );
+
+        let lists: Vec<Vec<Message>> = vec![
+            vec![],
+            vec![Message::new(
+                Role::User,
+                vec![ContentBlock::Text { text: "hi".into() }],
+            )],
+            vec![Message::new(
+                Role::User,
+                vec![ContentBlock::ToolResult {
+                    tool_use_id: "t1".to_string(),
+                    content: "x".repeat(26_054),
+                    is_error: false,
+                }],
+            )],
+        ];
+        for messages in &lists {
+            let full = estimate_request_tokens(messages, &system, &tools);
+            assert!(
+                full >= floor,
+                "floor {floor} exceeded the full estimate {full} for a {}-message \
+                 request -- then it is not a floor",
+                messages.len()
+            );
+        }
+    }
+
+    /// The floor must move when the TOOL SET moves, which is the whole reason
+    /// #1230 c2 refuses to trust a constant. A floor that ignored its tools
+    /// argument would still pass the bound test above and be useless.
+    #[test]
+    fn floor_tracks_the_tool_schemas_it_is_given() {
+        let system = "sys";
+        let lean = uncompactable_floor_tokens(system, &[tool("Read", "Read a file")]);
+        let fat = uncompactable_floor_tokens(
+            system,
+            &[
+                tool("Read", "Read a file"),
+                tool("Bash", &"Run a shell command. ".repeat(50)),
+            ],
+        );
+        assert!(
+            fat > lean,
+            "adding a tool schema left the floor at {lean} -- the floor is not \
+             reading the tool array"
+        );
+    }
 
     #[test]
     fn empty_messages_returns_zero() {

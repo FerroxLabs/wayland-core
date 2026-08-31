@@ -119,6 +119,101 @@ pub(crate) async fn probe_ollama_tool_support(
     }
 }
 
+// ---------------------------------------------------------------------------
+// #1230 c3 -- the SERVED slot, stated by the endpoint before we send to it.
+// ---------------------------------------------------------------------------
+
+/// Derive the Ollama native `/api/ps` URL from the OpenAI-wire `base_url`,
+/// with the same normalization [`ollama_show_url`] applies.
+pub(crate) fn ollama_ps_url(base_url: &str) -> String {
+    let trimmed = base_url.trim_end();
+    let no_slash = trimmed.strip_suffix('/').unwrap_or(trimmed);
+    let no_v1 = no_slash.strip_suffix("/v1").unwrap_or(no_slash);
+    let root = no_v1.strip_suffix('/').unwrap_or(no_v1);
+    format!("{root}/api/ps")
+}
+
+/// Read the SERVED context slot for `model` out of an Ollama `/api/ps` body.
+///
+/// # Why `/api/ps` and not `/api/show`
+///
+/// They answer different questions and #1172 measured them disagreeing by 10x
+/// on the same box. `/api/show` reports what the MODEL advertises
+/// (`qwen3.context_length = 40960`); `/api/ps` reports the slot the RUNNING
+/// instance was actually loaded with (`context_length = 4096` on a stock
+/// service with no `OLLAMA_CONTEXT_LENGTH`). Only the second one binds, and
+/// only the second one is what silently discards the head of an oversized
+/// prompt. Reading the advertised figure here would be worse than reading
+/// nothing: it would manufacture confidence in a window that does not exist.
+///
+/// # Fail-open
+///
+/// Returns `None` for every ambiguity -- no such model loaded, absent or
+/// non-numeric `context_length`, a zero. `None` means "unknown", and an
+/// unknown slot must never be the reason a run is refused.
+pub(crate) fn parse_served_window(ps_response: &Value, model: &str) -> Option<u64> {
+    let running = ps_response.get("models")?.as_array()?;
+    running
+        .iter()
+        .find(|entry| {
+            ["name", "model"].iter().any(|key| {
+                entry
+                    .get(*key)
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| value == model)
+            })
+        })
+        .and_then(|entry| entry.get("context_length"))
+        .and_then(Value::as_u64)
+        .filter(|slot| *slot > 0)
+}
+
+/// Ask a local Ollama backend what context slot `model` is currently loaded
+/// with, or `None` when it will not say.
+///
+/// # Why this probe is allowed where two earlier ones were backed out
+///
+/// [`wcore_config::context_window::ServedWindowTracker`] records that reaching
+/// for this figure was tried and reverted twice, because "probing the endpoint
+/// means deciding WHICH endpoints to probe" and every mock server in this
+/// workspace binds `127.0.0.1`, so loopback cannot separate a real self-hosted
+/// server from a test fixture. That objection is about SNIFFING, and it is
+/// already answered elsewhere in this file: [`probe_ollama_tool_support`] is
+/// gated on `ProviderCompat::provider_type() == "ollama"`, which is what the
+/// OPERATOR declared their endpoint to be, not something inferred from an
+/// address. This probe is gated the same way and inherits the same answer.
+///
+/// The tracker keeps its job. It learns from `usage` after the fact and needs
+/// no cooperation from the endpoint; it just cannot answer BEFORE the first
+/// request, which is what #1230 c4 asks for. The two are complementary: this
+/// one is consulted first and the tracker remains the fallback for every
+/// endpoint that does not answer.
+///
+/// Best-effort and advisory, exactly like the tool-capability probe: one GET,
+/// no retry, 2s ceiling, and every failure mode resolves to `None`.
+pub async fn probe_ollama_served_window(
+    client: &EgressClient,
+    base_url: &str,
+    model: &str,
+) -> Option<u64> {
+    let url = ollama_ps_url(base_url);
+    let probe = async {
+        let response = client.get(&url).send().await.ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+        let body: Value = response.json().await.ok()?;
+        parse_served_window(&body, model)
+    };
+    match tokio::time::timeout(std::time::Duration::from_secs(2), probe).await {
+        Ok(result) => result,
+        Err(_) => {
+            tracing::debug!(url = %url, "Ollama served-window probe timed out");
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,5 +308,80 @@ mod tests {
         // A malformed mixed array still resolves the `"tools"` string correctly.
         let resp = json!({ "capabilities": [1, true, "tools", null] });
         assert_eq!(parse_tool_capability(&resp), Some(true));
+    }
+
+    // --- #1230 c3: the served-slot probe -------------------------------
+
+    #[test]
+    fn ps_url_normalizes_the_same_way_show_does() {
+        for base in [
+            "http://localhost:11434/v1",
+            "http://localhost:11434/v1/",
+            "http://localhost:11434/",
+            "http://localhost:11434",
+        ] {
+            assert_eq!(ollama_ps_url(base), "http://localhost:11434/api/ps");
+        }
+    }
+
+    /// The shape a real Ollama 0.30.7 returns, captured on hetzner-dsm from a
+    /// private instance on port 21434 with qwen3:8b loaded at the stock slot.
+    #[test]
+    fn served_window_reads_the_loaded_slot() {
+        let body = json!({
+            "models": [{
+                "name": "qwen3:8b",
+                "model": "qwen3:8b",
+                "size": 5225388164u64,
+                "context_length": 4096,
+            }]
+        });
+        assert_eq!(parse_served_window(&body, "qwen3:8b"), Some(4_096));
+    }
+
+    /// Every ambiguity is `None`. A probe that guessed here would refuse runs
+    /// against endpoints that are perfectly healthy -- the wrong-refusal
+    /// failure, which is worse than the truncation it is trying to prevent.
+    #[test]
+    fn served_window_fails_open_on_every_ambiguity() {
+        // No model loaded at all -- the state a cold server is in, and the
+        // state a stock server returns to after its 5-minute idle unload.
+        assert_eq!(
+            parse_served_window(&json!({"models": []}), "qwen3:8b"),
+            None
+        );
+        // A DIFFERENT model is loaded; its slot says nothing about ours.
+        let other = json!({"models": [{"name": "llama3:8b", "context_length": 8192}]});
+        assert_eq!(parse_served_window(&other, "qwen3:8b"), None);
+        // Field absent (an older Ollama), non-numeric, or zero.
+        for entry in [
+            json!({"name": "qwen3:8b"}),
+            json!({"name": "qwen3:8b", "context_length": "4096"}),
+            json!({"name": "qwen3:8b", "context_length": 0}),
+        ] {
+            let body = json!({ "models": [entry] });
+            assert_eq!(parse_served_window(&body, "qwen3:8b"), None);
+        }
+        // Not an Ollama response at all.
+        assert_eq!(
+            parse_served_window(&json!({"object": "list"}), "qwen3:8b"),
+            None
+        );
+    }
+
+    /// POSITIVE CONTROL for the test above: the same helper, on the same
+    /// document shape, DOES answer when the answer is unambiguous. Without
+    /// this, a `parse_served_window` that returned `None` unconditionally
+    /// would pass every fail-open assertion.
+    #[test]
+    fn served_window_control_answers_when_unambiguous() {
+        let body = json!({
+            "models": [
+                {"name": "llama3:8b", "context_length": 8192},
+                {"name": "qwen3:8b", "context_length": 4096},
+            ]
+        });
+        assert_eq!(parse_served_window(&body, "llama3:8b"), Some(8_192));
+        assert_eq!(parse_served_window(&body, "qwen3:8b"), Some(4_096));
     }
 }
