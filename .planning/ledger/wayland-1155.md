@@ -15,6 +15,7 @@ criteria:
   - id: c2
     text: "The same guarantee holds on Windows"
     state: superseded
+    successor: FerroxLabs/wayland-core#370
     evidence: "test:crates/wcore-config/src/atomic_io.rs::the_check_is_handed_the_bytes_the_publish_displaced"
     owner: core
     handoff: "FerroxLabs/wayland-core#370"

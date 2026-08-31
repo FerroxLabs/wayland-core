@@ -21,7 +21,7 @@ criteria:
   - id: c3
     text: "The check is proven in both directions, including a resurrection introduced by a MERGE -- git log -S skips merges by default, which is how this one passed"
     state: met
-    evidence: "file:scripts/check-criteria-ledger.py:1379:def _merge_resurrection(resolution):"
+    evidence: "file:scripts/check-criteria-ledger.py:1452:def _merge_resurrection(resolution):"
     owner: core
     note: "MET AS WRITTEN. `--self-test` now BUILDS the history rather than describing it: a base holding the entry plus an untouched neighbour, a deletion in the c461293f shape, a lane branch cut BEFORE the deletion that rewords the same lines, and the merge back. `-X theirs` resurrects the entry and the gate REDS naming the criterion; `-X ours` does not and it stays GREEN -- the two arms differ in nothing else, so the red is the resolution. The reproduction is verified rather than asserted: a third arm runs `git log -S <needle>` on that same merged tree and requires it to find the ordinary commits and NOT report the merge, so if `-S` ever stops being blind to it this stops being a reproduction and says so. RED ARM on the enforcement site: guarding `if m.group('n') in t` with `if False and ...` turns 'MERGE resurrected the entry' from RED to green and the self-test exits 1 with 'self-test: BROKEN'; restored, `--self-test` exits 0."
 ---
