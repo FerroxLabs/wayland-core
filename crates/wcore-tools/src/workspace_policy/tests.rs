@@ -2651,3 +2651,67 @@ fn every_weak_resolver_site_states_which_resolver_and_why() {
         );
     }
 }
+
+/// FerroxLabs/wayland-core#394 c3 / #396 c3 / #398 c3 — the INSTRUMENT for the
+/// per-traversed-directory cost `grep_policy::scope_for` pays.
+///
+/// Not an assertion: a syscall count cannot be asserted inside the process
+/// making the syscalls. This runs `scope_for` over a workspace of
+/// `WL_PROBE_DIRS` ordinary directories so the caller can `strace -f -c` it at
+/// two or more sizes; the DIFFERENCE divided by the difference in directories
+/// cancels every one-off, the harness's own startup included.
+///
+/// Its own known-positive control is the `1 passed` line: a probe that fails to
+/// build its fixture, or that `scope_for` refuses outright, makes no syscalls
+/// and would report a flattering zero.
+///
+/// ```text
+/// for n in 100 1100 2100; do
+///   WL_PROBE_DIRS=$n strace -f -c -o /tmp/p.$n \
+///     cargo test -p wcore-tools --lib -- --exact --nocapture \
+///     workspace_policy::tests::probe_vcs_content_stores_per_traversed_directory
+/// done
+/// ```
+#[test]
+fn probe_vcs_content_stores_per_traversed_directory() {
+    let Ok(count) = std::env::var("WL_PROBE_DIRS") else {
+        // Not the probe run: keep the test cheap and still meaningful as a
+        // smoke test of the traversal it measures.
+        return;
+    };
+    let count: usize = count.parse().expect("WL_PROBE_DIRS must be a number");
+    let dir = tempfile::tempdir().expect("workspace");
+    let root = std::fs::canonicalize(dir.path()).expect("canonical root");
+    std::fs::create_dir_all(root.join(".git/objects/ab")).unwrap();
+    std::fs::write(root.join(".git/objects/ab/cdef"), b"x").unwrap();
+    for i in 0..count {
+        let leaf = root.join(format!("pkg{i}"));
+        std::fs::create_dir_all(&leaf).unwrap();
+        std::fs::write(leaf.join("main.rs"), b"fn main() {}\n").unwrap();
+    }
+    let policy = Arc::new(WorkspacePolicy::contained(&root));
+    // Warm the policy's one-off state OUTSIDE the measured traversal, so the
+    // figure is the steady-state per-directory cost this criterion is about
+    // and not a cold one-off divided by the fixture size.
+    assert!(!policy.denies_read_content(&root.join("pkg0/main.rs")));
+    // `WL_PROBE_REPS` repetitions of the traversal. Differencing two REP counts
+    // at the SAME directory count cancels the arm-4 one-off walk, which is
+    // itself O(directories) and would otherwise be indistinguishable from a
+    // per-traversal per-directory cost in a single-invocation measurement.
+    let reps: usize = std::env::var("WL_PROBE_REPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1);
+    let mut scope = crate::grep_policy::scope_for(&root, &root, Some(Arc::clone(&policy)));
+    for _ in 1..reps {
+        scope = crate::grep_policy::scope_for(&root, &root, Some(Arc::clone(&policy)));
+    }
+    // Known-positive control: the traversal must have SEEN the store, or a
+    // zero-syscall answer would look like an efficiency win.
+    assert!(
+        !scope.admits(&root.join("pkg0/main.rs"))
+            || scope.is_store(&root.join(".git/objects/ab/cdef")),
+        "probe control: `scope_for` must still classify the root store, or the \
+         syscall figure below is measuring a traversal that did nothing"
+    );
+}

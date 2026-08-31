@@ -332,12 +332,12 @@ impl GrepScope {
     /// True when `path` lives in a VCS CONTENT store, by EITHER arm of
     /// `WorkspacePolicy::is_vcs_content_store` — lexically, or because a `.git`
     /// this search passed through names it.
-    fn is_store(&self, path: &Path) -> bool {
+    pub(crate) fn is_store(&self, path: &Path) -> bool {
         is_vcs_content_store_static(path) || under_any(&self.named_stores, path)
     }
 
     /// True when this scope may report matches from `path`.
-    fn admits(&self, path: &Path) -> bool {
+    pub(crate) fn admits(&self, path: &Path) -> bool {
         match &self.target {
             // Rule 2 + rule 3: an explicitly named file is searched, unless it
             // is secret-shaped.
