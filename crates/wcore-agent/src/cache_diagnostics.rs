@@ -1507,8 +1507,12 @@ mod tests {
         // The THIRD transient injection. It was missing, so the lint said
         // nothing about a hook contribution landing after the snapshot — the
         // same defect it exists to catch, one injection over.
-        const PREPROMPT: &str =
-            "Self::apply_pre_prompt_contribution(&mut request.messages, &outcome);";
+        // #559 c6 gave this call a third argument — `&self.compat`, which
+        // decides whether the transient gets a carrier message of its own — so
+        // rustfmt now spreads it across lines. The marker is the call HEAD,
+        // still unique in this file: the unit tests below spell it
+        // `super::AgentEngine::apply_pre_prompt_contribution(`.
+        const PREPROMPT: &str = "Self::apply_pre_prompt_contribution(";
         const RECORD: &str = "self.cache_detector.record_request(";
 
         // Controls: each marker must be present exactly once, so a rename

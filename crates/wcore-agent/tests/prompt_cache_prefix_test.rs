@@ -122,6 +122,19 @@ fn final_round() -> Vec<LlmEvent> {
 /// Run ONE agentic turn that makes `tool_rounds` tool calls, and return every
 /// `LlmRequest` the provider was handed, in dispatch order.
 async fn dispatches_for_turn(tool_rounds: usize, install_hook: bool) -> Vec<LlmRequest> {
+    dispatches_for_turn_on(tool_rounds, install_hook, test_config()).await
+}
+
+/// `dispatches_for_turn` with the provider compat spelled out.
+///
+/// `test_config()` is `anthropic_defaults()`, whose `merge_same_role` folds
+/// adjacent same-role turns together; the OpenAI-shaped wire #559 was measured
+/// on does not. The two are separate arms below, not one assumed behaviour.
+async fn dispatches_for_turn_on(
+    tool_rounds: usize,
+    install_hook: bool,
+    config: wcore_config::config::Config,
+) -> Vec<LlmRequest> {
     let mut scripts: Vec<Vec<LlmEvent>> = (0..tool_rounds).map(tool_round).collect();
     scripts.push(final_round());
 
@@ -136,7 +149,7 @@ async fn dispatches_for_turn(tool_rounds: usize, install_hook: bool) -> Vec<LlmR
 
     let mut engine = AgentEngine::new_with_provider(
         provider,
-        test_config(),
+        config,
         tools,
         Arc::new(TestSink::new()) as Arc<dyn OutputSink>,
     );
@@ -363,4 +376,117 @@ async fn without_a_transient_contribution_the_tail_is_still_the_write_point() {
             "dispatch {n}: the tail must hold the write point on a clean turn"
         );
     }
+}
+
+// ===========================================================================
+// c6 — WHERE the transient lands on turn 1
+// ===========================================================================
+
+/// An OpenAI-shaped wire: the system prompt is serialised as `messages[0]`, so
+/// the engine's first user message is `messages[1]` — the position #559 named.
+/// `merge_same_role` is unset (false), which is what every OpenAI-family
+/// preset does, `flux_router_defaults()` included.
+fn openai_shaped_config() -> wcore_config::config::Config {
+    let mut config = test_config();
+    config.compat = wcore_config::compat::ProviderCompat::openai_defaults();
+    assert!(
+        !config.compat.merge_same_role(),
+        "precondition: this arm must be a wire that can carry two adjacent user turns"
+    );
+    config
+}
+
+/// #559 c6, stated positionally: "the skill-router hint and PrePrompt hook
+/// contributions no longer land at `messages[1]` on turn 1".
+///
+/// Those blocks live only in the per-turn clone, so the message they land on is
+/// re-sent WITHOUT them next turn. On turn 1 that message is the first user
+/// message — `messages[1]` once the system prompt takes `messages[0]` — so
+/// turn 1's cache entry is unreadable by every later turn. That is the
+/// `cache_read = 0` on all 26 turns the ticket measured.
+///
+/// Graded on the `LlmRequest` the provider was actually handed, off the real
+/// `run()` path, with the PrePrompt hook installed.
+#[tokio::test]
+async fn the_transient_does_not_land_in_the_first_user_message_on_turn_one() {
+    let dispatches = dispatches_for_turn_on(3, true, openai_shaped_config()).await;
+    assert!(
+        dispatches.len() >= 2,
+        "need turn 1 and at least one later turn"
+    );
+
+    // NON-VACUITY. If the contribution stopped being injected at all, every
+    // assertion below would pass for free. It must be on the tail of every
+    // dispatch — including turn 1's.
+    for (n, request) in dispatches.iter().enumerate() {
+        assert!(
+            carries_hook_text(request.messages.last().expect("non-empty")),
+            "dispatch {n} must still carry the PrePrompt contribution on its tail"
+        );
+    }
+
+    let first = &dispatches[0];
+    assert!(
+        !carries_hook_text(&first.messages[0]),
+        "turn 1's FIRST user message carries the transient contribution — that is \
+         `messages[1]` on the wire, and it is re-sent without it on turn 2"
+    );
+    for (n, later) in dispatches.iter().enumerate().skip(1) {
+        assert_eq!(
+            content_bytes(&first.messages[0]),
+            content_bytes(&later.messages[0]),
+            "dispatch {n}: the first user message is not byte-identical to turn 1's, \
+             so turn 1's cache entry cannot be read back"
+        );
+    }
+}
+
+/// WRONG-REFUSAL CONTROL for the test above. The cheapest way to make a
+/// positional criterion pass is to stop injecting the content — which would be
+/// worse than the cache cost it removes, because the skill-router hint exists
+/// to steer the model's FIRST action. Turn 1 must still carry it, in a message
+/// of its own, and that message must be the tail.
+#[tokio::test]
+async fn moving_the_transient_off_the_first_message_does_not_drop_it() {
+    let dispatches = dispatches_for_turn_on(2, true, openai_shaped_config()).await;
+    let first = &dispatches[0];
+
+    assert_eq!(
+        first.messages.len(),
+        2,
+        "turn 1 must be the user's own message plus a transient carrier"
+    );
+    assert!(
+        carries_hook_text(&first.messages[1]),
+        "the contribution must still reach the model on turn 1"
+    );
+    assert!(
+        matches!(first.messages[1].role, wcore_types::message::Role::User),
+        "the carrier must be user-role — an assistant tail would be a prefill"
+    );
+}
+
+/// The other arm of the compat gate, graded rather than assumed. On a wire that
+/// folds adjacent same-role turns (`merge_same_role`: Anthropic, Bedrock,
+/// Vertex, MiniMax, Gemini) a carrier would be merged straight back into the
+/// first user message — and appended AFTER the sender's own words, inverting
+/// the placement rule `attach_transient_block` exists to hold. So the engine
+/// must NOT create one there; those wires carry the system prompt in their own
+/// top-level field and have no `messages[1]` on turn 1 at all, and c7's
+/// write-point rule already keeps the entry readable.
+#[tokio::test]
+async fn a_merging_wire_still_carries_the_transient_inside_the_first_message() {
+    let dispatches = dispatches_for_turn(2, true).await;
+    let first = &dispatches[0];
+
+    assert!(
+        test_config().compat.merge_same_role(),
+        "precondition: this arm must be a merging wire"
+    );
+    assert_eq!(
+        first.messages.len(),
+        1,
+        "a merging wire must not gain a second adjacent user turn"
+    );
+    assert!(carries_hook_text(&first.messages[0]));
 }
