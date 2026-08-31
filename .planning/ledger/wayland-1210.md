@@ -3,7 +3,7 @@ issue: 1210
 repo: FerroxLabs/wayland
 kind: defect
 title: "The emergency hard-stop limit never sees the learned served window, so the reported last-resort limit can be 8x the one being enforced"
-status: open
+status: closed
 last_verified_commit: 6e404f28
 criteria:
   - id: c1

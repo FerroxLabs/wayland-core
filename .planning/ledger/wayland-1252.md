@@ -3,7 +3,7 @@ issue: 1252
 repo: FerroxLabs/wayland
 kind: defect
 title: "Three more hand-cut authority parsers survive #1243: /doctor suppresses its base-url caveat, a browser origin pattern normalises to a different host, and a redaction renders the smuggled host as the surviving one"
-status: open
+status: closed
 last_verified_commit: 488fbbae9
 criteria:
   - id: c1

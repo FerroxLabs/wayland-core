@@ -3,7 +3,7 @@ issue: 1268
 repo: FerroxLabs/wayland
 kind: defect
 title: "The #1248 notice path IS reachable on Windows: a structural-impossibility claim contradicts atomic_io.rs's own correction (split from #1248)"
-status: open
+status: closed
 last_verified_commit: 4f2ef0ae
 criteria:
   - id: c1

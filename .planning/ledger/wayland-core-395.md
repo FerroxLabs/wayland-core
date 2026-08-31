@@ -3,7 +3,7 @@ issue: 395
 repo: FerroxLabs/wayland-core
 kind: defect
 title: "engine.run() cost is ~linear in tool-result size (~100 s/MB in the test profile), and it is not the spill path"
-status: open
+status: closed
 last_verified_commit: 4a738f2e
 criteria:
   - id: c1

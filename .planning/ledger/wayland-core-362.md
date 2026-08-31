@@ -3,7 +3,7 @@ issue: 362
 repo: FerroxLabs/wayland-core
 kind: defect
 title: "bwrap backend: sandbox process-tree ownership races with ENOENT, and a containment test retries into a pass having never run its probe"
-status: open
+status: closed
 last_verified_commit: 6c87400b2
 criteria:
   - id: c1

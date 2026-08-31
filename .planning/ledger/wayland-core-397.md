@@ -3,7 +3,7 @@ issue: 397
 repo: FerroxLabs/wayland-core
 kind: defect
 title: "Stale doc comment on CredentialsBackend::Auto claims a plaintext fallback the code refuses"
-status: open
+status: closed
 last_verified_commit: 488fbbae9
 criteria:
   - id: c1

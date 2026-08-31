@@ -3,7 +3,7 @@ issue: 174
 repo: FerroxLabs/wayland
 kind: feature
 title: "[Feature]: prevent runaway token spend with budget guards and spend audits"
-status: open
+status: closed
 last_verified_commit: 7ee8f90a
 criteria:
   - id: c1

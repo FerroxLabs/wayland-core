@@ -3,7 +3,7 @@ issue: 370
 repo: FerroxLabs/wayland-core
 kind: defect
 title: "Edit-vs-save loses data on Windows: 7 of 169 interleavings lost at retries=0, and every ReplaceFileW failure degrades silently to the racy fallback"
-status: open
+status: closed
 last_verified_commit: 4895dd38
 criteria:
   - id: c1

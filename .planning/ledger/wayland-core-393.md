@@ -3,7 +3,7 @@ issue: 393
 repo: FerroxLabs/wayland-core
 kind: defect
 title: "Windows: a quarantine git abort kills the leaf and leaves its descendants running (split from #379)"
-status: open
+status: closed
 last_verified_commit: 4f2ef0ae
 criteria:
   - id: c1

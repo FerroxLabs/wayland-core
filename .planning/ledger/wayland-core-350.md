@@ -3,7 +3,7 @@ issue: 350
 repo: FerroxLabs/wayland-core
 kind: defect
 title: "[nightly-windows-soak] FAIL - 2026-08-28"
-status: open
+status: closed
 last_verified_commit: 43848f75
 criteria:
   - id: c1

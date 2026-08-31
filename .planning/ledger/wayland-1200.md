@@ -3,7 +3,7 @@ issue: 1200
 repo: FerroxLabs/wayland
 kind: defect
 title: "The accumulated-tool-result ceiling is a window-independent constant, so it permits about 80,000 tokens on a 32,768-token model"
-status: open
+status: closed
 last_verified_commit: 24518b36
 criteria:
   - id: c1

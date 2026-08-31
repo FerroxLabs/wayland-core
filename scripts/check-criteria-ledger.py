@@ -907,6 +907,14 @@ def run(root, offline=False, injected=None, quiet=False):
         # CRITERION wherever the issue declares them, and the count of issues
         # where it could not is printed -- a zero here must never be readable
         # as "everything was checked".
+        def _carrier_owes(recs, rp, n):
+            """Criterion ids the carrier still owes, [] if none, None if unledgered."""
+            for r in recs:
+                if r.get("repo") == rp and str(r.get("issue")) == str(n):
+                    return [c.get("id") for c in r.get("criteria", [])
+                            if c.get("state") in ("not-met", "blocked")]
+            return None
+
         judged, unjudgeable = 0, 0
         for rec in records:
             repo, num = rec.get("repo"), rec.get("issue")
@@ -957,10 +965,30 @@ def run(root, offline=False, injected=None, quiet=False):
                         "on THAT tracker. The repo is part of the address."
                         % (rec["path"], c.get("id"), rp2, n2))
                 elif st2 == "closed":
-                    problems.append(
-                        "%s: %s is superseded into %s#%d, which is CLOSED. A "
-                        "residual handed to a closed issue is not tracked; it "
-                        "is lost." % (rec["path"], c.get("id"), rp2, n2))
+                    # A carrier closed BECAUSE it finished is not a hole. Ask
+                    # the carrier's own ledger, not just the tracker. This gate
+                    # said "lost" for any closed carrier, so a completed
+                    # decomposition stayed red forever and the gate could never
+                    # certify anything -- while check-release-readiness.py,
+                    # which shares this file's PARSER, had already been fixed.
+                    # Two gates, one fact, two answers: that drift is the
+                    # defect #1274 c4 exists to prevent, so the rule is now the
+                    # same on both sides. No ledger at all still fails.
+                    owes = _carrier_owes(records, rp2, n2)
+                    if owes is None:
+                        problems.append(
+                            "%s: %s is superseded into %s#%d, which is CLOSED "
+                            "and has no ledger, so nothing records whether the "
+                            "residual was finished or dropped."
+                            % (rec["path"], c.get("id"), rp2, n2))
+                    elif owes:
+                        problems.append(
+                            "%s: %s is superseded into %s#%d, which is CLOSED "
+                            "while its own ledger still owes work (%s). A "
+                            "residual carried by a closed issue that is not "
+                            "finished is untracked with extra steps."
+                            % (rec["path"], c.get("id"), rp2, n2,
+                               ", ".join(owes)))
             states = [c.get("state") for c in rec["criteria"]]
             if (states and all(s in ("met", "superseded") for s in states)
                     and gh_state == "open"):
@@ -1123,6 +1151,33 @@ Prose a human with no context can read: the second tracker exists and its
 issues need ledger files exactly like the first tracker's.
 """
 
+# A carrier for the closed-successor arms. #11 is the issue a residual is
+# handed to; whether its closure is a hole depends on its OWN ledger, not on
+# the tracker state that both arms share.
+_CARRIER_DONE = """---
+issue: 11
+repo: FerroxLabs/wayland
+title: "the carrier that closed because it finished"
+status: closed
+last_verified_commit: %s
+criteria:
+  - id: c1
+    text: "the residual it took on is discharged"
+    state: met
+    evidence: "test:src/t.rs::the_boundary_is_probed"
+    owner: core
+    note: "the carrier finished the work it was handed"
+---
+
+A closed carrier owing nothing on its own ledger completed the decomposition.
+"""
+
+_CARRIER_OWING = _CARRIER_DONE.replace(
+    '    state: met\n    evidence: "test:src/t.rs::the_boundary_is_probed"\n',
+    "    state: not-met\n").replace(
+    "the carrier finished the work it was handed",
+    "the carrier closed with the residual still owed")
+
 
 def _ident(b):
     return b
@@ -1132,12 +1187,12 @@ def self_test():
     cases = []
 
     def case(label, mutate, must_fire, offline=False, inj=_INJ_CLEAN,
-             expect=None, says=None):
+             expect=None, says=None, extra=None):
         # `expect` is not decoration. A red arm that fires for the WRONG reason
         # proves nothing about the check it was written for, and a mutation
         # that silently stops applying (one did, on the first run of this
         # file) reads as a passing gate. Every RED arm names its own message.
-        cases.append((label, mutate, must_fire, offline, inj, expect, says))
+        cases.append((label, mutate, must_fire, offline, inj, expect, says, extra))
 
     case("clean control, both trackers covered", _ident, False)
     case("control again, offline", _ident, False, offline=True)
@@ -1305,16 +1360,30 @@ def self_test():
                              "    note: \"the residual moved on\""),
          True,
          expect="declares no `successor:` field")
-    case("superseded into an issue that is CLOSED",
-         lambda b: b.replace("    state: not-met\n    owner: core",
-                             "    state: superseded\n    successor: FerroxLabs/wayland#11\n    owner: core\n"
-                             "    note: \"the residual moved on\""),
-         True,
-         inj={"all": {"FerroxLabs/wayland": {7: "open", 11: "closed"},
+    # ── closed carrier, all THREE directions ────────────────────────────────
+    # "Closed" alone decides nothing. The three arms differ only in what the
+    # CARRIER'S OWN ledger says, which is the fact that actually separates a
+    # completed decomposition from a lost residual. Without the green arm the
+    # rule is a permanently-red gate; without the owing arm it is a rubber
+    # stamp. The tracker state is identical across all three.
+    _sup = lambda b: b.replace(
+        "    state: not-met\n    owner: core",
+        "    state: superseded\n    successor: FerroxLabs/wayland#11\n    owner: core\n"
+        "    note: \"the residual moved on\"")
+    _inj11 = {"all": {"FerroxLabs/wayland": {7: "open", 11: "closed"},
                       "FerroxLabs/wayland-core": {9: "open"}},
               "scoped": {"FerroxLabs/wayland": [7],
-                         "FerroxLabs/wayland-core": [9]}},
-         expect="which is CLOSED")
+                         "FerroxLabs/wayland-core": [9]}}
+    case("superseded into a CLOSED issue with NO ledger",
+         _sup, True, inj=_inj11,
+         expect="CLOSED and has no ledger")
+    case("superseded into a CLOSED carrier that owes NOTHING",
+         _sup, False, inj=_inj11,
+         extra={"wayland-11.md": _CARRIER_DONE})
+    case("superseded into a CLOSED carrier that STILL OWES work",
+         _sup, True, inj=_inj11,
+         extra={"wayland-11.md": _CARRIER_OWING},
+         expect="still owes work (c1)")
     case("superseded into an issue that is OPEN",
          lambda b: b.replace("    state: not-met\n    owner: core",
                              "    state: superseded\n    successor: FerroxLabs/wayland#11\n    owner: core\n"
@@ -1368,7 +1437,7 @@ def self_test():
 
     ok = True
     results = []
-    for label, mutate, must_fire, offline, inj, expect, says in cases:
+    for label, mutate, must_fire, offline, inj, expect, says, extra in cases:
         body = mutate(_CLEAN)
         # Several arms deliberately leave the file alone -- the two controls,
         # the two that vary the TRACKER state, and the three criterion-coverage
@@ -1385,7 +1454,9 @@ def self_test():
             ok = False
             continue
         with tempfile.TemporaryDirectory() as td:
-            _fixture(td, body, extra={"wayland-core-9.md": _CORE_9})
+            _x = {"wayland-core-9.md": _CORE_9}
+            _x.update(extra or {})
+            _fixture(td, body, extra=_x)
             code, out = run(td, offline=offline, injected=inj)
         fired = code != 0
         good = fired == must_fire

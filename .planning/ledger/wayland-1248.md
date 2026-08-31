@@ -3,7 +3,7 @@ issue: 1248
 repo: FerroxLabs/wayland
 kind: defect
 title: "The VFS write path discards the intercepted-save notice, so a preserved file is left on disk with nothing naming it"
-status: open
+status: closed
 last_verified_commit: e581dda5a
 criteria:
   - id: c1

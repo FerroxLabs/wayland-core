@@ -3,7 +3,7 @@ issue: 1232
 repo: FerroxLabs/wayland
 kind: defect
 title: "Static arms for two open-weights passthrough families served at wildly different limits by different hosts"
-status: open
+status: closed
 last_verified_commit: 4d7aa2757
 criteria:
   - id: c1

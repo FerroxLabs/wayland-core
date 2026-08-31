@@ -3,7 +3,7 @@ issue: 400
 repo: FerroxLabs/wayland-core
 kind: defect
 title: "sandbox status never says the backend refuses PowerShell, while four production sites silently downgrade the shell"
-status: open
+status: closed
 last_verified_commit: 6c87400b2
 criteria:
   - id: c1

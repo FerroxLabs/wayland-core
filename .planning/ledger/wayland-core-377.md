@@ -3,7 +3,7 @@ issue: 377
 repo: FerroxLabs/wayland-core
 kind: defect
 title: "@dir with an escaping spelling resolves to a silently empty payload: no files, no error, no warning"
-status: open
+status: closed
 last_verified_commit: 607d6ba9
 criteria:
   - id: c1

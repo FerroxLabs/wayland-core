@@ -3,7 +3,7 @@ issue: 378
 repo: FerroxLabs/wayland-core
 kind: defect
 title: "spill_readback_engine_wiring is the slowest test in wcore-agent and was killed at 60.010s on an otherwise-completing run"
-status: open
+status: closed
 last_verified_commit: 77d4cc3ed
 criteria:
   - id: c1

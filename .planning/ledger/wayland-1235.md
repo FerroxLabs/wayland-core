@@ -3,7 +3,7 @@ issue: 1235
 repo: FerroxLabs/wayland
 kind: defect
 title: "One mock turn with a 480 KB tool result costs 63.6 s of CPU; the spill/read-back test is killed by the default nextest budget 3/3"
-status: open
+status: closed
 last_verified_commit: 4a738f2e
 criteria:
   - id: c1

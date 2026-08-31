@@ -3,7 +3,7 @@ issue: 1231
 repo: FerroxLabs/wayland
 kind: defect
 title: "An all-reasoning turn still gives the user no answer, only an accurate explanation of why there is none"
-status: open
+status: closed
 last_verified_commit: 56b54a06e
 criteria:
   - id: c1

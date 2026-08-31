@@ -3,7 +3,7 @@ issue: 384
 repo: FerroxLabs/wayland-core
 kind: defect
 title: "is_session_write_granted documents itself as the write-grant enforcement predicate and has no production call site"
-status: open
+status: closed
 last_verified_commit: 607d6ba9
 criteria:
   - id: c1

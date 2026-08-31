@@ -3,7 +3,7 @@ issue: 1176
 repo: FerroxLabs/wayland
 kind: defect
 title: "Both model-limits guards are blind to provider-native passthrough ids — the #165 failure class is still uncovered"
-status: open
+status: closed
 last_verified_commit: 856df7d0
 criteria:
   - id: c1

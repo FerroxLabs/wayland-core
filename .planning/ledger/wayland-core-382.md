@@ -3,7 +3,7 @@ issue: 382
 repo: FerroxLabs/wayland-core
 kind: defect
 title: "The truncation notice tells the user core is sizing against the served window on the one turn when it is not"
-status: open
+status: closed
 last_verified_commit: 93ae3c4a
 criteria:
   - id: c1

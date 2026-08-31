@@ -3,7 +3,7 @@ issue: 1255
 repo: FerroxLabs/wayland
 kind: defect
 title: "The accumulated-tool-result pass leaves one 130-byte stub per tool call, so carried bytes grow without bound and cross a 32k window at ~238 calls"
-status: open
+status: closed
 last_verified_commit: e58300bdf
 criteria:
   - id: c1
