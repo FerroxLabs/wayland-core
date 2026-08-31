@@ -3,7 +3,7 @@ issue: 398
 repo: FerroxLabs/wayland-core
 kind: defect
 title: "Arm 3's lexical gate makes a guard on any path named objects/modules/store cost one syscall per workspace directory (split from #390 c3)"
-status: open
+status: closed
 last_verified_commit: 7e159c955
 criteria:
   - id: c1

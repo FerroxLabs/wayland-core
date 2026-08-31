@@ -3,7 +3,7 @@ issue: 390
 repo: FerroxLabs/wayland-core
 kind: defect
 title: "is_vcs_content_store arm 2 reads only <root>/.git, so a VENDORED gitfile's object store is VFS-readable (split from #244 c1)"
-status: open
+status: closed
 last_verified_commit: 7e159c955
 criteria:
   - id: c1

@@ -3,7 +3,7 @@ issue: 406
 repo: FerroxLabs/wayland-core
 kind: defect
 title: "Arm 3s gate cannot see a store created after the walk at a path it never recorded (residual of #390 c2)"
-status: open
+status: closed
 last_verified_commit: 7e159c955
 criteria:
   - id: c1

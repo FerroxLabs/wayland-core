@@ -3,7 +3,7 @@ issue: 394
 repo: FerroxLabs/wayland-core
 kind: defect
 title: "Arm 3's lexical gate misses an alternates borrow whose target is not store-shaped (split from #390 c2)"
-status: open
+status: closed
 last_verified_commit: 7e159c955
 criteria:
   - id: c1
