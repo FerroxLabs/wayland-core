@@ -140,13 +140,23 @@ pub fn estimate_request_tokens(messages: &[Message], system: &str, tools: &[Tool
 ///
 /// # Live figure
 ///
-/// Measured 2026-08-31 on hetzner-dsm, against a private Ollama on port 21434
-/// serving qwen3:8b at CONTEXT 4096: this function returned 3,619 tokens for
-/// the default turn, against 3,207 real prompt tokens reported for the same
-/// turn on the wire. The char/4 estimator therefore runs about 13% HIGH, i.e.
-/// conservative for a floor -- it refuses slightly early rather than slightly
-/// late, which is the correct direction for a guard whose failure mode is
-/// silent truncation.
+/// Measured 2026-08-31 on hetzner-dsm through a logging proxy, against a
+/// PRIVATE Ollama on port 21434 (not the ambient service on 11434) serving
+/// qwen3:8b at CONTEXT 4096. Core assembled a 4,454-character system prompt
+/// and 8 tool schemas totalling 8,903 characters; this function scores that at
+/// 4,091 tokens. The endpoint reported 3,193 real prompt tokens for the whole
+/// request (arm B of the same run, on a 16,384 slot, so nothing was
+/// truncated).
+///
+/// So the estimator runs about 28% HIGH, which is the correct direction for a
+/// floor: a guard built on it refuses slightly early rather than slightly
+/// late, and the failure it is preventing is silent truncation.
+///
+/// It also means this function and
+/// [`wcore_config::compact::BASELINE_TURN_TOKENS`] are in DIFFERENT UNITS --
+/// that constant was read off a `usage` block and is in real tokens. Comparing
+/// the two directly is a unit error, and #1230 c2 records what it costs: it
+/// reads as a 49% drift where the real drift is 2%.
 pub fn uncompactable_floor_tokens(system: &str, tools: &[ToolDef]) -> u64 {
     estimate_request_tokens(&[], system, tools)
 }

@@ -44,15 +44,41 @@ use wcore_config::compact::{BASELINE_TURN_TOKENS, CompactConfig};
 use wcore_config::compat::ProviderCompat;
 use wcore_config::config::{Config, ProviderType};
 
-/// The tolerance the drift guard allows between the hardcoded snapshot and the
-/// floor this tree actually produces.
+/// How far the char/4 + char/3 estimator in core over-counts a real prompt.
 ///
-/// 25% is not a comfort band, it is a TRIPWIRE width. The failure this guards
-/// against is the constant silently ceasing to describe the product -- a
-/// second built-in tool family, an always-on MCP server, a doubled
-/// constitution. Those move the floor by tens of percent, not by three. A
-/// tighter band would red on ordinary prompt copy-editing and be disabled
-/// within a week, which is how the constant got stale in the first place.
+/// MEASURED, not assumed. On the turn-1 request of the c4 live run
+/// (hetzner-dsm 2026-08-31, private Ollama on :21434, qwen3:8b, through a
+/// logging proxy) core assembled a 4,454-character system prompt and 8 tool
+/// schemas of 8,903 characters -- 4,091 tokens by `uncompactable_floor_tokens`
+/// -- and the endpoint reported 3,193 real prompt tokens for the whole request
+/// on the 16,384-slot arm, where nothing was truncated. 4,105 estimated over
+/// 3,193 real is 1.286.
+///
+/// This constant exists because the two quantities compared below are in
+/// DIFFERENT UNITS. `BASELINE_TURN_TOKENS` was read off a `usage` block and is
+/// in REAL tokens; `uncompactable_floor_tokens` is in ESTIMATOR tokens.
+/// Comparing them raw is a unit error and NOT a harmless one: it reads as a
+/// 49% drift where the measured drift is 2%, and correcting the constant to
+/// match would push `minimum_workable_window` from 6,929 to roughly 10,300 and
+/// turn every 8,192-token endpoint into a refusal -- contradicting the band
+/// #1179 measured as workable and breaking #1230 c5 outright.
+const ESTIMATOR_INFLATION: f64 = 1.286;
+
+/// The tolerance the drift guard allows, MEASURED rather than chosen to make
+/// today pass.
+///
+/// The floor is CONFIGURATION-dependent -- that is the whole claim of c1 -- so
+/// a tight band would red on the ordinary difference between two honest
+/// sessions. The spread actually observed on this tree between the shipped CLI
+/// turn (4,091 estimator tokens, 3,181 real-equivalent) and this bootstrap
+/// fixture (4,636 estimator tokens, 3,605 real-equivalent) is 14%. 25% sits
+/// above that observed spread and well below the 49% a genuinely mis-scaled
+/// comparison produced when this guard was first written against the RAW tool
+/// registry.
+///
+/// What it catches is the failure c2 names: the constant silently ceasing to
+/// describe the product -- a second built-in tool family, an always-on MCP
+/// server, a doubled constitution. Those move the floor by tens of percent.
 const DRIFT_TOLERANCE: f64 = 0.25;
 
 fn stock_config() -> Config {
@@ -97,9 +123,18 @@ async fn the_floor_is_derived_from_a_real_assembled_request() {
     .await
     .expect("bootstrap");
 
-    let system = result.engine.system_prompt().to_string();
-    let tools = result.engine.tools().to_tool_defs();
-    let floor = uncompactable_floor_tokens(&system, &tools);
+    let mut engine = result.engine;
+    // THE ASSEMBLED request, through the same method the turn loop calls --
+    // plan-mode filtering, MCP curation, the provider tool cap and cold-tool
+    // deferral all applied. The raw registry is a different and much larger
+    // object (measured on this tree: 19,101 tokens over 49 schemas, against
+    // 3,619 for what is actually sent), and grading it would have produced a
+    // guard that was wrong by 5x.
+    let floor = engine.uncompactable_turn_floor();
+    let (system, tools) = (
+        engine.system_prompt().to_string(),
+        engine.tools().to_tool_defs(),
+    );
 
     assert!(
         !tools.is_empty(),
@@ -108,7 +143,7 @@ async fn the_floor_is_derived_from_a_real_assembled_request() {
     );
     assert!(
         floor > 0,
-        "a real system prompt plus {} tool schemas cannot cost nothing",
+        "a real system prompt plus {} registered tools cannot cost nothing",
         tools.len()
     );
 
@@ -123,10 +158,15 @@ async fn the_floor_is_derived_from_a_real_assembled_request() {
     )];
     let with_messages = estimate_request_tokens(&big, &system, &tools);
     assert_eq!(
-        uncompactable_floor_tokens(&system, &tools),
+        engine.uncompactable_turn_floor(),
         floor,
         "the floor moved when messages were added -- then it is not the \
          un-compactable part"
+    );
+    assert!(
+        uncompactable_floor_tokens(&system, &tools) >= floor,
+        "the assembled floor must not exceed the raw-registry floor -- \
+         deferral and curation only ever remove schemas"
     );
     assert!(
         with_messages > floor,
@@ -147,8 +187,8 @@ async fn the_floor_is_derived_from_a_real_assembled_request() {
     );
 
     eprintln!(
-        "#1230 c1: derived floor = {floor} tokens over {} tool schemas \
-         ({} chars of system prompt); BASELINE_TURN_TOKENS = {BASELINE_TURN_TOKENS}",
+        "#1230 c1: assembled floor = {floor} tokens ({} registered tools, \
+         {} chars of system prompt); BASELINE_TURN_TOKENS = {BASELINE_TURN_TOKENS}",
         tools.len(),
         system.len()
     );
@@ -175,20 +215,44 @@ async fn the_baseline_constant_still_describes_this_tree() {
     .await
     .expect("bootstrap");
 
-    let floor = uncompactable_floor_tokens(
-        result.engine.system_prompt(),
-        &result.engine.tools().to_tool_defs(),
-    ) as f64;
+    let mut engine = result.engine;
+    let floor = engine.uncompactable_turn_floor();
+    // Into the units of the constant before comparing. See ESTIMATOR_INFLATION.
+    let floor_real_equivalent = floor as f64 / ESTIMATOR_INFLATION;
     let snapshot = BASELINE_TURN_TOKENS as f64;
-    let drift = (floor - snapshot).abs() / snapshot;
+    let drift = (floor_real_equivalent - snapshot).abs() / snapshot;
+
+    eprintln!(
+        "#1230 c2: assembled floor {floor} estimator tokens = \
+         {floor_real_equivalent:.0} real-equivalent vs BASELINE_TURN_TOKENS \
+         {BASELINE_TURN_TOKENS}; drift {:.1}%",
+        drift * 100.0
+    );
 
     assert!(
         drift <= DRIFT_TOLERANCE,
-        "BASELINE_TURN_TOKENS = {BASELINE_TURN_TOKENS} but this tree's real \
-         un-compactable floor is {floor:.0} tokens, a drift of {:.1}%. The \
-         constant gates every small-window decision in the product; regrade it \
-         against a live measurement and update it, do not widen this \
-         tolerance.",
+        "BASELINE_TURN_TOKENS = {BASELINE_TURN_TOKENS} but the un-compactable \
+         floor this tree assembles is {floor} estimator tokens \
+         ({floor_real_equivalent:.0} real-equivalent), a drift of {:.1}%. The \
+         constant gates every small-window decision in the product. Regrade it \
+         against a live measurement and update it; do not widen this tolerance.",
         drift * 100.0
+    );
+
+    // The load-bearing consequence, asserted rather than described: the figure
+    // core tells an operator to reach is DERIVED from the floor just measured,
+    // and it actually holds it.
+    let cfg = CompactConfig::default();
+    let derived = cfg.minimum_window_for_input_floor(floor as usize);
+    assert!(
+        cfg.input_ceiling_for_window(derived) > floor as usize,
+        "the derived remedy window {derived} does not itself hold the floor {floor}"
+    );
+    assert!(
+        derived > cfg.minimum_workable_window(),
+        "the derived remedy window {derived} is not above the snapshot-derived \
+         {}, so this tree no longer exhibits the gap #1230 c2 is about and the \
+         guard should be re-derived",
+        cfg.minimum_workable_window()
     );
 }

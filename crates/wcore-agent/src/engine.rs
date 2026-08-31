@@ -9001,6 +9001,98 @@ impl AgentEngine {
         ))
     }
 
+    /// FerroxLabs/wayland#1230 c1 - assemble the two UN-COMPACTABLE parts of
+    /// the next request: the system prompt and the tool array that will go on
+    /// the wire.
+    ///
+    /// Extracted from the turn loop, which is its only production caller, so
+    /// that anything grading the floor grades THE SAME OBJECT the loop sends.
+    /// Inline, the two were unreachable from a test, and the only floor a test
+    /// could compute was over the RAW registry - measured on this tree at
+    /// 19,101 tokens across 49 schemas, against 3,619 for the array the loop
+    /// actually assembles after deferral. A guard built on the first number
+    /// would have been wrong by 5x and confidently so.
+    ///
+    /// Pure with respect to the conversation: it reads the tool registry, the
+    /// plan state, the curation policy and the deferral config, and touches no
+    /// message. Callers that need the MCP catalogue to be current must
+    /// `refresh_mcp_catalog().await` first, exactly as the loop does.
+    fn assemble_turn_prelude(&mut self) -> (String, Vec<wcore_types::tool::ToolDef>) {
+        // Build tool list: filter based on plan mode state
+        let tools = if self.plan_state.is_active {
+            // Plan mode: only Info-category tools (excluding EnterPlanMode)
+            self.tools.to_tool_defs_filtered(|t| {
+                t.category() == ToolCategory::Info && t.name() != "EnterPlanMode"
+            })
+        } else {
+            // Normal mode: all tools except ExitPlanMode
+            self.tools
+                .to_tool_defs_filtered(|t| t.name() != "ExitPlanMode")
+        };
+
+        // W6 F17: trim MCP tools to a curated top-K. MCP tools are
+        // identified by real provenance (`ToolDef::server.is_some()`), not
+        // the `mcp__` name prefix — a non-colliding MCP tool keeps its bare
+        // name (wcore-mcp/src/tool_proxy.rs). Non-MCP tools (builtins,
+        // skills, spawn, plan tools) are always kept. Off-policy is a no-op.
+        // Audit-log recency degrades to empty/keyword-only when
+        // self.audit_log is None.
+        let tools = self.apply_mcp_curation(tools);
+
+        // #344/#359: enforce the provider's HARD tool-array cap (OpenAI =
+        // 128). MCP servers can push the total past the limit even after
+        // curation; this is the correctness guarantee, separate from the
+        // relevance trim above.
+        let tools = self.apply_provider_tool_cap(tools);
+
+        // Layer D1 (token-opt): defer cold tools to name-only stubs —
+        // only the configured hot allowlist (plus ToolSearch-hydrated
+        // tools) ships full schemas; the model hydrates a stub on demand
+        // via ToolSearch (the system prompt states that rule once,
+        // `tool_usage_guidance`). The hot/stub split is a pure function
+        // of static config + the monotonic hydrated set, so the
+        // serialized tools[] array stays byte-identical across turns
+        // (cache guard: `tools_array_byte_stable_across_roundtrips`);
+        // a hydration changes it once.
+        let tools = self.apply_tool_deferral(tools);
+
+        // Build system prompt: append plan mode instructions when active
+        //
+        // FerroxLabs/wayland#1208: the `Current date:` value is
+        // baked into `self.system_prompt` once at bootstrap and
+        // the same text tells the model it is the authoritative
+        // "today". Refresh it here, on the ONE path that puts the
+        // prompt on the wire, so a session that outlives the day
+        // it started in — a channel-gateway engine lives in an
+        // unevicted per-session pool — stops asserting the day the
+        // gateway booted. Byte-stable within a day (it borrows),
+        // so the cached prefix moves once per rollover and not
+        // once per turn.
+        let base = crate::context::refresh_current_date_line(
+            &self.system_prompt,
+            &crate::context::today_string(),
+        );
+        let system = if self.plan_state.is_active {
+            format!("{}\n\n{}", base, plan_prompt::plan_mode_instructions())
+        } else {
+            base.into_owned()
+        };
+        (system, tools)
+    }
+
+    /// #1230 c1 - the un-compactable floor of the turn this engine would
+    /// assemble right now, in estimated tokens.
+    ///
+    /// The public grading surface for the floor. It runs the real assembly
+    /// above and hands the result to the same
+    /// [`crate::compact::estimate::uncompactable_floor_tokens`] the turn loop
+    /// calls, so a test cannot drift onto a different tool array than the
+    /// product uses.
+    pub fn uncompactable_turn_floor(&mut self) -> u64 {
+        let (system, tools) = self.assemble_turn_prelude();
+        crate::compact::estimate::uncompactable_floor_tokens(&system, &tools)
+    }
+
     /// FerroxLabs/wayland#1230 c3 - how many times one session will ask an
     /// endpoint what slot it is serving before giving up on the question.
     ///
@@ -9120,7 +9212,18 @@ impl AgentEngine {
             .compact_config
             .minimum_window_for_input_floor(floor as usize);
         Some(format!(
-            "Run stopped: this endpoint states it is serving `{model}` with a              {window}-token context slot, and core's own floor for this turn is              {floor} tokens - the system prompt plus {tool_count} tool schemas,              which no compaction rung can shrink. Inside a {window}-token slot              that leaves an input ceiling of {ceiling} tokens, below the floor,              so the very first request would overflow and the server would              discard the head of it without saying so. Core refuses the turn              instead of sending a prompt it can predict will be truncated.              Raise the server's context length to at least {needed} tokens (on              llama.cpp-based servers, including Ollama, that is `num_ctx` /              `OLLAMA_CONTEXT_LENGTH`), or point core at an endpoint that serves              one.",
+            "Run stopped: this endpoint states it is serving `{model}` with a \
+             {window}-token context slot, and the floor of this turn is {floor} \
+             tokens - the system prompt plus {tool_count} tool schemas, which no \
+             compaction rung can shrink. Inside a {window}-token slot that \
+             leaves an input ceiling of {ceiling} tokens, below the floor, so \
+             the very first request would overflow and the server would discard \
+             the head of it without saying so. Core refuses the turn instead of \
+             sending a prompt it can predict will be truncated. Raise the \
+             context length of the server to at least {needed} tokens (on \
+             llama.cpp-based servers, including Ollama, that is `num_ctx` / \
+             `OLLAMA_CONTEXT_LENGTH`), or point core at an endpoint that serves \
+             one.",
             model = self.model,
         ))
     }
@@ -13544,65 +13647,7 @@ impl AgentEngine {
                     // once answered or once the attempt budget is spent.
                     self.refresh_stated_served_window().await;
 
-                    // Build tool list: filter based on plan mode state
-                    let tools = if self.plan_state.is_active {
-                        // Plan mode: only Info-category tools (excluding EnterPlanMode)
-                        self.tools.to_tool_defs_filtered(|t| {
-                            t.category() == ToolCategory::Info && t.name() != "EnterPlanMode"
-                        })
-                    } else {
-                        // Normal mode: all tools except ExitPlanMode
-                        self.tools
-                            .to_tool_defs_filtered(|t| t.name() != "ExitPlanMode")
-                    };
-
-                    // W6 F17: trim MCP tools to a curated top-K. MCP tools are
-                    // identified by real provenance (`ToolDef::server.is_some()`), not
-                    // the `mcp__` name prefix — a non-colliding MCP tool keeps its bare
-                    // name (wcore-mcp/src/tool_proxy.rs). Non-MCP tools (builtins,
-                    // skills, spawn, plan tools) are always kept. Off-policy is a no-op.
-                    // Audit-log recency degrades to empty/keyword-only when
-                    // self.audit_log is None.
-                    let tools = self.apply_mcp_curation(tools);
-
-                    // #344/#359: enforce the provider's HARD tool-array cap (OpenAI =
-                    // 128). MCP servers can push the total past the limit even after
-                    // curation; this is the correctness guarantee, separate from the
-                    // relevance trim above.
-                    let tools = self.apply_provider_tool_cap(tools);
-
-                    // Layer D1 (token-opt): defer cold tools to name-only stubs —
-                    // only the configured hot allowlist (plus ToolSearch-hydrated
-                    // tools) ships full schemas; the model hydrates a stub on demand
-                    // via ToolSearch (the system prompt states that rule once,
-                    // `tool_usage_guidance`). The hot/stub split is a pure function
-                    // of static config + the monotonic hydrated set, so the
-                    // serialized tools[] array stays byte-identical across turns
-                    // (cache guard: `tools_array_byte_stable_across_roundtrips`);
-                    // a hydration changes it once.
-                    let tools = self.apply_tool_deferral(tools);
-
-                    // Build system prompt: append plan mode instructions when active
-                    //
-                    // FerroxLabs/wayland#1208: the `Current date:` value is
-                    // baked into `self.system_prompt` once at bootstrap and
-                    // the same text tells the model it is the authoritative
-                    // "today". Refresh it here, on the ONE path that puts the
-                    // prompt on the wire, so a session that outlives the day
-                    // it started in — a channel-gateway engine lives in an
-                    // unevicted per-session pool — stops asserting the day the
-                    // gateway booted. Byte-stable within a day (it borrows),
-                    // so the cached prefix moves once per rollover and not
-                    // once per turn.
-                    let base = crate::context::refresh_current_date_line(
-                        &self.system_prompt,
-                        &crate::context::today_string(),
-                    );
-                    let system = if self.plan_state.is_active {
-                        format!("{}\n\n{}", base, plan_prompt::plan_mode_instructions())
-                    } else {
-                        base.into_owned()
-                    };
+                    let (system, tools) = self.assemble_turn_prelude();
 
                     // v0.8.1 U1 — the per-turn skill-router hint (when the router is
                     // installed and picked a visible catalog skill). Cache-stability
@@ -30857,7 +30902,7 @@ mod audit_2026_05_22_tests {
     /// A system prompt big enough that core's own floor cannot fit inside a
     /// 4,096-token slot, which is the condition #1230 is about. 16,000 chars
     /// is 4,000 estimated tokens against an input ceiling of 2,527 at that
-    /// window -- the same shape as the real measurement (3,619 against 2,527)
+    /// window -- the same shape as the real measurement (4,091 against 2,527)
     /// without depending on the production prompt, which the integration test
     /// `issue_1230_context_floor_test` grades separately and for real.
     fn engine_with_a_real_floor(provider: Arc<dyn LlmProvider>) -> super::AgentEngine {
@@ -30948,6 +30993,7 @@ mod audit_2026_05_22_tests {
         let mut engine = engine_with_a_real_floor(provider);
         // The slot #1230 measured a stock Ollama serving.
         engine.compact_state.stated_window = Some(4_096);
+        engine.model = "qwen3:8b".to_string();
 
         let floor = crate::compact::estimate::uncompactable_floor_tokens(
             &engine.system_prompt,
@@ -30989,7 +31035,7 @@ mod audit_2026_05_22_tests {
             emitted.starts_with("Run stopped:"),
             "the refusal, not some other error, must stop the run: {emitted:?}"
         );
-        for expected in ["4096", &floor.to_string(), "num_ctx"] {
+        for expected in ["4096", &floor.to_string(), "num_ctx", "qwen3:8b"] {
             assert!(
                 emitted.contains(expected),
                 "the refusal must name {expected}: {emitted:?}"
