@@ -419,9 +419,51 @@ pub fn harden_against_credential_prompt(cmd: &mut std::process::Command) {
 /// FALSE and both obvious remedies were measured foreclosed with it —
 /// reparenting is defeated by `AttachConsole(<pid>)`, and giving the child its
 /// own console is defeated by `FreeConsole()` first. Windows has no
-/// session-leader equivalent, so with process-creation flags alone the
+/// session-leader equivalent, so with process-creation FLAGS alone the
 /// property is not reachable, and the AppContainer route that might reach it
 /// is CLOSED by a recorded decision and is not to be reopened.
+///
+/// "Not reachable with creation flags" is NOT "not reachable", and this doc
+/// used to leave the two indistinguishable. MEASURED on Windows 11 build
+/// 10.0.26200.9168, 2026-08-31, on the INTERACTIVE window station (WinSta0,
+/// Default desktop): what decides whether `AttachConsole` can reach the
+/// operator is the child's TOKEN, not its creation flags.
+///
+/// ```text
+/// [plain]              SHARES_USER_CONSOLE_BEFORE=true   <- negative control
+/// [detached]           ATTACH_PARENT_PROCESS=SUCCEEDED  ATTACH_BY_EXPLICIT_PID=SUCCEEDED
+/// [detached_medium_il] ATTACH_PARENT_PROCESS=SUCCEEDED  ATTACH_BY_EXPLICIT_PID=SUCCEEDED
+/// [detached_low_il]    ATTACH_PARENT_PROCESS=FAILED     ATTACH_BY_EXPLICIT_PID=FAILED
+/// ```
+///
+/// `detached_medium_il` is the control that makes the row under it mean
+/// anything: it is the SAME `CreateProcessAsUser` call with the integrity
+/// level pinned at MEDIUM, and it still attaches. So what closes both
+/// spellings is the LOW INTEGRITY LEVEL, not the token API. This is NOT the
+/// AppContainer question: a mandatory integrity label on an ordinary primary
+/// token is a different primitive from a capability sandbox, and the closed
+/// decision is about the latter.
+///
+/// It is not implemented here, and that is a maintainer call on
+/// FerroxLabs/wayland-core#389 rather than a drive-by, because two costs were
+/// measured with it:
+///
+/// * the destination must carry a Low mandatory label or the child cannot
+///   write to it -- a Low `git clone` into a Medium-labelled directory exits
+///   1 where the Medium control in the same directory succeeds;
+/// * on a SERVICE window station -- which is where every CI job and every
+///   headless or service-hosted run lives -- the Low-integrity `cmd`+`git`
+///   chain FAILED TO START (`STATUS_DLL_INIT_FAILED`, 0xC0000142, empty log)
+///   where the Medium control in the same directory succeeded. Stated
+///   narrowly on purpose: a Low-integrity .NET probe DID start on that same
+///   station, so this is a measured fact about the git chain and not a claim
+///   that no Low process runs there; the exact cause was not isolated. It is
+///   still enough to say an UNCONDITIONAL Low spawn would be a wrong-refusal
+///   in exactly the contexts that have no operator console to protect.
+///
+/// Liveness, so this is not recorded as a guard that refuses everything: on
+/// the interactive station a Low-integrity `git clone --depth 1` of a public
+/// repository exits 0 and leaves the tree on disk.
 ///
 /// So `#389` c2's branch is taken instead: the prompt is LABELLED. This does
 /// not stop a determined child re-attaching; it makes the operator able to
