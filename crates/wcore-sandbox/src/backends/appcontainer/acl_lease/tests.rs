@@ -1002,3 +1002,174 @@ fn measure_concurrent_lifecycles() {
         );
     }
 }
+
+/// `#369` c1 — ONE lease that cannot be recovered must not disable the whole
+/// backend.
+///
+/// # The incident this is the regression test for
+///
+/// A single abandoned lease sat in `%LOCALAPPDATA%\Wayland\Core\
+/// AppContainerLeases\v1` on SEANDESKTOP from 2026-08-17. Every `execute()`
+/// refused, fail-closed, for TWELVE DAYS; `is_available()` returned a bare
+/// `false`; and moving that one file aside flipped the probe to available on
+/// the next run with no other change. The mechanism is that any `Err` raised
+/// while recovering one lease propagated out of `recover_dead_leases_locked`,
+/// out of `ExecutionIdentity::start`, and therefore out of every sandboxed
+/// command — and nothing expired the file, so every later process re-read it
+/// and failed identically.
+///
+/// # Why the fixture is an UNREADABLE lease
+///
+/// The lease that actually wedged that machine failed inside
+/// `remove_and_verify_exact_sid`, which needs a real AppContainer profile
+/// whose SID digest matches — not constructible here. An unreadable lease
+/// reaches the same `?` through `read_validated_lease`, on the SAME production
+/// path, with no test seam substituting anything: this drives
+/// `recover_dead_leases_locked` itself. The fix is at the loop, not at either
+/// call site, precisely so that both shapes and the ones nobody has hit yet
+/// are covered by one bound.
+///
+/// # Non-vacuity
+///
+/// A well-formed sibling is swept in the same pass and asserted to have been
+/// REACHED. Without it, "the sweep returned Ok" is satisfied by a sweep that
+/// stopped early and quietly, which is the defect wearing a different face.
+#[test]
+fn a_lease_that_cannot_be_recovered_is_quarantined_instead_of_wedging_the_backend() {
+    let _lock = reclamation_sink_lock();
+    let (_local, directory) = private_lease_root();
+    let _ = take_emitted_reclamations();
+
+    // Sorted first by `paths.sort()`, so the sibling below is reached only if
+    // this one did not abort the pass.
+    let unreadable = directory.join("WCore-aaaa-unreadable.toml");
+    fs::write(&unreadable, b"this file is not a lease at all\n").unwrap();
+    let sibling = write_unreconcilable_lease(&directory, "zzsibling", false, Vec::new());
+    assert!(
+        unreadable < sibling,
+        "the unreadable lease must sort BEFORE the sibling, or this test cannot show that \
+         the sweep continued past it: {} vs {}",
+        unreadable.display(),
+        sibling.display()
+    );
+
+    unsafe { recover_dead_leases_locked(&directory) }
+        .expect("one unrecoverable lease must not fail the whole sweep (#369 c1)");
+
+    assert!(
+        !unreadable.exists(),
+        "the unrecoverable lease is still in the lease directory, so the next acquisition \
+         meets it again and the backend stays down"
+    );
+    assert!(
+        !sibling.exists(),
+        "the sweep never reached the sibling lease, so it stopped at the bad one -- which is \
+         the defect, not the fix"
+    );
+
+    let reports = take_emitted_reclamations();
+    let quarantine = reports
+        .iter()
+        .find(|report| report.contains("could not be recovered"))
+        .unwrap_or_else(|| {
+            panic!(
+                "the unrecoverable lease was moved but the operator was told nothing: {reports:?}"
+            )
+        });
+    assert!(
+        quarantine.contains(&unreadable.display().to_string()),
+        "the report must name the lease it quarantined: {quarantine}"
+    );
+    assert!(
+        quarantine.contains("could not be read"),
+        "a lease whose contents could not be parsed must be reported as UNKNOWN residual, \
+         never as having granted nothing: {quarantine}"
+    );
+    assert!(
+        !quarantine.contains("nothing was left behind"),
+        "the report claims nothing was left behind for a lease it could not even read: \
+         {quarantine}"
+    );
+
+    for stale in quarantined_for(&unreadable) {
+        fs::remove_file(stale).unwrap();
+    }
+    for stale in quarantined_for(&sibling) {
+        fs::remove_file(stale).unwrap();
+    }
+}
+
+/// `#369` c3 — the whole-home package grant is refused at the point it would
+/// be recorded.
+///
+/// FOUND, not modelled. The quarantined lease preserved from SEANDESKTOP has
+/// as its first intent `path = '\\?\C:\Users\seand'  kind = "allow"
+/// mask = 1180095`, and 1180095 is [`ACL_WRITE_MASK`] to the bit — so it came
+/// from `fs_write_allow`, i.e. the workspace root, because wayland-core was
+/// started in the user's profile directory. The other 4366 intents in that
+/// same file are per-secret DENIES beneath it, which is the shape of the
+/// problem: one inheritable ALLOW on the profile root confers the subtree, and
+/// what claws it back is an enumeration taken at one instant.
+///
+/// Both directions are asserted. A refusal that refused everything would pass
+/// the first half and break the product, so a project directory UNDER the
+/// profile root must still be granted.
+#[test]
+fn a_package_allow_on_the_users_whole_profile_is_refused() {
+    let Ok(profile) = std::env::var("USERPROFILE") else {
+        panic!("USERPROFILE is unset, so this test cannot grade #369 c3 at all");
+    };
+    let profile = fs::canonicalize(&profile).expect("the user profile directory must exist");
+
+    let refused = canonical_intents(&SandboxManifest {
+        fs_write_allow: vec![profile.clone()],
+        ..Default::default()
+    })
+    .expect_err("granting the AppContainer package the whole user profile must be refused");
+    let refused = refused.to_string();
+    assert!(
+        refused.contains("entire profile directory"),
+        "the refusal must say WHY it refused, so an operator can act on it: {refused}"
+    );
+    assert!(
+        refused.contains("#369"),
+        "the refusal must carry the tracker it comes from: {refused}"
+    );
+
+    // CONTROL. The guard must bound the grant, not abolish it: a real
+    // workspace under the same profile root is still granted, and a refusal
+    // that also caught this would be a product outage rather than a fix.
+    let workspace = tempfile::tempdir_in(&profile).expect("a workspace under the profile root");
+    let granted = canonical_intents(&SandboxManifest {
+        fs_write_allow: vec![workspace.path().to_path_buf()],
+        ..Default::default()
+    })
+    .expect("an ordinary workspace directory must still be granted");
+    assert_eq!(
+        granted.len(),
+        1,
+        "the control granted {granted:?} rather than exactly the workspace"
+    );
+
+    // And the two roots that strictly CONTAIN the observed one.
+    let all_profiles = profile
+        .parent()
+        .expect("a user profile always has a parent")
+        .to_path_buf();
+    canonical_intents(&SandboxManifest {
+        fs_write_allow: vec![all_profiles],
+        ..Default::default()
+    })
+    .expect_err("granting the directory holding every user profile must be refused");
+
+    let drive_root = profile
+        .ancestors()
+        .last()
+        .expect("a canonical path always has a root")
+        .to_path_buf();
+    canonical_intents(&SandboxManifest {
+        fs_read_allow: vec![drive_root],
+        ..Default::default()
+    })
+    .expect_err("granting a drive root must be refused");
+}
