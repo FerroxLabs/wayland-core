@@ -39,6 +39,7 @@ criteria:
   - id: c6
     text: "After the fix, cargo test --workspace --lib --no-fail-fast passes N>=10 consecutive times on the build host, and the run count is recorded"
     state: superseded
+    successor: FerroxLabs/wayland-core#373
     owner: core
     handoff: "FerroxLabs/wayland-core#373"
     evidence: "commit:18e59e85"

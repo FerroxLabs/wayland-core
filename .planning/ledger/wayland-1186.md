@@ -21,11 +21,13 @@ criteria:
   - id: c3
     text: "matrix: the declared 16384 cap is verified against the real platform limit"
     state: superseded
+    successor: FerroxLabs/wayland#934
     owner: core
     note: "RESCOPED 2026-08-29 and handed back to wayland#934 c7, which is open and carries it. This is NOT a credentials problem: the cap derives from a byte budget (the assembled PDU), so BOTH probe arms land inside the accepted region and the harness enum Above has no variant meaning accepted-normally. A token would not close it; a probe-shape change would, and that is core's."
   - id: c4
     text: "msteams: the declared 20480 cap is verified against the real platform limit"
     state: superseded
+    successor: FerroxLabs/wayland#934
     owner: core
     note: "RESCOPED 2026-08-29 and handed back to wayland#934 c7, which is open and carries it. Same refutation as matrix: the 20,480 figure is derived from an 80 KB UTF-16 budget on the serialized Activity, so both arms land inside the accepted region. The Bot Framework credential is still the highest-setup item on the original list but it is no longer the binding constraint."
   - id: c5

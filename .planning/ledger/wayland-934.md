@@ -37,6 +37,7 @@ criteria:
   - id: c6
     text: "The WhatsApp BRIDGE cap, the eighth max_message_len, is measured or made honest and is reachable by the coverage guard"
     state: superseded
+    successor: FerroxLabs/wayland-core#360
     owner: core
     note: "Split out to wayland-core#360, which is open and carries the full contract including widening the guard to backends selected by a config key. UPDATE 2026-08-29: the successor's c1/c2/c4 are now met, so the last sentence of this note is stale -- the guard walks wcore_channels_registry::constructible_selectors() rather than platform strings, the bridge has probe cells and declaration rows keyed whatsapp+baileys / whatsapp+whatsapp-web, and the borrowed Some(4096) is now BRIDGE_UNMEASURED_CHUNK_WIDTH, documented as a chunking policy with a per-channel override. Measuring it at a real backend is still owed and is that issue's c1."
   - id: c7

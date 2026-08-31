@@ -15,6 +15,7 @@ criteria:
   - id: c2
     text: "ON UNIX: any prompt raised inside a quarantine operation is distinguishable by the user from a prompt raised by Wayland itself -- and in fact stronger, since none can be raised at all (c5). On Windows the product does NOT deliver this property; what it does deliver is measured in c6 and the remainder is FerroxLabs/wayland-core#389"
     state: superseded
+    successor: FerroxLabs/wayland-core#389
     evidence: "symbol:crates/wcore-cli/src/plugin/quarantine.rs::build_git_command"
     owner: core
     handoff: "FerroxLabs/wayland-core#389"

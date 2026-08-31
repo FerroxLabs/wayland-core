@@ -33,6 +33,7 @@ criteria:
   - id: c5
     text: "The third preserved rule holds: no static arm is added for an open-weights family served at wildly different limits by different hosts"
     state: superseded
+    successor: FerroxLabs/wayland#1232
     evidence: "symbol:scripts/check-model-limits-freshness.py::scan_open_weights_arms"
     owner: core
     handoff: "FerroxLabs/wayland#1232"
