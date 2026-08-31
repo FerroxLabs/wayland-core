@@ -928,9 +928,25 @@ mod tests {
     /// `ReplaceFileW`'s `lpBackupFileName`, `restore` publishes with
     /// `ReplaceFileW` again and returns `Ok(Some(exchanged_out))`, and
     /// `holds_exactly` then keeps a save that is not ours -- so
-    /// `intercepted_save: Some(..)` is reachable and the preserved file lands
-    /// at `<tmp>.wl-displaced.wl-displaced`. MEASURED on real Windows rather
-    /// than argued; see the ledger entry for wayland#1268.
+    /// `intercepted_save: Some(..)` is reachable there.
+    ///
+    /// That paragraph is READ OFF `wcore_config::atomic_io`, not measured, and
+    /// this doc claims nothing stronger. What has actually been established is
+    /// that the test is COMPILE-VALID for the Windows target: `cargo check -p
+    /// wcore-tools --all-targets --target x86_64-pc-windows-gnu` is clean, and
+    /// it only became clean with "fix(atomic-io): compile the non-unix restore
+    /// arm, and ungate the intercepted-save tests" -- before that commit
+    /// `atomic_io`'s own non-unix `restore` arm failed E0532, measured by
+    /// reverting that one line and watching the same check go back to
+    /// `error[E0532]`. So no Windows measurement of this path was even
+    /// POSSIBLE on this branch until then.
+    ///
+    /// It has NEVER been executed on a Windows host. The name the preserved
+    /// file takes there is therefore unverified -- the assertions below find
+    /// it by CONTENT rather than by name, which is why they are portable --
+    /// and the ledger for FerroxLabs/wayland#1268 records c2, the Windows
+    /// execution, as not-met. Do not read this comment as evidence that it
+    /// was run.
     #[tokio::test]
     async fn the_vfs_path_names_a_save_the_refusal_displaced() {
         const ORIGINAL: &str = "the only copy of the user's bytes\n";
