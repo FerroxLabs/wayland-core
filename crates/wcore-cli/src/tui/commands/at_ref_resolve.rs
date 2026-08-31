@@ -885,6 +885,19 @@ mod tests {
         );
     }
 
+    /// `str::find` that names what it was looking for when it fails. A
+    /// silent `None` here is how a source gate goes vacuous.
+    trait FindOrPanic {
+        fn unwrap_or_panic_find(&self, needle: &str) -> usize;
+    }
+
+    impl FindOrPanic for str {
+        fn unwrap_or_panic_find(&self, needle: &str) -> usize {
+            self.find(needle)
+                .unwrap_or_else(|| panic!("{needle} is not in the production half of this file"))
+        }
+    }
+
     /// The number of entries `SkippedFiles` reports, or `None` when the walk
     /// emitted no such warning.
     fn skipped_count(payload: &AtPayload) -> Option<usize> {
@@ -1010,49 +1023,58 @@ mod tests {
 
     /// core#377 c2 — the STRUCTURE, asserted over a closed property.
     ///
-    /// Deliberately not another scan for the spelling of a drop: that alphabet
-    /// is open and two gates written that way were defeated by shapes they did
-    /// not enumerate. This checks ONE function's parameter list — a closed,
-    /// two-name property. `judge_entry` cannot touch `skipped` or `out`, so it
-    /// cannot drop an entry at all; the drop is the caller's single
-    /// `EntryOutcome::Drop` arm, and the compiler forces every judgement path
-    /// to name an outcome.
+    /// Deliberately NOT another scan for the spelling of a drop: that alphabet
+    /// is open, and two gates written that way were defeated by shapes they
+    /// did not enumerate. This checks ONE function's parameter list — a
+    /// closed, two-name property. `judge_entry` cannot touch `skipped` or
+    /// `out`, so it cannot drop an entry at all; the drop is the caller's
+    /// single `EntryOutcome::Drop` arm, and the compiler forces every
+    /// judgement path to name an outcome.
+    ///
+    /// The search is confined to the half of this file ABOVE `#[cfg(test)]`.
+    /// The first draft was not, and it was VACUOUS: `find("fn judge_entry(")`
+    /// matched the string literal in this very test, so deleting the function
+    /// left the gate green against a slice of the test's own source.
     #[test]
     fn the_judgement_cannot_reach_the_counter_or_the_payload() {
         let source = include_str!("at_ref_resolve.rs");
-        let start = source
-            .find("fn judge_entry(")
-            .expect("judge_entry must exist - it is what makes a silent drop impossible");
-        let signature = &source[start
-            ..start
-                + source[start..]
-                    .find(") -> EntryOutcome {")
-                    .expect("judge_entry must return an EntryOutcome")];
+        let production = &source[..source
+            .find("\n#[cfg(test)]\n")
+            .expect("this file must have a test module to cut at")];
         assert!(
-            !signature.contains("skipped"),
-            "judge_entry took the skipped counter, so a judgement can once again \
-             drop an entry without the caller counting it: {signature}"
+            !production.contains("fn the_judgement_cannot_reach_the_counter_or_the_payload"),
+            "the cut left this test inside the production half, so every search \
+             below can match the test's own literals"
         );
-        assert!(
-            !signature.contains("out:"),
-            "judge_entry took the payload, so a judgement can once again half-admit \
-             an entry: {signature}"
-        );
-        // Non-vacuity: the same search over the CALLER finds both, so a
-        // silently-empty `signature` could not make the assertions above pass.
-        let walk = source.find("fn walk_dir(").expect("walk_dir must exist");
-        let walk_sig = &walk_dir_signature(source, walk);
-        assert!(
-            walk_sig.contains("skipped") && walk_sig.contains("out:"),
-            "control: the caller must hold both, or this test is searching nothing: {walk_sig}"
-        );
-    }
 
-    fn walk_dir_signature(source: &str, start: usize) -> String {
-        let end = source[start..]
-            .find(") -> Result<(), AtRefError> {")
-            .expect("walk_dir signature");
-        source[start..start + end].to_string()
+        let signature = |name: &str, ret: &str| -> String {
+            let at = production.unwrap_or_panic_find(name);
+            let end = production[at..]
+                .find(ret)
+                .unwrap_or_else(|| panic!("{name} must return {ret}"));
+            production[at..at + end].to_string()
+        };
+
+        let judge = signature("fn judge_entry(", ") -> EntryOutcome {");
+        assert!(
+            !judge.contains("skipped"),
+            "judge_entry took the skipped counter, so a judgement can once again \
+             drop an entry without the caller counting it: {judge}"
+        );
+        assert!(
+            !judge.contains("out:"),
+            "judge_entry took the payload, so a judgement can once again \
+             half-admit an entry: {judge}"
+        );
+
+        // Non-vacuity: the same search over the CALLER finds both names, so an
+        // empty or misplaced slice could not make the assertions above pass.
+        let walk = signature("fn walk_dir(", ") -> Result<(), AtRefError> {");
+        assert!(
+            walk.contains("skipped") && walk.contains("out:"),
+            "control: the caller must hold both, or this test is searching \
+             nothing: {walk}"
+        );
     }
 
     #[test]
