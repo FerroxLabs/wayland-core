@@ -296,6 +296,38 @@ fn probe_stderr() -> String {
     }
 }
 
+/// The same probe reached through the PRODUCTION SPAWN, `run_hardened` --
+/// which is what `run_git` calls and is the only place the creation flags are
+/// composed.
+///
+/// `#393` c3. `harden_against_credential_prompt` sets `DETACHED_PROCESS` and
+/// the Job Object that owns the process tree needs `CREATE_SUSPENDED`, and
+/// `CommandExt::creation_flags` is a SETTER, not an OR: calling both drops
+/// one, and the one it drops when the job wins is `DETACHED_PROCESS` -- which
+/// would reopen #338 as a side effect of fixing #393. So the OR lives at the
+/// single spawn site, and this arm grades it THERE.
+/// `probe_through_production_git` above cannot: it calls `Command::output`
+/// itself and never reaches the flags `run_hardened` applies.
+fn probe_through_production_spawn() -> String {
+    let exe = std::env::current_exe().expect("current test binary");
+    let alias = format!(
+        "alias.consoleprobe=!\"{}\" {TEST_NAME} --exact --nocapture --test-threads=1",
+        exe.display().to_string().replace('\\', "/")
+    );
+    let mut cmd = wcore_cli::plugin::quarantine::build_git_command(
+        &["-c", alias.as_str(), "consoleprobe"],
+        None,
+    );
+    cmd.env(PROBE_ENV, "1")
+        .env(PARENT_PID_ENV, std::process::id().to_string());
+    wcore_cli::plugin::quarantine::run_hardened(
+        cmd,
+        "git [consoleprobe]",
+        std::time::Duration::from_secs(120),
+    )
+    .unwrap_or_else(|e| format!("RUN_HARDENED_FAILED={e}\n"))
+}
+
 /// Pull one `KEY=value` field out of a probe report.
 ///
 /// Searched ANYWHERE in the line, not anchored at its start: libtest writes
@@ -462,6 +494,7 @@ fn quarantine_child_has_no_console_at_creation_on_windows() {
     let plain = probe(false);
     let hardened = probe(true);
     let production = probe_through_production_git();
+    let production_spawn = probe_through_production_spawn();
 
     // Emit the measurements, not only the verdict. #338's Windows arm is a
     // claim about what a Win32 flag delivers, and a bare `ok` from a CI job on
@@ -471,6 +504,7 @@ fn quarantine_child_has_no_console_at_creation_on_windows() {
         ("plain", &plain),
         ("hardened", &hardened),
         ("production_git", &production),
+        ("production_spawn", &production_spawn),
     ] {
         for line in report.lines().filter(|l| l.contains('=')) {
             println!("[{arm}] {}", line.trim());
@@ -520,6 +554,22 @@ fn quarantine_child_has_no_console_at_creation_on_windows() {
         "#338: `build_git_command` must apply the hardening — an assertion on \
          `harden_against_credential_prompt` alone stays green when `run_git` \
          stops calling it. production report:\n{production}"
+    );
+
+    // ---- #393 c3: the composed creation flags -----------------------------
+    // The console flag and the containment flag COEXIST rather than
+    // overwriting each other. Graded on the real spawn -- `run_hardened` --
+    // because that is the only place the OR is applied, and a naive
+    // composition would silently drop `DETACHED_PROCESS` there and nowhere
+    // else, so no arm above would notice. If this ever reports `true`, #393's
+    // Job Object has reopened #338.
+    assert_eq!(
+        field(&production_spawn, "SHARES_USER_CONSOLE_BEFORE"),
+        Some("false"),
+        "#393 c3: a child spawned through `run_hardened` -- with the Job Object's \
+         CREATE_SUSPENDED OR-ed into the creation flags -- is on the operator's console, \
+         so the composition dropped DETACHED_PROCESS and reopened #338. production_spawn \
+         report:\n{production_spawn}"
     );
 
     // ---- liveness ---------------------------------------------------------

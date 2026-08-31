@@ -400,11 +400,11 @@ pub fn harden_against_credential_prompt(cmd: &mut std::process::Command) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        /// `DETACHED_PROCESS` — the child is CREATED with no console and
-        /// does not inherit ours. Creation-time only; see the measured
-        /// residual in this function's doc comment and
-        /// `tests/quarantine_console_authority_windows.rs`.
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        // `DETACHED_PROCESS` alone, so a caller that builds a command and runs
+        // it itself (`Command::output`) still gets the #338 reduction and is
+        // not handed a frozen child. `run_hardened`, which is the production
+        // spawn path, re-sets this to `QUARANTINE_SPAWN_FLAGS` — the OR with
+        // `CREATE_SUSPENDED` that #393's Job Object needs — in one place.
         cmd.creation_flags(DETACHED_PROCESS);
     }
 }
@@ -501,6 +501,41 @@ pub fn announce_on_every_operator_sink(notice: &str) -> NoticeDelivery {
     }
 }
 
+/// `DETACHED_PROCESS` — the child is CREATED with no console and does not
+/// inherit ours (#338). Creation-time only; see
+/// [`harden_against_credential_prompt`]'s doc for the measured residual.
+#[cfg(windows)]
+const DETACHED_PROCESS: u32 = 0x0000_0008;
+
+/// The creation flags every quarantine spawn is made with, composed in ONE
+/// place because `CommandExt::creation_flags` is a SETTER and not an OR.
+///
+/// # The trap this constant exists to remove (`#393`)
+///
+/// `harden_against_credential_prompt` sets `DETACHED_PROCESS` for `#338`, and
+/// [`WindowsJobObject::create_suspended`](wcore_types::job_object::WindowsJobObject::create_suspended)
+/// sets `CREATE_SUSPENDED` for `#393`. Both spell that as
+/// `command.creation_flags(..)`, which OVERWRITES. Composing them by calling
+/// both — in either order — silently drops one, and the one it drops when the
+/// job wins is `DETACHED_PROCESS`, which reopens `#338`'s Windows console
+/// reduction. A fix that reproduces the defect next door is not a fix.
+///
+/// So the two flags are OR-ed here, applied at the single spawn site in
+/// [`run_hardened`], and NOT applied by `create_suspended`, which is never
+/// called on this path. Both halves are then asserted rather than assumed:
+///
+/// * `CREATE_SUSPENDED` landing is proven by `WindowsJobObject::attach`
+///   itself, which reads the child's SUSPEND COUNT and errors on `0` — the
+///   value a child that was never suspended reports. So if this constant ever
+///   loses `CREATE_SUSPENDED`, or something re-sets `creation_flags` after
+///   this line, the spawn FAILS rather than silently racing.
+/// * `DETACHED_PROCESS` landing is proven on real Windows by
+///   `tests/quarantine_console_authority_windows.rs`, which drives a probe
+///   through this exact spawn path and asserts it does not share the
+///   operator's console. That is `#393` c3.
+#[cfg(windows)]
+const QUARANTINE_SPAWN_FLAGS: u32 = DETACHED_PROCESS | 0x0000_0004 /* CREATE_SUSPENDED */;
+
 /// Build the `git` command `run_git` runs, hardened, without spawning it.
 ///
 /// Split out so a test grades the WIRING and not just the function: an
@@ -561,15 +596,15 @@ pub fn build_git_command(args: &[&str], cwd: Option<&Path>) -> std::process::Com
 /// * A descendant that calls `setsid`/`setpgid` for itself leaves the group and
 ///   is out of reach of any group signal. Hard containment is the sandbox's
 ///   job (a PID namespace or a Job Object), never a process group's.
-/// * On Windows the hardening creates no session and no group — `DETACHED_PROCESS`
-///   is a creation-time console decision — so there is nothing here for a group
-///   signal to address and descendants remain reachable only through a Job
-///   Object. Windows never regressed the way unix did (it had no group teardown
-///   to lose), but it has no teardown either, and composing a Job Object with
-///   the console flag is not free -- `WindowsJobObject::create_suspended` SETS
-///   `creation_flags` rather than OR-ing them, so a naive composition drops
-///   `DETACHED_PROCESS` and reopens #338. Tracked as its own remainder with
-///   that trap recorded: `FerroxLabs/wayland-core#393`.
+/// * On Windows the hardening creates no session and no group —
+///   `DETACHED_PROCESS` is a creation-time console decision — so nothing here
+///   addresses a descendant, and this function is a no-op there. The teardown
+///   is a kill-on-close Job Object instead, taken in [`run_hardened`] and
+///   fired by [`HardenedTree::drop`] (`FerroxLabs/wayland-core#393`, closed).
+///   The trap that made it non-trivial is recorded on
+///   [`QUARANTINE_SPAWN_FLAGS`]: `creation_flags` is a setter, so composing
+///   the job's `CREATE_SUSPENDED` with this console flag by calling both drops
+///   one of them, and dropping `DETACHED_PROCESS` reopens #338.
 ///
 /// The cost is deliberate and bounded to the FAILING exits. `git`'s own
 /// `git-credential-cache--daemon` is in this group when `git` started one, and
@@ -595,8 +630,15 @@ fn terminate_hardened_tree(child_pid: u32) {
     }
 }
 
-/// No-op counterpart: see the unix doc comment for why Windows has no session
-/// or process group for a group signal to address.
+/// No-op counterpart: there is no session or process group here for a group
+/// signal to address.
+///
+/// On WINDOWS that is no longer the whole story, and this comment used to
+/// imply it was. The tree is owned by a kill-on-close Job Object taken in
+/// [`run_hardened`] and torn down by [`HardenedTree::drop`], which is the
+/// kernel-backed equivalent of `kill(-pgid)` and is what closes
+/// `FerroxLabs/wayland-core#393`. This function stays a no-op there because
+/// the teardown is the JOB's, not a signal's — not because Windows has none.
 #[cfg(not(unix))]
 fn terminate_hardened_tree(_child_pid: u32) {}
 
@@ -619,23 +661,55 @@ struct HardenedTree {
     /// `Some` while the tree must be torn down if this scope ends; `None` once
     /// the run has proven the tree finished.
     child_pid: Option<u32>,
+    /// #393. The Windows half of the same ownership: a kill-on-close Job
+    /// Object holding the child and every descendant it goes on to create.
+    /// `None` on the platforms that have a process group instead.
+    #[cfg(windows)]
+    job: Option<wcore_types::job_object::WindowsJobObject>,
 }
 
 impl HardenedTree {
     fn arm(child_pid: u32) -> Self {
         Self {
             child_pid: Some(child_pid),
+            #[cfg(windows)]
+            job: None,
         }
     }
 
+    /// Hand the guard the Job Object that owns this tree (#393).
+    #[cfg(windows)]
+    fn own(&mut self, job: wcore_types::job_object::WindowsJobObject) {
+        self.job = Some(job);
+    }
+
     /// The tree is FINISHED, not abandoned: leave it standing.
+    ///
+    /// On Windows that takes an explicit `release`, because the Job Object
+    /// kills on close and merely forgetting it here would take the tree down
+    /// on a SUCCESSFUL install — including `git-credential-cache--daemon`,
+    /// which is shared with the operator's other `git` operations. Same
+    /// distinction the unix arm draws by not signalling the group.
     fn disarm(&mut self) {
         self.child_pid = None;
+        #[cfg(windows)]
+        if let Some(job) = self.job.take() {
+            job.release();
+        }
     }
 }
 
 impl Drop for HardenedTree {
     fn drop(&mut self) {
+        // #393. Windows first and unconditionally: `terminate_hardened_tree`
+        // is a no-op there, and the Job Object is the only thing that reaches
+        // a descendant `git` spawned. `TerminateJobObject` before the leaf's
+        // own kill or after it are both correct -- it is idempotent, and a
+        // reaped leaf does not leave the job.
+        #[cfg(windows)]
+        if let Some(job) = self.job.take() {
+            job.terminate();
+        }
         if let Some(child_pid) = self.child_pid.take() {
             terminate_hardened_tree(child_pid);
         }
@@ -658,7 +732,25 @@ fn run_git(args: &[&str], cwd: Option<&Path>, timeout: Duration) -> Result<Strin
 /// without needing a `git` on `PATH` that can be made to hang on demand.
 /// `label` is what the caller calls this process in an error message, and is
 /// `git ["clone", …]` for every production call.
-fn run_hardened(mut cmd: std::process::Command, label: &str, timeout: Duration) -> Result<String> {
+///
+/// `pub` for the same reason `harden_against_credential_prompt` is: the
+/// properties #338 and #393 are about are only observable from a child that
+/// was spawned THROUGH this function, with the composed creation flags and the
+/// Job Object assignment that only exist here. A test that rebuilds the spawn
+/// grades its own copy of it.
+pub fn run_hardened(
+    mut cmd: std::process::Command,
+    label: &str,
+    timeout: Duration,
+) -> Result<String> {
+    // #393. The composed flags, applied at the ONE spawn site — see
+    // `QUARANTINE_SPAWN_FLAGS` for why this is not two `creation_flags` calls.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(QUARANTINE_SPAWN_FLAGS);
+    }
+
     let mut child = cmd
         .spawn()
         .map_err(|e| PluginCliError::Git(format!("spawn git: {e}")))?;
@@ -670,6 +762,31 @@ fn run_hardened(mut cmd: std::process::Command, label: &str, timeout: Duration) 
     // belongs to the scope, not to the branches, because the branches are what
     // #379 proved incomplete.
     let mut teardown = HardenedTree::arm(child_pid);
+
+    // #393. Take ownership of the TREE before the child has executed one
+    // instruction. The child was created suspended, so every descendant it
+    // will ever have is created after this assignment and is therefore inside
+    // the job; `attach_running` would leave a window in which a descendant
+    // escapes it permanently. `attach` resumes the child only once the kernel
+    // has accepted the assignment, and it verifies the SUSPEND COUNT, so a
+    // spawn that somehow lost `CREATE_SUSPENDED` fails loudly here instead of
+    // handing back a job that owns nothing.
+    #[cfg(windows)]
+    {
+        match wcore_types::job_object::WindowsJobObject::attach(child_pid) {
+            Ok(job) => teardown.own(job),
+            Err(e) => {
+                // The child is suspended and unowned, or already dead inside a
+                // job that is about to be dropped. Killing is correct for both
+                // — see `WindowsJobObject::attach`'s own doc.
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(PluginCliError::Git(format!(
+                    "could not take ownership of the quarantine process tree for {label}: {e}.                      Refusing to run it unowned: an abort would then reap the leaf and leave                      every helper git spawned running (FerroxLabs/wayland-core#393)"
+                )));
+            }
+        }
+    }
 
     let mut out_pipe = child.stdout.take().expect("stdout piped");
     let mut err_pipe = child.stderr.take().expect("stderr piped");

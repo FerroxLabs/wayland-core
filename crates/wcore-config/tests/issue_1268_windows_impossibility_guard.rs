@@ -226,7 +226,10 @@ fn no_doc_comment_claims_the_displaced_save_path_is_impossible_on_windows() {
     let mut files = Vec::new();
     for crate_name in ["wcore-tools", "wcore-config"] {
         for sub in ["src", "tests"] {
-            rust_sources(&workspace.join("crates").join(crate_name).join(sub), &mut files);
+            rust_sources(
+                &workspace.join("crates").join(crate_name).join(sub),
+                &mut files,
+            );
         }
     }
     assert!(
