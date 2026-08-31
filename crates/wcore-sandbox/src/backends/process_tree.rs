@@ -127,8 +127,36 @@ impl ProcessTreeGuard {
     /// 33240249894 (linux-containerized) turned two `wcore-sandbox` tests that
     /// had run to completion into
     /// `ExecFailed("sandbox process-tree ownership: No such file or directory
-    /// (os error 2)")`, and the same reproduces on hetzner-dsm by pinning
-    /// concurrent bwrap execs onto two CPUs.
+    /// (os error 2)")`.
+    ///
+    /// #362 c2 — HOW WIDE THE WINDOW HAS TO BE, AND ON WHICH SHAPE. Trials of
+    /// the two bwrap tests at `--retries 0`, n=10 per cell, on the pre-fix
+    /// tree, with a sleep injected at the exact point between reading
+    /// `child-pid` and opening `/proc/<pid>/stat`:
+    ///
+    /// | injected window | plain Linux host | CI image + the four grants |
+    /// |---|---|---|
+    /// | 1000 ms | 10/10 failed | 10/10 failed |
+    /// |  100 ms | 10/10 failed | 10/10 failed |
+    /// |   50 ms |         0/10 | 10/10 failed |
+    /// |   30 ms |         0/10 | 10/10 failed |
+    /// |   10 ms |         0/10 |  7/10 failed |
+    /// |    1 ms |         0/10 | — |
+    ///
+    /// So it REACHES A PLAIN LINUX HOST — it is not an artefact of CI's
+    /// nested-bwrap-in-docker shape — and the nested shape is susceptible at a
+    /// window an order of magnitude narrower, which is why every observed
+    /// natural occurrence is on the containerized leg.
+    ///
+    /// CORRECTION. An earlier version of this comment said the failure "the
+    /// same reproduces on hetzner-dsm by pinning concurrent bwrap execs onto
+    /// two CPUs". Run as written — trials and eight concurrent bwrap noise
+    /// loops all pinned to CPUs 0,1 — that reproduces it 0 times in 25 on a
+    /// plain host AND 0 times in 25 in the CI image. Natural contention on a
+    /// 96-core box does not open a 100 ms window; the injection above is what
+    /// does, and a claim of natural reproduction that does not reproduce is
+    /// worse than no claim. Full table and transcripts:
+    /// `.planning/evidence/core-362/c1-c3-window.md`.
     ///
     /// # Why "gone" is safe to answer with no guard
     ///

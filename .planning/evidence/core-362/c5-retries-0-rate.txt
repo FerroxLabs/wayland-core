@@ -1,0 +1,39 @@
+core#362 c5 - the --retries 0 rate on the CI image
+
+IMAGE: rust:1.95-slim-bookworm + .github/workflows/ci.yml own package list
+  (libdbus-1-dev libseccomp-dev libssl-dev libasound2-dev pkg-config mold
+   ca-certificates git python3 procps bubblewrap curl), cargo-nextest, cargo-audit.
+POSTURE: ci.yml DOCKER_RUN_SANDBOX verbatim - --init --network=host
+  --cap-add SYS_ADMIN --security-opt seccomp=unconfined
+  --security-opt apparmor=unconfined --security-opt systempaths=unconfined
+  -e WCORE_REQUIRE_ENFORCING_SANDBOX=1
+BOX: hetzner-dsm, Ubuntu 24.04 noble, kernel 6.8.0-101-generic, 96 cores.
+TREE: lane/f13-s2-linux-sandbox (fix f07482c80 present).
+
+ONE TRIAL = one cargo nextest run of both bwrap tests at --retries 0.
+Trials and 8 concurrent bwrap noise loops all pinned to CPUs 0,1.
+
+RESULT C5-ci-image-fixed: 0/30 trials failed, 0 of them with the ENOENT ownership race (cpus=0,1 load=8)
+
+RATE: 0/30 = 0.0%. Upper bound ~9.5% (one-sided 95% on n=30).
+
+WHY THIS ZERO IS INTERPRETABLE - the positive control is in the SAME image.
+A query that fails silently returns nothing, and nothing reads as absent, so
+a 0/30 alone would certify nothing. On the PRE-FIX tree, same image, same
+harness, with the window injected at the exact race point:
+    WINDOW 1000ms: 10/10 trials failed
+    WINDOW  100ms: 10/10 trials failed
+    WINDOW   50ms: 10/10 trials failed
+    WINDOW   30ms: 10/10 trials failed
+    WINDOW   10ms:  7/10 trials failed
+On the FIXED tree, same image, same injection:
+    WINDOW 1000ms: 0/10 failed; 20 probe(s) saw /proc/<child-pid> already gone
+    WINDOW   10ms: 0/10 failed; 10 probe(s) saw /proc/<child-pid> already gone
+The probe counts are the load-bearing part: the race CONDITION was present on
+every trial and no trial failed. The harness can see this race in this image.
+
+REGRESSION CHECK, same image, --retries 0, whole crate:
+     Summary [  33.138s] 209 tests run: 209 passed (1 slow), 11 skipped
+
+CONFOUND, STATED: the IMAGE is the CI image; the BOX is not a GitHub-hosted
+4-core runner, which is more contended. This bounds the rate on the image.
