@@ -78,11 +78,7 @@ async fn assert_control_readable(fs: &SandboxedFs<SecretDenyFs<RealFs>>, root: &
     );
 }
 
-async fn assert_store_refused(
-    fs: &SandboxedFs<SecretDenyFs<RealFs>>,
-    object: &Path,
-    ticket: &str,
-) {
+async fn assert_store_refused(fs: &SandboxedFs<SecretDenyFs<RealFs>>, object: &Path, ticket: &str) {
     let out = read(fs, object).await;
     assert!(
         out.is_err(),
@@ -108,7 +104,10 @@ async fn a_vendored_gitfiles_object_store_is_refused() {
     write(&object, CANARY);
     std::fs::create_dir_all(root.join("vendor/pkg")).unwrap();
     std::fs::write(root.join("vendor/pkg/.git"), "gitdir: ../pkg-git\n").unwrap();
-    write(&root.join("vendor/pkg/README.md"), &format!("{CONTROL} pkg"));
+    write(
+        &root.join("vendor/pkg/README.md"),
+        &format!("{CONTROL} pkg"),
+    );
 
     let policy = Arc::new(WorkspacePolicy::contained(&root));
     let fs = stack(&policy, &root);
@@ -146,7 +145,10 @@ async fn a_nested_alternates_borrow_is_refused_whatever_its_target_is_named() {
         &root.join("vendor/pkg/.git/objects/info/alternates"),
         "../../../../odb",
     );
-    write(&root.join("vendor/pkg/README.md"), &format!("{CONTROL} pkg"));
+    write(
+        &root.join("vendor/pkg/README.md"),
+        &format!("{CONTROL} pkg"),
+    );
 
     let policy = Arc::new(WorkspacePolicy::contained(&root));
     let fs = stack(&policy, &root);
@@ -211,8 +213,12 @@ async fn a_bare_repository_vendored_under_the_root_is_refused() {
     let fs = stack(&policy, &root);
 
     for name in ["vendor/pkg.git", "vendor/mirror"] {
-        assert_store_refused(&fs, &root.join(name).join("objects/ab/cd1234"), "core#396 c1")
-            .await;
+        assert_store_refused(
+            &fs,
+            &root.join(name).join("objects/ab/cd1234"),
+            "core#396 c1",
+        )
+        .await;
         // A bare repository's own refs and HEAD carry no content and stay
         // readable, mirroring the `git rev-parse` carve-out the root
         // repository gets.
@@ -241,7 +247,14 @@ async fn a_bare_repository_vendored_under_the_root_is_refused() {
 #[tokio::test]
 async fn an_ordinary_directory_named_like_a_store_is_not_a_repository() {
     let (_dir, root) = workspace();
-    for leaf in ["objects", "modules", "store", "lfs", "pristine", "repository"] {
+    for leaf in [
+        "objects",
+        "modules",
+        "store",
+        "lfs",
+        "pristine",
+        "repository",
+    ] {
         write(
             &root.join("app").join(leaf).join("index.ts"),
             &format!("export const x = '{CONTROL}';"),
@@ -251,7 +264,14 @@ async fn an_ordinary_directory_named_like_a_store_is_not_a_repository() {
     let policy = Arc::new(WorkspacePolicy::contained(&root));
     let fs = stack(&policy, &root);
 
-    for leaf in ["objects", "modules", "store", "lfs", "pristine", "repository"] {
+    for leaf in [
+        "objects",
+        "modules",
+        "store",
+        "lfs",
+        "pristine",
+        "repository",
+    ] {
         let path = root.join("app").join(leaf).join("index.ts");
         let out = read(&fs, &path).await;
         assert!(

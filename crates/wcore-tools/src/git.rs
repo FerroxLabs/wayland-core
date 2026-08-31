@@ -58,8 +58,8 @@ use wcore_types::tool::{JsonSchema, ToolResult};
 
 use crate::Tool;
 use crate::context::ToolContext;
-use crate::workspace_policy::WorkspacePolicy;
 use crate::unsaved_work::{Staging, staging_verdict, stash_refusal};
+use crate::workspace_policy::WorkspacePolicy;
 
 /// Typed git op variants — not consumed directly by the LLM (the tool input
 /// is JSON with an `op` field), but useful for downstream introspection /
@@ -755,7 +755,11 @@ impl Tool for GitTool {
         // `tests/git_content_store_deny.rs::the_posture_decides_and_trusted_local_is_left_alone`;
         // a filter that withheld everywhere would overturn Sean's ruling
         // silently.
-        let Some(policy) = ctx.workspace.clone().filter(|p| p.secret_read_deny_required()) else {
+        let Some(policy) = ctx
+            .workspace
+            .clone()
+            .filter(|p| p.secret_read_deny_required())
+        else {
             return self.execute(input).await;
         };
         let repo = resolved_cwd(cwd);

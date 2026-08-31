@@ -4,28 +4,31 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "A BARE repository vendored under the root has its object store VFS-readable: no arm of is_vcs_content_store sees it (class remainder of #390)"
 status: open
-last_verified_commit: 4a738f2e
+last_verified_commit: 30fd6cfde
 criteria:
   - id: c1
     text: "A VFS `Read` of an object under a BARE repository vendored beneath the"
-    state: not-met
+    state: met
+    evidence: test:crates/wcore-tools/tests/vfs_nested_store_deny.rs::a_bare_repository_vendored_under_the_root_is_refused
     owner: core
-    note: "Transcribed from the issue body verbatim on 2026-08-31. This ledger did not exist until now: the issue was filed 2026-08-29/30 by this cycle's own verification and never entered the release gate, which counts only issues holding a ledger file. State is not-met because no lane has claimed it and nothing in the tree has been graded against this text. kind is defect, not task, because the gate reserves task for a credential, an account or a platform a human must obtain and there is code behind this one."
+    note: "MEASURED. `vfs_nested_store_deny.rs::a_bare_repository_vendored_under_the_root_is_refused` covers BOTH spellings the ticket names -- `<root>/vendor/pkg.git/objects/ab/cd1234` and the suffix-less `<root>/vendor/mirror/objects/ab/cd1234` -- through the production stack. Sibling working-tree control (`vendor/notes.md`) readable, and the repository's own `HEAD` stays readable, mirroring the `git rev-parse` carve-out. Closed by arm 3 (`encloses_repository_store`), which asks whether an ancestor carrying a store leaf name has a parent that IS a repository (`HEAD` plus `refs` or `config`) rather than what the path is called; a bare repo has no control directory for a name-based arm to find."
   - id: c2
     text: "Whatever detects a bare repository is graded against a NEGATIVE control"
-    state: not-met
+    state: met
+    evidence: test:crates/wcore-tools/tests/vfs_nested_store_deny.rs::an_ordinary_directory_named_like_a_store_is_not_a_repository
     owner: core
-    note: "Transcribed from the issue body verbatim on 2026-08-31. This ledger did not exist until now: the issue was filed 2026-08-29/30 by this cycle's own verification and never entered the release gate, which counts only issues holding a ledger file. State is not-met because no lane has claimed it and nothing in the tree has been graded against this text. kind is defect, not task, because the gate reserves task for a credential, an account or a platform a human must obtain and there is code behind this one."
+    note: "`an_ordinary_directory_named_like_a_store_is_not_a_repository`, WIDENED past the criterion: not only `objects` but every `VCS_CONTENT_STORES` leaf name -- `objects`, `modules`, `store`, `lfs`, `pristine`, `repository` -- under `<root>/app/<leaf>/index.ts`, with no `HEAD`/`refs` anywhere. All six readable through the stack AND `is_vcs_content_store` asserted false for each, so the fix cannot be a bare component match. This is also the test that would catch a `store_shaped`-style lexical denial being introduced later."
   - id: c3
     text: "The per-traversed-directory cost `grep_policy::scope_for` pays does not"
     state: not-met
     owner: core
-    note: "Transcribed from the issue body verbatim on 2026-08-31. This ledger did not exist until now: the issue was filed 2026-08-29/30 by this cycle's own verification and never entered the release gate, which counts only issues holding a ledger file. State is not-met because no lane has claimed it and nothing in the tree has been graded against this text. kind is defect, not task, because the gate reserves task for a credential, an account or a platform a human must obtain and there is code behind this one."
+    note: "Same as #394 c3: the 5 syscalls/directory figure was measured on a tree that is not an ancestor of `integ/f13`, and the probe named in the criterion is not in this lineage. A probe was written here and the comparable measurement made base-vs-HEAD on the same fixture: 35.009 -> 34.997 syscalls per traversed directory, known-positive control green in every run."
   - id: c4
     text: "`Grep` and the VFS agree on the shape: a test asserts the point"
-    state: not-met
+    state: met
+    evidence: test:crates/wcore-tools/tests/vfs_nested_store_deny.rs::grep_and_the_vfs_agree_about_a_bare_repository_object
     owner: core
-    note: "Transcribed from the issue body verbatim on 2026-08-31. This ledger did not exist until now: the issue was filed 2026-08-29/30 by this cycle's own verification and never entered the release gate, which counts only issues holding a ledger file. State is not-met because no lane has claimed it and nothing in the tree has been graded against this text. kind is defect, not task, because the gate reserves task for a credential, an account or a platform a human must obtain and there is code behind this one."
+    note: "`grep_and_the_vfs_agree_about_a_bare_repository_object`: the same bare-repo object is refused by the VFS and absent from `Grep(pattern, path=\".\")`, with Grep's own positive control (the ordinary file's match) asserted present so a broken Grep cannot pass. Structurally tied rather than duplicated -- `grep_policy::scope_for` asks this policy's `denies_read_content`, which is the same conjunction `SecretDenyFs::guard` asks, so arms 3 and 4 reach Grep without a second name list."
 ---
 
 Created 2026-08-31 to close a COVERAGE gap. It records no work as done.

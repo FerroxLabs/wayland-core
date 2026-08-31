@@ -2652,7 +2652,6 @@ fn every_weak_resolver_site_states_which_resolver_and_why() {
     }
 }
 
-
 /// FerroxLabs/wayland-core#394 c3 / #396 c3 / #398 c3 — the INSTRUMENT for the
 /// per-traversed-directory cost `grep_policy::scope_for` pays.
 ///
@@ -2710,7 +2709,8 @@ fn probe_vcs_content_stores_per_traversed_directory() {
     // Known-positive control: the traversal must have SEEN the store, or a
     // zero-syscall answer would look like an efficiency win.
     assert!(
-        !scope.admits(&root.join("pkg0/main.rs")) || scope.is_store(&root.join(".git/objects/ab/cdef")),
+        !scope.admits(&root.join("pkg0/main.rs"))
+            || scope.is_store(&root.join(".git/objects/ab/cdef")),
         "probe control: `scope_for` must still classify the root store, or the \
          syscall figure below is measuring a traversal that did nothing"
     );
