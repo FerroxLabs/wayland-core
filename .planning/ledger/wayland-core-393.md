@@ -32,3 +32,52 @@ Searched before filing: the open quarantine issues in this repo are #338, #369, 
 prompt authority, not teardown; a keyword search for "quarantine Windows job object" and for
 "descendant process tree Windows" returned nothing, against a control search for "quarantine"
 that returned all six. There was no carrier.
+
+## What is graded off Windows, and what is not (lane `f13-w3-win-393-linux-arm`, 2026-08-31)
+
+Both of this ticket's test files -- `crates/wcore-cli/tests/quarantine_process_tree_windows.rs`
+and `crates/wcore-cli/tests/quarantine_console_authority_windows.rs` -- are `#![cfg(windows)]`,
+so on every host our gates execute today they compile to ZERO tests. While that holds, the
+whole fix can be deleted and every green stays green.
+
+`crates/wcore-cli/tests/issue_393_quarantine_spawn_flags_guard.rs` closes the part of that
+which is decidable off Windows. It has no `#![cfg]` and runs on Linux, macOS and Windows
+alike. It deliberately closes NO criterion here; c1, c2 and c3 are unchanged and still
+`not-met`.
+
+WHAT IT GRADES (each shown RED on hetzner against a mutation of the production file, with
+`cargo check -p wcore-cli --tests` RC=0 first, and restored green afterwards):
+
+* the composed VALUE -- `QUARANTINE_SPAWN_FLAGS` contains `DETACHED_PROCESS`, contains
+  `CREATE_SUSPENDED`, is exactly their OR, and `DETACHED_PROCESS` is `0x8` and not `0x10`
+  (`CREATE_NEW_CONSOLE`). That last one is the mutation no source scan can see: it reads
+  identically and inverts #338. Both constants were ungated and made `pub` for this; a `u32`
+  costs nothing where it is never applied.
+* the WIRING -- `quarantine.rs` makes exactly two `creation_flags` calls, one per function;
+  `harden_against_credential_prompt`'s is `DETACHED_PROCESS`, `run_hardened`'s is the composed
+  constant and precedes the `.spawn()` it governs; and nothing here calls
+  `WindowsJobObject::create_suspended`, which is a second writer of the same field under
+  another name. That is c3's trap, read from source.
+* the release/terminate SPLIT -- `HardenedTree::disarm` releases the job and does not
+  terminate it; `Drop` terminates and does not release; both `take()` the handle; the unix
+  group teardown is still on the `Drop` path.
+
+WHAT IT DOES NOT GRADE, ON ANY HOST BUT WINDOWS:
+
+* that the flags reach `CreateProcessW` or have their effect. `std::process::Command` has no
+  `creation_flags` on unix, so off Windows they are never applied to anything.
+* that the child has no console (#338 c1 / #393 c3's own wording).
+* that the Job Object owns a DESCENDANT and kills it (c1, c2). A `release` that has stopped
+  releasing, or a `terminate` that terminates nothing, is invisible to a source scan.
+
+The wiring and split arms are source scans on purpose: nothing inside a unix process can
+observe a Windows creation flag or a Job Object, so whether the calls are there is in the
+source or nowhere -- the same argument `every_spawn_site_owns_its_tree.rs` makes for its
+wrapping ratchet, and the same cost (a deliberate refactor of this path reds them and has to
+be re-argued there). The scans blank comments and string literals first, because
+`quarantine.rs` names `creation_flags` five times in prose before calling it twice in code,
+and each proves both polarities of its reader on synthetic sources in the same test call.
+
+Net: what the release buys from Linux is that the DECISION cannot be edited away silently.
+What it still does not buy is any evidence the decision works, and #393 stays open for
+SeanDesktop.
