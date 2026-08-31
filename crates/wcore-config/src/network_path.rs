@@ -137,8 +137,18 @@ pub fn has_device_or_verbatim_prefix(path: &Path) -> bool {
 /// Everything else under `\\?\` stays outside this predicate:
 /// `\\?\GLOBALROOT\Device\…` and `\\?\Volume{…}` reach raw devices and
 /// volumes, `\\.\…` is the device namespace, and `\\?\UNC\…` is UNC (see
-/// [`has_unc_prefix`]). Answers the same on every platform, for the reason
-/// given on [`has_unc_prefix`].
+/// [`has_unc_prefix`]).
+///
+/// **Backslashes only, unlike the two predicates above, and that is the whole
+/// difference between them.** They normalise `/`→`\` because Windows accepts
+/// either separator in a UNC name, so a `/` spelling must not evade a REFUSAL.
+/// This predicate grants an EXEMPTION, so the same latitude would run the wrong
+/// way: Win32 does not honour `//?/C:/x` as a verbatim path at all, and MEASURED
+/// on Windows 11 26200 `std::path` parses it as `Prefix::UNC("?", "C:")` — i.e.
+/// the platform itself calls it a UNC name, not a disk. Exempting only the
+/// exact spelling Windows honours keeps the guard's answer the same on Linux
+/// (where the coarse predicate still claims it) and on Windows (where
+/// [`has_unc_prefix`] claims it first): refused either way.
 pub fn has_verbatim_disk_prefix(path: &Path) -> bool {
     // Authoritative on Windows, exactly as in the two predicates above.
     #[cfg(windows)]
@@ -151,7 +161,7 @@ pub fn has_verbatim_disk_prefix(path: &Path) -> bool {
         }
     }
 
-    let lower = normalised_lower(path);
+    let lower = path.to_string_lossy().to_ascii_lowercase();
     let Some(rest) = lower.strip_prefix(r"\\?\") else {
         return false;
     };
@@ -309,7 +319,6 @@ mod tests {
             r"\\?\c:\x",
             r"\\?\F:\ws\.wayland-out",
             r"\\?\C:",
-            "//?/C:/x",
         ] {
             assert!(
                 has_verbatim_disk_prefix(&p(ordinary)),
@@ -337,6 +346,14 @@ mod tests {
                 "{device:?} must stay claimed by the coarse predicate"
             );
         }
+
+        // The forward-slash spelling is NOT exempted — see the predicate's
+        // doc. Windows itself parses it as a UNC name, so admitting it would
+        // make the answer differ by platform in the one direction that opens
+        // something. It stays claimed by the coarse predicate on every host.
+        let slashed = p("//?/C:/x");
+        assert!(!has_verbatim_disk_prefix(&slashed));
+        assert!(has_device_or_verbatim_prefix(&slashed) || has_unc_prefix(&slashed));
 
         // `\\?\UNC\…` belongs to neither: it is UNC and nothing else.
         let unc = p(r"\\?\UNC\server\share");
