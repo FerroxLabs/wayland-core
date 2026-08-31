@@ -140,7 +140,7 @@ fn scrub_direct<'a>(input: &'a str) -> Cow<'a, str> {
         let label = PATTERNS[idx].0;
         let replacement = format!("[REDACTED:{label}]");
         if label == "SECRET_ASSIGNMENT" {
-            result = rx
+            let replaced = rx
                 .replace_all(&result, |captures: &regex::Captures<'_>| {
                     let matched = captures
                         .get(0)
@@ -151,19 +151,62 @@ fn scrub_direct<'a>(input: &'a str) -> Cow<'a, str> {
                     } else {
                         replacement.clone()
                     }
-                })
-                .into_owned();
-        } else {
-            result = rx.replace_all(&result, replacement.as_str()).into_owned();
+                });
+            if let Cow::Owned(replaced) = replaced {
+                result = replaced;
+            }
+        } else if let Cow::Owned(replaced) = rx.replace_all(&result, replacement.as_str()) {
+            // `replace_all` BORROWS when it changed nothing, so the old
+            // unconditional `into_owned()` copied the whole string once per
+            // pattern that did not match — 25 full-length copies on a payload
+            // carrying no secret, which is the common case on the turn loop
+            // (FerroxLabs/wayland-core#395). Taking the buffer only when a
+            // replacement actually happened is the same result.
+            result = replaced;
         }
     }
     Cow::Owned(result)
 }
 
+/// True when any base64 alphabet decodes `candidate` into bytes that carry a
+/// secret.
+///
+/// DETECTION IS UNCHANGED, and the equivalence is structural rather than
+/// empirical. This used to ask `matches!(scrub_direct(..), Cow::Owned(_))`.
+/// [`scrub_direct`] returns `Cow::Borrowed` if and only if
+/// `!fast_set().is_match(input)` — that is its first statement — and returns
+/// `Cow::Owned` on every other path. So the discriminant this predicate read
+/// IS `fast_set().is_match`, and the rewritten string it built to produce that
+/// discriminant was never looked at. Asking the pre-filter directly drops 25
+/// `Regex::replace_all` passes and 25 full-length allocations per decode
+/// attempt while answering the identical question.
+///
+/// The four decodes are also evaluated lazily now. The old array literal
+/// decoded the candidate four times before `any()` looked at the first result;
+/// `||` stops at the first alphabet that both decodes and carries a secret,
+/// which is the same answer.
+///
+/// Why it matters (FerroxLabs/wayland-core#395, FerroxLabs/wayland#1235):
+/// every tool result on the turn loop is scrubbed twice, and a whitespace-free
+/// run of >= 24 characters — an ordinary `Read` of a minified file, a base64
+/// blob, a long log line — is one candidate that reaches here at full length.
 fn decoded_contains_secret(candidate: &str) -> bool {
     use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
 
-    [
+    fn carries_secret(bytes: &[u8]) -> bool {
+        fast_set().is_match(&String::from_utf8_lossy(bytes))
+    }
+
+    // The four alphabets DISAGREE only on `+/` vs `-_` and on padding, so a
+    // candidate carrying none of those characters — which is the ordinary case
+    // for a long alphanumeric run — decodes to the SAME bytes four times, and
+    // the old code paid for the expensive half four times over. Deduplicating
+    // on the decoded bytes is exact: a byte string already checked cannot
+    // answer differently on a second look, and comparing two decoded buffers
+    // costs a memcmp against a UTF-8 lossy allocation plus a 25-pattern
+    // RegexSet scan. Decode order, and therefore the answer, is unchanged.
+    let mut checked: Vec<Vec<u8>> = Vec::with_capacity(4);
+    for decoded in [
         STANDARD.decode(candidate),
         STANDARD_NO_PAD.decode(candidate),
         URL_SAFE.decode(candidate),
@@ -171,12 +214,16 @@ fn decoded_contains_secret(candidate: &str) -> bool {
     ]
     .into_iter()
     .flatten()
-    .any(|bytes| {
-        matches!(
-            scrub_direct(&String::from_utf8_lossy(&bytes)),
-            Cow::Owned(_)
-        )
-    })
+    {
+        if checked.iter().any(|seen| seen == &decoded) {
+            continue;
+        }
+        if carries_secret(&decoded) {
+            return true;
+        }
+        checked.push(decoded);
+    }
+    false
 }
 
 /// Maximum number of separate whitespace-split secrets redacted individually
