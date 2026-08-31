@@ -504,6 +504,7 @@ mod tests {
         ) -> SubAgentResult {
             self.calls.fetch_add(1, Ordering::SeqCst);
             SubAgentResult {
+                failure_category: wcore_types::failure::FailureCategory::Unknown,
                 name: config.name,
                 text: format!("done: {}", config.prompt),
                 usage: TokenUsage::default(),
@@ -528,9 +529,14 @@ mod tests {
         ) -> SubAgentResult {
             let i = self.calls.fetch_add(1, Ordering::SeqCst);
             if i == 1 {
-                SubAgentResult::error(&config.name, "child failed")
+                SubAgentResult::error(
+                    &config.name,
+                    "child failed",
+                    wcore_types::failure::FailureCategory::Unknown,
+                )
             } else {
                 SubAgentResult {
+                    failure_category: wcore_types::failure::FailureCategory::Unknown,
                     name: config.name,
                     text: "ok".to_string(),
                     usage: TokenUsage::default(),
@@ -690,6 +696,7 @@ mod tests {
         ) -> SubAgentResult {
             self.seen.lock().unwrap().push(config.max_tokens);
             SubAgentResult {
+                failure_category: wcore_types::failure::FailureCategory::Unknown,
                 name: config.name,
                 text: "ok".to_string(),
                 usage: TokenUsage::default(),

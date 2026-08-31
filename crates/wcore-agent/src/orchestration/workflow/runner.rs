@@ -1462,7 +1462,15 @@ impl<'a> WorkflowRunner<'a> {
                 .into_iter()
                 .next()
                 .map(|(_, result)| result)
-                .unwrap_or_else(|| SubAgentResult::error(id, "retry dispatch returned no result"));
+                .unwrap_or_else(|| {
+                    SubAgentResult::error(
+                        id,
+                        "retry dispatch returned no result",
+                        // `ToolRuntime`s own definition: "a child that ended
+                        // without a result".
+                        wcore_protocol::events::FailureCategory::ToolRuntime,
+                    )
+                });
         }
         self.spawner
             .spawn_one_with_origin(config, ChildOrigin::Workflow)
@@ -1787,12 +1795,21 @@ impl<'a> WorkflowRunner<'a> {
                         .first()
                         .map(|r| r.text.clone())
                         .unwrap_or_else(|| format!("fleet dispatch returned no result for `{id}`"));
+                    // #1266 c3 -- when this node borrows the unmatched
+                    // result`s TEXT it must borrow its CATEGORY too, or the
+                    // surfaced failure says one thing and classifies as
+                    // another.
+                    let failure_category = unmatched
+                        .first()
+                        .map(|r| r.failure_category)
+                        .unwrap_or(wcore_protocol::events::FailureCategory::ToolRuntime);
                     SubAgentResult {
                         name: id.clone(),
                         text,
                         usage: wcore_types::message::TokenUsage::default(),
                         turns: 0,
                         is_error: true,
+                        failure_category,
                     }
                 });
                 (id, result)

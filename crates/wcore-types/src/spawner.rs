@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
+use crate::failure::FailureCategory;
 use crate::message::TokenUsage;
 
 pub use crate::child_transaction::{
@@ -626,19 +627,38 @@ pub struct SubAgentResult {
     pub usage: TokenUsage,
     pub turns: usize,
     pub is_error: bool,
+    /// FerroxLabs/wayland#1266 c3 — the CHILD`s own failure category, carried
+    /// to the parent`s authoritative terminal frame.
+    ///
+    /// Before this field the relay hardcoded
+    /// [`FailureCategory::Unknown`], so a child that died on a context limit
+    /// and one that died on a local authority fault were indistinguishable to
+    /// the host even though the raising code knew better.
+    ///
+    /// Required rather than defaulted, and deliberately so: this struct has no
+    /// `Default`, so every construction site in the workspace names a category
+    /// or fails to compile. `Unknown` is the honest value where the cause is
+    /// genuinely opaque -- an upstream non-2xx, or a child that simply
+    /// succeeded -- and must never be upgraded to a plausible-looking guess.
+    pub failure_category: FailureCategory,
 }
 
 impl SubAgentResult {
     /// Build a terminal error result for a sub-agent that never ran (e.g. its
     /// pinned provider could not be resolved). Zero usage, zero turns,
     /// `is_error = true`.
-    pub fn error(name: &str, text: &str) -> Self {
+    ///
+    /// `category` is required: every caller of this constructor is a LOCAL
+    /// fault the calling code has already named, so defaulting it would throw
+    /// away a classification that exists (#1266 c3).
+    pub fn error(name: &str, text: &str, category: FailureCategory) -> Self {
         Self {
             name: name.to_string(),
             text: text.to_string(),
             usage: TokenUsage::default(),
             turns: 0,
             is_error: true,
+            failure_category: category,
         }
     }
 }
