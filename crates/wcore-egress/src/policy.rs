@@ -20,6 +20,34 @@
 use std::future::Future;
 use std::sync::{Arc, OnceLock};
 
+/// Who chose the destination of an outbound request.
+///
+/// This is a property of the **request**, stamped centrally by the client that
+/// issues it. It is NOT a second policy: there is still exactly one
+/// [`EgressPolicy`] and one allowlist, and `EgressOrigin` only tells that policy
+/// whether the URL in front of it was chosen by the product or by the model.
+///
+/// wayland#1264: an allowlisted host is admitted on the host match alone, so a
+/// model-chosen URL to an allowlisted apex (`WebFetch
+/// https://github.com/?leak=<secret>`) never reaches the method or path/query
+/// checks below it. Splitting the *policy* per client was considered and
+/// refuted -- the boundary would then depend on who constructed the client,
+/// which is a bypass factory. Splitting the *request* by origin does not: the
+/// same classifier runs on the same allowlist, with one more fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EgressOrigin {
+    /// The product chose this destination. Provider/LLM transports, channel
+    /// APIs, MCP transports, the updater, and the scoped API tools whose URL is
+    /// built by `format!` against a fixed host with encoded path segments.
+    /// Admitted on the allowlist alone -- unchanged behaviour.
+    #[default]
+    Product,
+    /// The model chose this destination, host and query string included. Today
+    /// that is `WebFetch`, whose URL is taken verbatim from tool input. Shape-
+    /// checked even when the host is allowlisted.
+    ModelDirected,
+}
+
 /// What the policy decided about a single outbound request.
 #[derive(Debug, Clone)]
 pub enum EgressDecision {
@@ -43,7 +71,11 @@ pub enum EgressDecision {
 #[async_trait::async_trait]
 pub trait EgressPolicy: Send + Sync {
     /// Inspect a request that is about to be sent.
-    async fn check(&self, request: &reqwest::Request) -> EgressDecision;
+    ///
+    /// `origin` says who chose the destination (wayland#1264). It is stamped by
+    /// the [`crate::EgressClient`] that issued the request, not by the call
+    /// site, so a tool cannot claim to be provider traffic.
+    async fn check(&self, request: &reqwest::Request, origin: EgressOrigin) -> EgressDecision;
 }
 
 /// Permit every request. The behavior before any policy is installed, and a
@@ -53,7 +85,7 @@ pub struct AllowAllPolicy;
 
 #[async_trait::async_trait]
 impl EgressPolicy for AllowAllPolicy {
-    async fn check(&self, _request: &reqwest::Request) -> EgressDecision {
+    async fn check(&self, _request: &reqwest::Request, _origin: EgressOrigin) -> EgressDecision {
         EgressDecision::Allow
     }
 }
@@ -131,9 +163,9 @@ pub struct GlobalDefaultPolicy;
 
 #[async_trait::async_trait]
 impl EgressPolicy for GlobalDefaultPolicy {
-    async fn check(&self, request: &reqwest::Request) -> EgressDecision {
+    async fn check(&self, request: &reqwest::Request, origin: EgressOrigin) -> EgressDecision {
         match GLOBAL_POLICY.get() {
-            Some(policy) => policy.check(request).await,
+            Some(policy) => policy.check(request, origin).await,
             None => EgressDecision::Allow,
         }
     }
@@ -158,7 +190,11 @@ mod session_scope_tests {
 
     #[async_trait::async_trait]
     impl EgressPolicy for NamedDeny {
-        async fn check(&self, _request: &reqwest::Request) -> EgressDecision {
+        async fn check(
+            &self,
+            _request: &reqwest::Request,
+            _origin: EgressOrigin,
+        ) -> EgressDecision {
             EgressDecision::Deny {
                 reason: self.0.to_string(),
             }
@@ -189,11 +225,11 @@ mod session_scope_tests {
         );
 
         assert!(matches!(
-            first.policy().check(&request()).await,
+            first.policy().check(&request(), EgressOrigin::Product).await,
             EgressDecision::Deny { reason } if reason == "session-one"
         ));
         assert!(matches!(
-            second.policy().check(&request()).await,
+            second.policy().check(&request(), EgressOrigin::Product).await,
             EgressDecision::Deny { reason } if reason == "session-two"
         ));
     }
@@ -206,7 +242,7 @@ mod session_scope_tests {
         .await;
 
         assert!(matches!(
-            client.policy().check(&request()).await,
+            client.policy().check(&request(), EgressOrigin::Product).await,
             EgressDecision::Deny { reason } if reason == "retained"
         ));
     }

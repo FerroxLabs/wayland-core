@@ -19,7 +19,7 @@ use crate::error::{BeforeDispatchError, EgressError};
 use crate::observer::{
     EgressAttemptGuard, EgressOutcome, SharedEgressObserver, classify_transport_error,
 };
-use crate::policy::{EgressDecision, SharedPolicy};
+use crate::policy::{EgressDecision, EgressOrigin, SharedPolicy};
 
 type BeforeDispatchFuture =
     Pin<Box<dyn Future<Output = Result<(), BeforeDispatchError>> + Send + 'static>>;
@@ -37,6 +37,8 @@ pub struct EgressRequestBuilder {
     next_attempt_id: Arc<AtomicU64>,
     inner: reqwest::RequestBuilder,
     before_dispatch: Option<BeforeDispatchHook>,
+    /// wayland#1264 — copied from the issuing client, never set per call site.
+    origin: EgressOrigin,
 }
 
 impl EgressRequestBuilder {
@@ -46,6 +48,7 @@ impl EgressRequestBuilder {
         observer: SharedEgressObserver,
         next_attempt_id: Arc<AtomicU64>,
         inner: reqwest::RequestBuilder,
+        origin: EgressOrigin,
     ) -> Self {
         Self {
             client,
@@ -54,6 +57,7 @@ impl EgressRequestBuilder {
             next_attempt_id,
             inner,
             before_dispatch: None,
+            origin,
         }
     }
 
@@ -162,6 +166,7 @@ impl EgressRequestBuilder {
             next_attempt_id: self.next_attempt_id.clone(),
             inner,
             before_dispatch: self.before_dispatch.clone(),
+            origin: self.origin,
         })
     }
 
@@ -174,7 +179,7 @@ impl EgressRequestBuilder {
         let request = self.inner.build()?;
         let attempt_id = self.next_attempt_id.fetch_add(1, Ordering::Relaxed);
         let mut observation = EgressAttemptGuard::new(self.observer.clone(), attempt_id, &request);
-        match self.policy.check(&request).await {
+        match self.policy.check(&request, self.origin).await {
             EgressDecision::Allow => {
                 observation.mark_allowed();
                 if let Some(before_dispatch) = self.before_dispatch

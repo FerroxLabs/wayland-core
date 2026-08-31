@@ -29,6 +29,13 @@ impl HttpGitHubBackend {
             client: build_ssrf_safe_tool_client(),
         }
     }
+
+    /// The egress origin stamped on every request this backend issues
+    /// (wayland#1264). Exposed so the wiring can be graded: without it the
+    /// stamp is a private field and a refactor could drop it silently.
+    pub fn egress_origin(&self) -> wcore_egress::EgressOrigin {
+        self.client.origin()
+    }
 }
 
 impl Default for HttpGitHubBackend {

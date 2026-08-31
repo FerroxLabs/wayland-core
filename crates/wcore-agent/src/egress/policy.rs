@@ -25,8 +25,9 @@ use std::sync::RwLock as StdRwLock;
 use tokio::sync::RwLock;
 use wcore_egress::{EgressDecision, EgressPolicy};
 
-use super::classify::{AllowList, EgressVerdict, classify};
+use super::classify::{AllowList, EgressVerdict, UnattendedFallback, classify};
 use super::consent::{ConsentDecision, ConsentDoorbell};
+use wcore_egress::EgressOrigin;
 
 /// Whether the egress boundary is enforced or disabled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,10 +108,32 @@ impl AgentEgressPolicy {
     /// sensitive leaves on a data-less read, and the exfil boundary stays
     /// hard-denied regardless. With a doorbell, prompt once/always/no; on
     /// "always" persist the registrable domain so subsequent reaches are silent.
-    async fn resolve_ask(&self, host: &str, registrable: &str, reason: &str) -> EgressDecision {
+    async fn resolve_ask(
+        &self,
+        host: &str,
+        registrable: &str,
+        reason: &str,
+        unattended: UnattendedFallback,
+    ) -> EgressDecision {
         let doorbell = self.doorbell.read().ok().and_then(|slot| slot.clone());
         let Some(doorbell) = doorbell else {
-            return EgressDecision::Allow;
+            // wayland#1264: this used to be an unconditional `Allow`. It still
+            // is for a data-less read to a new destination. It is not for a
+            // model-chosen URL carrying data to an allowlisted host, where
+            // "nobody is here to ask" is the attack's precondition, not an
+            // excuse to proceed.
+            return match unattended {
+                UnattendedFallback::Allow => EgressDecision::Allow,
+                UnattendedFallback::Deny => EgressDecision::Deny {
+                    reason: format!(
+                        "{reason}. This session has no way to ask you, so it was \
+                         refused rather than sent. Add `{host}` under \
+                         `[security] egress_allow = [..]` in your config if this \
+                         request is expected, or run in a session with an \
+                         approval surface."
+                    ),
+                },
+            };
         };
         match doorbell.ask(host, registrable, reason).await {
             ConsentDecision::Once => EgressDecision::Allow,
@@ -172,7 +195,7 @@ impl AgentEgressPolicy {
 
 #[async_trait::async_trait]
 impl EgressPolicy for AgentEgressPolicy {
-    async fn check(&self, request: &reqwest::Request) -> EgressDecision {
+    async fn check(&self, request: &reqwest::Request, origin: EgressOrigin) -> EgressDecision {
         if self.posture == EgressPosture::Off {
             return EgressDecision::Allow;
         }
@@ -180,7 +203,7 @@ impl EgressPolicy for AgentEgressPolicy {
         let url = request.url();
         let verdict = {
             let allow = self.allow.read().await;
-            classify(request.method(), url, &allow)
+            classify(request.method(), url, &allow, origin)
         };
         match verdict {
             EgressVerdict::Allow => EgressDecision::Allow,
@@ -188,9 +211,22 @@ impl EgressPolicy for AgentEgressPolicy {
                 host,
                 registrable,
                 reason,
-            } => self.resolve_ask(&host, &registrable, &reason).await,
+                unattended,
+            } => {
+                self.resolve_ask(&host, &registrable, &reason, unattended)
+                    .await
+            }
             EgressVerdict::Exfil { host, reason, .. } => self.resolve_exfil(&host, &reason),
         }
+    }
+}
+
+/// Test-only shorthand. Every arm written before wayland#1264 grades
+/// PRODUCT-origin traffic, whose treatment the change leaves exactly as it was.
+#[cfg(test)]
+impl AgentEgressPolicy {
+    async fn check_as_product(&self, request: &reqwest::Request) -> EgressDecision {
+        self.check(request, EgressOrigin::Product).await
     }
 }
 
@@ -215,7 +251,7 @@ mod tests {
         let p = AgentEgressPolicy::disabled();
         // Even a blatant POST-exfil to a request-bin is allowed when off.
         let d = p
-            .check(&req(reqwest::Method::POST, "https://webhook.site/abc"))
+            .check_as_product(&req(reqwest::Method::POST, "https://webhook.site/abc"))
             .await;
         assert!(matches!(d, EgressDecision::Allow));
     }
@@ -224,7 +260,7 @@ mod tests {
     async fn allowlisted_post_is_allowed() {
         let p = AgentEgressPolicy::enforcing(allow_with(&["anthropic.com"]));
         let d = p
-            .check(&req(
+            .check_as_product(&req(
                 reqwest::Method::POST,
                 "https://api.anthropic.com/v1/messages",
             ))
@@ -236,7 +272,7 @@ mod tests {
     async fn post_to_non_allowlisted_host_is_denied() {
         let p = AgentEgressPolicy::enforcing(AllowList::default());
         let d = p
-            .check(&req(reqwest::Method::POST, "https://evil.test/collect"))
+            .check_as_product(&req(reqwest::Method::POST, "https://evil.test/collect"))
             .await;
         match d {
             EgressDecision::Deny { reason } => assert!(reason.contains("evil.test")),
@@ -249,7 +285,7 @@ mod tests {
         let p = AgentEgressPolicy::enforcing(AllowList::default());
         let secret = "A".repeat(120);
         let d = p
-            .check(&req(
+            .check_as_product(&req(
                 reqwest::Method::GET,
                 &format!("https://evil.test/x?d={secret}"),
             ))
@@ -263,7 +299,7 @@ mod tests {
         // makes this prompt). Nothing sensitive leaves.
         let p = AgentEgressPolicy::enforcing(AllowList::default());
         let d = p
-            .check(&req(reqwest::Method::GET, "https://react.dev/learn"))
+            .check_as_product(&req(reqwest::Method::GET, "https://react.dev/learn"))
             .await;
         assert!(matches!(d, EgressDecision::Allow));
     }
@@ -272,7 +308,7 @@ mod tests {
     async fn shared_platform_read_is_denied_even_dataless() {
         let p = AgentEgressPolicy::enforcing(AllowList::default());
         let d = p
-            .check(&req(
+            .check_as_product(&req(
                 reqwest::Method::GET,
                 "https://victim.s3.amazonaws.com/o",
             ))
@@ -312,14 +348,14 @@ mod tests {
         p.set_doorbell(bell.clone());
 
         let d = p
-            .check(&req(reqwest::Method::GET, "https://react.dev/learn"))
+            .check_as_product(&req(reqwest::Method::GET, "https://react.dev/learn"))
             .await;
         assert!(matches!(d, EgressDecision::Allow));
         assert_eq!(bell.asked.lock().unwrap().as_slice(), &["react.dev"]);
 
         // "Once" must NOT persist: a second reach asks again.
         let _ = p
-            .check(&req(reqwest::Method::GET, "https://react.dev/reference"))
+            .check_as_product(&req(reqwest::Method::GET, "https://react.dev/reference"))
             .await;
         assert_eq!(bell.asked.lock().unwrap().len(), 2, "Once never persists");
     }
@@ -332,7 +368,7 @@ mod tests {
 
         // First reach prompts and is allowed.
         let d = p
-            .check(&req(reqwest::Method::GET, "https://react.dev/learn"))
+            .check_as_product(&req(reqwest::Method::GET, "https://react.dev/learn"))
             .await;
         assert!(matches!(d, EgressDecision::Allow));
         assert_eq!(bell.asked.lock().unwrap().len(), 1);
@@ -340,7 +376,7 @@ mod tests {
         // "Always" persisted the registrable domain → a subsequent reach
         // (even a subdomain) is allowed WITHOUT prompting again.
         let d2 = p
-            .check(&req(reqwest::Method::GET, "https://api.react.dev/v1"))
+            .check_as_product(&req(reqwest::Method::GET, "https://api.react.dev/v1"))
             .await;
         assert!(matches!(d2, EgressDecision::Allow));
         assert_eq!(
@@ -355,7 +391,7 @@ mod tests {
         let p = AgentEgressPolicy::enforcing(AllowList::default());
         p.set_doorbell(FixedDoorbell::new(ConsentDecision::No));
         let d = p
-            .check(&req(reqwest::Method::GET, "https://react.dev/learn"))
+            .check_as_product(&req(reqwest::Method::GET, "https://react.dev/learn"))
             .await;
         match d {
             EgressDecision::Deny { reason } => assert!(reason.contains("react.dev")),
@@ -373,7 +409,7 @@ mod tests {
 
         // Allowlisted POST → Allow, no prompt.
         let d = p
-            .check(&req(
+            .check_as_product(&req(
                 reqwest::Method::POST,
                 "https://api.anthropic.com/v1/messages",
             ))
@@ -383,7 +419,7 @@ mod tests {
         // Exfil POST → Deny, no prompt (the doorbell would have said No anyway,
         // but the point is it is never asked — exfil is non-negotiable).
         let d = p
-            .check(&req(reqwest::Method::POST, "https://evil.test/collect"))
+            .check_as_product(&req(reqwest::Method::POST, "https://evil.test/collect"))
             .await;
         assert!(matches!(d, EgressDecision::Deny { .. }));
 

