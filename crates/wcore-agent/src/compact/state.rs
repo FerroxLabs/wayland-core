@@ -28,6 +28,23 @@ pub struct CompactState {
     /// silently discarded the head of every oversized prompt down to it. Only
     /// what came BACK reveals that, and it costs no extra request.
     pub served_window: wcore_config::context_window::ServedWindowTracker,
+    /// FerroxLabs/wayland#1230 -- the slot the endpoint STATED it is serving,
+    /// as opposed to the one `served_window` above INFERS after the fact.
+    ///
+    /// The two are complementary and neither replaces the other. The tracker
+    /// needs no cooperation from the endpoint but cannot answer until a prompt
+    /// has already been truncated twice; this one answers before the first
+    /// request but only for an endpoint that will say (today: an operator-
+    /// declared Ollama, via `/api/ps`). `None` is "did not say", never "the
+    /// window is fine" -- exactly the reading `served_window` carries.
+    pub stated_window: Option<u64>,
+    /// How many times this session has asked. Bounded by
+    /// `AgentEngine::STATED_WINDOW_PROBE_ATTEMPTS`, because a stock Ollama
+    /// unloads an idle model and then reports nothing at all: turn 1 can be
+    /// legitimately unanswerable and turn 2 legitimately answerable, but an
+    /// endpoint that will never answer must not be asked once per turn
+    /// forever.
+    pub stated_window_probes: u32,
     /// B7 — the user's ORIGINAL instruction, captured once and re-folded
     /// verbatim into every compaction.
     ///
@@ -49,6 +66,8 @@ impl CompactState {
             last_input_tokens: 0,
             last_real_input_tokens: 0,
             served_window: Default::default(),
+            stated_window: None,
+            stated_window_probes: 0,
             pinned_instruction: None,
         }
     }
