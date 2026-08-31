@@ -62,7 +62,18 @@ const PIDFILE_ENV: &str = "WCORE_QUARANTINE_TREE_PIDFILE";
 /// past the run's timeout reaches the wall-clock abort.
 const HOLD_MS_ENV: &str = "WCORE_QUARANTINE_TREE_HOLD_MS";
 
-const TEST_NAME: &str = "a_quarantine_abort_takes_the_whole_process_tree_on_windows";
+/// The single test name every re-exec is launched under. One name, not one
+/// per test, so the probe roles have exactly one entry point to keep correct.
+const TEST_NAME: &str = "the_drain_grace_abort_takes_the_whole_process_tree_on_windows";
+
+/// Run whichever probe role this process was re-executed as.
+fn dispatch_role() {
+    match std::env::var(ROLE_ENV).as_deref() {
+        Ok("descendant") => run_as_descendant(),
+        Ok("alias") => run_as_alias(),
+        other => panic!("unknown probe role {other:?}"),
+    }
+}
 
 /// Long enough that the descendant cannot plausibly have exited on its own
 /// within any arm of this test.
@@ -181,86 +192,106 @@ fn abort_through_production(hold_ms: u64, timeout: Duration) -> (u32, String) {
     (pid, err.to_string())
 }
 
-#[test]
-fn a_quarantine_abort_takes_the_whole_process_tree_on_windows() {
-    match std::env::var(ROLE_ENV).as_deref() {
-        Ok("descendant") => return run_as_descendant(),
-        Ok("alias") => return run_as_alias(),
-        _ => {}
-    }
-
-    // ---- liveness control, FIRST -----------------------------------------
-    // Run the identical alias with nobody owning the tree, and prove the
-    // descendant is still alive after `git` has exited. Without this, "the
-    // descendant is gone" below is satisfied by a descendant that never runs
-    // or that ends by itself, and the graded arms would pass against the
-    // kill-the-leaf code this issue is about.
+/// The control that makes every "the descendant is gone" assertion mean
+/// something: run the identical alias with NOBODY owning the tree and prove
+/// the descendant is still alive after `git` has exited.
+///
+/// Without it, a descendant that never starts, or one that ends by itself,
+/// satisfies the graded arms against exactly the kill-the-leaf code this
+/// issue is about. Run first in both of them, and it kills what it measures.
+fn assert_a_descendant_outlives_its_git_when_nobody_owns_the_tree() {
     let exe = std::env::current_exe().expect("current test binary");
-    let control_dir = tempfile::tempdir().expect("tempdir");
-    let control_pidfile = control_dir.path().join("descendant.pid");
-    let control_status = Command::new("git")
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pidfile = dir.path().join("descendant.pid");
+    let status = Command::new("git")
         .args(["-c", alias_args(&exe).as_str(), "treeprobe"])
         .env(ROLE_ENV, "alias")
-        .env(PIDFILE_ENV, &control_pidfile)
+        .env(PIDFILE_ENV, &pidfile)
         .env(HOLD_MS_ENV, "0")
         .stdin(Stdio::null())
         // Null, not piped: the point of the control is that `git` exits and
-        // nothing tears the tree down, and a piped stdout would make this
-        // call block on the very descendant it is measuring.
+        // nothing tears the tree down, and a piped stdout would make this call
+        // block on the very descendant it is measuring.
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
         .expect("run the control alias");
     assert!(
-        control_status.success(),
-        "the control alias did not run cleanly ({control_status}); the fixture, not the \
-         product, is what failed"
+        status.success(),
+        "the control alias did not run cleanly ({status}); the fixture, not the product, is \
+         what failed"
     );
-    let control_pid = read_pid(&control_pidfile).expect(
+    let pid = read_pid(&pidfile).expect(
         "the control recorded no descendant pid, so this fixture spawns nothing and every \
-         assertion below would be vacuous",
+         assertion in the graded arms would be vacuous",
     );
+    let state = process_liveness(pid);
+    kill_pid(pid);
     assert_eq!(
-        process_liveness(control_pid),
+        state,
         ProcessLiveness::Live,
-        "CONTROL: with nobody owning the tree, the descendant must still be alive after \
-         `git` exited. It is not, so the descendant does not outlive its parent here and \
-         this fixture cannot demonstrate #393 at all"
+        "CONTROL: with nobody owning the tree, the descendant must still be alive after `git` \
+         exited. It is {state:?}, so the descendant does not outlive its parent here and this \
+         fixture cannot demonstrate #393 at all"
     );
-    kill_pid(control_pid);
+}
 
-    // ---- arm 1: the drain-grace abort ------------------------------------
-    // `git` exits promptly and the descendant holds the inherited pipe, so
-    // `join_drain` is what fails. The wall-clock budget is far above the
-    // 5 s drain grace so it cannot be the guard that fires.
-    let (drain_pid, drain_err) = abort_through_production(0, Duration::from_secs(120));
-    assert!(
-        drain_err.contains("pipe is still open"),
-        "arm 1 must reach the DRAIN-GRACE abort, not some other exit, or it grades a path \
-         #393 c1 does not name: {drain_err}"
-    );
-    let drain_state = settle(drain_pid, Duration::from_secs(20));
-    assert_eq!(
-        drain_state,
-        ProcessLiveness::Dead,
-        "#393 c1: after the drain-grace abort the descendant (pid {drain_pid}) is {drain_state:?}. \
-         The leaf was reaped and its tree was left running. abort said: {drain_err}"
-    );
+/// #393 c1, ABORT PATH 1 of 2 — the drain-grace exit.
+///
+/// `git` exits promptly and a descendant it started still holds the inherited
+/// pipe, so the pipe can never reach EOF and `join_drain` is what fails. This
+/// is the exit the ticket calls the second door onto the abandoned tree, and
+/// it is reached with the wall-clock guard untouched.
+///
+/// Separate from the wall-clock arm rather than a second assertion inside it:
+/// c1 says BOTH paths, and a single test stops at its first failing assertion,
+/// so one test could only ever demonstrate one of them going red.
+#[test]
+fn the_drain_grace_abort_takes_the_whole_process_tree_on_windows() {
+    if std::env::var_os(ROLE_ENV).is_some() {
+        return dispatch_role();
+    }
+    assert_a_descendant_outlives_its_git_when_nobody_owns_the_tree();
 
-    // ---- arm 2: the wall-clock abort -------------------------------------
-    // The alias itself out-lives the timeout, so `git` is still running when
-    // the wall-clock guard fires and the leaf kill happens on that branch.
-    let (timeout_pid, timeout_err) = abort_through_production(30_000, Duration::from_millis(1_500));
+    // The wall-clock budget is far above the 5 s drain grace, so it cannot be
+    // the guard that fires.
+    let (pid, err) = abort_through_production(0, Duration::from_secs(120));
     assert!(
-        timeout_err.contains("timed out after"),
-        "arm 2 must reach the WALL-CLOCK abort: {timeout_err}"
+        err.contains("pipe is still open"),
+        "this arm must reach the DRAIN-GRACE abort, not some other exit, or it grades a path \
+         #393 c1 does not name: {err}"
     );
-    let timeout_state = settle(timeout_pid, Duration::from_secs(20));
+    let state = settle(pid, Duration::from_secs(20));
     assert_eq!(
-        timeout_state,
+        state,
         ProcessLiveness::Dead,
-        "#393 c1: after the wall-clock abort the descendant (pid {timeout_pid}) is \
-         {timeout_state:?}. abort said: {timeout_err}"
+        "#393 c1: after the drain-grace abort the descendant (pid {pid}) is {state:?}. The \
+         leaf was reaped and its tree was left running. abort said: {err}"
+    );
+}
+
+/// #393 c1, ABORT PATH 2 of 2 — the wall-clock timeout.
+///
+/// The alias itself out-lives the timeout, so `git` is still running when the
+/// guard fires and the branch taken is the one that kills the leaf and waits.
+#[test]
+fn the_wall_clock_abort_takes_the_whole_process_tree_on_windows() {
+    if std::env::var_os(ROLE_ENV).is_some() {
+        return dispatch_role();
+    }
+    assert_a_descendant_outlives_its_git_when_nobody_owns_the_tree();
+
+    let (pid, err) = abort_through_production(30_000, Duration::from_millis(1_500));
+    assert!(
+        err.contains("timed out after"),
+        "this arm must reach the WALL-CLOCK abort: {err}"
+    );
+    let state = settle(pid, Duration::from_secs(20));
+    assert_eq!(
+        state,
+        ProcessLiveness::Dead,
+        "#393 c1: after the wall-clock abort the descendant (pid {pid}) is {state:?}. abort \
+         said: {err}"
     );
 }
 
@@ -277,7 +308,7 @@ fn a_quarantine_abort_takes_the_whole_process_tree_on_windows() {
 #[test]
 fn a_successful_quarantine_run_leaves_its_tree_standing_on_windows() {
     if std::env::var_os(ROLE_ENV).is_some() {
-        return;
+        return dispatch_role();
     }
     let exe = std::env::current_exe().expect("current test binary");
     let dir = tempfile::tempdir().expect("tempdir");
