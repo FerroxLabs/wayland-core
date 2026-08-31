@@ -9165,6 +9165,52 @@ impl AgentEngine {
         ctx
     }
 
+    /// FerroxLabs/wayland#1218 — the output cap for THIS turn, sized against
+    /// the window that is ACTUALLY in force.
+    ///
+    /// This is the turn loop's whole output-sizing step, moved off the call
+    /// site and onto the engine. It was inline, and that is why #1218 could not
+    /// be bound: `size_output_cap` is pure and every test reached it directly,
+    /// so the one production line that decides WHICH window it is handed —
+    /// `resolve_preflight_window(...).window` — was reachable only by running a
+    /// whole turn. Replacing that derivation with a literal `None` (the exact
+    /// shape of the defect: sizing the ask against no window at all) compiled
+    /// and left the entire suite green. As a method it is on the same footing
+    /// as [`Self::emergency_limit_tokens`] and [`Self::autocompact_threshold_now`],
+    /// the other window-derived boundaries, and a test can grade the derivation
+    /// rather than the arithmetic.
+    ///
+    /// `model` must be the FINAL post-swap model — the same one the guard
+    /// certified the input against — so the ceiling and the ask cannot be
+    /// computed on different windows.
+    ///
+    /// Per `.planning/DECISIONS.md` Q-1218 the clamp is to the ROOM LEFT in the
+    /// window in force, never to the withheld reserve: it is identity wherever
+    /// the window in force is the catalogued one, so a healthy large window
+    /// keeps the model's real output ceiling.
+    fn turn_output_cap(
+        &self,
+        est_input_tokens: usize,
+        is_reasoning_turn: bool,
+        model: &str,
+    ) -> u32 {
+        // #1179 — the same reconciled window the #255 guard certified the input
+        // against, so the ceiling and the ask cannot be computed on different
+        // windows.
+        let window_in_force = self
+            .resolve_preflight_window(est_input_tokens as u64, model)
+            .window
+            .map(|w| u32::try_from(w).unwrap_or(u32::MAX));
+        size_output_cap(
+            self.max_tokens,
+            self.compat.provider_type(),
+            model,
+            est_input_tokens,
+            is_reasoning_turn,
+            window_in_force,
+        )
+    }
+
     fn smart_compact_fraction(&self) -> Option<f64> {
         // Chokepoint: nothing below runs unless explicitly enabled.
         if !self.compact_config.smart_enabled {
@@ -14138,20 +14184,12 @@ impl AgentEngine {
                     // so both must lift an unknown model off the 8192 floor.
                     let is_reasoning_turn =
                         requested_thinking_budget.is_some() || request.reasoning_effort.is_some();
-                    // #1179 — the same reconciled window the #255 guard above
-                    // certified the input against, so the ceiling and the ask
-                    // cannot be computed on different windows.
-                    let window_in_force = self
-                        .resolve_preflight_window(input_token_estimate as u64, &request.model)
-                        .window
-                        .map(|w| u32::try_from(w).unwrap_or(u32::MAX));
-                    request.max_tokens = size_output_cap(
-                        self.max_tokens,
-                        self.compat.provider_type(),
-                        &request.model,
+                    // #1218 — the window derivation and the sizing live together
+                    // on `turn_output_cap`, which is what makes them gradeable.
+                    request.max_tokens = self.turn_output_cap(
                         input_token_estimate,
                         is_reasoning_turn,
-                        window_in_force,
+                        &request.model,
                     );
                     // #112 — when the user omitted `--max-tokens`, the model is
                     // unknown to the registry, and the provider is omit-safe, OMIT the
@@ -24939,6 +24977,159 @@ mod compact_tests {
             format!("{:?}", engine.messages),
             before,
             "second pass must also be a no-op (idempotent)"
+        );
+    }
+
+    // -- #1218: the output ask is sized against the window in force --
+
+    /// FerroxLabs/wayland#1218 c1/c2 — the `max_tokens` a turn ACTUALLY asks
+    /// for must be sized against the window in force, so the admitted input
+    /// plus the asked output cannot exceed it.
+    ///
+    /// This grades [`AgentEngine::turn_output_cap`], not `size_output_cap`.
+    /// The arithmetic was never the defect: `size_output_cap` is pure, has
+    /// twenty-odd unit tests, and every one of them passes `window_in_force`
+    /// itself. The defect is which window the PRODUCTION path hands it, and
+    /// that line — `resolve_preflight_window(..).window` — had exactly one
+    /// call site, inside the turn loop, reachable by no test. Replacing it
+    /// with a literal `None` compiled and left 4,010 tests green. Extracting
+    /// the derivation onto the engine, next to `emergency_limit_tokens` and
+    /// `autocompact_threshold_now`, is what makes it gradeable.
+    ///
+    /// The configuration is the one #1218 measured, and the same one #1210's
+    /// control uses: an unlisted model with a CORROBORATED 8,192-token learned
+    /// served window. The ticket's arithmetic is `ceiling 5,053 + ask 8,192 =
+    /// 13,245 on an 8,192-token slot`, so the input estimate here is that
+    /// 5,053-token ceiling.
+    #[test]
+    fn the_output_ask_is_sized_against_the_window_in_force() {
+        const LEARNED: u32 = 8_192;
+        /// The pre-flight ceiling on the learned slot — the figure the guard
+        /// admits, and therefore the input this ask has to fit beside.
+        const EST_INPUT: usize = 5_053;
+        /// `size_output_cap`'s WINDOW_BUFFER, restated so a re-grade reads the
+        /// same arithmetic rather than trusting a private constant.
+        const WINDOW_BUFFER: u32 = 512;
+        /// The un-windowed ask the defect produced (`UNKNOWN_CAP`).
+        const UNWINDOWED_ASK: u32 = 8_192;
+
+        let config = CompactConfig::default();
+        let mut state = CompactState::new();
+        // Corroborate through the tracker rather than by poking a field: the
+        // Shortfall arm carries its own corroboration, so one qualifying
+        // observation is enough.
+        state
+            .served_window
+            .observe("test/test-model", 20_000, LEARNED as u64)
+            .expect("precondition: a gross shortfall must produce evidence");
+        assert_eq!(
+            state.served_window.sizing_window(),
+            Some(LEARNED as u64),
+            "precondition: the evidence must be CORROBORATED, or this test \
+             grades the un-narrowed path and passes for the wrong reason"
+        );
+
+        let mut engine = make_compact_engine(config, state, vec![]);
+        // A generous user cap, so what is graded is the WINDOW clamp and not
+        // `self.max_tokens` binding first.
+        engine.max_tokens = 64_000;
+        assert!(
+            wcore_config::limits::model_output_ceiling(
+                engine.compat.provider_type(),
+                &engine.model
+            )
+            .is_none(),
+            "precondition: an UNLISTED model — the arm that had no window \
+             clamp at all before #1179, and the arm #1218 measured"
+        );
+        assert_eq!(
+            engine
+                .resolve_preflight_window(EST_INPUT as u64, &engine.model)
+                .window,
+            Some(LEARNED as u64),
+            "precondition: the window in force must BE the learned one"
+        );
+
+        let ask = engine.turn_output_cap(EST_INPUT, false, &engine.model);
+
+        // Graded as an IDENTITY against the window in force, not as an
+        // inequality: any number of wrong windows are "smaller than 8,192".
+        assert_eq!(
+            ask,
+            LEARNED - EST_INPUT as u32 - WINDOW_BUFFER,
+            "the ask must be the room left in the window IN FORCE"
+        );
+        // And the property the ticket actually measures, stated in the
+        // ticket's own terms.
+        assert!(
+            EST_INPUT as u32 + ask <= LEARNED,
+            "#1218: admitted input + asked output must fit the window in force; \
+             got {EST_INPUT} + {ask} on a {LEARNED}-token slot"
+        );
+        assert_ne!(
+            ask,
+            UNWINDOWED_ASK,
+            "the un-windowed ask is what the defect sent: {EST_INPUT} + \
+             {UNWINDOWED_ASK} = {} on a {LEARNED}-token slot",
+            EST_INPUT as u32 + UNWINDOWED_ASK
+        );
+    }
+
+    /// The control `.planning/DECISIONS.md` Q-1218 demands: WRONG REFUSAL
+    /// outranks the leak here, because a cap that comes out too small silently
+    /// TRUNCATES EVERY ANSWER, on every turn, on every large model.
+    ///
+    /// #1218's title reads as an instruction to clamp the ask to the withheld
+    /// `output_reserve`. Done literally that cuts a healthy large-window Claude
+    /// turn from its real 128,000-token output ceiling down to the reserve, to
+    /// fix a defect that only exists below a 49,152-token window. Q-1218
+    /// clamps to the ROOM LEFT in the window instead, which is identity here.
+    ///
+    /// This test must hold at the PRODUCTION path — the pure-function pin
+    /// `a_window_in_force_that_is_the_catalogued_one_changes_no_sizing` covers
+    /// the arithmetic, but it cannot see what the turn loop hands in.
+    #[test]
+    fn a_large_healthy_window_still_gets_the_models_full_output_ceiling() {
+        let config = CompactConfig::default();
+        // No served-window evidence at all: nothing narrows, and the window in
+        // force is the catalogued one.
+        let engine_state = CompactState::new();
+        assert_eq!(
+            engine_state.served_window.sizing_window(),
+            None,
+            "precondition: a HEALTHY route — no truncation has been observed"
+        );
+
+        let mut engine = make_compact_engine(config.clone(), engine_state, vec![]);
+        engine.model = "claude-sonnet-4-6".to_string();
+        // Above the model's real ceiling, so the CEILING binds and not the cap.
+        engine.max_tokens = 200_000;
+
+        let (ceiling, window) = wcore_config::limits::model_output_ceiling(
+            engine.compat.provider_type(),
+            &engine.model,
+        )
+        .expect("precondition: a CATALOGUED model, or this control grades nothing");
+        assert!(
+            window >= 200_000,
+            "precondition: a large healthy window, got {window}"
+        );
+
+        let ask = engine.turn_output_cap(1_000, false, &engine.model);
+
+        assert_eq!(
+            ask, ceiling,
+            "a large healthy window must still get the model's full output \
+             ceiling — #1218's clamp is IDENTITY wherever the window in force \
+             is the catalogued one"
+        );
+        // Named explicitly, because this is the regression the control exists
+        // to catch: clamping to the withheld reserve instead of to the room.
+        let reserve = config.scaled_reserves(window as usize).output_reserve;
+        assert!(
+            (ask as usize) > reserve,
+            "clamping the ask to the withheld reserve would cut this turn from \
+             {ceiling} to {reserve} tokens — every answer, every turn"
         );
     }
 
