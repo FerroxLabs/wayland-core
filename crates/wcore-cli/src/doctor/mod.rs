@@ -24,6 +24,7 @@ use std::process::ExitCode;
 
 use wcore_config::shell::shell_command_argv;
 use wcore_cua::permissions::{TccCapability, TccStatus};
+use wcore_types::url_authority::dialed_host_str;
 
 /// A structured doctor report: every check row plus the version banner.
 ///
@@ -996,28 +997,29 @@ fn base_url_caveat(cfg: &wcore_config::config::Config) -> Vec<String> {
         Some(p) => crate::provider_keys::validation_endpoint(p, ""),
         None => return Vec::new(),
     };
-    let vendor_host = host_of(&url);
-    if vendor_host.is_empty() || vendor_host == host_of(&cfg.base_url) {
+    let Some(vendor_host) = dialed_host_str(&url) else {
+        return Vec::new();
+    };
+    // FerroxLabs/wayland#1252 c1/c3 — both sides of this comparison come from
+    // the ONE authority parser (`wcore_types::url_authority`), never from a
+    // hand cut. The cut that used to live here read
+    // `https://evil.example\@api.openai.com/v1` as `api.openai.com`, which
+    // EQUALS the vendor host, so this returned early and the caveat was NOT
+    // printed — while reqwest dialed `evil.example`. That is the suppression
+    // #1079 exists to prevent, reached through the spelling rather than the
+    // shape.
+    //
+    // A `base_url` whose host the parser cannot name at all (`None`) is
+    // treated as DIFFERENT from the vendor host, so the caveat IS printed.
+    // Fail-loud is the safe direction for a diagnostic: an extra caveat is
+    // noise, a missing one answers a question the user did not ask.
+    if dialed_host_str(&cfg.base_url).as_deref() == Some(vendor_host.as_str()) {
         return Vec::new();
     }
     vec![
         format!("           checked against {vendor_host}, NOT the base url above —"),
         "           a proxy or gateway there is not covered by this verdict".to_string(),
     ]
-}
-
-/// Host portion of a URL, without pulling in a URL parser for one comparison.
-/// Returns `""` when there is no `//` authority to read.
-fn host_of(url: &str) -> &str {
-    let after_scheme = match url.split_once("//") {
-        Some((_, rest)) => rest,
-        None => return "",
-    };
-    let host = after_scheme
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or_default();
-    host.rsplit_once('@').map_or(host, |(_, h)| h)
 }
 
 /// **Printed, deliberately NOT a `CheckResult` row** — the same reason
@@ -1865,17 +1867,74 @@ mod tests {
         );
     }
 
+    fn caveat_for(base_url: &str) -> Vec<String> {
+        base_url_caveat(&wcore_config::config::Config {
+            provider_label: "openai".to_string(),
+            base_url: base_url.to_string(),
+            ..Default::default()
+        })
+    }
+
+    /// FerroxLabs/wayland#1252 c1 + c4 — the PRODUCTION site, not a helper.
+    ///
+    /// `base_url_caveat` is what decides whether `/doctor` tells the user its
+    /// key verdict is about the vendor endpoint rather than the endpoint they
+    /// configured. Both directions are asserted here on purpose: #1243's own
+    /// red arm showed that a mutation which simply prints the caveat always
+    /// passes the positive test while destroying the feature.
     #[test]
-    fn host_of_reads_the_authority_and_nothing_else() {
-        assert_eq!(
-            host_of("https://api.anthropic.com/v1/models"),
-            "api.anthropic.com"
+    fn the_base_url_caveat_is_printed_for_every_host_that_is_not_the_vendor() {
+        // THE DEFECT (#1252 site A). `\` is a path separator for a special
+        // scheme, so this dials `evil.example`. The hand cut read
+        // `api.openai.com`, matched the vendor host, and SUPPRESSED the caveat.
+        let smuggled = caveat_for(r"https://evil.example\@api.openai.com/v1");
+        assert!(
+            !smuggled.is_empty(),
+            "a base_url that dials evil.example must still print the caveat"
         );
-        assert_eq!(host_of("https://api.openai.com"), "api.openai.com");
-        assert_eq!(host_of("https://h.example/v1?key=secret"), "h.example");
-        // Credentials in the authority must not be mistaken for the host.
-        assert_eq!(host_of("https://user:pw@h.example/v1"), "h.example");
-        assert_eq!(host_of("not-a-url"), "");
+        assert!(
+            smuggled[0].contains("api.openai.com"),
+            "the caveat must name the VENDOR host that was checked: {smuggled:?}"
+        );
+
+        // The two spellings that defeated the earlier hand cuts, for the same
+        // reason: the authority ends before `?` and before `#` too.
+        for raw in [
+            "https://evil.example?z=@api.openai.com",
+            "https://evil.example#@api.openai.com",
+            "https://api.openai.com.evil.example/v1",
+            "https://proxy.internal/v1",
+        ] {
+            assert!(
+                !caveat_for(raw).is_empty(),
+                "a genuinely different configured host must print the caveat: {raw}"
+            );
+        }
+
+        // WRONG-REFUSAL CONTROL, the direction a blanket-print mutation
+        // destroys: a base_url that really IS the vendor host suppresses it.
+        for raw in [
+            "https://api.openai.com/v1",
+            "https://API.OpenAI.COM/v1",
+            "https://user:pw@api.openai.com/v1",
+        ] {
+            assert!(
+                caveat_for(raw).is_empty(),
+                "the configured host IS the vendor host — no caveat is owed: {raw}"
+            );
+        }
+    }
+
+    /// A `base_url` the URL parser cannot name a host for is not the vendor
+    /// host, so the caveat is printed. `None` must never read as "same".
+    #[test]
+    fn an_unparsable_base_url_still_prints_the_caveat() {
+        for raw in ["", "   ", "api.openai.com", "not a url at all"] {
+            assert!(
+                !caveat_for(raw).is_empty(),
+                "an unnameable base_url must not suppress the caveat: {raw:?}"
+            );
+        }
     }
 
     #[test]

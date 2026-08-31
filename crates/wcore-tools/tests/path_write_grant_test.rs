@@ -15,6 +15,17 @@
 //! 3. **Nothing legitimate is refused** — a wrong refusal is a defect too, and
 //!    it is the one that gets shipped, because a refusal looks like the guard
 //!    working.
+//!
+//! FerroxLabs/wayland-core#384: two assertions in this file used to also ask
+//! `WorkspacePolicy::is_session_write_granted`. That predicate had NO
+//! production call site — its doc comment claimed `SandboxedFs`'s mutating
+//! operations asked it, and they never did — so those two assertions graded
+//! nothing reachable, and it has been deleted. The enclosing tests are
+//! deliberately KEPT: each drives `fs.write` / `fs.read` on the real
+//! `SandboxedFs`, which is the enforcement point (`contain_write` ->
+//! `contain_granted` -> `live_grant_roots`). Deleting them to satisfy the
+//! letter of "deleted together with the two tests that grade it" would remove
+//! #1104's definition-of-done arms and grade the live path less, not more.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
