@@ -109,7 +109,32 @@ fn float_bearing_values_are_stable_across_a_round_trip() {
     // Provider payloads carry computed floats. serde_json writes the shortest
     // representation that round-trips, so these must be exact; if they were
     // not, every journal carrying a cost or a score would be unreadable.
-    for v in [0.1_f64, 1.0 / 3.0, 1e-10, 1e22, f64::MIN_POSITIVE] {
+    //
+    // THIS TEST SHIPPED VACUOUS. It carried this name and this reason while
+    // the defect it describes was live in every release from v0.10.0 to
+    // v0.13.11, because all five of its original values happen to survive the
+    // imprecise parser. WRITING the float was never the problem -- serde uses
+    // ryu and is exact. READING it back was: without serde_json's
+    // `float_roundtrip` feature the fast parse path double-rounds and lands
+    // 1 ULP off, so the re-serialization differs from the bytes on disk, the
+    // recomputed `state_payload_digest` disagrees, and every later turn in
+    // that conversation is refused forever with `state digest mismatch`.
+    //
+    // MEASURED on this workspace, both arms, 200,000 uniform f64 in [0,1):
+    // 10.51% fail to round-trip WITHOUT the feature, 0.00% WITH it. All five
+    // original values are in the 89% that pass, which is the whole reason this
+    // test was green. Do not reduce this set to "nice" constants again.
+    let mut named: Vec<f64> = vec![0.1, 1.0 / 3.0, 1e-10, 1e22, f64::MIN_POSITIVE];
+    // Each of these was MEASURED to break with the feature off.
+    named.extend([
+        0.39897699999999997,
+        0.38595771669529844,
+        0.9238829120510785,
+        0.20599677708342345,
+        0.17634486044635123,
+        0.9956056817917075,
+    ]);
+    for v in named {
         let ev = SessionEvent::ToolExecutionFinished {
             tool_execution_id: "f".into(),
             outcome: CompletionOutcome::Succeeded,
@@ -117,6 +142,33 @@ fn float_bearing_values_are_stable_across_a_round_trip() {
         };
         assert_round_trip_stable(&ev, &format!("float {v}"));
     }
+
+    // A named set can only ever prove the values someone thought of, and the
+    // last one missed a defect that hits one value in ten. This sweep is what
+    // makes the test unable to go vacuous: a deterministic xorshift over a
+    // realistic cost/score range, carried in ONE event so it costs one
+    // round-trip. At 10.51% per value the feature being dropped is caught with
+    // certainty, and the sequence is fixed so a failure is reproducible.
+    let mut s: u64 = 0x2545F4914F6CDD1D;
+    let mut swept: Vec<serde_json::Value> = Vec::with_capacity(2048);
+    for _ in 0..2048 {
+        s ^= s << 13;
+        s ^= s >> 7;
+        s ^= s << 17;
+        let v = (s >> 11) as f64 / (1u64 << 53) as f64;
+        swept.push(json!(v));
+    }
+    let ev = SessionEvent::ToolExecutionFinished {
+        tool_execution_id: "sweep".into(),
+        outcome: CompletionOutcome::Succeeded,
+        result: json!({ "costs": swept }),
+    };
+    assert_round_trip_stable(
+        &ev,
+        "2048 swept floats -- if this is the only arm that failed, \
+         serde_json's `float_roundtrip` feature has been dropped from the \
+         workspace Cargo.toml",
+    );
 }
 
 #[test]
