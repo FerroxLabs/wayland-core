@@ -2849,6 +2849,23 @@ jobs:
     #
     # `eval-gate-linux`, `build` and `all-features-check` were absent for the
     # same reason and are added with it.
+    # not-aggregated: build-darwin-selfhosted
+    #
+    # DELIBERATE, and it is the only job excluded. `build-darwin-selfhosted`
+    # runs on `push` to `lane/**` ONLY -- never on `pull_request` -- so on the
+    # path that actually gates `main` (a PR) its `if:` is false and it is
+    # SKIPPED. Aggregating a job that cannot run on the gating path adds no
+    # signal to the required check.
+    #
+    # It also adds a liveness hazard. On a `lane/**` push where the job DOES
+    # run, `needs` waits for it to conclude; if the self-hosted Mac is offline
+    # the job sits QUEUED and GitHub only cancels it after 24h, so `report`
+    # -- a required context -- would pend for a day. `if: always()` does not
+    # help: it decides whether the job runs once its needs RESOLVE, and a
+    # queued need never resolves. That machine goes offline routinely.
+    #
+    # No signal is lost: the job publishes its own check,
+    # `Build (aarch64-apple-darwin) [self-hosted]`, which is visible on the run.
     needs: [ci, ci-windows-hosted, ci-linux, eval-gate-linux, build, all-features-check]
     if: always()
     runs-on: ubuntu-latest
@@ -2882,27 +2899,33 @@ jobs:
       # so on a rationed run the one assertion that would catch a hollow pass
       # skipped too and `report` asserted NOTHING.
       - name: No dependency failed (a required check must grade what it aggregates)
-        run: |
-          set -euo pipefail
-          fail=0
-          check() {
-            case "$2" in
-              failure|cancelled)
-                echo "::error title=report::dependency '$1' concluded '$2' — the required check cannot pass over it."
-                fail=1 ;;
-              *) printf '  ok   %-22s %s\n' "$1" "$2" ;;
-            esac
-          }
-          check ci                 "${{ needs.ci.result }}"
-          check ci-windows-hosted  "${{ needs.ci-windows-hosted.result }}"
-          check ci-linux           "${{ needs.ci-linux.result }}"
-          check eval-gate-linux    "${{ needs.eval-gate-linux.result }}"
-          check build              "${{ needs.build.result }}"
-          check all-features-check "${{ needs.all-features-check.result }}"
-          [ "$fail" -eq 0 ] || exit 1
-          echo "OK: no dependency failed or was cancelled."
+        # ADMISSION: `!cancelled()` and nothing else. A step with no `if:` is
+        # implicitly `if: success()`, which is NOT unconditional -- it stands
+        # down the moment anything before it fails, which is exactly when a
+        # gate matters most. `always() && <expr>` is worse: it reads as
+        # unconditional and is a gate ANDed back off.
+        if: ${{ !cancelled() }}
+        # THE SET GRADED IS THE SET DEPENDED ON, BY CONSTRUCTION. This was six
+        # hand-written `check <job> "${{ needs.<job>.result }}"` lines beside a
+        # six-name `needs:` list, with nothing keeping them in sync. Deleting
+        # one `check` line left this required check silently passing over that
+        # job with every self-test on the branch still green, and the same
+        # class one level up let `report` go GREEN over a RED `ci-linux`
+        # (run 33262552890). Passing `toJSON(needs)` removes the second list,
+        # so a dependency cannot be added to `needs:` and forgotten here.
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: bash .github/scripts/assert-no-dependency-failed.sh
 
+      # PREREQUISITE OF A GATE, so it carries the gate's own admission.
+      # Measured on run 33320774111: the evidence gate ran (it had
+      # `!cancelled()`) and died exit 127 with "assert-test-evidence.sh: No
+      # such file or directory", because the step above it had FAILED and
+      # this checkout, carrying no condition, was skipped along with the
+      # artifact download. A required check reported "No such file" where
+      # it meant "a dependency failed".
       - uses: actions/checkout@v6
+        if: ${{ !cancelled() }}
 
       # `merge-multiple: true` was REMOVED 2026-08-02 (lane/ci-windows-fallback).
       # Every producing leg uploads its report under the SAME filename,
@@ -2918,6 +2941,8 @@ jobs:
       # it — but the defect predates the addition and cost the aggregate report
       # its per-leg detail for as long as more than one leg has been uploading.
       - name: Download nextest JUnit artifacts
+        # Prerequisite of the evidence gate -- see the checkout above.
+        if: ${{ !cancelled() }}
         uses: actions/download-artifact@v8
         with:
           pattern: nextest-junit-*
@@ -3006,10 +3031,25 @@ jobs:
       # The `if:` now also fires when `ci` was skipped but `ci-linux` produced a
       # verdict. Without that widening, the per-leg floor would be unreachable
       # on exactly the lane pushes where `ci-linux` is the only leg that ran.
+      # ADMISSION WAS a hand-written needs-result expression, which is a gate
+      # that stands itself down: when BOTH `ci` and `ci-linux` were cancelled
+      # or skipped it evaluated false, the step was SKIPPED, and a skipped step
+      # is not a failure -- so `report` could conclude success having asserted
+      # NOTHING about test evidence. It is now a status-check function and
+      # nothing else; whether the evidence is ADEQUATE is
+      # assert-test-evidence.sh's job, and that script fails closed.
+      #
+      # `!cancelled()` also strictly covers the wayland#1216 case the old
+      # expression existed for -- the gate must still fire when `ci` was
+      # skipped but the required `ci-linux` leg ran -- because it fires on
+      # every outcome except cancellation.
+      #
+      # KEEP THIS COMMENT ABOVE THE `- name:` LINE. outer-retry-evidence.test.sh
+      # extracts this step's condition with `awk` from the step name down to
+      # `env:` and compares the result for equality, so a comment placed
+      # BETWEEN them is read as part of the condition and fails the check.
       - name: Assert test evidence exists (a skipped test step is not a pass)
-        if: >-
-          ${{ (needs.ci.result != 'cancelled' && needs.ci.result != 'skipped')
-              || (needs.ci-linux.result != 'cancelled' && needs.ci-linux.result != 'skipped') }}
+        if: ${{ !cancelled() }}
         env:
           EVIDENCE_DIR: junit-reports
           EXPECTED_MIN: 1

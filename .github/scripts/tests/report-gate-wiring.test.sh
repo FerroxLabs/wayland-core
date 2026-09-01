@@ -211,8 +211,38 @@ want_grep "the required leg name matches the uploaded artifact name" \
   "$CI" "name: nextest-junit-linux-containerized"
 # ...and the report job must still fire when `ci` was skipped but the required
 # leg ran, or the floor is unreachable on exactly those runs.
-want_grep "the evidence step fires on ci-linux's own result too" \
-  "$CI" "needs.ci-linux.result != 'cancelled'"
+#
+# THIS ASSERTION WAS A LITERAL grep FOR `needs.ci-linux.result != 'cancelled'`,
+# i.e. it pinned one IMPLEMENTATION of that requirement. That implementation is
+# now FORBIDDEN: gate-admission.py requires the evidence gate be admitted by
+# `always()` or `!cancelled()` and nothing else, because a hand-written
+# needs-result expression is a gate that can stand ITSELF down -- when both `ci`
+# and `ci-linux` were cancelled or skipped the old expression evaluated false,
+# the step was SKIPPED, and a skipped step is not a failure, so `report` could
+# conclude success having asserted nothing. The two rules contradicted, and the
+# older literal one lost.
+#
+# The REQUIREMENT is unchanged and is now met more broadly: `!cancelled()` fires
+# on every outcome except cancellation, which strictly includes "ci skipped,
+# ci-linux ran". Assert that property instead of the vanished string, so the
+# gate cannot be re-narrowed to any needs-result expression.
+gate_if=$(awk '/^      - name: Assert test evidence exists/ {f=1; next}
+               f && /^        env:/ {exit}
+               f' "$CI" | tr -d '\n' | sed -e 's/^ *if: *//' -e 's/^\${{//' \
+                 -e 's/}}$//' -e 's/[[:space:]]//g')
+case "$gate_if" in
+  'always()'|'!cancelled()')
+    ok "the evidence step fires regardless of which leg ran (supersedes the ci-linux grep)" ;;
+  *)
+    bad "the evidence step fires regardless of which leg ran (admitted by: $gate_if)" ;;
+esac
+# ANTI-VACUITY: the extractor must still be able to find a condition at all, or
+# the case above would pass a rename by matching the empty string.
+if [ -n "$gate_if" ]; then
+  ok "the evidence gate's condition was located (anti-vacuity)"
+else
+  bad "the evidence gate's condition was located (anti-vacuity)"
+fi
 
 echo "---"
 echo "passed: $PASS  failed: $FAIL"
