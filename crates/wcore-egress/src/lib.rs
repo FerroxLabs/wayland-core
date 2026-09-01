@@ -128,11 +128,36 @@ pub async fn read_body_capped(
 /// `ECONNREFUSED`, and while the socket is held nothing else can bind it. So
 /// the fixture stops assuming the port is free and starts OWNING it.
 ///
-/// Proven on this host with its own controls before the type was written:
+/// Proven ON LINUX with its own controls before the type was written:
 /// bound-not-listening → `REFUSED`; a second bind of the same port →
 /// `Address already in use`; the same socket WITH `listen()` → `CONNECTED`
 /// (so the refusal arm is not vacuous); and the old idiom's dropped port →
 /// re-bound and LISTENING by another socket, which is the race itself.
+///
+/// That proof did not generalise, and saying "this host" is how it got shipped
+/// as though it had. On DARWIN a bound-but-not-listening PCB is found by the
+/// SYN lookup and the packet is DROPPED rather than answered with RST, so
+/// `connect` retransmits and dies at `ETIMEDOUT` instead of refusing. All five
+/// callers of this type were red on ci-macos from the day it landed, and no
+/// re-run could have gone green: it is deterministic, not flaky.
+///
+/// MEASURED on macOS (arm64), five candidates -- `connect` outcome, and
+/// whether a second socket could bind the port while the first was held:
+///
+/// ```text
+///   bind, no listen                ETIMEDOUT  7.78s     unstealable
+///   bind, listen, close            ECONNREFUSED 0.000s  STEALABLE
+///   bind, listen, shutdown, hold   CONNECTED             unstealable
+///   bind, listen(0), hold          CONNECTED             unstealable
+///   listen, close, rebind, hold    ETIMEDOUT  7.86s     unstealable
+/// ```
+///
+/// No idiom gives both properties on Darwin; they are mutually exclusive, and
+/// the two that keep the reservation are the two that cannot refuse. So the
+/// Darwin arm gives up the reservation and VERIFIES the refusal instead, which
+/// is the property every caller actually asserts. `[::1]` and `0.0.0.0` were
+/// measured too and change nothing -- the RST suppression is a property of the
+/// bound PCB, not of the address.
 pub mod refused_port {
     use std::io;
     use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
@@ -148,12 +173,19 @@ pub mod refused_port {
         // Held, never `listen()`ed. Both facts are load-bearing: holding it
         // reserves the port, and not listening is what makes the kernel answer
         // RST instead of completing a handshake.
+        //
+        // Absent on Darwin, where not listening is what makes the kernel answer
+        // NOTHING. See the module doc.
+        #[cfg(not(target_vendor = "apple"))]
         _socket: Socket,
         addr: SocketAddr,
     }
 
     impl RefusedPort {
         /// Reserve an ephemeral loopback port that will refuse connections.
+        ///
+        /// Holds the socket, so the port cannot be taken while the guard lives.
+        #[cfg(not(target_vendor = "apple"))]
         pub fn reserve() -> io::Result<Self> {
             let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
             // Deliberately NOT `set_reuse_address(true)`: SO_REUSEADDR is what
@@ -168,6 +200,59 @@ pub mod refused_port {
                 _socket: socket,
                 addr,
             })
+        }
+
+        /// Darwin: bind, `listen()`, then CLOSE -- and PROVE the refusal before
+        /// handing the address back.
+        ///
+        /// The reservation is genuinely given up here, which is a real loss and
+        /// is why this is not the implementation everywhere. It buys the only
+        /// thing the callers assert: a prompt `ConnectionRefused`. The window
+        /// in which the released port could be taken is the microseconds
+        /// between the probe below and the caller's own connect; today's
+        /// alternative on this platform is not a smaller window but a
+        /// guaranteed `ETIMEDOUT`, so this is strictly better rather than good.
+        #[cfg(target_vendor = "apple")]
+        pub fn reserve() -> io::Result<Self> {
+            // A redraw costs microseconds. Enough of them that a genuinely
+            // contended host fails LOUDLY here rather than intermittently in
+            // whichever assertion happened to inherit the stolen port.
+            const ATTEMPTS: usize = 8;
+
+            let mut last = io::Error::other("no attempt was made");
+            for _ in 0..ATTEMPTS {
+                let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
+                socket.bind(&SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).into())?;
+                // `listen()` is the load-bearing call: it is what makes Darwin
+                // answer RST once the socket is closed. Without it the kernel
+                // silently drops the SYN and `connect` hangs to ETIMEDOUT,
+                // which is the defect this whole branch exists to close.
+                socket.listen(1)?;
+                let addr = socket
+                    .local_addr()?
+                    .as_socket()
+                    .ok_or_else(|| io::Error::other("loopback bind did not yield an IP address"))?;
+                drop(socket);
+
+                // Verify, never assume. Giving up the reservation is only
+                // defensible because the property it protected is checked here,
+                // on this host, at this moment, before the caller sees it.
+                match std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(2))
+                {
+                    Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => {
+                        return Ok(Self { addr });
+                    }
+                    Ok(_) => {
+                        last = io::Error::other(
+                            "the released port was listening again before it could be used",
+                        );
+                    }
+                    Err(e) => last = e,
+                }
+            }
+            Err(io::Error::other(format!(
+                "no refusing loopback port after {ATTEMPTS} attempts: {last}"
+            )))
         }
 
         /// The reserved address. Connecting to it is refused.
@@ -649,11 +734,27 @@ mod tests {
             std::io::ErrorKind::ConnectionRefused,
             "want a refusal, got {err:?}"
         );
+        // The reservation half of the contract exists only where the kernel
+        // refuses a bound-but-not-listening socket. Darwin does not (the module
+        // doc carries the measurement), so there the port is genuinely released
+        // and what is asserted instead is the property every caller depends on:
+        // the refusal is STABLE, not a one-shot that a retry would lose.
+        #[cfg(not(target_vendor = "apple"))]
         assert!(
             std::net::TcpListener::bind(reserved.addr()).is_err(),
             "the port must stay reserved while the guard is alive, or another \
              process can start listening on it mid-test"
         );
+        #[cfg(target_vendor = "apple")]
+        {
+            let again = std::net::TcpStream::connect(reserved.addr())
+                .expect_err("the refusal must hold on a second connect too");
+            assert_eq!(
+                again.kind(),
+                std::io::ErrorKind::ConnectionRefused,
+                "want a stable refusal, got {again:?}"
+            );
+        }
 
         // CONTROL: bind-then-drop leaves the port free for anyone. This is the
         // exact window that reddened the workspace --lib suite.
