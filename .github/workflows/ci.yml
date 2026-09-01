@@ -1244,10 +1244,17 @@ jobs:
     # measured figure moves materially, move this WITH it and update the table
     # above rather than widening the gap.
     #
-    # NOT a cache problem: this workflow has NO actions/cache step anywhere
-    # (grep -c 'actions/cache' ci.yml == 0), so there is no cross-run cache to
-    # go cold and repeated cancellations cannot have caused this. It is
-    # hosted-runner variance against a limit set too close.
+    # NOT a cache problem: THIS JOB caches nothing. Its only `uses:` are
+    # actions/checkout, nick-fields/retry and actions/upload-artifact, so there
+    # is no cross-run cache to go cold and repeated cancellations cannot have
+    # caused this. It is hosted-runner variance against a limit set too close.
+    #
+    # Scope that claim to this job and verify it by reading this job's body --
+    # NOT by grepping the whole file. Other jobs here do set `cache: 'true'`,
+    # and sibling workflows use actions/cache and Swatinem/rust-cache. An
+    # earlier version of this comment cited `grep -c 'actions/cache' ci.yml ==
+    # 0` and its own text then matched that grep, so the check it named
+    # returned 2 and falsified the comment that named it.
     timeout-minutes: 150
     # A job-level `permissions:` block REPLACES the workflow-level one at the
     # top of this file wholesale (GHA semantics) — the same rule that cost the
