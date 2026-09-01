@@ -2912,6 +2912,24 @@ jobs:
       # `needs.ci.result != 'skipped'`, and `ci` is the leg most often skipped,
       # so on a rationed run the one assertion that would catch a hollow pass
       # skipped too and `report` asserted NOTHING.
+      # PREREQUISITE OF A GATE, so it carries the gate's own admission.
+      # Measured on run 33320774111: the evidence gate ran (it had
+      # `!cancelled()`) and died exit 127 with "assert-test-evidence.sh: No
+      # such file or directory", because the step above it had FAILED and
+      # this checkout, carrying no condition, was skipped along with the
+      # artifact download. A required check reported "No such file" where
+      # it meant "a dependency failed".
+      - uses: actions/checkout@v6
+        if: ${{ !cancelled() }}
+
+      # ORDER MATTERS AND IT BIT US: this step runs a script FROM THE REPO, so it
+      # must come AFTER checkout. It previously sat above it -- carried over from
+      # when it was an inline `run:` block that needed no working tree -- and on
+      # PR #417 run 33542986300 it died with
+      #   bash: .github/scripts/assert-no-dependency-failed.sh: No such file or directory
+      # while EVERY dependency had actually succeeded. A required check that reds
+      # for a missing file when nothing failed is the same "red naming the wrong
+      # cause" this job's own comments warn about, one step over.
       - name: No dependency failed (a required check must grade what it aggregates)
         # ADMISSION: `!cancelled()` and nothing else. A step with no `if:` is
         # implicitly `if: success()`, which is NOT unconditional -- it stands
@@ -2930,16 +2948,6 @@ jobs:
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
         run: bash .github/scripts/assert-no-dependency-failed.sh
-
-      # PREREQUISITE OF A GATE, so it carries the gate's own admission.
-      # Measured on run 33320774111: the evidence gate ran (it had
-      # `!cancelled()`) and died exit 127 with "assert-test-evidence.sh: No
-      # such file or directory", because the step above it had FAILED and
-      # this checkout, carrying no condition, was skipped along with the
-      # artifact download. A required check reported "No such file" where
-      # it meant "a dependency failed".
-      - uses: actions/checkout@v6
-        if: ${{ !cancelled() }}
 
       # `merge-multiple: true` was REMOVED 2026-08-02 (lane/ci-windows-fallback).
       # Every producing leg uploads its report under the SAME filename,

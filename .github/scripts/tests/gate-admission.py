@@ -334,4 +334,61 @@ emit(
     repr(aggregate),
 )
 
+# ── a step that runs a REPO script must come AFTER the checkout ──────────────
+#
+# MEASURED, PR #417 run 33542986300: the aggregate gate was rewritten from an
+# inline `run:` block -- which needs no working tree -- into an invocation of
+# `.github/scripts/assert-no-dependency-failed.sh`, and left in its original
+# position ABOVE `actions/checkout`. Every dependency had succeeded, and the
+# required `report` check went RED with
+#   bash: .github/scripts/assert-no-dependency-failed.sh: No such file or directory
+# A required check reporting a missing file when it means nothing failed is the
+# same "red naming the wrong cause" that `!cancelled()` on the prerequisites
+# exists to prevent, one step over -- and EVERY assertion in this file passed
+# both before and after that mistake, which is why this one exists.
+for jobs_file, doc in parsed.items():
+    for job_id, job in (doc.get("jobs") or {}).items():
+        if not isinstance(job, dict):
+            continue
+        seen_checkout = False
+        offenders = []
+        for step in job.get("steps") or []:
+            if not isinstance(step, dict):
+                continue
+            if "actions/checkout" in str(step.get("uses") or ""):
+                seen_checkout = True
+                continue
+            run = str(step.get("run") or "")
+            # only repo-relative script invocations; `python3 -c`, inline bash and
+            # absolute paths are not working-tree dependent in the same way.
+            if ".github/scripts/" in run and not seen_checkout:
+                offenders.append("%s / %s / %r runs a repo script before any checkout"
+                                 % (os.path.basename(jobs_file), job_id,
+                                    step.get("name") or step.get("uses")))
+        if offenders:
+            emit(False,
+                 "a step that runs a repo script comes after the checkout",
+                 "\n".join(offenders))
+            break
+    else:
+        continue
+    break
+else:
+    emit(True, "a step that runs a repo script comes after the checkout", "")
+
+# ANTI-VACUITY for the rule above: it must actually have inspected steps that
+# invoke repo scripts, or a workflow that stopped using them would pass it
+# silently.
+_script_steps = sum(
+    1
+    for doc in parsed.values()
+    for job in (doc.get("jobs") or {}).values() if isinstance(job, dict)
+    for step in (job.get("steps") or []) if isinstance(step, dict)
+    and ".github/scripts/" in str(step.get("run") or "")
+)
+emit(_script_steps >= 3,
+     "the checkout-ordering rule found repo-script steps to grade (anti-vacuity)",
+     "repo-script steps seen: %d" % _script_steps)
+info("repo-script steps graded for checkout ordering: %d" % _script_steps)
+
 sys.exit(1 if FAILURES else 0)
