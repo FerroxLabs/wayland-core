@@ -1227,7 +1227,28 @@ jobs:
     # artifacts) and costs ~16 min, appended to a job that already sat at ~81.
     # A cancelled required context is not a verdict, so the cost is a whole
     # cycle every time it tips over.
-    timeout-minutes: 120
+    # MEASURED, this job, four consecutive runs on integ/f13:
+    #   33437649161  101.9 min (failure)
+    #   33462025536   99.5 min (success)
+    #   33488263125  120.3 min -> KILLED by this timeout at step 30 of 34
+    # 99-102 min against a 120 limit is ~18% headroom, which is too thin for a
+    # job of this length: 33488263125 lost the F01 driver gate, the security
+    # audit and the release-manifest drill to the wall, having ALREADY passed
+    # every test step including the shared-process integration suite. A run
+    # that does all the work and is then killed before it can report is the
+    # most expensive possible outcome -- 2 hours for no verdict.
+    #
+    # 150 is ~50% over the measured figure. Deliberately NOT larger: this
+    # timeout is the only thing that catches a genuine hang, so it has to stay
+    # close enough to the real duration to still mean something. If the
+    # measured figure moves materially, move this WITH it and update the table
+    # above rather than widening the gap.
+    #
+    # NOT a cache problem: this workflow has NO actions/cache step anywhere
+    # (grep -c 'actions/cache' ci.yml == 0), so there is no cross-run cache to
+    # go cold and repeated cancellations cannot have caused this. It is
+    # hosted-runner variance against a limit set too close.
+    timeout-minutes: 150
     # A job-level `permissions:` block REPLACES the workflow-level one at the
     # top of this file wholesale (GHA semantics) — the same rule that cost the
     # `report` job "multiple weeks of red" when `contents: read` was dropped by
