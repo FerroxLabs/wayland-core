@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "wcore-eval-scenarios smoke: spawn returns ENOENT on a path discovery just proved exists (shared-process leg, main red)"
 status: open
-last_verified_commit: 51731e29
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "`cargo test -p wcore-eval-scenarios --test smoke` passes in the shared-process integration leg, or the reason it cannot is understood and stated."
