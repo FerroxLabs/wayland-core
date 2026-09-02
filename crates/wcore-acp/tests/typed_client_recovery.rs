@@ -180,6 +180,7 @@ async fn a_severed_typed_client_recovers_the_exact_gap_over_a_real_socket() {
             tools: Vec::new(),
             system_prompt: None,
             agent: None,
+            mcp_servers: Vec::new(),
         })
         .await
         .expect("create");
@@ -301,6 +302,7 @@ async fn a_cursor_from_another_stream_is_refused_over_the_wire_not_silently_serv
             tools: Vec::new(),
             system_prompt: None,
             agent: None,
+            mcp_servers: Vec::new(),
         })
         .await
         .expect("create");
@@ -413,6 +415,7 @@ async fn the_ahead_and_unknown_session_refusals_survive_the_wire_with_their_own_
             tools: Vec::new(),
             system_prompt: None,
             agent: None,
+            mcp_servers: Vec::new(),
         })
         .await
         .expect("create");
@@ -504,6 +507,7 @@ async fn a_cursor_that_fell_out_of_retention_is_refused_naming_where_to_resync()
             tools: Vec::new(),
             system_prompt: None,
             agent: None,
+            mcp_servers: Vec::new(),
         })
         .await
         .expect("create");

@@ -373,9 +373,19 @@ pub fn register_single_server_tools(
 /// the same deferral it would have had if the server had advertised it at
 /// connect.
 pub struct McpCatalogRefresh {
-    managers: Vec<Arc<McpManager>>,
+    entries: std::sync::Mutex<Vec<RefreshEntry>>,
     builtin_names: Vec<String>,
-    server_configs: HashMap<String, McpServerConfig>,
+    server_configs: std::sync::Mutex<HashMap<String, McpServerConfig>>,
+}
+
+/// One manager in the refresh, plus the runtime-added servers it was admitted
+/// for. A boot manager has an EMPTY `runtime_servers` and is never withdrawn.
+struct RefreshEntry {
+    manager: Arc<McpManager>,
+    /// `true` for a manager captured at boot. Boot entries are never
+    /// withdrawn — only a runtime add can be rolled back.
+    boot: bool,
+    runtime_servers: Vec<String>,
 }
 
 impl McpCatalogRefresh {
@@ -385,15 +395,96 @@ impl McpCatalogRefresh {
         server_configs: HashMap<String, McpServerConfig>,
     ) -> Self {
         Self {
-            managers,
+            entries: std::sync::Mutex::new(
+                managers
+                    .into_iter()
+                    .map(|manager| RefreshEntry {
+                        manager,
+                        boot: true,
+                        runtime_servers: Vec::new(),
+                    })
+                    .collect(),
+            ),
             builtin_names,
-            server_configs,
+            server_configs: std::sync::Mutex::new(server_configs),
         }
     }
 
-    /// Whether there is anything to poll at all.
-    pub fn is_empty(&self) -> bool {
-        self.managers.is_empty()
+    /// Admit a manager built AFTER boot — the `/mcp add` paths and the #551
+    /// deferred config connect — so its `tools/list_changed` is honoured for
+    /// the rest of the session (wayland#1174, wayland#1175).
+    ///
+    /// `servers` MUST carry a `McpServerConfig` for every server the manager
+    /// serves, and the call is refused if it is empty. That is not a
+    /// convenience check: `refresh_changed_mcp_tools` reads `allowed_tools`
+    /// out of this map, and a lookup MISS is `None`, which
+    /// `register_single_server_tools` reads as "no operator restriction —
+    /// register everything the server advertises". Admitting a manager whose
+    /// configs never arrived would therefore hand a server its FULL tool set
+    /// on the next `list_changed`, escalating past the #998 per-tool
+    /// allowlist the operator set. Manager and configs enter together or not
+    /// at all.
+    ///
+    /// Returns whether the manager was admitted.
+    pub fn register_runtime_server(
+        &self,
+        manager: &Arc<McpManager>,
+        servers: &HashMap<String, McpServerConfig>,
+    ) -> bool {
+        if servers.is_empty() {
+            tracing::error!(
+                target: "wcore_mcp::tool_proxy",
+                "refusing to admit a runtime MCP manager with no server config: a \
+                 refresh would restore the server's full tool set and drop the \
+                 operator's per-tool allowlist"
+            );
+            return false;
+        }
+        let names: Vec<String> = servers.keys().cloned().collect();
+        {
+            let mut configs = self.lock_configs();
+            for (name, config) in servers {
+                configs.insert(name.clone(), config.clone());
+            }
+        }
+        let mut entries = self.lock_entries();
+        match entries
+            .iter_mut()
+            .find(|entry| Arc::ptr_eq(&entry.manager, manager))
+        {
+            Some(entry) => entry.runtime_servers.extend(names),
+            None => entries.push(RefreshEntry {
+                manager: Arc::clone(manager),
+                boot: false,
+                runtime_servers: names,
+            }),
+        }
+        true
+    }
+
+    /// Withdraw a runtime-added server again — the rollback arm of a `/mcp
+    /// add` that could not be published, and `/mcp remove`. Its config goes
+    /// with it, so a later re-add cannot inherit a stale allowlist. A boot
+    /// manager is never dropped.
+    pub fn forget_runtime_server(&self, name: &str) {
+        self.lock_configs().remove(name);
+        let mut entries = self.lock_entries();
+        for entry in entries.iter_mut() {
+            entry.runtime_servers.retain(|server| server != name);
+        }
+        // A runtime entry that has no servers left serves nothing; a boot
+        // entry stays regardless.
+        entries.retain(|entry| entry.boot || !entry.runtime_servers.is_empty());
+    }
+
+    fn lock_entries(&self) -> std::sync::MutexGuard<'_, Vec<RefreshEntry>> {
+        self.entries.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn lock_configs(&self) -> std::sync::MutexGuard<'_, HashMap<String, McpServerConfig>> {
+        self.server_configs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     /// Poll every manager and re-register the servers that changed.
@@ -403,11 +494,22 @@ impl McpCatalogRefresh {
         registry: &mut wcore_tools::registry::ToolRegistry,
         defer_cold: &wcore_config::tools::DeferColdConfig,
     ) -> Vec<String> {
+        // Snapshot under the locks and release them: `apply` awaits, and a
+        // `std::sync` guard must not be held across an await point.
+        let managers: Vec<Arc<McpManager>> = self
+            .lock_entries()
+            .iter()
+            .map(|entry| Arc::clone(&entry.manager))
+            .collect();
+        if managers.is_empty() {
+            return Vec::new();
+        }
+        let server_configs = self.lock_configs().clone();
         refresh_changed_mcp_tools(
             registry,
-            &self.managers,
+            &managers,
             &self.builtin_names,
-            &self.server_configs,
+            &server_configs,
             defer_cold,
         )
         .await

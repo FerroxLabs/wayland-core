@@ -34,7 +34,8 @@ async fn a_refused_connection_names_the_host_and_port_it_was_refused_by() {
     let message = connection_message_for("http://127.0.0.1:1/v1/chat/completions").await;
     assert!(
         message.contains("127.0.0.1:1"),
-        "a refusal must name the endpoint nothing was listening on, so the          operator can see the typo; got: {message}"
+        "a refusal must name the endpoint nothing was listening on, so the \
+            operator can see the typo; got: {message}"
     );
     // The cause must survive alongside the endpoint — the endpoint says WHERE,
     // the OS error says WHAT, and dropping either one re-opens #1077.

@@ -178,7 +178,7 @@ mod tests {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
         fn emit_provider_circuit_event(
             &self,
@@ -401,7 +401,7 @@ mod failover_notice_tests {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, msg: &str) {
             self.infos.lock().unwrap().push(msg.to_string());
         }

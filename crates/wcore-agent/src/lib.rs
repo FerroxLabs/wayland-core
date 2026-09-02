@@ -142,6 +142,9 @@ pub mod skill_tool;
 pub mod slash;
 pub mod spawn_tool;
 pub mod spawner;
+// FerroxLabs/wayland#174 items 2-5 — spend modes, the model-escalation gate
+// and the per-task spend audit record, enforced at provider dispatch.
+pub mod spend_guard;
 pub mod style_detector;
 // B1 — `WorkflowTool`: LLM-facing surface for the dynamic-workflow engine
 // (parses inline RON via `WorkflowPlan`, runs it via `WorkflowRunner`).

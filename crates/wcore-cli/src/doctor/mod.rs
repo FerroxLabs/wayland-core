@@ -24,6 +24,7 @@ use std::process::ExitCode;
 
 use wcore_config::shell::shell_command_argv;
 use wcore_cua::permissions::{TccCapability, TccStatus};
+use wcore_types::url_authority::dialed_host_str;
 
 /// A structured doctor report: every check row plus the version banner.
 ///
@@ -569,6 +570,27 @@ async fn print_mcp_section(probe: bool, cli_args: &wcore_config::config::CliArgs
                     println!("  [config] {name:<20} {transport:<14} {target}");
                 }
             }
+            // wayland-core#354 c7 — install the operator's chosen mode into
+            // this process BEFORE anything below can launch a server.
+            //
+            // `--doctor` returns at `main.rs` ahead of config/OAuth/engine
+            // bootstrap, and `AgentBootstrap::build` is the only OTHER caller
+            // of `install_mode`. Without this line the probe further down
+            // reaches `StdioTransport::spawn` with the mode uninstalled and
+            // silently takes the permissive default — so under strict, the one
+            // command an operator runs to ASK whether the gate is on would be
+            // the command that does not honour it. A mode the diagnostic path
+            // ignores is not an operator choice.
+            //
+            // Installed at the point the mode is READ for display, so the
+            // posture printed and the posture enforced cannot drift.
+            // `install_mode` is one-shot and idempotent, so this cannot fight
+            // a later boot; nothing in this process boots after `--doctor`.
+            wcore_mcp::malware_gate::install_mode(cfg.mcp.malware_gate);
+            // wayland-core#354 — the launch gate's posture, printed whether or
+            // not any server is declared: a fresh config with no servers yet
+            // is exactly when an operator wants to see which mode they are on.
+            println!("{}", malware_gate_line(cfg.mcp.malware_gate));
         }
         Err(e) => println!("  (config not loaded: {e})"),
     }
@@ -975,28 +997,29 @@ fn base_url_caveat(cfg: &wcore_config::config::Config) -> Vec<String> {
         Some(p) => crate::provider_keys::validation_endpoint(p, ""),
         None => return Vec::new(),
     };
-    let vendor_host = host_of(&url);
-    if vendor_host.is_empty() || vendor_host == host_of(&cfg.base_url) {
+    let Some(vendor_host) = dialed_host_str(&url) else {
+        return Vec::new();
+    };
+    // FerroxLabs/wayland#1252 c1/c3 — both sides of this comparison come from
+    // the ONE authority parser (`wcore_types::url_authority`), never from a
+    // hand cut. The cut that used to live here read
+    // `https://evil.example\@api.openai.com/v1` as `api.openai.com`, which
+    // EQUALS the vendor host, so this returned early and the caveat was NOT
+    // printed — while reqwest dialed `evil.example`. That is the suppression
+    // #1079 exists to prevent, reached through the spelling rather than the
+    // shape.
+    //
+    // A `base_url` whose host the parser cannot name at all (`None`) is
+    // treated as DIFFERENT from the vendor host, so the caveat IS printed.
+    // Fail-loud is the safe direction for a diagnostic: an extra caveat is
+    // noise, a missing one answers a question the user did not ask.
+    if dialed_host_str(&cfg.base_url).as_deref() == Some(vendor_host.as_str()) {
         return Vec::new();
     }
     vec![
         format!("           checked against {vendor_host}, NOT the base url above —"),
         "           a proxy or gateway there is not covered by this verdict".to_string(),
     ]
-}
-
-/// Host portion of a URL, without pulling in a URL parser for one comparison.
-/// Returns `""` when there is no `//` authority to read.
-fn host_of(url: &str) -> &str {
-    let after_scheme = match url.split_once("//") {
-        Some((_, rest)) => rest,
-        None => return "",
-    };
-    let host = after_scheme
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or_default();
-    host.rsplit_once('@').map_or(host, |(_, h)| h)
 }
 
 /// **Printed, deliberately NOT a `CheckResult` row** — the same reason
@@ -1117,6 +1140,27 @@ fn wlrctl_hints() -> Vec<String> {
     ]
 }
 
+/// wayland-core#354 — the `/doctor` face of `[mcp] malware_gate`.
+///
+/// A security posture that is only visible by reading `config.toml` is a
+/// posture nobody audits, and the permissive default is exactly the one an
+/// operator would want to discover they still have. Kept as a pure function
+/// so the line itself is graded, not just the fact that something printed.
+pub(crate) fn malware_gate_line(mode: wcore_config::config::McpMalwareGateMode) -> String {
+    use wcore_config::config::McpMalwareGateMode as Mode;
+    let consequence = match mode {
+        Mode::Permissive => {
+            "an OSV malware check that cannot be performed LOGS at ERROR and the server \
+             still launches (default)"
+        }
+        Mode::Strict => "an OSV malware check that cannot be performed REFUSES the launch",
+    };
+    format!(
+        "  [mcp] malware_gate = \"{}\" — {consequence}",
+        mode.as_str()
+    )
+}
+
 fn grim_hints() -> Vec<String> {
     vec![
         "apt install grim                (Debian/Ubuntu)".into(),
@@ -1129,6 +1173,52 @@ fn grim_hints() -> Vec<String> {
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    // -- wayland-core#354: the malware-gate mode has a `/doctor` face ------
+
+    /// Both modes must name the config key AND state the consequence. A line
+    /// that only echoes `permissive` tells an operator nothing about what
+    /// their machine does when `api.osv.dev` is unreachable, which is the
+    /// entire reason the key exists.
+    #[test]
+    fn doctor_names_the_malware_gate_mode_and_what_it_does() {
+        use wcore_config::config::McpMalwareGateMode as Mode;
+
+        let permissive = malware_gate_line(Mode::Permissive);
+        assert!(
+            permissive.contains("malware_gate") && permissive.contains("\"permissive\""),
+            "the line must name the config key and its value: {permissive}"
+        );
+        assert!(
+            permissive.contains("still launches"),
+            "permissive must say the launch goes ahead: {permissive}"
+        );
+
+        let strict = malware_gate_line(Mode::Strict);
+        assert!(
+            strict.contains("malware_gate") && strict.contains("\"strict\""),
+            "the line must name the config key and its value: {strict}"
+        );
+        assert!(
+            strict.contains("REFUSES"),
+            "strict must say the launch is refused: {strict}"
+        );
+        assert_ne!(
+            permissive, strict,
+            "one line for both modes would report nothing"
+        );
+    }
+
+    /// The default posture a fresh install reports is the permissive one --
+    /// this is the row that would catch a change of default slipping in.
+    #[test]
+    fn doctor_reports_permissive_for_a_default_config() {
+        let cfg = wcore_config::config::Config::default();
+        assert_eq!(
+            malware_gate_line(cfg.mcp.malware_gate),
+            malware_gate_line(wcore_config::config::McpMalwareGateMode::Permissive)
+        );
+    }
 
     // -- `br-default`: the browser-policy row ----------------------------
     //
@@ -1272,6 +1362,21 @@ mod tests {
     #[serial]
     async fn the_browser_row_recommends_the_compiled_backend_not_chromium() {
         let empty = tempfile::tempdir().unwrap();
+        // PATH is process-global, and this binary runs its tests in ONE
+        // process. Emptying PATH outright breaks any concurrently running test
+        // that spawns through `wcore_config::shell`, which resolves `sh` (Unix)
+        // / `cmd` (Windows) off PATH — measured: it took `goal_cmd`'s worker
+        // tests down with "worker command 'sh' failed to start: No such file or
+        // directory" in the shared-process `--lib` leg. Carry the system shell
+        // across. It is not a browser backend, so `resolve_any` still finds
+        // nothing and the row under test is unchanged.
+        #[cfg(unix)]
+        {
+            let sh = std::path::Path::new("/bin/sh");
+            if sh.exists() {
+                let _ = std::os::unix::fs::symlink(sh, empty.path().join("sh"));
+            }
+        }
         let prior_path = std::env::var_os("PATH");
         let prior_bin = std::env::var_os("WAYLAND_CAMOUFOX_BIN");
         unsafe {
@@ -1467,7 +1572,21 @@ mod tests {
         }
     }
 
+    // #[serial], because these two READ a process-global that a sibling test
+    // WRITES. FerroxLabs/wayland-core#373 c5: measured red on run 6 of a
+    // 10-run `cargo test --workspace --lib --no-fail-fast` loop on hetzner-dsm
+    // -- "expected `which sh` to resolve on Unix". The window is
+    // `the_browser_row_recommends_the_compiled_backend_not_chromium` above,
+    // which replaces PATH with a temp dir for the duration of one call. That
+    // test already carries `/bin/sh` across (18e59e85f), which is why the
+    // `goal_cmd` worker failures it was written for stopped -- but `which()`
+    // does not need `sh`: it SPAWNS THE EXTERNAL `which` BINARY off PATH, and
+    // that binary is not carried across, so the lookup returns None while the
+    // window is open. Serialising the readers is the fix rather than adding a
+    // second symlink, because the next global this test needs would need a
+    // third.
     #[tokio::test]
+    #[serial]
     async fn which_returns_some_for_known_binary() {
         // `sh` is virtually guaranteed on Unix CI; on Windows we
         // skip the assertion because the doctor doesn't probe `sh`.
@@ -1478,6 +1597,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn which_returns_none_for_unlikely_binary() {
         let r = which("definitely-not-a-real-binary-w5-doctor").await;
         assert!(r.is_none());
@@ -1747,17 +1867,74 @@ mod tests {
         );
     }
 
+    fn caveat_for(base_url: &str) -> Vec<String> {
+        base_url_caveat(&wcore_config::config::Config {
+            provider_label: "openai".to_string(),
+            base_url: base_url.to_string(),
+            ..Default::default()
+        })
+    }
+
+    /// FerroxLabs/wayland#1252 c1 + c4 — the PRODUCTION site, not a helper.
+    ///
+    /// `base_url_caveat` is what decides whether `/doctor` tells the user its
+    /// key verdict is about the vendor endpoint rather than the endpoint they
+    /// configured. Both directions are asserted here on purpose: #1243's own
+    /// red arm showed that a mutation which simply prints the caveat always
+    /// passes the positive test while destroying the feature.
     #[test]
-    fn host_of_reads_the_authority_and_nothing_else() {
-        assert_eq!(
-            host_of("https://api.anthropic.com/v1/models"),
-            "api.anthropic.com"
+    fn the_base_url_caveat_is_printed_for_every_host_that_is_not_the_vendor() {
+        // THE DEFECT (#1252 site A). `\` is a path separator for a special
+        // scheme, so this dials `evil.example`. The hand cut read
+        // `api.openai.com`, matched the vendor host, and SUPPRESSED the caveat.
+        let smuggled = caveat_for(r"https://evil.example\@api.openai.com/v1");
+        assert!(
+            !smuggled.is_empty(),
+            "a base_url that dials evil.example must still print the caveat"
         );
-        assert_eq!(host_of("https://api.openai.com"), "api.openai.com");
-        assert_eq!(host_of("https://h.example/v1?key=secret"), "h.example");
-        // Credentials in the authority must not be mistaken for the host.
-        assert_eq!(host_of("https://user:pw@h.example/v1"), "h.example");
-        assert_eq!(host_of("not-a-url"), "");
+        assert!(
+            smuggled[0].contains("api.openai.com"),
+            "the caveat must name the VENDOR host that was checked: {smuggled:?}"
+        );
+
+        // The two spellings that defeated the earlier hand cuts, for the same
+        // reason: the authority ends before `?` and before `#` too.
+        for raw in [
+            "https://evil.example?z=@api.openai.com",
+            "https://evil.example#@api.openai.com",
+            "https://api.openai.com.evil.example/v1",
+            "https://proxy.internal/v1",
+        ] {
+            assert!(
+                !caveat_for(raw).is_empty(),
+                "a genuinely different configured host must print the caveat: {raw}"
+            );
+        }
+
+        // WRONG-REFUSAL CONTROL, the direction a blanket-print mutation
+        // destroys: a base_url that really IS the vendor host suppresses it.
+        for raw in [
+            "https://api.openai.com/v1",
+            "https://API.OpenAI.COM/v1",
+            "https://user:pw@api.openai.com/v1",
+        ] {
+            assert!(
+                caveat_for(raw).is_empty(),
+                "the configured host IS the vendor host — no caveat is owed: {raw}"
+            );
+        }
+    }
+
+    /// A `base_url` the URL parser cannot name a host for is not the vendor
+    /// host, so the caveat is printed. `None` must never read as "same".
+    #[test]
+    fn an_unparsable_base_url_still_prints_the_caveat() {
+        for raw in ["", "   ", "api.openai.com", "not a url at all"] {
+            assert!(
+                !caveat_for(raw).is_empty(),
+                "an unnameable base_url must not suppress the caveat: {raw:?}"
+            );
+        }
     }
 
     #[test]

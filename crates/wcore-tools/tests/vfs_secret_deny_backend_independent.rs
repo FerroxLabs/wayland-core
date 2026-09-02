@@ -14,7 +14,9 @@
 //! exact leak #234/#667 closed. The design calls this "the easiest thing to
 //! get wrong", so it gets its own pin.
 //!
-//! **Red arm:** make `SecretDenyFs::guard` (or `is_project_secret`) consult the
+//! **Red arm:** make `WorkspacePolicy::denies_read_content` (or
+//! `is_project_secret`) — the single predicate `SecretDenyFs::guard` asks —
+//! consult the
 //! backend's `enforces_read_deny()` the way `secret_deny_paths_for_backend`
 //! does. Every assertion below must go red.
 //!

@@ -883,6 +883,21 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "resume_token",
         "hitl_suspend"
     ),
+    // wayland-core#314 c5. Same footing as `set_mode_refused` below: an
+    // always-emitted forward-additive refusal, `available` rather than a
+    // dedicated capability. The correlation key is `grant_id`, the id the host
+    // sent on `grant_path`. `grant_workspace_capability` carries no id and
+    // publishes `null` rather than omitting the field, because a correlation
+    // key that can VANISH is indistinguishable from a bug at the consumer --
+    // the same reasoning `Ready.session_id` is documented with.
+    wire!(
+        "grant_refused",
+        "events/grant_refused.json",
+        ["grant_id", "surface", "reason", "detail"],
+        Safety,
+        "grant_id",
+        "available"
+    ),
     // wayland#1088. Always-emitted forward-additive variant (same footing as
     // `budget_exceeded`), so `available` rather than a dedicated capability.
     wire!(
@@ -1283,6 +1298,7 @@ pub const PRODUCER_EVENT_TYPES: &[&str] = &[
     "approval_required",
     "suspend",
     "approval_resume",
+    "grant_refused",
     "set_mode_refused",
     "budget_exceeded",
     "budget_grant_result",
@@ -1331,6 +1347,7 @@ pub const SOURCE_INPUTS: &[&str] = &[
     "crates/wcore-protocol/src/contract/check.rs",
     "crates/wcore-protocol/src/bin/wcore-contract.rs",
     "crates/wcore-types/src/execution_policy.rs",
+    "crates/wcore-types/src/failure.rs",
     "crates/wcore-types/src/spawner.rs",
     "crates/wcore-types/src/child_transaction.rs",
     "crates/wcore-types/src/workspace_trust.rs",
@@ -1976,6 +1993,15 @@ pub fn event_fixture_values() -> BTreeMap<String, ProtocolEvent> {
             },
         ),
         (
+            "events/grant_refused.json".into(),
+            ProtocolEvent::GrantRefused {
+                grant_id: Some("grant-001".into()),
+                surface: crate::events::GrantSurface::Path,
+                reason: crate::events::GrantRefusalReason::LocalOptInRequired,
+                detail: "the local launcher did not opt in with --allow-host-path-grants".into(),
+            },
+        ),
+        (
             "events/set_mode_refused.json".into(),
             ProtocolEvent::SetModeRefused {
                 requested: crate::commands::SessionMode::Force,
@@ -2070,6 +2096,7 @@ pub fn event_fixture_values() -> BTreeMap<String, ProtocolEvent> {
                     code: "provider_error".into(),
                     message: "provider stream failed".into(),
                     retryable: true,
+                    category: crate::events::FailureCategory::Unknown,
                 },
             },
         ),
@@ -2802,6 +2829,7 @@ pub fn compatibility_event_values() -> BTreeMap<String, ProtocolEvent> {
                     code: "session_error".into(),
                     message: "session failed".into(),
                     retryable: false,
+                    category: crate::events::FailureCategory::Unknown,
                 },
             },
         ),

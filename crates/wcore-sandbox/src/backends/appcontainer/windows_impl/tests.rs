@@ -1446,3 +1446,46 @@ async fn cleanup_timeout_reports_the_completed_command_as_completed() {
 
     std::fs::remove_dir_all(&root).ok();
 }
+
+/// `#369` c2 POSITIVE CONTROL. The live `sandbox status` run on SEANDESKTOP
+/// shows `unavailable_reason: null` -- correct, because AppContainer is
+/// AVAILABLE on that host now -- and a null is not evidence that a cause would
+/// ever be shown. This is the arm that proves it would.
+///
+/// It is a unit test and not a host test on purpose. The only way to observe
+/// the real thing end-to-end is to WEDGE the machine's AppContainer backend by
+/// restoring the abandoned lease `#369` preserved, which disables sandboxed
+/// execution for every process on the box and for every other lane using it.
+/// That is a destructive act on shared hardware to re-measure a mechanism that
+/// is already recorded, so the reachability is graded here instead and the
+/// ledger says which half was measured where.
+///
+/// Both directions are asserted. A `unavailable_reason` that could only ever
+/// return `Some` would be as dishonest as the silence it replaces: the slot is
+/// cleared on every successful probe precisely so a recovered host cannot keep
+/// quoting a stale cause at its operator, and the `None` leg is what pins that.
+#[test]
+fn the_recorded_probe_cause_is_readable_without_provoking_an_execute() {
+    let backend = AppContainerBackend::new();
+
+    // A host whose probe has failed can say why.
+    record_probe_outcome(Some(
+        "sandbox child execution failed: AppContainer ACE cleanup verification failed".to_owned(),
+    ));
+    let why = backend
+        .unavailable_reason()
+        .expect("a recorded probe failure must be readable from the status surface");
+    assert!(
+        why.contains("ACE cleanup verification failed"),
+        "the cause must come back VERBATIM -- a summarised cause is not a \
+         thing an operator can search for: {why:?}"
+    );
+
+    // A host that has recovered must stop quoting the old cause.
+    record_probe_outcome(None);
+    assert!(
+        backend.unavailable_reason().is_none(),
+        "a cleared probe outcome must clear the reason, or a recovered host \
+         keeps reporting a failure it no longer has"
+    );
+}

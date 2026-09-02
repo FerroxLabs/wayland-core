@@ -77,7 +77,13 @@ impl OutputSink for RecordingSink {
         _finish_reason: FinishReason,
     ) {
     }
-    fn emit_error(&self, _msg: &str, _retryable: bool) {}
+    fn emit_error(
+        &self,
+        _msg: &str,
+        _retryable: bool,
+        _category: wcore_protocol::events::FailureCategory,
+    ) {
+    }
     fn emit_info(&self, msg: &str) {
         self.info.lock().expect("info lock").push(msg.to_string());
     }

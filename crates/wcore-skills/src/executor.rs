@@ -692,6 +692,7 @@ mod phase7_tests {
             *self.captured_config.lock().unwrap() = Some(config.clone());
             *self.captured_overrides.lock().unwrap() = Some(overrides.clone());
             SubAgentResult {
+                failure_category: wcore_types::failure::FailureCategory::Unknown,
                 name: config.name.clone(),
                 text: self.text.clone(),
                 usage: TokenUsage::default(),

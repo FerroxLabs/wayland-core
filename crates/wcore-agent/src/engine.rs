@@ -639,7 +639,17 @@ impl Drop for ProviderBudgetReservation {
 
 enum ConfiguredFallbackAdmissionFailure {
     Budget(ProviderBudgetMutationError),
-    Unpriced { provider: String, model: String },
+    Unpriced {
+        provider: String,
+        model: String,
+    },
+    /// #174 c3-c5 — the fallback's provider/model is refused by the session's
+    /// spend mode, or is an un-authorized model escalation.
+    ///
+    /// This site needs its own gate: a configured fallback swaps the model
+    /// INSIDE `ResilientProvider::stream`, below the engine's guarded provider
+    /// handle, so the decorator that covers every other dispatch never sees it.
+    SpendGuard(wcore_budget::SpendRefusal),
 }
 
 struct ConfiguredFallbackBudgetState {
@@ -1135,12 +1145,18 @@ fn fit_thinking_budget(max_tokens: u32, requested_budget: u32) -> u32 {
 /// conservative 8192 floor cannot hold the reasoning spend plus a visible
 /// answer, so a reasoning turn is allowed to grow to `UNKNOWN_REASONING_CAP`
 /// (#426). Known models already get their real ceiling.
+///
+/// `window_in_force` is #1179's addition: the window this turn is ACTUALLY
+/// being sized against, as reconciled by `resolve_preflight_window` (catalogue,
+/// operator setting, Flux tier signal, #1172's learned served window). Passing
+/// `None` means "no window is known", and leaves the sizing exactly as it was.
 fn size_output_cap(
     config_max: u32,
     provider: &str,
     model: &str,
     est_input_tokens: usize,
     is_reasoning_turn: bool,
+    window_in_force: Option<u32>,
 ) -> u32 {
     /// Conservative cap for models with no known output ceiling. Safe for
     /// essentially every modern model (gpt-4o is 16384). Never raised on
@@ -1149,14 +1165,17 @@ fn size_output_cap(
     /// Headroom kept free in the window for prompt growth / safety margin.
     const WINDOW_BUFFER: u32 = 512;
 
-    match wcore_config::limits::model_output_ceiling(provider, model) {
+    let est = u32::try_from(est_input_tokens).unwrap_or(u32::MAX);
+    let room = |window: u32| {
+        window
+            .saturating_sub(est)
+            .saturating_sub(WINDOW_BUFFER)
+            .max(1)
+    };
+
+    let sized = match wcore_config::limits::model_output_ceiling(provider, model) {
         Some((out_ceiling, context_window)) => {
-            let est = u32::try_from(est_input_tokens).unwrap_or(u32::MAX);
-            let window_room = context_window
-                .saturating_sub(est)
-                .saturating_sub(WINDOW_BUFFER)
-                .max(1);
-            config_max.min(out_ceiling).min(window_room)
+            config_max.min(out_ceiling).min(room(context_window))
         }
         // Unknown / router-aliased model. Normally clamp to a conservative
         // floor so a small served model never 400s. But a reasoning turn on
@@ -1170,7 +1189,80 @@ fn size_output_cap(
             };
             config_max.min(cap)
         }
+    };
+
+    // #1179 — the ask and the window that certified the input must agree.
+    //
+    // The `Some` arm above has always clamped to the room left in the
+    // CATALOGUED window; the `None` arm clamped to nothing at all, and neither
+    // could see the window actually in force. Scaling the reserves made that
+    // load-bearing: at #1172's learned 8,192 slot the pre-flight ceiling is
+    // 5,053 with a 2,730-token output reserve, while this function still asked
+    // for UNKNOWN_CAP = 8,192 — a total ask of 13,245 tokens on an 8,192-token
+    // slot, certified by the guard as inside its ceiling. On a truncating
+    // endpoint that re-creates the silent prompt truncation #1172 is about.
+    //
+    // Clamping to `room(window_in_force)` is identity wherever the window in
+    // force IS the catalogued one (every model in the registry, absent a
+    // narrowing), so no large-window sizing moves.
+    match window_in_force {
+        Some(window) => sized.min(room(window)),
+        None => sized,
     }
+}
+
+/// wayland-core#353 — the user-facing notice for one truncation observation.
+///
+/// Pure, and separate from the turn loop, because its whole defect was a
+/// sentence nothing could contradict. The old text asserted "Core is now sizing
+/// this session against the {served}-token window this endpoint has actually
+/// demonstrated" on every arm, and that claim was FALSE exactly when it was
+/// emitted: `ServedWindowTracker::observe` returns evidence on the FIRST
+/// regression, at which point `sizing_window()` is still `None` and neither the
+/// autocompact trigger nor the pre-flight ceiling has moved — and the second
+/// regression, the one that does corroborate, was suppressed as a repeat. So an
+/// operator was told core had fixed itself at the one moment it had not, and
+/// was never told when it had. It also stayed false whenever the served window
+/// is one core cannot work in at all.
+///
+/// Three arms, one per thing that is actually true.
+fn truncation_notice(
+    evidence: &wcore_config::context_window::ServedWindowEvidence,
+    model: &str,
+    compact_config: &wcore_config::compact::CompactConfig,
+) -> String {
+    let served = evidence.served_window;
+    let sizing_note = if !evidence.corroborated {
+        "Core has NOT changed how it sizes this session on one observation alone: a \
+         single anomalous usage report must not be allowed to discard your \
+         conversation. If this endpoint truncates again, it will."
+            .to_string()
+    } else if compact_config.supports_compaction(served as usize) {
+        format!(
+            "Core is now sizing this session against the {served}-token window this \
+             endpoint has actually demonstrated."
+        )
+    } else {
+        format!(
+            "Core cannot size a session against {served} tokens at all - its own \
+             baseline turn, the system prompt plus the tool schemas before you have \
+             typed anything, is {baseline} tokens. This run will stop rather than keep \
+             sending prompts the server silently truncates.",
+            baseline = wcore_config::compact::BASELINE_TURN_TOKENS,
+        )
+    };
+    format!(
+        "Context truncated by the endpoint: it processed only {reported} of the \
+         ~{sent} prompt tokens this turn sent to `{model}`, and discarded the rest. \
+         Servers drop the HEAD of the conversation first, so the system prompt and \
+         your task are what went - the reply was written from a context that no longer \
+         contained them. {sizing_note} Raise the server's context length (on \
+         llama.cpp-based servers, including Ollama, that is `num_ctx` / \
+         `OLLAMA_CONTEXT_LENGTH`), or set `[compact] context_window` to the figure it \
+         really serves.",
+        reported = evidence.reported_input,
+        sent = evidence.sent_estimate,
+    )
 }
 
 /// #112 — whether this turn's WIRE max-tokens field should be omitted so the
@@ -1206,28 +1298,280 @@ fn should_omit_max_tokens(
 mod output_sizing_tests {
     use super::{
         MIN_THINKING_BUDGET, MIN_VISIBLE_OUTPUT, UNKNOWN_REASONING_CAP, fit_thinking_budget,
-        should_omit_max_tokens, size_output_cap,
+        should_omit_max_tokens, size_output_cap, truncation_notice,
     };
     use wcore_config::compat::ProviderCompat;
+
+    /// #1179 — the ask must fit ALONGSIDE the input the pre-flight ceiling
+    /// certified, in the window actually in force.
+    ///
+    /// Scaling the reserves down decoupled `output_reserve` from the
+    /// `max_tokens` this function asks for. On #1172's endpoint (unlisted
+    /// model, openai-compat, so the wire field IS sent) with a learned 8,192
+    /// slot, the ceiling is 5,053 with a 2,730-token reserve while the ask
+    /// stayed at `UNKNOWN_CAP` = 8,192: a total of 13,245 tokens on an
+    /// 8,192-token slot, certified by the guard as inside its ceiling. On a
+    /// truncating endpoint that re-creates the silent truncation #1172 is
+    /// about.
+    #[test]
+    fn the_output_ask_fits_inside_the_window_actually_in_force() {
+        // The pre-#1179 behaviour, for contrast: no window in force -> the
+        // conservative unknown floor, which alone overflows an 8,192 slot.
+        assert_eq!(
+            size_output_cap(64_000, "openai-compat", "qwen3:8b", 3_118, false, None),
+            8_192
+        );
+        // With the learned window in force the ask is clamped to the room left.
+        let ask = size_output_cap(
+            64_000,
+            "openai-compat",
+            "qwen3:8b",
+            3_118,
+            false,
+            Some(8_192),
+        );
+        assert_eq!(ask, 8_192 - 3_118 - 512);
+        assert!(
+            3_118 + ask <= 8_192,
+            "input {} + ask {ask} must fit the 8,192-token slot",
+            3_118
+        );
+    }
+
+    /// FerroxLabs/wayland#1218 c2 — the ask and the reserve the ceiling
+    /// withheld must AGREE, across the whole band where #1179's scaling made
+    /// them disagree.
+    ///
+    /// The band is the ticket's own: 4,096..49,152. Below 24,576 the scaled
+    /// `output_reserve` is under `UNKNOWN_CAP` = 8,192, and below 49,152 it is
+    /// under gpt-4o's 16,384 output ceiling, so in that band the pre-flight
+    /// guard could certify an input while this function asked for more output
+    /// than the ceiling had held back for it.
+    ///
+    /// Graded at the input the guard ACTUALLY admits — `input_ceiling_for_window`
+    /// — because that is where the ticket's own arithmetic evaluated it: its
+    /// "total ask 13,245 on an 8,192 slot" is ceiling 5,053 + ask 8,192. A
+    /// smaller input leaves more room and is allowed to use it; clamping the
+    /// ask to the reserve at EVERY input would cut a 200k-window Claude turn
+    /// from its real 64,000-token output ceiling to the 23,000-token
+    /// compaction reserve, which is a regression, not a fix. See
+    /// `.planning/DECISIONS.md` Q-1218.
+    #[test]
+    fn the_output_ask_never_outgrows_the_reserve_the_ceiling_withheld() {
+        let cfg = wcore_config::compact::CompactConfig::default();
+        // An unlisted model: the arm with no catalogued output ceiling, which
+        // is the one the ticket measured.
+        let (provider, model) = ("openai-compat", "qwen3:8b");
+        assert!(
+            wcore_config::limits::model_output_ceiling(provider, model).is_none(),
+            "control: this test is about the UNLISTED arm; {model} is now catalogued \
+             and the case it grades has moved"
+        );
+        for window in (4_096usize..=49_152).step_by(64) {
+            let r = cfg.scaled_reserves(window);
+            let withheld = r.output_reserve + r.emergency_buffer;
+            let ceiling = cfg.input_ceiling_for_window(window);
+            assert_eq!(
+                ceiling,
+                window - withheld,
+                "window {window}: the ceiling is exactly what the reserves left"
+            );
+            let ask = size_output_cap(
+                64_000,
+                provider,
+                model,
+                ceiling,
+                false,
+                Some(u32::try_from(window).unwrap()),
+            ) as usize;
+            assert!(
+                ask <= withheld,
+                "window {window}: the guard admits {ceiling} input tokens having \
+                 withheld {withheld} for the output, and the ask is {ask} — the \
+                 ceiling certified a request that cannot fit"
+            );
+            // The property the ticket's TITLE is about, over every input the
+            // guard admits rather than only the worst one.
+            for est in [0, 1, ceiling / 2, ceiling.saturating_sub(1), ceiling] {
+                let ask = size_output_cap(
+                    64_000,
+                    provider,
+                    model,
+                    est,
+                    false,
+                    Some(u32::try_from(window).unwrap()),
+                ) as usize;
+                assert!(
+                    est + ask <= window,
+                    "window {window}, input {est}: total ask {} exceeds the whole \
+                     window",
+                    est + ask
+                );
+            }
+        }
+    }
+
+    /// #1218 c3 — the two cases the ticket MEASURED, stated as the figures it
+    /// stated them in, so a re-grade reads the same arithmetic.
+    #[test]
+    fn the_measured_1218_overflows_no_longer_hold() {
+        let cfg = wcore_config::compact::CompactConfig::default();
+        for (window, ceiling, reserve) in [
+            (8_192usize, 5_053usize, 2_730usize),
+            (16_384, 10_104, 5_461),
+        ] {
+            assert_eq!(
+                cfg.input_ceiling_for_window(window),
+                ceiling,
+                "window {window}"
+            );
+            assert_eq!(
+                cfg.scaled_reserves(window).output_reserve,
+                reserve,
+                "window {window}"
+            );
+            let ask = size_output_cap(
+                64_000,
+                "openai-compat",
+                "qwen3:8b",
+                ceiling,
+                false,
+                Some(u32::try_from(window).unwrap()),
+            ) as usize;
+            assert_ne!(
+                ask, 8_192,
+                "window {window}: this is the ticket's measured ask, on the input \
+                 its measurement used"
+            );
+            assert!(
+                ceiling + ask <= window,
+                "window {window}: {ceiling} + {ask} must fit"
+            );
+        }
+    }
+
+    /// The clamp is IDENTITY wherever the window in force is the catalogued
+    /// one, which is every registry model absent a narrowing. Without this the
+    /// fix would silently cut a 128k-output model to its 20,000-token compaction
+    /// reserve — the naive formulation, and a real regression.
+    #[test]
+    fn a_window_in_force_that_is_the_catalogued_one_changes_no_sizing() {
+        for (provider, model, window) in [
+            ("anthropic", "claude-opus-4-7", 200_000u32),
+            ("openai", "gpt-4o-mini", 128_000),
+            ("gemini", "gemini-2.5-flash", 1_048_576),
+        ] {
+            assert_eq!(
+                size_output_cap(200_000, provider, model, 1_000, false, Some(window)),
+                size_output_cap(200_000, provider, model, 1_000, false, None),
+                "{model}: the reconciled window is the catalogued window"
+            );
+        }
+    }
+
+    fn evidence(
+        served: u64,
+        corroborated: bool,
+    ) -> wcore_config::context_window::ServedWindowEvidence {
+        wcore_config::context_window::ServedWindowEvidence {
+            signal: wcore_config::context_window::TruncationSignal::Regression,
+            sent_estimate: 10_466,
+            reported_input: served,
+            served_window: served,
+            corroborated,
+        }
+    }
+
+    /// #1172 c2 - "the shortfall is named to the user, and says the HEAD of the
+    /// prompt is what was lost".
+    ///
+    /// c2's evidence used to be a bare `file:` line pointer into the turn loop,
+    /// which drifted onto unrelated billing code the moment this lane edited
+    /// engine.rs - and a line number cannot assert a sentence anyway. WHICH end
+    /// of the conversation went is the whole point of the notice: a user told
+    /// only "context truncated" reasonably assumes the tail was trimmed and
+    /// that their system prompt and task survived. They did not.
+    #[test]
+    fn the_truncation_notice_says_the_head_of_the_prompt_is_what_was_lost() {
+        let cfg = wcore_config::compact::CompactConfig::default();
+        for corroborated in [false, true] {
+            let text = truncation_notice(&evidence(4_050, corroborated), "qwen3:8b", &cfg);
+            assert!(
+                text.contains("HEAD"),
+                "corroborated={corroborated}: the notice must name WHICH end was \
+                 discarded: {text}"
+            );
+            assert!(
+                text.contains("the system prompt and your task are what went"),
+                "corroborated={corroborated}: naming the head is only useful if \
+                 the notice says what was in it: {text}"
+            );
+            // The figures the operator needs to act, on every arm.
+            assert!(text.contains("4050"), "the served figure: {text}");
+            assert!(text.contains("10466"), "the sent figure: {text}");
+        }
+    }
+
+    /// wayland-core#353 D10 — the notice must not claim core changed its sizing
+    /// on a turn where it did not.
+    ///
+    /// The first `Regression` is the ONLY turn the notice ever fired for that
+    /// arm, and on it `sizing_window()` is still `None`.
+    #[test]
+    fn a_single_observation_notice_does_not_claim_the_session_was_resized() {
+        let cfg = wcore_config::compact::CompactConfig::default();
+        let text = truncation_notice(&evidence(4_050, false), "qwen3:8b", &cfg);
+        assert!(
+            !text.contains("is now sizing"),
+            "nothing has been resized yet: {text}"
+        );
+        assert!(text.contains("has NOT changed how it sizes"), "{text}");
+    }
+
+    /// The corroborating turn is where the claim becomes true, and it is now
+    /// the turn that carries it.
+    #[test]
+    fn the_corroborating_notice_is_the_one_that_claims_the_resize() {
+        let cfg = wcore_config::compact::CompactConfig::default();
+        let text = truncation_notice(&evidence(8_192, true), "qwen3:8b", &cfg);
+        assert!(
+            text.contains("Core is now sizing this session against the 8192-token"),
+            "{text}"
+        );
+    }
+
+    /// And when the served window is one core cannot work in at all, the notice
+    /// says THAT instead of promising a resize that would brick the run.
+    #[test]
+    fn an_unworkable_served_window_notice_says_the_run_will_stop() {
+        let cfg = wcore_config::compact::CompactConfig::default();
+        let text = truncation_notice(&evidence(4_096, true), "qwen3:8b", &cfg);
+        assert!(!text.contains("is now sizing"), "{text}");
+        assert!(
+            text.contains("cannot size a session against 4096"),
+            "{text}"
+        );
+        assert!(text.contains("run will stop"), "{text}");
+    }
 
     #[test]
     fn known_model_is_clamped_to_its_real_output_ceiling() {
         // A generous config cap is clamped DOWN to the model's real ceiling,
         // so a large default never 400s a model that allows less.
         assert_eq!(
-            size_output_cap(64_000, "openai", "gpt-4o-mini", 1_000, false),
+            size_output_cap(64_000, "openai", "gpt-4o-mini", 1_000, false, None),
             16_384,
             "gpt-4o output ceiling binds"
         );
         // Opus 4.6+ allows 128k output (#165); a generous config above that is
         // clamped DOWN to the 128k ceiling.
         assert_eq!(
-            size_output_cap(200_000, "anthropic", "claude-opus-4-7", 1_000, false),
+            size_output_cap(200_000, "anthropic", "claude-opus-4-7", 1_000, false, None),
             128_000,
             "opus 4.6+ output ceiling (128k) binds"
         );
         assert_eq!(
-            size_output_cap(64_000, "anthropic", "claude-sonnet-4-6", 1_000, false),
+            size_output_cap(64_000, "anthropic", "claude-sonnet-4-6", 1_000, false, None),
             64_000,
             "sonnet can use its full 64k"
         );
@@ -1238,11 +1582,11 @@ mod output_sizing_tests {
         // A router alias (served model unknown) must NOT receive the generous
         // 64k — it could route to a small model and 400. Clamp to the floor.
         assert_eq!(
-            size_output_cap(64_000, "flux-router", "flux-auto", 1_000, false),
+            size_output_cap(64_000, "flux-router", "flux-auto", 1_000, false, None),
             8_192
         );
         assert_eq!(
-            size_output_cap(64_000, "ollama", "some-local-model", 1_000, false),
+            size_output_cap(64_000, "ollama", "some-local-model", 1_000, false, None),
             8_192
         );
     }
@@ -1251,11 +1595,11 @@ mod output_sizing_tests {
     fn explicit_low_user_cap_is_always_respected() {
         // If the user sets a low max_tokens, it binds on known AND unknown.
         assert_eq!(
-            size_output_cap(4_000, "anthropic", "claude-opus-4-7", 1_000, false),
+            size_output_cap(4_000, "anthropic", "claude-opus-4-7", 1_000, false, None),
             4_000
         );
         assert_eq!(
-            size_output_cap(4_000, "flux-router", "flux-auto", 1_000, false),
+            size_output_cap(4_000, "flux-router", "flux-auto", 1_000, false, None),
             4_000
         );
     }
@@ -1266,7 +1610,7 @@ mod output_sizing_tests {
         // below the model's output ceiling (prevents an input+output overflow).
         // Opus 4.6+ now has a 1M window (#165), so the prompt must be near 1M
         // (not 200k) for the remaining room to bind below the output ceiling.
-        let cap = size_output_cap(64_000, "anthropic", "claude-opus-4-7", 995_000, false);
+        let cap = size_output_cap(64_000, "anthropic", "claude-opus-4-7", 995_000, false, None);
         assert!(cap < 32_000, "window room must bind near the context limit");
         assert!(cap >= 1, "never zero or negative");
     }
@@ -1280,20 +1624,20 @@ mod output_sizing_tests {
         // DeepSeek) and an OpenAI reasoning_effort (o-series / gpt-5) — which is
         // why the parameter is a single `is_reasoning_turn` flag.
         assert_eq!(
-            size_output_cap(64_000, "flux-router", "flux-auto", 1_000, true),
+            size_output_cap(64_000, "flux-router", "flux-auto", 1_000, true, None),
             UNKNOWN_REASONING_CAP,
             "a reasoning turn on a router alias gets reasoning headroom"
         );
         // Specifically the reasoning_effort path: an unknown o-series model with
         // NO numeric budget (only reasoning_effort) must still get the headroom.
         assert_eq!(
-            size_output_cap(64_000, "openai", "o3-pro-unlisted", 1_000, true),
+            size_output_cap(64_000, "openai", "o3-pro-unlisted", 1_000, true, None),
             UNKNOWN_REASONING_CAP,
             "reasoning_effort lifts an unknown o-series model off 8192"
         );
         // Non-reasoning turn on the same alias still gets the conservative floor.
         assert_eq!(
-            size_output_cap(64_000, "flux-router", "flux-auto", 1_000, false),
+            size_output_cap(64_000, "flux-router", "flux-auto", 1_000, false, None),
             8_192
         );
     }
@@ -1303,7 +1647,7 @@ mod output_sizing_tests {
         // A known model's real ceiling/window always binds, even with thinking
         // on — the reasoning ceiling only rescues UNKNOWN models from 8192.
         assert_eq!(
-            size_output_cap(200_000, "anthropic", "claude-opus-4-7", 1_000, true),
+            size_output_cap(200_000, "anthropic", "claude-opus-4-7", 1_000, true, None),
             128_000,
             "opus 4.6+ ceiling (128k) still binds with thinking on"
         );
@@ -1375,7 +1719,7 @@ mod output_sizing_tests {
         ));
         // And the sized value itself binds (existing contract, re-pinned).
         assert_eq!(
-            size_output_cap(4_000, "flux-router", "flux-auto", 1_000, false),
+            size_output_cap(4_000, "flux-router", "flux-auto", 1_000, false, None),
             4_000
         );
     }
@@ -1393,16 +1737,16 @@ mod output_sizing_tests {
         // Its sizing resolves through the registry entry (config cap binds
         // below the 65_536 ceiling), not the 8192 unknown floor.
         assert_eq!(
-            size_output_cap(64_000, "gemini", "gemini-2.5-flash", 1_000, false),
+            size_output_cap(64_000, "gemini", "gemini-2.5-flash", 1_000, false, None),
             64_000
         );
         // Known-model sizing contracts re-pinned per the #112 test plan.
         assert_eq!(
-            size_output_cap(64_000, "openai", "gpt-4o", 1_000, false),
+            size_output_cap(64_000, "openai", "gpt-4o", 1_000, false, None),
             16_384
         );
         assert_eq!(
-            size_output_cap(64_000, "anthropic", "claude-sonnet-4-6", 1_000, false),
+            size_output_cap(64_000, "anthropic", "claude-sonnet-4-6", 1_000, false, None),
             64_000
         );
     }
@@ -2039,6 +2383,55 @@ const AUTH_FAILURE_REMEDY: &str = "The provider rejected this API key — not re
      encrypted vault), pass --api-key for a one-off, or set the provider's \
      environment variable (ANTHROPIC_API_KEY, OPENAI_API_KEY, …).";
 
+/// #434 c2 — does this provider refusal say the request is missing the
+/// historical `reasoning_content` a strict reasoner requires?
+///
+/// This is the ONE refusal the engine may answer by re-shaping the SAME turn.
+/// It exists because the shaping decision is made BEFORE the answer that would
+/// inform it: a Flux tier alias (`flux-auto`) names no model, and
+/// `x-flux-routed-model` only arrives on the way back, so on the turn the alias
+/// FIRST resolves to DeepSeek/Kimi the request goes out without the replay that
+/// endpoint requires. The refusal itself is the missing signal, and re-sending
+/// with replay on has a real chance of being accepted.
+///
+/// The gate is deliberately narrow, for the same reason
+/// [`is_orphaned_tool_pair_rejection`] is: every other 400 fails identically on
+/// a second send, so a wider match bills the user twice for nothing. The
+/// refusal must be a 400, must NAME `reasoning_content` (the wire field, not
+/// the concept), and must describe it as absent or mandatory — a sentence that
+/// merely mentions reasoning does not qualify.
+fn is_missing_reasoning_content_rejection(error: &ProviderError) -> bool {
+    let ProviderError::Api { status, message } = error else {
+        return false;
+    };
+    if *status != 400 {
+        return false;
+    }
+    let message = message.to_ascii_lowercase();
+    // The wire field, in either spelling a provider serializes it with.
+    if !(message.contains("reasoning_content") || message.contains("reasoningcontent")) {
+        return false;
+    }
+    // ...and the complaint has to be that it is ABSENT or REQUIRED. A refusal
+    // that names the field for some other reason ("reasoning_content is not
+    // supported by this model") is a capability refusal: re-sending it WITH
+    // more reasoning_content is strictly worse than not retrying.
+    const ABSENCE_NEEDLES: [&str; 6] = [
+        "missing",
+        "required",
+        "must be",
+        "must contain",
+        "must include",
+        "expected",
+    ];
+    if ABSENCE_NEEDLES.iter().any(|n| message.contains(n)) {
+        // "not supported" wins over any absence wording in the same sentence:
+        // a model that rejects the field cannot be appeased by sending it.
+        return !(message.contains("not supported") || message.contains("unsupported"));
+    }
+    false
+}
+
 /// #923(3) — does this provider refusal name an orphaned `tool_use` /
 /// `tool_result` pair?
 ///
@@ -2238,7 +2631,7 @@ fn request_wire_fingerprint(
 /// tool-result body in the outbound retry context. `short_error` is the first
 /// line of the original body, capped, so the model still sees WHAT failed
 /// without the engine re-sending the full contaminated transcript.
-fn retry_stub(tool_name: &str, error_body: &str) -> String {
+pub(crate) fn retry_stub(tool_name: &str, error_body: &str) -> String {
     const MAX_ERR_CHARS: usize = 200;
     let mut short: String = error_body
         .lines()
@@ -3805,8 +4198,45 @@ impl ReplayProtectionLoss {
     }
 }
 
+/// #174 — an unrestricted, in-memory spend guard for the hand-built
+/// `AgentEngine` literals in this test module. The constructors install a real
+/// one; these literals bypass the constructors, so they need their own.
+///
+/// The baseline is deliberately `Unpriced`, which is the only billing that
+/// imposes NO escalation ceiling (see `EscalationGate::is_escalation` rule 3:
+/// a ceiling nobody could read cannot be exceeded). A `Free` baseline is not
+/// unrestricted — it refuses every uncatalogued model name as an escalation,
+/// which is correct in production and pure noise for a literal whose model is
+/// a placeholder like `"new-model"`. Tests that mean to exercise the gate
+/// build their own guard with a real baseline; this one must stay out of the
+/// way of the hook, compaction and plan-mode plumbing it exists to support.
+#[cfg(test)]
+fn test_spend_guard() -> Arc<crate::spend_guard::SpendGuard> {
+    Arc::new(crate::spend_guard::SpendGuard::new(
+        wcore_budget::SpendMode::Unrestricted,
+        "test-session",
+        wcore_budget::ModelSpendProfile::new(
+            "test",
+            "test-model",
+            wcore_budget::ModelBilling::Unpriced,
+            0.0,
+        ),
+        Arc::new(wcore_budget::MemorySpendAuditSink::default()),
+    ))
+}
+
 pub struct AgentEngine {
     provider: Arc<dyn LlmProvider>,
+    /// #174 c2-c5 — the run's spend guard. Always present, even in the default
+    /// unrestricted mode, because the per-task spend AUDIT is unconditional
+    /// while the modes are opt-in.
+    ///
+    /// `self.provider` is a [`crate::spend_guard::SpendGuardProvider`] wrapping
+    /// this guard, so every dispatch made through the engine's provider handle
+    /// — the conversation turn, its compaction call, the online-evolution
+    /// paraphrase — is admitted by it without each of those sites having to
+    /// remember to ask.
+    spend_guard: Arc<crate::spend_guard::SpendGuard>,
     /// Immutable outbound authority for this session. Runtime-lazy clients
     /// must clone this handle instead of consulting process or task globals.
     egress_policy: wcore_egress::SharedPolicy,
@@ -4159,6 +4589,11 @@ pub struct AgentEngine {
     /// to (see `is_unserved_request_failure`). Reset at every turn entry and
     /// disclosed at every turn exit by `report_unserved_resends`.
     unserved_resends: u32,
+    /// Set by `emit_incomplete_run_admission`, cleared at every turn entry.
+    /// Read only by `admit_unspoken_run_failure`, so the run-loop backstop can
+    /// tell a turn that already said it stopped short from one that ended
+    /// silently. #388 bullet 4.
+    admitted_incomplete_this_turn: bool,
     midflight_monitor: MidFlightMonitor,
     /// v0.6.1 CRIT-1: opt-in policy gate. When `Some`, every tool call
     /// in `dispatch_once` is checked against the `PolicyEngine` before
@@ -4417,6 +4852,15 @@ pub struct AgentEngine {
     /// routed-model header, and a mid-conversation re-route are all uncovered
     /// here and need router-side cover.
     flux_routed_model: Option<String>,
+    /// #434 c2 — replay historical `reasoning_content` on every remaining
+    /// request of this conversation.
+    ///
+    /// Learned from a provider refusal, never from a model string: see
+    /// [`is_missing_reasoning_content_rejection`]. Sticky once set, because the
+    /// contract belongs to the conversation's served model — un-setting it on
+    /// the next turn would re-earn the same 400 the recovery just paid for.
+    /// Cleared with the rest of the router state when the conversation is.
+    forced_reasoning_replay: bool,
     /// #282 contract V1: the LAST-seen Flux context pressure
     /// (`x-flux-context-pressure`, `0.0..=1.0` = required / window). Captured
     /// for #280 pressure-driven scheduling (see `smart_compact_fraction`).
@@ -4589,6 +5033,79 @@ pub(crate) fn resolve_user_model_user_id() -> String {
     }
 }
 
+/// #174 c2 — durable per-task spend audit log for this profile.
+///
+/// Beside the daily spend ledger, not inside the prunable diagnostics cost
+/// ledger: an audit trail that a prune can silently truncate is not one.
+pub fn spend_audit_log_path() -> std::path::PathBuf {
+    wcore_config::config::wayland_config_dir()
+        .join("budget")
+        .join("spend-audit.jsonl")
+}
+
+/// Build the run's spend guard from `config` and wrap `provider` in it.
+///
+/// The ONE place the engine installs a provider handle. Every constructor and
+/// `rebind_provider` route through it, so there is no code path that leaves the
+/// engine holding an unguarded provider.
+/// #1203 — the id [`AgentEngine::budget_session_id`] yields before a session,
+/// a durable budget authority or a host-supplied id exists.
+///
+/// Both constructors used to hand `install_spend_guard` a fresh
+/// `uuid::Uuid::new_v4()` instead. That is not an identity: it is minted per
+/// engine construction, never persisted, never restored on resume, and
+/// `rebind_provider` — the one call site that got it right — then swapped it
+/// for the real `budget_session_id()` mid-session, so a single `/model` switch
+/// split one conversation into two unrelated keys in
+/// `~/.wayland/budget/spend-audit.jsonl`. The placeholder is now the SAME value
+/// the authority chain falls back to, and it is replaced by
+/// [`AgentEngine::sync_spend_guard_session`] the moment a real id exists.
+pub(crate) const UNBOUND_BUDGET_SESSION_ID: &str = "session-unknown";
+
+fn install_spend_guard(
+    provider: Arc<dyn LlmProvider>,
+    provider_key: &str,
+    model: &str,
+    compat: &wcore_config::compat::ProviderCompat,
+    mode: wcore_budget::SpendMode,
+    session_id: &str,
+) -> (Arc<dyn LlmProvider>, Arc<crate::spend_guard::SpendGuard>) {
+    let baseline = crate::spend_guard::classify_model(provider_key, model, compat);
+    let sink: Arc<dyn wcore_budget::SpendAuditSink> = Arc::new(
+        wcore_budget::JsonlSpendAuditSink::new(spend_audit_log_path()),
+    );
+    let guard = Arc::new(crate::spend_guard::SpendGuard::new(
+        mode, session_id, baseline, sink,
+    ));
+    let wrapped: Arc<dyn LlmProvider> = Arc::new(crate::spend_guard::SpendGuardProvider::new(
+        provider,
+        Arc::clone(&guard),
+        provider_key,
+        compat.clone(),
+    ));
+    (wrapped, guard)
+}
+
+/// wayland#1231 c2 — the label that marks a reply recovered from a model's own
+/// reasoning tags.
+///
+/// A recovered answer is the model's REASONING, handed to the user because
+/// there was nothing else. It must never read as an ordinary answer: the user
+/// is entitled to know they are looking at working-out rather than a composed
+/// reply, and the next turn (which now carries it, per c3) is entitled to the
+/// same. Kept as a const so the guard test and the production path cannot
+/// drift apart into two different strings.
+pub const REASONING_RECOVERY_LABEL: &str =
+    "[recovered from this model's reasoning — it emitted no answer outside its own tags]";
+
+/// Internal sentinel: the empty-turn branch took the wayland#1231 c2 recovery
+/// path and already spoke on the answer stream, so no error is owed.
+///
+/// A sentinel rather than a second `bool` because the surrounding expression
+/// yields ONE `&str` down every arm and adding a parallel flag is how two
+/// arms drift out of agreement.
+const RECOVERED_FROM_REASONING: &str = "\u{0}wayland-1231-recovered";
+
 impl AgentEngine {
     pub fn new(config: Config, tools: ToolRegistry, output: Arc<dyn OutputSink>) -> Self {
         let provider = create_provider(&config);
@@ -4609,6 +5126,21 @@ impl AgentEngine {
         // on `self.config` solely for the live gate's transient `AgentSpawner`.
         let workflow_live_mode = config.observability.workflow_live_mode;
         let retained_config = config.clone();
+        // #174 — install the spend guard BEFORE the struct literal partially
+        // moves `config`.
+        let (provider, spend_guard) = install_spend_guard(
+            provider,
+            config.compat.provider_type(),
+            &config.model,
+            &config.compat,
+            config.budget.spend_mode(),
+            // #1203 — a fresh engine has no session, no authority and no
+            // host-supplied id, so this IS what `budget_session_id()` resolves
+            // to right now. `sync_spend_guard_session` re-keys the guard as
+            // soon as one of the three appears, and every audit record is
+            // written at task end, after that has happened.
+            UNBOUND_BUDGET_SESSION_ID,
+        );
         let system_prompt = config.system_prompt.clone().unwrap_or_default();
         let confirmer = ToolConfirmer::with_policy(
             config.smart_approval_policy(),
@@ -4638,6 +5170,7 @@ impl AgentEngine {
         Self {
             flux_loop_intent: None,
             provider,
+            spend_guard,
             egress_policy: wcore_egress::default_policy(),
             tools: Arc::new(tools),
             messages: Vec::new(),
@@ -4743,6 +5276,7 @@ impl AgentEngine {
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             narrowed_execution_budget: None,
             unserved_resends: 0,
+            admitted_incomplete_this_turn: false,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -4798,6 +5332,7 @@ impl AgentEngine {
             // #282: no Flux signal-back seen yet at construction.
             flux_served_window: None,
             flux_routed_model: None,
+            forced_reasoning_replay: false,
             flux_context_pressure: None,
             // #280: smart auto-compaction starts armed; latches seeded clear.
             smart_compact_armed: true,
@@ -4870,6 +5405,21 @@ impl AgentEngine {
         // `new_with_provider` for the rationale).
         let workflow_live_mode = config.observability.workflow_live_mode;
         let retained_config = config.clone();
+        // #174 — see `new_with_provider`: guard installed before the literal
+        // partially moves `config`.
+        let (provider, spend_guard) = install_spend_guard(
+            provider,
+            config.compat.provider_type(),
+            &config.model,
+            &config.compat,
+            config.budget.spend_mode(),
+            // #1203 — the resumed session IS the authority here: with no
+            // durable budget authority installed yet and no host-supplied id,
+            // `budget_session_id()` resolves through `current_session_id()` to
+            // exactly this string. A random uuid here is what made a resume
+            // write its spend under a key the first launch never used.
+            &session.id,
+        );
         // #1161 — read the persisted conversation id BEFORE `session` is moved
         // into `current_session` below.
         let resumed_conversation_id = session
@@ -4929,6 +5479,7 @@ impl AgentEngine {
         Self {
             flux_loop_intent: None,
             provider,
+            spend_guard,
             egress_policy: wcore_egress::default_policy(),
             tools: Arc::new(tools),
             messages: session.messages.clone(),
@@ -5035,6 +5586,7 @@ impl AgentEngine {
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             narrowed_execution_budget: None,
             unserved_resends: 0,
+            admitted_incomplete_this_turn: false,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -5100,6 +5652,7 @@ impl AgentEngine {
             // #282: no Flux signal-back seen yet at construction.
             flux_served_window: None,
             flux_routed_model: None,
+            forced_reasoning_replay: false,
             flux_context_pressure: None,
             // #280: smart auto-compaction starts armed; latches seeded clear.
             smart_compact_armed: true,
@@ -5176,6 +5729,37 @@ impl AgentEngine {
         Arc::get_mut(&mut self.tools)
     }
 
+    /// FerroxLabs/wayland#1234 — retire a runtime-added MCP server from every
+    /// structure THIS ENGINE owns, as one operation.
+    ///
+    /// The engine owns both the tool registry and the `McpCatalogRefresh`, and
+    /// a removal has to touch both: drop the server's tools from the registry,
+    /// and withdraw its manager from the refresh so it stops being polled.
+    /// `McpCatalogRefresh` keeps its own `Arc<McpManager>` from
+    /// `register_runtime_server`, so a caller that did only the first left the
+    /// removed server registered for the life of the session — which is what
+    /// #1234 reports on the json-stream `RemoveMcpServer` path, and what the
+    /// TUI's `/mcp remove` did on the same shape until this existed.
+    ///
+    /// The two halves are ordered so a refusal cannot half-perform: the
+    /// registry is claimed FIRST, and nothing is withdrawn if it is busy.
+    /// `None` means a turn holds the registry and the caller must refuse the
+    /// removal rather than complete part of it.
+    pub fn retire_runtime_mcp_server(
+        &mut self,
+        name: &str,
+        defer_cold: &wcore_config::tools::DeferColdConfig,
+    ) -> Option<Vec<String>> {
+        let refresh = self.mcp_catalog_refresh();
+        let registry = self.registry_mut()?;
+        let removed_tools = registry.remove_mcp_server(name);
+        registry.refresh_tool_search_catalog(defer_cold);
+        if let Some(refresh) = refresh {
+            refresh.forget_runtime_server(name);
+        }
+        Some(removed_tools)
+    }
+
     /// Wire the mid-session MCP catalogue refresh (post-construction setter,
     /// matching `set_agent_registry`). Bootstrap calls this once it has both
     /// the connected managers and the `builtin_names` / server-config
@@ -5183,14 +5767,27 @@ impl AgentEngine {
     ///
     /// Without it the engine still runs; it simply never notices a server
     /// that changes its tool list after connect.
+    ///
+    /// wayland#1174: installed UNCONDITIONALLY, including when the refresh is
+    /// empty. It used to return early on `is_empty()`, which is exactly the
+    /// state `defer_config_mcp` produces — the mode the desktop host runs in —
+    /// so that session got no refresher at all and `tools/list_changed` was
+    /// invisible for every server for the life of the session. An empty
+    /// refresh is not "nothing to do"; it is "nothing to do YET", because the
+    /// deferred connect and `/mcp add` both admit managers into it later.
     pub fn set_mcp_catalog_refresh(
         &mut self,
         refresh: Arc<wcore_mcp::tool_proxy::McpCatalogRefresh>,
     ) {
-        if refresh.is_empty() {
-            return;
-        }
         self.mcp_catalog_refresh = Some(refresh);
+    }
+
+    /// The live catalogue refresh, for hosts that attach an MCP server after
+    /// boot. wayland#1175: every runtime-add path builds a NEW `McpManager`,
+    /// and a manager that never reaches this handle is a server whose
+    /// `tools/list_changed` is silently ignored for the rest of the session.
+    pub fn mcp_catalog_refresh(&self) -> Option<Arc<wcore_mcp::tool_proxy::McpCatalogRefresh>> {
+        self.mcp_catalog_refresh.clone()
     }
 
     /// Pick up any MCP server that announced `notifications/tools/list_changed`
@@ -5479,6 +6076,7 @@ impl AgentEngine {
         self.conversation_id = switched_conversation_id;
         self.flux_served_window = None;
         self.flux_routed_model = None;
+        self.forced_reasoning_replay = false;
         self.flux_context_pressure = None;
         self.smart_compact_armed = true;
         self.smart_compact_last_turn = None;
@@ -5486,6 +6084,8 @@ impl AgentEngine {
         self.smart_compact_force = false;
         self.length_wedge_fingerprint = None;
         self.budget_session_id = Some(session_id.clone());
+        // #1203 — the spend audit follows the session the engine is now on.
+        self.sync_spend_guard_session();
         self.style_detector = Mutex::new(crate::style_detector::StyleDetector::new());
         if let Some(state) = &self.session_state {
             state.reset_for_session(
@@ -5521,14 +6121,19 @@ impl AgentEngine {
     /// Every `emit_error` in this file goes through here so the tap cannot be
     /// bypassed by a new call site. Forwards verbatim to the sink; the tap is
     /// a side-channel, not a filter.
-    fn emit_error(&self, msg: &str, retryable: bool) {
+    fn emit_error(
+        &self,
+        msg: &str,
+        retryable: bool,
+        category: wcore_protocol::events::FailureCategory,
+    ) {
         if let Some(tap) = self.error_tap.as_ref() {
             match tap.lock() {
                 Ok(mut slot) => *slot = Some(msg.to_string()),
                 Err(poisoned) => *poisoned.into_inner() = Some(msg.to_string()),
             }
         }
-        self.output.emit_error(msg, retryable);
+        self.output.emit_error(msg, retryable, category);
     }
 
     /// CORE-2 — snapshot of the engine's usage counters:
@@ -5628,6 +6233,9 @@ impl AgentEngine {
         self.budget_authority_seed = Some(seed);
         self.budget_tracker = None;
         self.budget_session_id = None;
+        // #1203 — the authority outranks every other id source, so the spend
+        // audit has to move onto it the moment it is installed.
+        self.sync_spend_guard_session();
         Ok(())
     }
 
@@ -5734,6 +6342,8 @@ impl AgentEngine {
         self.budget_authority_seed = None;
         self.budget_tracker = None;
         self.budget_session_id = None;
+        // #1203 — see `install_budget_authority`.
+        self.sync_spend_guard_session();
         Ok(())
     }
 
@@ -5755,6 +6365,20 @@ impl AgentEngine {
     /// runtime identity shared with spawned children.
     pub fn set_budget_session_id(&mut self, session_id: impl Into<String>) {
         self.budget_session_id = Some(session_id.into());
+        // #1203 — a host that binds a runtime identity binds the spend audit
+        // to it too; the two used to be independent.
+        self.sync_spend_guard_session();
+    }
+
+    /// #1203 — re-key the spend guard onto whatever
+    /// [`Self::budget_session_id`] resolves to now.
+    ///
+    /// Called from every site that can change that answer, and once more
+    /// immediately before a task's record is written, so a path nobody thought
+    /// of still emits under the right key.
+    pub(crate) fn sync_spend_guard_session(&self) {
+        self.spend_guard
+            .rebind_session_id(&self.budget_session_id());
     }
 
     fn budget_session_id(&self) -> String {
@@ -5764,7 +6388,7 @@ impl AgentEngine {
         self.budget_session_id
             .clone()
             .or_else(|| self.current_session_id())
-            .unwrap_or_else(|| "session-unknown".to_string())
+            .unwrap_or_else(|| UNBOUND_BUDGET_SESSION_ID.to_string())
     }
 
     /// #388 — whether an actual provider CAP (token or monetary) governs this
@@ -6352,6 +6976,28 @@ impl AgentEngine {
     /// `/new`) to release the pin and let hook/skill switches resume.
     pub fn set_model(&mut self, model: impl Into<String>) {
         let model = model.into();
+        // #174 c5 — an explicit operator pick is not a SILENT escalation, but
+        // it is still an escalation and must be recorded with its reason.
+        // A spend MODE still binds: `/model` cannot buy through `local-only`.
+        let profile =
+            crate::spend_guard::classify_model(self.compat.provider_type(), &model, &self.compat);
+        // #1203 — an escalation record is written durably here, before any task
+        // record is; it must carry the session id too.
+        self.sync_spend_guard_session();
+        if let Err(refusal) = self.spend_guard.authorize(
+            profile,
+            crate::spend_guard::EscalationSource::Operator,
+            "explicit operator model selection",
+        ) {
+            tracing::warn!(
+                target: "wcore_agent::spend_guard",
+                requested = %model,
+                %refusal,
+                "model selection refused by the spend guard"
+            );
+            self.output.emit_info(&refusal.to_string());
+            return;
+        }
         self.user_model_pin = Some(model.clone());
         self.model = model;
     }
@@ -6408,7 +7054,61 @@ impl AgentEngine {
             );
             return;
         }
+        // #174 c5 — this IS the silent-escalation path: a skill or hook moving
+        // the live model with nobody asked. `admit` (not `authorize`) is
+        // deliberate — a hook cannot supply an operator's reason, so an upward
+        // move here is refused rather than recorded and allowed.
+        let profile = crate::spend_guard::classify_model(
+            self.compat.provider_type(),
+            &new_model,
+            &self.compat,
+        );
+        if let Err(refusal) = self.spend_guard.admit(&profile) {
+            tracing::warn!(
+                target: "wcore_agent::spend_guard",
+                requested = %new_model,
+                %refusal,
+                "skill/hook switch_model refused by the spend guard"
+            );
+            self.output.emit_info(&refusal.to_string());
+            return;
+        }
         self.model = new_model;
+    }
+
+    /// #174 c2 — the run's spend guard, for hosts and tests that need to read
+    /// the audit or authorize an escalation.
+    pub fn spend_guard(&self) -> &Arc<crate::spend_guard::SpendGuard> {
+        &self.spend_guard
+    }
+
+    /// #174 c2 — close the current task's spend audit and persist its record.
+    ///
+    /// Called from exactly one place ([`Self::run_with_content`]), on EVERY
+    /// terminal path including the error ones, which is what makes "a record
+    /// after every task" true rather than "a record after a task that ended
+    /// the way we expected".
+    fn emit_task_spend_audit(&self) {
+        // #1203 — the last chance to key the record correctly. Every other sync
+        // site is an event we know about; this one is the write itself, so a
+        // session id that arrived by some path not listed above still lands on
+        // the record instead of a placeholder.
+        self.sync_spend_guard_session();
+        let Some(record) = self.spend_guard.finish_task() else {
+            return;
+        };
+        tracing::info!(
+            target: "wcore_agent::spend_audit",
+            task = %record.task_id,
+            summary = %record.summary(),
+            "per-task spend audit record"
+        );
+        // Only surface it to the user when something was refused or escalated.
+        // A line on every turn would train the reader to skip the one turn
+        // where it mattered.
+        if !record.refusals.is_empty() || !record.escalations.is_empty() {
+            self.output.emit_info(&record.summary());
+        }
     }
 
     /// The active model identifier (used by the TUI status bar + tests).
@@ -6449,7 +7149,20 @@ impl AgentEngine {
         compat: wcore_config::compat::ProviderCompat,
         model: String,
     ) {
-        self.provider = provider;
+        // #174 — a rebind installs a deliberately chosen provider+model, so it
+        // is the new authorized baseline. Routed through the same installer as
+        // the constructors: there must be no way to reach `self.provider` with
+        // an unguarded handle.
+        let (wrapped, spend_guard) = install_spend_guard(
+            provider,
+            compat.provider_type(),
+            &model,
+            &compat,
+            self.spend_guard.mode(),
+            &self.budget_session_id(),
+        );
+        self.provider = wrapped;
+        self.spend_guard = spend_guard;
         self.compat = compat;
         self.model = model;
         // D014: a provider rebind installs a deliberately chosen model for the
@@ -6522,8 +7235,19 @@ impl AgentEngine {
         // `run_compaction` step 0. No file-cache bump for this pass: it never
         // touches tool-RESULT bodies (where diff-resend bases live).
         let args_result = micro::compact_tool_call_args(&mut self.messages, &self.compact_config);
+        // #1150 c4: the accumulated tool-RESULT ceiling, mirroring
+        // `run_compaction` step 0b.
+        // #1200 — the SAME resolved window every other boundary uses,
+        // learned narrowing included. Resolved BEFORE the mutable borrow of
+        // self.messages below, not inlined into the call.
+        let result_window = Some(self.compaction_window_now());
+        let results_result = micro::bound_accumulated_tool_results(
+            &mut self.messages,
+            &self.compact_config,
+            result_window,
+        );
         let result = micro::microcompact(&mut self.messages, &self.compact_config);
-        if result.cleared_count > 0 {
+        if result.cleared_count + results_result.cleared_count > 0 {
             // Token-opt (diff-resend): clearing a tool-result body can remove
             // the read content a cached diff base references. Bump the file
             // cache's compaction generation so those bases stop qualifying —
@@ -6531,9 +7255,12 @@ impl AgentEngine {
             self.bump_file_cache_generation();
         }
         micro::MicrocompactResult {
-            cleared_count: result.cleared_count + args_result.cleared_count,
+            cleared_count: result.cleared_count
+                + args_result.cleared_count
+                + results_result.cleared_count,
             estimated_tokens_freed: result.estimated_tokens_freed
-                + args_result.estimated_tokens_freed,
+                + args_result.estimated_tokens_freed
+                + results_result.estimated_tokens_freed,
         }
     }
 
@@ -7572,6 +8299,62 @@ impl AgentEngine {
         }
     }
 
+    /// #559 c6 — the message a per-turn transient block must be attached to,
+    /// creating a dedicated trailing CARRIER when attaching to the tail would
+    /// put the block inside the first user message.
+    ///
+    /// On turn 1 the tail user message IS the first user message, so
+    /// `attach_transient_block` lands the skill-router hint and the PrePrompt
+    /// contributions at `messages[1]` of an OpenAI-shaped body — the system
+    /// prompt takes `messages[0]`. Those blocks live only in the per-turn
+    /// clone, so the same message is re-sent WITHOUT them on turn 2 and turn
+    /// 1's prompt-cache entry can never be read back. That is how the session
+    /// #559 measured reached turn 26 with `cache_read = 0` on every turn.
+    /// A carrier of their own leaves the first user message byte-stable from
+    /// turn 1 onwards, so turn 1 writes an entry later turns can read —
+    /// strictly more than the write-point rule alone, which only stops turn 1
+    /// writing a poisoned entry (c7).
+    ///
+    /// `compat.merge_same_role()` is the gate; a provider name never is
+    /// (AGENTS.md). A wire that folds adjacent same-role turns together merges
+    /// the carrier straight back into the first user message — and appends it
+    /// AFTER the sender's own words, inverting the placement rule
+    /// `attach_transient_block` exists to hold. Those wires are exactly
+    /// `anthropic` / `bedrock` / `vertex` / `minimax` / `gemini`, the only
+    /// presets that set the flag, and every one of them carries the system
+    /// prompt in its own top-level field (`system`, `systemInstruction`), so
+    /// their turn-1 request has no `messages[1]` for anything to land in.
+    ///
+    /// Returns `None` — injecting nothing — when the tail is not user-role,
+    /// exactly as both call sites did before: never orphan a `tool_use`, never
+    /// create adjacent user messages on a wire that cannot carry them.
+    fn transient_carrier<'a>(
+        messages: &'a mut Vec<Message>,
+        compat: &wcore_config::compat::ProviderCompat,
+    ) -> Option<&'a mut Message> {
+        if !matches!(messages.last()?.role, Role::User) {
+            return None;
+        }
+        // `len() == 1` is precisely "the tail user message is also the first
+        // one". A carrier pushed by an earlier injection on this same turn
+        // makes it 2, so the second injection joins that carrier instead of
+        // starting another.
+        if messages.len() == 1 && !compat.merge_same_role() {
+            // The timestamp is DERIVED from the message it follows, never
+            // minted: the session journal digests the prepared request, so a
+            // `Utc::now()` here would make a replay of the same turn hash
+            // differently and fail recovery closed.
+            let timestamp = messages.last().and_then(|m| m.timestamp);
+            messages.push(Message {
+                role: Role::User,
+                content: Vec::new(),
+                timestamp,
+                cache_breakpoint: None,
+            });
+        }
+        messages.last_mut()
+    }
+
     /// AUDIT D-6 — synthesize the `ToolResult` blocks needed to repair a
     /// trailing assistant message that carries `tool_use` blocks with no
     /// following tool-results message.
@@ -8024,7 +8807,7 @@ impl AgentEngine {
     ///
     /// A wrong answer must become an admission. This is the admission, and it
     /// goes where the answer went.
-    fn emit_terminated_run_admission(&self, turn: usize, stop_reason: StopReason) {
+    fn emit_terminated_run_admission(&mut self, turn: usize, stop_reason: StopReason) {
         // `StopReason::MaxTurns` is the shared verdict for SEVERAL terminal
         // guards - the turn cap, the runaway-loop breaker, the consecutive-
         // failure breaker and the pre-send budget denial all land on it. Only
@@ -8045,12 +8828,73 @@ impl AgentEngine {
             StopReason::MaxTokens => "the output limit of the model cut the reply off".to_string(),
             _ => return,
         };
+        self.emit_incomplete_run_admission(&cause);
+    }
+
+    /// Say on the ANSWER stream that the run stopped short, for ONE stated
+    /// cause.
+    ///
+    /// #388, Expected-Behavior bullet 4 ("clearly mark the task as
+    /// failed/incomplete"). Extracted from
+    /// [`Self::emit_terminated_run_admission`] because the limit exits were
+    /// not the only ones that owe this sentence and were the only ones saying
+    /// it. A run that ends on a provider failure returns `Err`, never reaches
+    /// `finish_run_terminated_inner`, and emits its explanation through
+    /// `emit_error` — which goes to **stderr**. A `-p` run's stdout therefore
+    /// ends on the model's last narration, which reads as a finished answer:
+    /// the Job-corpus A-10 failure, on the paths #388 actually reports.
+    ///
+    /// One body, one wording, so the admission a failure exit gives and the
+    /// admission a limit exit gives cannot drift apart.
+    fn emit_incomplete_run_admission(&mut self, cause: &str) {
         let admission = format!(
             "\n\n[stopped early] I did not finish this: {cause}. Anything above is \
              partial work, not an answer."
         );
         self.output
             .emit_text_delta(&admission, &self.current_msg_id);
+        self.admitted_incomplete_this_turn = true;
+    }
+
+    /// #388 bullet 4, enforced ONCE for the whole run loop instead of once per
+    /// exit.
+    ///
+    /// `run_inner_impl` has 32 `return Err` sites. Three earlier fixes closed
+    /// three buckets of them by editing the exit itself, and each rested on a
+    /// census asserting that nothing else was left — a census that was wrong
+    /// twice. A per-site fix can only ever be as sound as the count behind it,
+    /// so the guarantee lives here: whatever `Err` a turn ends on, if nothing
+    /// has already said so on the ANSWER stream, this does. The exits that DO
+    /// admit keep their own, more specific cause;
+    /// `admitted_incomplete_this_turn` is what stops the two doubling up.
+    ///
+    /// `UserAborted` is the one deliberate exclusion, and it is graded rather
+    /// than asserted (`a_cancelled_run_carries_no_admission`): the stop was the
+    /// user's own request, the mid-stream cancel arm already emits "Run
+    /// cancelled while receiving provider output.", and the host is told
+    /// through `RecoveryLifecycle::Cancelled` rather than through an error.
+    fn admit_unspoken_run_failure(&mut self, error: &AgentError) {
+        if self.admitted_incomplete_this_turn {
+            return;
+        }
+        let cause = match error {
+            AgentError::UserAborted => return,
+            AgentError::SessionAuthority(detail) => {
+                format!("this session's persistence authority failed ({detail})")
+            }
+            AgentError::ContextTooLong {
+                input_tokens,
+                limit,
+            } => format!(
+                "the context reached {input_tokens} tokens against a limit of {limit} and \
+                 could not be reduced"
+            ),
+            AgentError::Provider(detail) => {
+                format!("the provider call for this turn failed ({detail})")
+            }
+            AgentError::ApiError(detail) => format!("this turn ended on an error ({detail})"),
+        };
+        self.emit_incomplete_run_admission(&cause);
     }
 
     async fn finish_run_terminated_inner(
@@ -8173,9 +9017,502 @@ impl AgentEngine {
     /// `flux_served_window` / `flux_context_pressure` fresh each turn (the model
     /// swap was already applied by `apply_pre_turn_outcome`), so there is no
     /// stored trigger state to invalidate.
+    /// #1172/#1179 — THE one place a LEARNED served window is admitted.
+    ///
+    /// `served_window()` is `None` until this route has been OBSERVED to drop
+    /// part of a prompt, and `None` there means "no evidence", never "the
+    /// window is fine" — so a route that has never truncated is returned
+    /// unchanged. When there IS evidence it is applied by `min`, so it can only
+    /// ever narrow.
+    ///
+    /// There is no `supports_compaction` escape hatch here any more — see the
+    /// body. At the 4,096-token slot #1172 measured, core's own 3,118-token
+    /// baseline turn is 76% of the window, so no division of it leaves room to
+    /// work; that case is answered by `unworkable_window_refusal` stopping the
+    /// run out loud, not by silently sizing against 8x the served window.
+    fn narrow_to_served_window(&self, window: Option<u64>) -> Option<u64> {
+        // #353 — `sizing_window()`, not `served_window()`. Everything reached
+        // through this function ACTS on the conversation — the autocompact
+        // trigger, the pre-flight ceiling, the smart-compact fraction — so it
+        // is held to corroborated evidence. The notice and the context gauge
+        // read `served_window()` directly and keep their one-observation
+        // sensitivity: telling the user is cheap to be wrong about, compacting
+        // their conversation is not.
+        let Some(served) = self.compact_state.served_window.sizing_window() else {
+            return window;
+        };
+        // #1172 c3 — NO `supports_compaction` escape hatch here any more. This
+        // used to return the WIDER window when the served one was too small to
+        // compact in, which is the defect that ticket refused to let #1150
+        // close: at the 4,096-token slot it measured, core went on sizing
+        // against `UNVERIFIED_CONTEXT_WINDOW` = 32,768 — 8x the window the
+        // endpoint had been OBSERVED to serve — and kept sending ~10.5k-token
+        // prompts the server silently truncated. Declining to narrow did not
+        // avoid a brick; it hid one, on the fail-open side, where the model
+        // answers from a context it no longer has.
+        //
+        // The window a route has been corroborated to serve is now applied
+        // unconditionally, and `unworkable_window_refusal` is what handles the
+        // case where core cannot work inside it: refusing the endpoint out
+        // loud, once, with the number the operator has to reach.
+        Some(window.map_or(served, |w| w.min(served)))
+    }
+
+    /// The autocompact trigger VALUE for this turn, on the window that will
+    /// actually serve it.
+    ///
+    /// #1172: `auto::autocompact_threshold` resolves the window from the config
+    /// and the model alone, so it could never see a window learned from the
+    /// endpoint's own `usage`. Against the stock Ollama #1172 reproduced, that
+    /// left the trigger at 22,937 on a 4,096-token slot — five times past
+    /// anything the endpoint would accept, which is the "compaction never
+    /// fires" half of that report.
+    ///
+    /// Only the LEARNED narrowing is added here; the base window is still
+    /// `effective_context_window`, so an operator's `[compact] context_window`
+    /// keeps the precedence it has always had.
+    fn autocompact_threshold_now(&self) -> usize {
+        self.compact_config
+            .autocompact_threshold_for_window(self.compaction_window_now())
+    }
+
+    /// The window every compaction boundary for THIS turn is derived from:
+    /// `effective_context_window` (catalogued, or the operator's `[compact]
+    /// context_window`), narrowed by #1172's learned served window when there
+    /// is corroborated evidence for one.
+    ///
+    /// Extracted so the threshold's VALUE and the trigger's DECISION cannot end
+    /// up on different windows — the shape #1179 c2 was: the decision consulted
+    /// `supports_compaction` only inside `narrow_to_served_window`, so a
+    /// configured window never met the gate at all.
+    fn compaction_window_now(&self) -> usize {
+        let base = self
+            .compact_config
+            .effective_context_window(self.compat.provider_type(), &self.model);
+        self.narrow_to_served_window(Some(base as u64))
+            .unwrap_or(base as u64) as usize
+    }
+
+    /// [`Self::autocompact_threshold_now`] as the trigger `should_autocompact`
+    /// spells, `config.enabled` included.
+    fn should_autocompact_now(&self, tokens: u64) -> bool {
+        self.compact_config
+            .should_autocompact_at(self.compaction_window_now(), tokens as usize)
+    }
+
+    /// #1172 c3 / #1179 - the refusal core owes an endpoint it provably cannot
+    /// operate in, or `None`.
+    ///
+    /// Two sources STATE the window rather than guessing at it: the operator's
+    /// explicit `[compact] context_window`, and #1172's CORROBORATED learned
+    /// served window - what the endpoint DID with a prompt we actually sent.
+    /// Nothing else can reach here: the smallest window in the
+    /// `wcore_config::limits` catalogue is 128,000, and
+    /// `UNVERIFIED_CONTEXT_WINDOW` is a declared fallback rather than a fact.
+    ///
+    /// When such a window is below [`CompactConfig::minimum_workable_window`]
+    /// there is no compaction path to hand it. Core's own baseline turn (the
+    /// system prompt plus the tool schemas, before the user has typed
+    /// anything) already exceeds the input ceiling, and compaction shrinks the
+    /// conversation, not the system prompt or the tool schemas. That left two
+    /// options, and #1172 c3 named the one that is not allowed: sizing the
+    /// session against a window the endpoint has been observed NOT to serve is
+    /// SILENT data loss (the server drops the head of the prompt and the model
+    /// answers fluently from a context it no longer has). So core refuses, out
+    /// loud, naming the figure the operator has to reach.
+    ///
+    /// This function only BUILDS the refusal. The turn loop is what STOPS on
+    /// it; that wiring is pinned by
+    /// `an_unworkable_window_stops_the_run_and_the_refusal_reaches_the_user`,
+    /// which drives the loop and fails if the call site is removed.
+    fn unworkable_window_refusal(&self) -> Option<String> {
+        let configured = self.compact_config.context_window.map(|w| w as u64);
+        let learned = self.compact_state.served_window.sizing_window();
+        let (window, from_config) = match (configured, learned) {
+            (Some(c), Some(l)) => {
+                if l <= c {
+                    (l, false)
+                } else {
+                    (c, true)
+                }
+            }
+            (Some(c), None) => (c, true),
+            (None, Some(l)) => (l, false),
+            (None, None) => return None,
+        };
+        if self.compact_config.supports_compaction(window as usize) {
+            return None;
+        }
+        let minimum = self.compact_config.minimum_workable_window();
+        let source = if from_config {
+            "`[compact] context_window` is set to".to_string()
+        } else {
+            format!(
+                "this endpoint has been observed to serve only {window} of the prompt \
+                 tokens sent to `{}`, twice - so its context window is",
+                self.model
+            )
+        };
+        let remedy = if from_config {
+            format!(
+                "Raise `[compact] context_window` to at least {minimum}, or remove it and \
+                 let core size the session from the model's own window."
+            )
+        } else {
+            format!(
+                "Raise the server's context length to at least {minimum} tokens (on \
+                 llama.cpp-based servers, including Ollama, that is `num_ctx` / \
+                 `OLLAMA_CONTEXT_LENGTH`), or point core at an endpoint that serves one."
+            )
+        };
+        Some(format!(
+            "Run stopped: {source} {window} tokens, and core cannot operate in a window \
+             that small. Core's own baseline turn - the system prompt plus the tool \
+             schemas, before you have typed anything - is {baseline} tokens, so every \
+             request already overflows it and the server discards the head of the prompt \
+             without saying so. Compaction cannot rescue this: it shrinks the \
+             conversation, not the system prompt or the tool schemas. {remedy}",
+            baseline = wcore_config::compact::BASELINE_TURN_TOKENS,
+        ))
+    }
+
+    /// FerroxLabs/wayland#1230 c1 - assemble the two UN-COMPACTABLE parts of
+    /// the next request: the system prompt and the tool array that will go on
+    /// the wire.
+    ///
+    /// Extracted from the turn loop, which is its only production caller, so
+    /// that anything grading the floor grades THE SAME OBJECT the loop sends.
+    /// Inline, the two were unreachable from a test, and the only floor a test
+    /// could compute was over the RAW registry - measured on this tree at
+    /// 19,101 tokens across 49 schemas, against 3,619 for the array the loop
+    /// actually assembles after deferral. A guard built on the first number
+    /// would have been wrong by 5x and confidently so.
+    ///
+    /// Pure with respect to the conversation: it reads the tool registry, the
+    /// plan state, the curation policy and the deferral config, and touches no
+    /// message. Callers that need the MCP catalogue to be current must
+    /// `refresh_mcp_catalog().await` first, exactly as the loop does.
+    fn assemble_turn_prelude(&mut self) -> (String, Vec<wcore_types::tool::ToolDef>) {
+        // Build tool list: filter based on plan mode state
+        let tools = if self.plan_state.is_active {
+            // Plan mode: only Info-category tools (excluding EnterPlanMode)
+            self.tools.to_tool_defs_filtered(|t| {
+                t.category() == ToolCategory::Info && t.name() != "EnterPlanMode"
+            })
+        } else {
+            // Normal mode: all tools except ExitPlanMode
+            self.tools
+                .to_tool_defs_filtered(|t| t.name() != "ExitPlanMode")
+        };
+
+        // W6 F17: trim MCP tools to a curated top-K. MCP tools are
+        // identified by real provenance (`ToolDef::server.is_some()`), not
+        // the `mcp__` name prefix — a non-colliding MCP tool keeps its bare
+        // name (wcore-mcp/src/tool_proxy.rs). Non-MCP tools (builtins,
+        // skills, spawn, plan tools) are always kept. Off-policy is a no-op.
+        // Audit-log recency degrades to empty/keyword-only when
+        // self.audit_log is None.
+        let tools = self.apply_mcp_curation(tools);
+
+        // #344/#359: enforce the provider's HARD tool-array cap (OpenAI =
+        // 128). MCP servers can push the total past the limit even after
+        // curation; this is the correctness guarantee, separate from the
+        // relevance trim above.
+        let tools = self.apply_provider_tool_cap(tools);
+
+        // Layer D1 (token-opt): defer cold tools to name-only stubs —
+        // only the configured hot allowlist (plus ToolSearch-hydrated
+        // tools) ships full schemas; the model hydrates a stub on demand
+        // via ToolSearch (the system prompt states that rule once,
+        // `tool_usage_guidance`). The hot/stub split is a pure function
+        // of static config + the monotonic hydrated set, so the
+        // serialized tools[] array stays byte-identical across turns
+        // (cache guard: `tools_array_byte_stable_across_roundtrips`);
+        // a hydration changes it once.
+        let tools = self.apply_tool_deferral(tools);
+
+        // Build system prompt: append plan mode instructions when active
+        //
+        // FerroxLabs/wayland#1208: the `Current date:` value is
+        // baked into `self.system_prompt` once at bootstrap and
+        // the same text tells the model it is the authoritative
+        // "today". Refresh it here, on the ONE path that puts the
+        // prompt on the wire, so a session that outlives the day
+        // it started in — a channel-gateway engine lives in an
+        // unevicted per-session pool — stops asserting the day the
+        // gateway booted. Byte-stable within a day (it borrows),
+        // so the cached prefix moves once per rollover and not
+        // once per turn.
+        let base = crate::context::refresh_current_date_line(
+            &self.system_prompt,
+            &crate::context::today_string(),
+        );
+        let system = if self.plan_state.is_active {
+            format!("{}\n\n{}", base, plan_prompt::plan_mode_instructions())
+        } else {
+            base.into_owned()
+        };
+        (system, tools)
+    }
+
+    /// #1230 c1 - the un-compactable floor of the turn this engine would
+    /// assemble right now, in estimated tokens.
+    ///
+    /// The public grading surface for the floor. It runs the real assembly
+    /// above and hands the result to the same
+    /// [`crate::compact::estimate::uncompactable_floor_tokens`] the turn loop
+    /// calls, so a test cannot drift onto a different tool array than the
+    /// product uses.
+    pub fn uncompactable_turn_floor(&mut self) -> u64 {
+        let (system, tools) = self.assemble_turn_prelude();
+        crate::compact::estimate::uncompactable_floor_tokens(&system, &tools)
+    }
+
+    /// FerroxLabs/wayland#1230 c3 - how many times one session will ask an
+    /// endpoint what slot it is serving before giving up on the question.
+    ///
+    /// Two, and the two are not interchangeable. A stock Ollama unloads an
+    /// idle model and then reports NOTHING, so the answer on turn 1 against a
+    /// cold server is legitimately absent and the answer on turn 2 -- after
+    /// core has itself caused the model to load -- is legitimately present.
+    /// One attempt would miss every cold start. Unbounded attempts would put
+    /// a round trip on every turn, forever, against any endpoint that never
+    /// answers, which is most of them.
+    const STATED_WINDOW_PROBE_ATTEMPTS: u32 = 2;
+
+    /// #1230 c3 - learn the context slot the endpoint STATES it is serving,
+    /// before core sends it a request that would be silently truncated.
+    ///
+    /// # Why a probe is admissible here
+    ///
+    /// [`wcore_config::context_window::ServedWindowTracker`] records that
+    /// reaching for this figure was tried and backed out twice, because
+    /// "probing the endpoint means deciding WHICH endpoints to probe" and
+    /// every mock server in this workspace binds `127.0.0.1`, so loopback
+    /// cannot separate a real self-hosted server from a test fixture. That
+    /// objection is about SNIFFING an endpoint, and this does not sniff: the
+    /// gate is `ProviderCompat::provider_type() == "ollama"`, which is what
+    /// the OPERATOR declared their endpoint to be. It is the same gate
+    /// `wcore_providers::ollama_probe::probe_ollama_tool_support` has shipped
+    /// behind since before #1172, on the same endpoint, for the same reason.
+    ///
+    /// The tracker keeps its job unchanged. It remains the only thing allowed
+    /// to SIZE the session, and this figure is deliberately NOT fed into
+    /// `narrow_to_served_window`: a stated slot answers "may this request be
+    /// sent at all", not "how should the conversation be divided". It reaches
+    /// exactly one decision, [`Self::context_floor_refusal`].
+    ///
+    /// Fail-open in every direction. A non-Ollama provider never issues a
+    /// request; an Ollama that does not answer leaves `stated_window` at
+    /// `None`, which means unknown and can never by itself refuse a run.
+    async fn refresh_stated_served_window(&mut self) {
+        if self.compact_state.stated_window.is_some()
+            || self.compact_state.stated_window_probes >= Self::STATED_WINDOW_PROBE_ATTEMPTS
+            || self.compat.provider_type() != "ollama"
+        {
+            return;
+        }
+        self.compact_state.stated_window_probes += 1;
+        let client = wcore_egress::EgressClient::tool().with_policy(self.egress_policy.clone());
+        self.compact_state.stated_window =
+            wcore_providers::ollama_probe::probe_ollama_served_window(
+                &client,
+                &self.config.base_url,
+                &self.model,
+            )
+            .await;
+        if let Some(slot) = self.compact_state.stated_window {
+            tracing::debug!(
+                slot,
+                model = %self.model,
+                "endpoint stated its served context slot"
+            );
+        }
+    }
+
+    /// #1230 c1/c3 - THE NAMED DECISION at a served window below core's own
+    /// un-compactable floor: REFUSE THE TURN, naming both numbers.
+    ///
+    /// `floor` is computed by
+    /// [`crate::compact::estimate::uncompactable_floor_tokens`] from the
+    /// request this turn has just assembled - the system prompt plus the tool
+    /// schemas actually about to go on the wire - not read off
+    /// `BASELINE_TURN_TOKENS`, which is a snapshot of some other session.
+    ///
+    /// # Why refusal, and not the other two options #1230 c3 offered
+    ///
+    /// * **Negotiate the slot upward.** MEASURED and refuted, hetzner-dsm
+    ///   2026-08-31, Ollama 0.30.7 on a private port: a ~5,000-token prompt
+    ///   sent to `/v1/chat/completions` reported `prompt_tokens = 4095` with
+    ///   no `num_ctx`, with a top-level `num_ctx`, AND with an
+    ///   `options.num_ctx` - byte-identical in all three arms. The
+    ///   OpenAI-compatible surface core speaks does not carry the field at
+    ///   all, so there is nothing to negotiate with. It is reachable only on
+    ///   the native `/api/chat` wire, which core does not use.
+    /// * **Shed the tool schemas.** The floor is 2,457 of a 4,096 slot in the
+    ///   configuration #1230 measured, so dropping it does buy room. It also
+    ///   turns the agent into a chatbot: every tool-shaped task then fails
+    ///   with a wrong answer rather than an honest stop, which is the same
+    ///   silent-wrong-answer failure this ticket exists to end, moved one
+    ///   layer up. A user who wants that can already have it by configuring
+    ///   fewer tools; core should not choose it for them behind their back.
+    ///
+    /// So: refuse, out loud, once, naming the slot, the floor, and the number
+    /// to raise the slot to. The tradeoff is accepted and stated - a session
+    /// that would have produced fluent wrong answers now produces none, and
+    /// the operator is told exactly which knob fixes it.
+    ///
+    /// # Scope
+    ///
+    /// Only the STATED window reaches this gate. The configured and
+    /// corroborated-learned windows are already answered, earlier in the turn
+    /// and before the summarizer runs, by
+    /// [`Self::unworkable_window_refusal`]; routing them here as well would
+    /// give the same condition two different messages.
+    ///
+    /// The boundary is the INPUT CEILING alone, not
+    /// [`wcore_config::compact::CompactConfig::supports_compaction`]. The
+    /// question this gate asks is whether the request in hand can be sent;
+    /// whether compaction would additionally thrash inside the window is the
+    /// other gate's question.
+    fn context_floor_refusal(&self, floor: u64, tool_count: usize) -> Option<String> {
+        let window = self.compact_state.stated_window?;
+        let ceiling = self
+            .compact_config
+            .input_ceiling_for_window(window as usize) as u64;
+        if ceiling > floor {
+            return None;
+        }
+        let needed = self
+            .compact_config
+            .minimum_window_for_input_floor(floor as usize);
+        Some(format!(
+            "Run stopped: this endpoint states it is serving `{model}` with a \
+             {window}-token context slot, and the floor of this turn is {floor} \
+             tokens - the system prompt plus {tool_count} tool schemas, which no \
+             compaction rung can shrink. Inside a {window}-token slot that \
+             leaves an input ceiling of {ceiling} tokens, below the floor, so \
+             the very first request would overflow and the server would discard \
+             the head of it without saying so. Core refuses the turn instead of \
+             sending a prompt it can predict will be truncated. Raise the \
+             context length of the server to at least {needed} tokens (on \
+             llama.cpp-based servers, including Ollama, that is `num_ctx` / \
+             `OLLAMA_CONTEXT_LENGTH`), or point core at an endpoint that serves \
+             one.",
+            model = self.model,
+        ))
+    }
+
+    /// THE one reconciliation of every window source, for the #255 pre-flight
+    /// guard and everything that must agree with it.
+    ///
+    /// Three sources, in increasing order of authority:
+    ///
+    /// 1. the kernel (`ContextWindow::resolve`) — the model's catalogued window,
+    ///    or the operator's `[compact] context_window`, or `None`;
+    /// 2. Flux's signalled-back served window (#282), for a tier alias;
+    /// 3. #1172's LEARNED served window — what this endpoint was OBSERVED to
+    ///    actually process, applied by `min` so it can only ever narrow.
+    ///
+    /// # Why (3) is gated (#1179)
+    ///
+    /// The learned window fed the pressure gauge and the user-facing notice
+    /// from the day #1172 shipped, and deliberately fed nothing else, because
+    /// with ABSOLUTE reserves it would have bricked the run rather than saved
+    /// it: at the 4,096-token slot #1172 measured, the ceiling saturated to
+    /// zero and the guard fired on every turn. Scaling the reserves
+    /// (`CompactConfig::scaled_reserves`) fixes that for every window with room
+    /// to work in, and `supports_compaction` is what decides whether this one
+    /// has any: both boundaries must clear core's own 3,118-token baseline
+    /// turn. At 4,096 they cannot — the baseline turn alone is 76% of the
+    /// window — so the learned figure is NOT narrowed onto here and the run
+    /// proceeds on the wider estimate while the notice tells the operator to
+    /// raise the server's context length. Aborting faster is not a fix.
+    fn resolve_preflight_window(
+        &self,
+        used_tokens: u64,
+        model: &str,
+    ) -> wcore_config::context_window::ContextWindow {
+        let mut ctx = wcore_config::context_window::ContextWindow::resolve(
+            used_tokens,
+            self.compat.provider_type(),
+            model,
+            self.compact_config.kernel_config_window(),
+        );
+        if wcore_providers::is_flux_tier_alias(model)
+            && let Some(window) = self.flux_served_window
+        {
+            ctx.window = Some(window);
+        }
+        ctx.window = self.narrow_to_served_window(ctx.window);
+        ctx
+    }
+
+    /// FerroxLabs/wayland#1218 — the output cap for THIS turn, sized against
+    /// the window that is ACTUALLY in force.
+    ///
+    /// This is the turn loop's whole output-sizing step, moved off the call
+    /// site and onto the engine. It was inline, and that is why #1218 could not
+    /// be bound: `size_output_cap` is pure and every test reached it directly,
+    /// so the one production line that decides WHICH window it is handed —
+    /// `resolve_preflight_window(...).window` — was reachable only by running a
+    /// whole turn. Replacing that derivation with a literal `None` (the exact
+    /// shape of the defect: sizing the ask against no window at all) compiled
+    /// and left the entire suite green. As a method it is on the same footing
+    /// as [`Self::emergency_limit_tokens`] and [`Self::autocompact_threshold_now`],
+    /// the other window-derived boundaries, and a test can grade the derivation
+    /// rather than the arithmetic.
+    ///
+    /// `model` must be the FINAL post-swap model — the same one the guard
+    /// certified the input against — so the ceiling and the ask cannot be
+    /// computed on different windows.
+    ///
+    /// Per `.planning/DECISIONS.md` Q-1218 the clamp is to the ROOM LEFT in the
+    /// window in force, never to the withheld reserve: it is identity wherever
+    /// the window in force is the catalogued one, so a healthy large window
+    /// keeps the model's real output ceiling.
+    fn turn_output_cap(
+        &self,
+        est_input_tokens: usize,
+        is_reasoning_turn: bool,
+        model: &str,
+    ) -> u32 {
+        // #1179 — the same reconciled window the #255 guard certified the input
+        // against, so the ceiling and the ask cannot be computed on different
+        // windows.
+        let window_in_force = self
+            .resolve_preflight_window(est_input_tokens as u64, model)
+            .window
+            .map(|w| u32::try_from(w).unwrap_or(u32::MAX));
+        size_output_cap(
+            self.max_tokens,
+            self.compat.provider_type(),
+            model,
+            est_input_tokens,
+            is_reasoning_turn,
+            window_in_force,
+        )
+    }
+
     fn smart_compact_fraction(&self) -> Option<f64> {
         // Chokepoint: nothing below runs unless explicitly enabled.
         if !self.compact_config.smart_enabled {
+            return None;
+        }
+        // #1179 c7 — the SAME workability gate the static trigger carries in
+        // `should_autocompact_at`. Without it this trigger was the second way
+        // into the summarizer and the only ungated one: at a configured 1,024
+        // window the fraction on core's own 3,118-token baseline turn is 3.04,
+        // five times the 0.60 trigger, so #280 fired an LLM summarization on an
+        // empty conversation at the top of every turn. It survived only because
+        // `unworkable_window_refusal` returns from the turn loop a few lines
+        // ABOVE the call site here - a guarantee one edit away from gone.
+        // Returning `None` is this function's own "no honest denominator" path,
+        // so the pre-gate reads false without a second exit shape.
+        if !self
+            .compact_config
+            .supports_compaction(self.compaction_window_now())
+        {
             return None;
         }
         use wcore_config::context_window::ContextWindow;
@@ -8187,6 +9524,12 @@ impl AgentEngine {
         // Flux-aware denominator, mirroring the pre-flight guard + #282
         // reconciliation: prefer the REAL served-model window when Flux signalled
         // it back for a tier alias; else the #255 kernel resolution.
+        // #1179: the same three-source reconciliation the pre-flight guard uses,
+        // so the trigger and the guard cannot disagree about the window. The
+        // learned served window is applied here on the same `supports_compaction`
+        // gate — pointing the summarizer at a window whose threshold sits below
+        // core's own baseline turn is an LLM call at the top of every turn,
+        // forever, which is the brick #1179 exists to avoid.
         let kernel_fraction: Option<f64> = if wcore_providers::is_flux_tier_alias(&self.model)
             && self.flux_served_window.is_some()
         {
@@ -8196,13 +9539,8 @@ impl AgentEngine {
             }
             .fraction()
         } else {
-            ContextWindow::resolve(
-                used_tokens,
-                self.compat.provider_type(),
-                &self.model,
-                self.compact_config.kernel_config_window(),
-            )
-            .fraction()
+            self.resolve_preflight_window(used_tokens, &self.model)
+                .fraction()
         };
 
         // The Flux-signalled pressure header is served-model ground truth; it
@@ -8415,6 +9753,24 @@ impl AgentEngine {
     /// The active provider receives the image blocks in this turn directly;
     /// no auxiliary vision backend or second credential is involved.
     pub async fn run_with_content(
+        &mut self,
+        user_input: &str,
+        additional_content: Vec<ContentBlock>,
+        msg_id: &str,
+    ) -> Result<AgentResult, AgentError> {
+        // #174 c2 — ONE task, ONE spend audit record. The body below has a
+        // dozen `return` paths (answered, budget-stopped, cancelled, journal
+        // refusal, `?` on an authority error); wrapping it here is the only
+        // shape where every one of them emits, and where adding a thirteenth
+        // cannot forget to.
+        let outcome = self
+            .run_with_content_audited(user_input, additional_content, msg_id)
+            .await;
+        self.emit_task_spend_audit();
+        outcome
+    }
+
+    async fn run_with_content_audited(
         &mut self,
         user_input: &str,
         additional_content: Vec<ContentBlock>,
@@ -11905,6 +13261,7 @@ impl AgentEngine {
         recovered_provider_round: Option<crate::provider_recovery::RecoveredProviderRound>,
     ) -> Result<AgentResult, AgentError> {
         self.unserved_resends = 0;
+        self.admitted_incomplete_this_turn = false;
         let result = self
             .run_inner_impl(
                 user_turn,
@@ -11915,6 +13272,9 @@ impl AgentEngine {
                 recovered_provider_round,
             )
             .await;
+        if let Err(error) = &result {
+            self.admit_unspoken_run_failure(error);
+        }
         self.report_unserved_resends();
         result
     }
@@ -12089,8 +13449,11 @@ impl AgentEngine {
                 // later `--resume` has something to restore.
                 session.conversation_id = Some(conversation_id);
                 if let Err(e) = mgr.persist_first_message(session) {
-                    self.output
-                        .emit_error(&format!("Failed to persist first message: {}", e), false);
+                    self.output.emit_error(
+                        &format!("Failed to persist first message: {}", e),
+                        false,
+                        wcore_protocol::events::FailureCategory::LocalWayland,
+                    );
                 }
             } else {
                 let user_message = self.messages.last().ok_or_else(|| {
@@ -12099,8 +13462,11 @@ impl AgentEngine {
                     )
                 })?;
                 if let Err(e) = mgr.append_wal_message(session, user_message) {
-                    self.output
-                        .emit_error(&format!("Failed to append WAL: {}", e), false);
+                    self.output.emit_error(
+                        &format!("Failed to append WAL: {}", e),
+                        false,
+                        wcore_protocol::events::FailureCategory::LocalWayland,
+                    );
                 }
             }
         }
@@ -12315,6 +13681,12 @@ impl AgentEngine {
             // Worst case after a mid-turn resume is one further retry — still
             // bounded, never a loop.
             let mut orphan_repair_retried = false;
+            // #434 c2 REPLAY GATE: bounds the reasoning-content re-shape to ONE
+            // extra provider send per turn, exactly like the orphan repair
+            // above. The flag it sets is sticky for the conversation, so a
+            // later turn never pays this again — the second send happens once,
+            // on the turn the alias first resolves.
+            let mut reasoning_replay_retried = false;
             let mut resumed_provider_dispatch = false;
             let mut resumed_dispatch_id = None;
             let (mut request, effective_model, mut input_token_estimate, mut last_routed_model) =
@@ -12399,6 +13771,36 @@ impl AgentEngine {
                         }
                     }
 
+                    // #1172 c3 / #1179 — refuse a window core provably cannot
+                    // operate in, BEFORE `run_compaction` below gets a chance
+                    // to summarize against it. Placed here rather than beside
+                    // the #255 guard for two reasons: the summarizer runs
+                    // first, so a refusal further down would still have burned
+                    // an LLM call and discarded the user's conversation; and
+                    // the #255 message ("compaction could not reduce it
+                    // further") would name the wrong cause — nothing is wrong
+                    // with the conversation, the window is smaller than core's
+                    // fixed overhead.
+                    //
+                    // Resumable: the saved history is fine and reopens cleanly
+                    // the moment the window is raised.
+                    if let Some(refusal) = self.unworkable_window_refusal() {
+                        self.emit_error(
+                            &refusal,
+                            false,
+                            wcore_protocol::events::FailureCategory::ContextLimit,
+                        );
+                        return self
+                            .finish_run_terminated_inner(
+                                user_input,
+                                turn,
+                                FinishReason::Length,
+                                StopReason::MaxTurns,
+                                true,
+                            )
+                            .await;
+                    }
+
                     // #280 — smart auto-compaction pre-gate. Boundary-fire ONLY: this is
                     // the turn-loop top (the tool loop lives below provider.stream in the
                     // same iteration), and the model swap was already applied above, so
@@ -12442,6 +13844,15 @@ impl AgentEngine {
                         self.fire_on_session_end(turn).await;
                         self.cache_ledger.finish();
                         self.save_session_mirror();
+                        // #388 bullet 4, same class as the four provider-failure
+                        // exits: this is a TERMINAL exit of the run and it said
+                        // nothing on the ANSWER stream. A compaction bail is the
+                        // reporter’s own "runs out of token budget" symptom, so a
+                        // `-p` run ended with an EMPTY stdout and the cause only on
+                        // stderr. Measured, not modelled — see the c10 red arm.
+                        self.emit_incomplete_run_admission(
+                            "the context could not be compacted small enough to continue this run",
+                        );
                         return Err(e);
                     }
 
@@ -12451,54 +13862,13 @@ impl AgentEngine {
                     // offered on this one.
                     self.refresh_mcp_catalog().await;
 
-                    // Build tool list: filter based on plan mode state
-                    let tools = if self.plan_state.is_active {
-                        // Plan mode: only Info-category tools (excluding EnterPlanMode)
-                        self.tools.to_tool_defs_filtered(|t| {
-                            t.category() == ToolCategory::Info && t.name() != "EnterPlanMode"
-                        })
-                    } else {
-                        // Normal mode: all tools except ExitPlanMode
-                        self.tools
-                            .to_tool_defs_filtered(|t| t.name() != "ExitPlanMode")
-                    };
+                    // #1230 c3 - ask the endpoint what slot it is serving,
+                    // BEFORE assembling a request for it. A no-op for every
+                    // provider but an operator-declared Ollama, and a no-op
+                    // once answered or once the attempt budget is spent.
+                    self.refresh_stated_served_window().await;
 
-                    // W6 F17: trim MCP tools to a curated top-K. MCP tools are
-                    // identified by real provenance (`ToolDef::server.is_some()`), not
-                    // the `mcp__` name prefix — a non-colliding MCP tool keeps its bare
-                    // name (wcore-mcp/src/tool_proxy.rs). Non-MCP tools (builtins,
-                    // skills, spawn, plan tools) are always kept. Off-policy is a no-op.
-                    // Audit-log recency degrades to empty/keyword-only when
-                    // self.audit_log is None.
-                    let tools = self.apply_mcp_curation(tools);
-
-                    // #344/#359: enforce the provider's HARD tool-array cap (OpenAI =
-                    // 128). MCP servers can push the total past the limit even after
-                    // curation; this is the correctness guarantee, separate from the
-                    // relevance trim above.
-                    let tools = self.apply_provider_tool_cap(tools);
-
-                    // Layer D1 (token-opt): defer cold tools to name-only stubs —
-                    // only the configured hot allowlist (plus ToolSearch-hydrated
-                    // tools) ships full schemas; the model hydrates a stub on demand
-                    // via ToolSearch (the system prompt states that rule once,
-                    // `tool_usage_guidance`). The hot/stub split is a pure function
-                    // of static config + the monotonic hydrated set, so the
-                    // serialized tools[] array stays byte-identical across turns
-                    // (cache guard: `tools_array_byte_stable_across_roundtrips`);
-                    // a hydration changes it once.
-                    let tools = self.apply_tool_deferral(tools);
-
-                    // Build system prompt: append plan mode instructions when active
-                    let system = if self.plan_state.is_active {
-                        format!(
-                            "{}\n\n{}",
-                            self.system_prompt,
-                            plan_prompt::plan_mode_instructions()
-                        )
-                    } else {
-                        self.system_prompt.clone()
-                    };
+                    let (system, tools) = self.assemble_turn_prelude();
 
                     // v0.8.1 U1 — the per-turn skill-router hint (when the router is
                     // installed and picked a visible catalog skill). Cache-stability
@@ -12526,6 +13896,38 @@ impl AgentEngine {
                     // configs).
                     let mut input_token_estimate =
                         estimate::estimate_request_tokens(&self.messages, &system, &tools) as usize;
+
+                    // #1230 c1/c3 - THE FLOOR GATE. Placed here, and not up
+                    // beside `unworkable_window_refusal`, for one reason: the
+                    // floor has to be COMPUTED from the request, and `system`
+                    // and `tools` above are that request. Everything the
+                    // degradation rungs can reach lives in `self.messages`;
+                    // what is left is charged on every turn this session will
+                    // ever send, and is what a slot below it cannot hold.
+                    //
+                    // Still before dispatch: nothing has gone on the wire at
+                    // this point, so a refusal here is a refusal BEFORE the
+                    // first truncated request rather than an explanation
+                    // after it.
+                    let uncompactable_floor = estimate::uncompactable_floor_tokens(&system, &tools);
+                    if let Some(refusal) =
+                        self.context_floor_refusal(uncompactable_floor, tools.len())
+                    {
+                        self.emit_error(
+                            &refusal,
+                            false,
+                            wcore_protocol::events::FailureCategory::ContextLimit,
+                        );
+                        return self
+                            .finish_run_terminated_inner(
+                                user_input,
+                                turn,
+                                FinishReason::Length,
+                                StopReason::MaxTurns,
+                                true,
+                            )
+                            .await;
+                    }
                     // AUDIT A1 / #255 — context-token overflow guard MOVED below, to
                     // immediately AFTER the smart-routing tier swap (so it measures the
                     // POST-swap effective model's REAL window via the wcore-config
@@ -12639,6 +14041,7 @@ impl AgentEngine {
                         // routing tier swap, so the omit decision sees the final model.
                         omit_max_tokens: false,
                         routed_model_hint: None,
+                        replay_reasoning_content: false,
                     };
 
                     // Cache-stability (token-opt): inject the per-turn skill-router
@@ -12649,11 +14052,17 @@ impl AgentEngine {
                     // accounts for the final content. Skipped unless the tail is
                     // user-role (never orphans a tool_use or creates adjacent user
                     // messages).
+                    //
+                    // #559 c6: every such injection is recorded, because the
+                    // message it lands on must not become a prompt-cache write
+                    // point — see the `mark_cache_boundaries` call below.
+                    let mut transient_tail = false;
                     if let Some(hint) = skill_hint
-                        && let Some(last) = request.messages.last_mut()
-                        && matches!(last.role, Role::User)
+                        && let Some(last) =
+                            Self::transient_carrier(&mut request.messages, &self.compat)
                     {
                         Self::attach_transient_block(last, hint);
+                        transient_tail = true;
                     }
 
                     // #559: the current date is NOT injected here any more. It
@@ -12690,7 +14099,11 @@ impl AgentEngine {
                         for line in &outcome.hook_trace {
                             tracing::debug!(target: "wcore_agent::hooks", "{line}");
                         }
-                        Self::apply_pre_prompt_contribution(&mut request.messages, &outcome);
+                        transient_tail |= Self::apply_pre_prompt_contribution(
+                            &mut request.messages,
+                            &self.compat,
+                            &outcome,
+                        );
                     }
 
                     // W1 S3: place per-message cache breakpoints when the provider
@@ -12703,10 +14116,19 @@ impl AgentEngine {
                     // keeps the long prefix cache-valid while continuous
                     // args-compaction transitions the message at the
                     // keep_recent_turns boundary inside it.
+                    //
+                    // #559 c6: `transient_tail` carries the per-turn injections
+                    // above. The blocks they add live only in this clone, so the
+                    // message they land on is re-sent WITHOUT them next turn —
+                    // an entry written there can never be read back. On turn 1
+                    // that message is the whole conversation, which is how a
+                    // session reaches turn 26 with `cache_read = 0` on every
+                    // turn. The write point moves off it.
                     mark_cache_boundaries(
                         &mut request,
                         &self.compat,
                         micro::cache_anchor_index(&self.messages),
+                        transient_tail,
                     );
 
                     // W1 v0.6.3: stamp a smart-routing hint onto the request so
@@ -12756,15 +14178,42 @@ impl AgentEngine {
                         if let Some(tier_model) =
                             select_tier_model(&decision, requires_vision, &self.compat)
                         {
-                            tracing::debug!(
-                                target: "wcore_agent::routing",
-                                from = %self.model,
-                                to = %tier_model,
-                                hint = %decision.to_hint().0,
-                                "smart-routing tier swap"
+                            // #174 c3-c5 — a tier "downgrade" is only a
+                            // downgrade if the tier model is actually cheaper.
+                            // A `[compat.tier_models]` entry naming a pricier
+                            // (or unpriced, or hosted-under-local-only) model
+                            // is an escalation wearing a cheap tier's name, so
+                            // it is checked, not trusted. Refusing here DECLINES
+                            // THE SWAP rather than failing the turn: the
+                            // configured model is still perfectly runnable, and
+                            // the decorator remains the backstop if it is not.
+                            let tier_profile = crate::spend_guard::classify_model(
+                                self.compat.provider_type(),
+                                &tier_model,
+                                &self.compat,
                             );
-                            request.model = tier_model.clone();
-                            effective_model = tier_model;
+                            match self.spend_guard.admit(&tier_profile) {
+                                Ok(()) => {
+                                    tracing::debug!(
+                                        target: "wcore_agent::routing",
+                                        from = %self.model,
+                                        to = %tier_model,
+                                        hint = %decision.to_hint().0,
+                                        "smart-routing tier swap"
+                                    );
+                                    request.model = tier_model.clone();
+                                    effective_model = tier_model;
+                                }
+                                Err(refusal) => {
+                                    tracing::warn!(
+                                        target: "wcore_agent::routing",
+                                        from = %self.model,
+                                        to = %tier_model,
+                                        %refusal,
+                                        "smart-routing tier swap refused by the spend guard"
+                                    );
+                                }
+                            }
                         }
                     }
 
@@ -12787,25 +14236,15 @@ impl AgentEngine {
                     // to the old `window > 0` skip; `size_output_cap`'s UNKNOWN_CAP and
                     // the provider 400 are the backstops.
                     {
-                        let mut ctx = wcore_config::context_window::ContextWindow::resolve(
-                            input_token_estimate as u64,
-                            self.compat.provider_type(),
-                            &request.model,
-                            self.compact_config.kernel_config_window(),
-                        );
-                        // #282 contract V1: once Flux has SIGNALLED-BACK the real served
-                        // window (`x-flux-model-window`) on a prior turn of THIS Flux
-                        // route, prefer it over the alias's pre-route guess so the guard
-                        // measures against the model that will actually serve the turn.
-                        if wcore_providers::is_flux_tier_alias(&request.model)
-                            && let Some(window) = self.flux_served_window
-                        {
-                            ctx.window = Some(window);
-                        }
-                        if let Some(ceiling) = ctx.input_ceiling(
-                            self.compact_config.output_reserve as u64,
-                            self.compact_config.emergency_buffer as u64,
-                        ) && ctx.used_tokens >= ceiling
+                        // #282 contract V1 (Flux's signalled-back served window) and
+                        // #1172's LEARNED served window are both reconciled inside
+                        // `resolve_preflight_window`, so this guard and the
+                        // length-finish check below can never end up on different
+                        // windows.
+                        let mut ctx = self
+                            .resolve_preflight_window(input_token_estimate as u64, &request.model);
+                        if let Some(ceiling) = ctx.input_ceiling(&self.compact_config)
+                            && ctx.used_tokens >= ceiling
                         {
                             // #636 — graceful degradation (rung 1). Before aborting, shed
                             // the largest tool-result outputs (spilling full content to
@@ -12945,6 +14384,7 @@ impl AgentEngine {
                                         request.model,
                                     ),
                                     false,
+                                    wcore_protocol::events::FailureCategory::ContextLimit,
                                 );
                                 // Context ceiling: a bigger budget is needed, not more turns.
                                 return self
@@ -13010,12 +14450,12 @@ impl AgentEngine {
                     // so both must lift an unknown model off the 8192 floor.
                     let is_reasoning_turn =
                         requested_thinking_budget.is_some() || request.reasoning_effort.is_some();
-                    request.max_tokens = size_output_cap(
-                        self.max_tokens,
-                        self.compat.provider_type(),
-                        &request.model,
+                    // #1218 — the window derivation and the sizing live together
+                    // on `turn_output_cap`, which is what makes them gradeable.
+                    request.max_tokens = self.turn_output_cap(
                         input_token_estimate,
                         is_reasoning_turn,
+                        &request.model,
                     );
                     // #112 — when the user omitted `--max-tokens`, the model is
                     // unknown to the registry, and the provider is omit-safe, OMIT the
@@ -13061,6 +14501,13 @@ impl AgentEngine {
                         } else {
                             None
                         };
+                    // #434 c2 — and once THIS conversation has been refused for
+                    // missing `reasoning_content`, keep replaying it. The hint
+                    // above cannot cover the turn on which the alias first
+                    // resolves (the router answers on the way back); this is
+                    // what the engine learned from that refusal, and it holds
+                    // for every later request of the conversation.
+                    request.replay_reasoning_content = self.forced_reasoning_replay;
 
                     // #426 / wayland#422 — separate the reasoning budget from the output
                     // budget so extended thinking can never starve the visible answer.
@@ -13164,6 +14611,35 @@ impl AgentEngine {
             // Stateful across deltas, because a tag straddles chunk
             // boundaries; reset per attempt alongside `assistant_text`.
             let mut assistant_reasoning = ReasoningFilter::new();
+            // #908 — how much text the provider actually streamed, counted
+            // BEFORE the filter above removed any of it.
+            //
+            // The empty-turn guard below has to tell two very different
+            // situations apart: the provider sent nothing, and the provider
+            // sent a reply that was entirely reasoning and we deleted it. They
+            // look identical from `assistant_text`, and only the first is an
+            // endpoint problem. Nothing else here can distinguish them:
+            // `assistant_content` carries NATIVE thinking blocks only, so an
+            // open-weights model emitting inline `<think>`/`<thought>` tags —
+            // the class this issue was reported against — leaves it empty and
+            // falls to the "the endpoint may be incompatible" diagnosis, which
+            // sends the user to debug a working endpoint. A count is enough to
+            // separate them and costs one `usize` per turn.
+            //
+            // Declared without an initial value, like `stop_reason` below: the
+            // per-attempt reset inside `'stream` is the only assignment that
+            // can be observed, so an initialiser here would be dead.
+            let mut raw_text_chars: usize;
+            // wayland#1221 c3 — how much text survived the history filter,
+            // sampled at the END OF THE STREAM and not at the end of the turn.
+            // The two are different: `assistant_text` also collects the
+            // grounding-sources block a Flux web_search turn renders into it
+            // (below), which never passed through the filter and never counted
+            // toward `raw_text_chars`. Comparing the turn-final length would
+            // let that block mask a strip and silence the notice. Declared
+            // without an initial value for the same reason as the counter
+            // above: only the per-attempt assignment can be observed.
+            let mut filtered_text_chars: usize;
             let mut thinking_text = String::new();
             // C-4b — an opaque provider signature covering this turn's
             // reasoning (Gemini `thoughtSignature` on a thought part). Kept
@@ -13199,6 +14675,8 @@ impl AgentEngine {
                 // double-commits text/tool-calls from a failed attempt.
                 assistant_text.clear();
                 assistant_reasoning.reset();
+                raw_text_chars = 0;
+                filtered_text_chars = 0;
                 thinking_text.clear();
                 let _ = thinking_signature.take();
                 tool_calls.clear();
@@ -13335,6 +14813,7 @@ impl AgentEngine {
                                  the work in smaller pieces."
                             ),
                             false,
+                            wcore_protocol::events::FailureCategory::ContextLimit,
                         );
                         return self.finish_run_output_truncated(user_input, turn).await;
                     }
@@ -13413,6 +14892,7 @@ impl AgentEngine {
                             request.model,
                         ),
                         false,
+                        wcore_protocol::events::FailureCategory::ContextLimit,
                     );
                     return self
                         .finish_run_terminated(user_input, turn, FinishReason::Length)
@@ -13472,6 +14952,7 @@ impl AgentEngine {
                                  remove the explicit max_cost_usd to use token-only governance."
                             ),
                             false,
+                            wcore_protocol::events::FailureCategory::LocalWayland,
                         );
                         return self
                             .finish_run_terminated(user_input, turn, FinishReason::Length)
@@ -13532,7 +15013,7 @@ impl AgentEngine {
                                      additional budget to authorize more work."
                                 ),
                                 false,
-                            );
+                            wcore_protocol::events::FailureCategory::LocalWayland);
                             return self
                                 .finish_run_terminated(user_input, turn, FinishReason::Length)
                                 .await;
@@ -13567,7 +15048,7 @@ impl AgentEngine {
                                      additional budget to authorize more work."
                                 ),
                                 false,
-                            );
+                            wcore_protocol::events::FailureCategory::LocalWayland);
                             return self
                                 .finish_run_terminated(user_input, turn, FinishReason::Length)
                                 .await;
@@ -13589,6 +15070,7 @@ impl AgentEngine {
                 let fallback_session_id = reservation_session_id.clone();
                 let fallback_dispatch_id = budget_dispatch_id.clone();
                 let fallback_compat = self.compat.clone();
+                let guard_for_fallback = Arc::clone(&self.spend_guard);
                 let fallback_admitter: wcore_providers::retry::ConfiguredFallbackAdmitter =
                     Arc::new(move |_, _, next_provider, next_model, previous_attempted| {
                         let mut state = fallback_state_for_admission
@@ -13623,6 +15105,24 @@ impl AgentEngine {
                             }
                         }
 
+                        // #174 c3-c5 — the spend guard binds here, before any
+                        // reservation is taken, because this is the one
+                        // dispatch path that changes provider AND model below
+                        // the guarded provider handle.
+                        let next_profile = crate::spend_guard::classify_model(
+                            next_provider,
+                            next_model,
+                            &fallback_compat,
+                        );
+                        if let Err(refusal) = guard_for_fallback.admit(&next_profile) {
+                            state.failure =
+                                Some(ConfiguredFallbackAdmissionFailure::SpendGuard(refusal));
+                            return Err(ProviderError::NotAttempted {
+                                reason: "configured fallback refused by the spend guard"
+                                    .to_string(),
+                                failure_code: Some("spend_guard_refused".to_string()),
+                            });
+                        }
                         let next_cost = resolve_conservative_reservation_cost(
                             next_provider,
                             next_model,
@@ -13898,6 +15398,7 @@ impl AgentEngine {
                                      {observed})."
                                 ),
                                 false,
+                                wcore_protocol::events::FailureCategory::LocalWayland,
                             );
                         }
                         ConfiguredFallbackAdmissionFailure::Budget(
@@ -13918,6 +15419,21 @@ impl AgentEngine {
                                      managed USD cap cannot be enforced."
                                 ),
                                 false,
+                                wcore_protocol::events::FailureCategory::LocalWayland,
+                            );
+                        }
+                        ConfiguredFallbackAdmissionFailure::SpendGuard(refusal) => {
+                            self.output.emit_budget_exceeded(
+                                refusal.kind(),
+                                &format!("{current_attempt_provider}/{current_attempt_model}"),
+                                "a model this session is permitted to use",
+                            );
+                            // A spend guard is this process refusing to
+                            // spend, on its own account.
+                            self.emit_error(
+                                &refusal.to_string(),
+                                false,
+                                wcore_protocol::events::FailureCategory::LocalWayland,
                             );
                         }
                     }
@@ -14000,7 +15516,7 @@ impl AgentEngine {
                                              budget cap '{kind}' (limit {limit}, observed {observed})."
                                         ),
                                         false,
-                                    );
+                                    wcore_protocol::events::FailureCategory::LocalWayland);
                                     return self
                                         .finish_run_terminated(
                                             user_input,
@@ -14084,6 +15600,15 @@ impl AgentEngine {
                             self.fire_on_session_end(turn).await;
                             self.cache_ledger.finish();
                             self.save_session_mirror();
+                            // #388 bullet 4, same class as the four provider-failure
+                            // exits: this is a TERMINAL exit of the run and it said
+                            // nothing on the ANSWER stream. A compaction bail is the
+                            // reporter’s own "runs out of token budget" symptom, so a
+                            // `-p` run ended with an EMPTY stdout and the cause only on
+                            // stderr. Measured, not modelled — see the c10 red arm.
+                            self.emit_incomplete_run_admission(
+                                "the context could not be compacted small enough to continue this run",
+                            );
                             return Err(e);
                         }
                         // Rebuild the volatile request inputs from the compacted
@@ -14153,6 +15678,41 @@ impl AgentEngine {
                         // sibling ContextOverflow retry arm above emits info for
                         // exactly this reason. The capture is still written
                         // either way, and still named.
+                        // #434 c2 — a strict reasoner refused this request for
+                        // the `reasoning_content` a tier alias could not know it
+                        // needed. The refusal IS the route signal the response
+                        // header would have carried, so learn it here and
+                        // re-issue the SAME turn shaped for the served model,
+                        // rather than failing the turn and covering only N+1.
+                        // Placed ahead of the orphan gate: the two classifiers
+                        // are disjoint, and this one changes no history.
+                        if !reasoning_replay_retried
+                            && !self.forced_reasoning_replay
+                            && is_missing_reasoning_content_rejection(&e)
+                        {
+                            reasoning_replay_retried = true;
+                            self.forced_reasoning_replay = true;
+                            request.replay_reasoning_content = true;
+                            self.output.emit_provider_retry(
+                                Some("missing_reasoning_content"),
+                                provider_retry_seq.fetch_add(1, Ordering::SeqCst) + 1,
+                            );
+                            let mut retry_note = "the router resolved this request to a \
+                                 reasoning model that requires the conversation's earlier \
+                                 reasoning to be replayed — retrying once with it, and \
+                                 keeping it on for the rest of the conversation"
+                                .to_string();
+                            if let Some(path) = captured.as_ref() {
+                                retry_note.push_str(&format!(
+                                    " (the refused request was captured to {})",
+                                    path.display()
+                                ));
+                            }
+                            self.output.emit_info(&retry_note);
+                            self.settle_failed_turn_provider_attempts(&e.to_string())
+                                .await;
+                            continue 'stream;
+                        }
                         if !orphan_repair_retried && is_orphaned_tool_pair_rejection(&e) {
                             // The three pre-send guards already ran against
                             // THIS array and all three are idempotent, so
@@ -14202,7 +15762,11 @@ impl AgentEngine {
                                  not re-sent, because a second send would be identical.",
                             );
                         }
-                        self.emit_error(&surfaced, false);
+                        self.emit_error(
+                            &surfaced,
+                            false,
+                            wcore_protocol::events::FailureCategory::Unknown,
+                        );
                         // #923(2) — fail the TURN, not the session. The dispatch
                         // left this turn's provider attempt nonterminal, and the
                         // reducer will not let a turn holding one take ANY
@@ -14214,6 +15778,10 @@ impl AgentEngine {
                         // what propagates and the session stays usable.
                         self.settle_failed_turn_provider_attempts(&e.to_string())
                             .await;
+                        self.emit_incomplete_run_admission(
+                            "the provider refused this request and it could not be repaired \
+                             into one worth re-sending",
+                        );
                         return Err(e.into());
                     }
                 };
@@ -14256,6 +15824,7 @@ impl AgentEngine {
                             // renders a collapsed `Thought:` block. Only the
                             // durable copy is filtered (#908).
                             self.output.emit_text_delta(&text, &self.current_msg_id);
+                            raw_text_chars += text.chars().count();
                             assistant_text.push_str(&assistant_reasoning.process(&text));
                         }
                         LlmEvent::ToolUse {
@@ -14407,6 +15976,10 @@ impl AgentEngine {
                                     loop_engaged = %engaged,
                                     "{detail}"
                                 );
+                                self.emit_incomplete_run_admission(
+                                    "the router and this engine both tried to own the same \
+                                     escalation loop, so the turn was abandoned",
+                                );
                                 return Err(AgentError::ApiError(detail));
                             }
                             // #282 contract V1: Flux SIGNALS-BACK. Capture the
@@ -14445,6 +16018,26 @@ impl AgentEngine {
                         }
                     }
                 }
+
+                // wayland#1222 — the provider stream for this attempt is
+                // over, so drain whatever the history filter is still holding
+                // back. `process` is a LOSSY view on its own: at the last
+                // delta the filter may be sitting on an undecided `<`-prefix
+                // (`the answer is 5 <`) or inside a reasoning block the model
+                // never closed. Both used to be discarded, and since 508405d4
+                // put this filter on the DURABLE record that discard is
+                // permanent history loss rather than a rendering glitch
+                // (wayland#1221). `finish` returns the held-back bytes; for an
+                // unclosed block it returns the raw text from the opening tag
+                // onward, which is what makes "Use the <thinking> tag to wrap
+                // reasoning." survive whole.
+                //
+                // Unconditional, and BEFORE the attempt-outcome classification
+                // below: a retried attempt clears `assistant_text` and resets
+                // the filter at the top of `'stream`, so a flush on a failed
+                // attempt cannot survive into the next one.
+                assistant_text.push_str(&assistant_reasoning.finish());
+                filtered_text_chars = assistant_text.chars().count();
 
                 // AUDIT A3 / E-C2 — classify the attempt outcome.
                 // A clean `Done` is success. A mid-stream `LlmEvent::Error`
@@ -14520,7 +16113,7 @@ impl AgentEngine {
                                          cap '{kind}' (limit {limit}, observed {observed})."
                                     ),
                                     false,
-                                );
+                                wcore_protocol::events::FailureCategory::LocalWayland);
                                 return self
                                     .finish_run_terminated(user_input, turn, FinishReason::Length)
                                     .await;
@@ -14558,21 +16151,9 @@ impl AgentEngine {
                         // guard, including the Flux served-window signal-back
                         // (which may have just updated via ProviderMeta on
                         // THIS stream).
-                        let mut ctx = wcore_config::context_window::ContextWindow::resolve(
-                            input_token_estimate as u64,
-                            self.compat.provider_type(),
-                            &request.model,
-                            self.compact_config.kernel_config_window(),
-                        );
-                        if wcore_providers::is_flux_tier_alias(&request.model)
-                            && let Some(window) = self.flux_served_window
-                        {
-                            ctx.window = Some(window);
-                        }
-                        let ceiling = ctx.input_ceiling(
-                            self.compact_config.output_reserve as u64,
-                            self.compact_config.emergency_buffer as u64,
-                        );
+                        let ctx = self
+                            .resolve_preflight_window(input_token_estimate as u64, &request.model);
+                        let ceiling = ctx.input_ceiling(&self.compact_config);
                         // At/over on either count: the provider-billed input is
                         // authoritative when present — providers can count
                         // higher than our estimate, which is exactly how a
@@ -14625,6 +16206,15 @@ impl AgentEngine {
                                     self.fire_on_session_end(turn).await;
                                     self.cache_ledger.finish();
                                     self.save_session_mirror();
+                                    // #388 bullet 4, same class as the four provider-failure
+                                    // exits: this is a TERMINAL exit of the run and it said
+                                    // nothing on the ANSWER stream. A compaction bail is the
+                                    // reporter’s own "runs out of token budget" symptom, so a
+                                    // `-p` run ended with an EMPTY stdout and the cause only on
+                                    // stderr. Measured, not modelled — see the c10 red arm.
+                                    self.emit_incomplete_run_admission(
+                                        "the context could not be compacted small enough to continue this run",
+                                    );
                                     return Err(e);
                                 }
                                 let history_after = request_wire_fingerprint(
@@ -14690,6 +16280,7 @@ impl AgentEngine {
                                     request.model,
                                 ),
                                 false,
+                                wcore_protocol::events::FailureCategory::ContextLimit,
                             );
                             return self
                                 .finish_run_terminated_inner(
@@ -14812,6 +16403,7 @@ impl AgentEngine {
                                 )
                             },
                             false,
+                            wcore_protocol::events::FailureCategory::ContextLimit,
                         );
                         return self.finish_run_output_truncated(user_input, turn).await;
                     }
@@ -15025,8 +16617,33 @@ impl AgentEngine {
                                 MonitorDirective::Stop,
                                 MonitorReason::OutputStall,
                             );
-                            self.emit_error(&gate_msg, false);
+                            self.emit_error(
+                                &gate_msg,
+                                false,
+                                wcore_protocol::events::FailureCategory::LocalWayland,
+                            );
                             self.emit_midflight_monitor_occurrence();
+                            // #388, Expected-Behavior bullet 3 — "clearly mark
+                            // the task as failed/incomplete". This is a TERMINAL
+                            // exit of the run and it was the one exit in this
+                            // loop that said nothing on the ANSWER stream:
+                            // `emit_error` is stderr, so a `-p` run's stdout
+                            // ended on the model's last narration and read as a
+                            // finished reply.
+                            //
+                            // Deliberately NOT also writing the session here,
+                            // unlike the retry-exhausted exit below. Measured:
+                            // `sync_journal_conversation` runs once per attempt,
+                            // so the conversation is already canonical when this
+                            // gate fires, and an engine holding a persisted
+                            // session without a journal is refused outright — so
+                            // there is no reachable install where a write here
+                            // saves anything.
+                            self.emit_incomplete_run_admission(
+                                "the provider stream failed twice with no output while the last \
+                                 tool round had failed, so retrying the same context was \
+                                 spending tokens without progress",
+                            );
                             return Err(AgentError::ApiError(gate_msg));
                         }
                         MonitorAction::CancelBudget { reason } => {
@@ -15147,8 +16764,14 @@ impl AgentEngine {
                     permanent_endpoint,
                     is_auth_failure,
                 );
-                self.output
-                    .emit_error(&final_error, !is_client_error && !permanent_endpoint);
+                self.output.emit_error(
+                    &final_error,
+                    !is_client_error && !permanent_endpoint,
+                    wcore_protocol::events::FailureCategory::Unknown,
+                );
+                self.emit_incomplete_run_admission(&format!(
+                    "the provider failed every one of {sends} attempts at this turn"
+                ));
                 return Err(AgentError::ApiError(final_error));
             }
 
@@ -15231,21 +16854,14 @@ impl AgentEngine {
                 // fluently from a context it no longer has, which is why #372
                 // read as a retry loop — so a log-only announcement would be
                 // indistinguishable from saying nothing at all.
-                self.output.emit_info(&format!(
-                    "Context truncated by the endpoint: it processed only {reported} of \
-                     the ~{sent} prompt tokens this turn sent to `{model}`, and discarded \
-                     the rest. Servers drop the HEAD of the conversation first, so the \
-                     system prompt and your task are what went - the reply was written \
-                     from a context that no longer contained them. Core is now sizing \
-                     this session against the {served}-token window this endpoint has \
-                     actually demonstrated. Raise the server's context length (on \
-                     llama.cpp-based servers, including Ollama, that is `num_ctx` / \
-                     `OLLAMA_CONTEXT_LENGTH`), or set `[compact] context_window` to the \
-                     figure it really serves.",
-                    reported = evidence.reported_input,
-                    sent = evidence.sent_estimate,
-                    model = effective_model,
-                    served = evidence.served_window,
+                // wayland-core#353 — the wording is decided by
+                // `truncation_notice`, which is pure and therefore gradable;
+                // inline, the sentence "Core is now sizing this session against
+                // N" was unfalsifiable and false on every turn it was emitted.
+                self.output.emit_info(&truncation_notice(
+                    &evidence,
+                    &effective_model,
+                    &self.compact_config,
                 ));
             }
 
@@ -15446,6 +17062,75 @@ impl AgentEngine {
                      content. That is the provider reporting a failure on this request, not \
                      a wire-format mismatch — check the provider's own error detail (and any \
                      content filter or safety stop) for it."
+                } else if raw_text_chars > 0 {
+                    // #908 diagnosed this branch; wayland#1231 c2 makes it
+                    // produce an ANSWER instead of only an accurate report of
+                    // there not being one.
+                    //
+                    // #908's own ledger conceded the limit in as many words:
+                    // "this makes the empty turn HONEST, it does not restore an
+                    // answer". The reported symptom was "not producing any
+                    // response at all", so a correct explanation is not the
+                    // property. This is the recovery.
+                    //
+                    // WHICH RECOVERY, and why. The issue names two candidates:
+                    // surface the captured reasoning as a clearly-labelled
+                    // answer, or take one automatic retry telling the model to
+                    // answer outside its tags. Surfacing wins on measurement,
+                    // not on taste. A retry costs a second full billed
+                    // round-trip and a second wait EVERY time this fires, and
+                    // buys no guarantee: capturing the c1 fixture took four
+                    // temperature-0 attempts against qwen3:8b to get one reply
+                    // that honoured an explicit instruction about where to put
+                    // its tags, so instruction-following on tag PLACEMENT is
+                    // exactly the thing that is unreliable here. A retry that
+                    // fails leaves the user with two empty turns instead of
+                    // one, at twice the cost. Surfacing is deterministic, free,
+                    // and the content is genuinely there -- the model DID
+                    // answer, our filter removed it. Labelling it is the honest
+                    // way to hand it back.
+                    //
+                    // c4's negative control survives by construction: this arm
+                    // is inside `raw_text_chars > 0`, so a turn that produced
+                    // nothing has nothing to recover and falls through to the
+                    // diagnosis below with no fabricated answer.
+                    let recovered = assistant_reasoning.take_captured();
+                    let recovered = recovered.trim();
+                    if !recovered.is_empty() {
+                        let labelled = format!("{REASONING_RECOVERY_LABEL}\n\n{recovered}");
+                        // The user reads it, and — wayland#1231 c3 — the
+                        // conversation keeps it. Pushing a Text block makes
+                        // `assistant_content` non-empty, so the commit below
+                        // fires and the next turn, a resumed session and the
+                        // next provider request all see the answer. Today the
+                        // empty turn is deliberately dropped, which is why c3
+                        // is a separate criterion from c2.
+                        self.output.emit_text_delta(&labelled, &self.current_msg_id);
+                        assistant_content.push(ContentBlock::Text {
+                            text: labelled.clone(),
+                        });
+                        assistant_text = labelled;
+                        self.output.emit_info(
+                            "The reply above was recovered from this model's reasoning tags \
+                             (<think>, <thought>, <reasoning>): it emitted no answer text \
+                             outside them, so there was nothing else to show. Use a model \
+                             that answers outside its reasoning tags to avoid this.",
+                        );
+                        RECOVERED_FROM_REASONING
+                    } else {
+                        // Raw text arrived and the filter removed all of it,
+                        // but nothing was CAPTURED to hand back — the stray
+                        // closing-tag shape (wayland#1231 c5), where the whole
+                        // reply is unmatched `</thought>` tags with no body
+                        // between them. There is no answer in there to
+                        // recover, so this stays the #908 diagnosis rather
+                        // than inventing one.
+                        "This model's entire reply arrived inside reasoning tags \
+                         (<think>, <thought>, <reasoning>), so once they were stripped there was no \
+                         answer left to show. The endpoint and the wire format are working — this \
+                         model emitted no answer text outside its own reasoning. Ask again, or use \
+                         a model that emits its answer outside its reasoning tags."
+                    }
                 } else if !assistant_content.is_empty() {
                     // Reasoning, and nothing else. The model thought and then
                     // said nothing; the thinking is not an answer and on most
@@ -15459,7 +17144,45 @@ impl AgentEngine {
                      The endpoint or model may be incompatible (verify it speaks the OpenAI \
                      chat-completions streaming format and that the model name is valid)."
                 };
-                self.emit_error(message, false);
+                // wayland#1231 c2: the recovery arm above already spoke on
+                // the ANSWER stream. Emitting an error beside a delivered
+                // answer would tell the user the turn failed when it did not.
+                if message != RECOVERED_FROM_REASONING {
+                    self.emit_error(
+                        message,
+                        false,
+                        wcore_protocol::events::FailureCategory::Unknown,
+                    );
+                }
+            } else if raw_text_chars > filtered_text_chars {
+                // wayland#1221 c3 — the empty-turn notice above is the ONLY
+                // guard that ever announced an over-strip, and it fires only
+                // when the strip is TOTAL (`assistant_text.is_empty()`). A
+                // PARTIAL strip is the shape that actually bites: the turn is
+                // non-empty, so nothing above fires, and the user has no way
+                // to know the stored record is shorter than the answer they
+                // just read. This is that second guard.
+                //
+                // What remains strippable after the wayland#1222 flush above
+                // is exactly reasoning that CLOSED — a real `<think>…</think>`
+                // block — plus the bare tags themselves. That is deliberate
+                // (wayland#908 c1), but "deliberate" is not "announced": the
+                // stripped body is what the provider replays on every later
+                // turn, so the user is entitled to know it left.
+                //
+                // Counted in chars on both sides: `raw_text_chars` is the char
+                // count of the raw text deltas, `filtered_text_chars` is what
+                // the filter let through, sampled right after the flush.
+                // Emitted through the
+                // output sink rather than `tracing`, because RUST_LOG is unset
+                // on a default install and a `warn!` would reach nobody.
+                let removed = raw_text_chars - filtered_text_chars;
+                self.output.emit_info(&format!(
+                    "{removed} characters of this reply were inline reasoning \
+                     (<think>, <thought>, <reasoning>) and are NOT stored in the \
+                     conversation history; the answer above is what a resumed session \
+                     and the next request will see."
+                ));
             }
 
             // …and do not COMMIT the empty turn either. The error above is the
@@ -15516,6 +17239,7 @@ impl AgentEngine {
                      its configured spend ceiling."
                     ),
                     false,
+                    wcore_protocol::events::FailureCategory::LocalWayland,
                 );
                 return self
                     .finish_run_terminated(user_input, turn + 1, FinishReason::Length)
@@ -15909,7 +17633,7 @@ impl AgentEngine {
                     }
                 },
                 Err(GraphError::Cancelled) => GraphExit::Aborted,
-                Err(e) => GraphExit::Failed(format!("orchestration graph failed: {e}")),
+                Err(e) => GraphExit::Failed(e.to_string()),
             };
             drop(cell_guard);
             let outcome = match exit {
@@ -15923,12 +17647,37 @@ impl AgentEngine {
                     self.cache_ledger.finish();
                     return Err(AgentError::UserAborted);
                 }
-                GraphExit::Failed(msg) => {
+                GraphExit::Failed(cause) => {
+                    // #388 bullet 4 ("clearly mark the task as
+                    // failed/incomplete"), for the category bullet 7 names
+                    // "tool/runtime failure". This is a terminal Err exit of
+                    // the run loop on the MAINLINE tool-dispatch path: every
+                    // `Node::AgentCall` is `tokio::spawn`ed by the walker
+                    // (orchestration/graph.rs), so a panic in dispatch that
+                    // falls outside the per-tool `catch_unwind` arrives here
+                    // as `GraphError::AgentFailed { agent: "<join>" }`.
+                    //
+                    // Nothing on this path writes to the ANSWER stream - the
+                    // cause travels out as `Err` and the CLI renders it on
+                    // stderr - so before this line a `-p` run that died here
+                    // ended stdout on the model's last narration and read as
+                    // a finished answer. Same shared helper and wording as
+                    // the provider and compaction exits, so the three cannot
+                    // drift apart.
+                    //
+                    // Emitted FIRST, ahead of `prepare_durable_conversation`,
+                    // whose own `?` would otherwise carry the run out of this
+                    // arm with the admission never written.
+                    self.emit_incomplete_run_admission(&format!(
+                        "the tool run for this turn failed ({cause})"
+                    ));
                     self.prepare_durable_conversation().await?;
                     self.fire_on_session_end(turn + 1).await;
                     self.cache_ledger.finish();
                     self.save_session_mirror();
-                    return Err(AgentError::ApiError(msg));
+                    return Err(AgentError::ApiError(format!(
+                        "orchestration graph failed: {cause}"
+                    )));
                 }
             };
 
@@ -16067,6 +17816,25 @@ impl AgentEngine {
 
                     self.output.emit_tool_result(tool_name, *is_error, content);
 
+                    // #355 — a command-floor refusal is a POLICY decision, and
+                    // the user has to be told even when the model decides not
+                    // to tell them. The payload carries the stop instruction
+                    // (`command_floor::disclose`), but a payload is only ever
+                    // as good as the model's compliance, and the reported
+                    // incident is exactly the case where it improvised instead.
+                    // This is the half that does not depend on it: `emit_info`
+                    // is the sink the user reads — the terminal formatter's
+                    // session line, and `ProtocolEvent::Info` for the TUI and
+                    // json-stream hosts. A `warn!` here would reach nobody:
+                    // `RUST_LOG` is unset on a default install, so only ERROR
+                    // makes it to stderr.
+                    if *is_error
+                        && let Some(notice) =
+                            wcore_config::command_floor::policy_refusal_notice(tool_name, content)
+                    {
+                        self.output.emit_info(&notice);
+                    }
+
                     // Layer D1 follow-up (hydrated-tool admission): a
                     // successful ToolSearch teaches the model a tool's
                     // schema. Record the returned names so the curation/cap
@@ -16192,6 +17960,7 @@ impl AgentEngine {
                          disable via WAYLAND_MAX_CONSECUTIVE_TOOL_FAILURES.)"
                     ),
                     false,
+                    wcore_protocol::events::FailureCategory::ToolRuntime,
                 );
                 // #475 + #457: the retry-cap is a budget guardrail, not a hard
                 // failure — surface finish_reason=max_turns so the host offers
@@ -16221,6 +17990,7 @@ impl AgentEngine {
                          same call. (Tune or disable via WAYLAND_MAX_REPEATED_TOOL_CALLS.)"
                     ),
                     false,
+                    wcore_protocol::events::FailureCategory::ToolRuntime,
                 );
                 return self
                     .finish_run_terminated(user_input, turn + 1, FinishReason::Length)
@@ -16250,6 +18020,7 @@ impl AgentEngine {
                          mid-flight monitor required a strategy change. Continue with a \
                          materially different approach or explain the blocker.",
                         false,
+                        wcore_protocol::events::FailureCategory::ToolRuntime,
                     );
                     self.emit_midflight_monitor_occurrence();
                     return self
@@ -16275,6 +18046,7 @@ impl AgentEngine {
                          mid-flight monitor required a strategy change. Continue with a \
                          materially different tool sequence or explain the blocker.",
                         false,
+                        wcore_protocol::events::FailureCategory::ToolRuntime,
                     );
                     self.emit_midflight_monitor_occurrence();
                     return self
@@ -16296,6 +18068,7 @@ impl AgentEngine {
                              (limit {limit}, observed {observed})."
                         ),
                         false,
+                        wcore_protocol::events::FailureCategory::LocalWayland,
                     );
                     self.emit_midflight_monitor_occurrence();
                     return self
@@ -17252,22 +19025,22 @@ impl AgentEngine {
     /// exactly that drift. (`self.model` is already post-swap — the tier swap
     /// is applied by `apply_pre_turn_outcome` before the turn runs.)
     fn autocompact_threshold_tokens(&self) -> u64 {
-        auto::autocompact_threshold(
-            &self.compact_config,
-            self.compat.provider_type(),
-            &self.model,
-        ) as u64
+        // #1172: the REPORTED threshold must be the ENFORCED one, learned
+        // window included, or the ledger sends an operator hunting a boundary
+        // the engine never used.
+        self.autocompact_threshold_now() as u64
     }
 
-    /// The emergency hard-stop limit, as tokens, for this engine's config and
-    /// currently-active model (GH#635). Same `self.model` reasoning as
-    /// [`Self::autocompact_threshold_tokens`].
+    /// The emergency hard-stop limit, as tokens, on the window that will
+    /// actually serve this turn (GH#635, FerroxLabs/wayland#1210).
+    ///
+    /// #1210: this was the fourth window-derived boundary and the only one that
+    /// re-resolved the window from config + model alone, so the figure reported
+    /// to operators beside the NARROWED autocompact threshold could be 8x it.
+    /// It now shares `compaction_window_now` with the threshold, the pre-flight
+    /// ceiling and the smart-compact fraction, so the four cannot disagree.
     fn emergency_limit_tokens(&self) -> u64 {
-        emergency::emergency_limit(
-            &self.compact_config,
-            self.compat.provider_type(),
-            &self.model,
-        ) as u64
+        emergency::emergency_limit(&self.compact_config, self.compaction_window_now()) as u64
     }
 
     /// Record one completed LLM round-trip into the cache/compaction ledger.
@@ -17536,6 +19309,33 @@ impl AgentEngine {
             ));
         }
 
+        // 0b. Accumulated tool-RESULT ceiling (#1150 c4) — CONTINUOUS, for the
+        // same reason as step 0: per-result truncation caps ONE result at
+        // ingestion and the microcompact below only fires under context
+        // pressure, so between them N results at the per-result cap ride in
+        // history at full size and are re-sent whole on every turn. This
+        // bounds their SUM. Monotone + epoch-quantized like step 0, so a
+        // bounded result never changes bytes again and the boundary advances
+        // in batches rather than once per turn inside the cached prefix.
+        // #1200 — the SAME resolved window every other boundary uses,
+        // learned narrowing included. Resolved BEFORE the mutable borrow of
+        // self.messages below, not inlined into the call.
+        let result_window = Some(self.compaction_window_now());
+        let results_result = micro::bound_accumulated_tool_results(
+            &mut self.messages,
+            &self.compact_config,
+            result_window,
+        );
+        if results_result.cleared_count > 0 {
+            self.output.emit_info(&format!(
+                "Dropped {} tool result(s) over the accumulated budget (~{} tokens freed)",
+                results_result.cleared_count, results_result.estimated_tokens_freed
+            ));
+            // Token-opt (diff-resend): dropping a tool-result body can remove
+            // the read content a cached diff base references.
+            self.bump_file_cache_generation();
+        }
+
         // 1. Microcompact (lightweight, no LLM call)
         //
         // A-6: the count trigger is gated on the SAME real-pressure watermark
@@ -17543,11 +19343,7 @@ impl AgentEngine {
         // relief rather than an unconditional wipe on the eleventh tool call.
         let micro_pressure = micro::ContextPressure {
             real_input_tokens: self.compact_state.last_real_input_tokens,
-            autocompact_threshold: auto::autocompact_threshold(
-                &self.compact_config,
-                self.compat.provider_type(),
-                &self.model,
-            ),
+            autocompact_threshold: self.autocompact_threshold_now(),
         };
         if micro::should_microcompact(&self.messages, &self.compact_config, micro_pressure) {
             let result = micro::microcompact(&mut self.messages, &self.compact_config);
@@ -17587,13 +19383,8 @@ impl AgentEngine {
         // so a tripped breaker can't latch it. `smart_drove` is reused below for
         // the CompactOffload reason string and the cannot-shrink latch.
         let smart_drove = std::mem::take(&mut self.smart_compact_force);
-        let should_compact = smart_drove
-            || auto::should_autocompact(
-                self.compact_state.last_real_input_tokens,
-                &self.compact_config,
-                self.compat.provider_type(),
-                &self.model,
-            );
+        let should_compact =
+            smart_drove || self.should_autocompact_now(self.compact_state.last_real_input_tokens);
         if should_compact && !self.compact_state.is_circuit_broken(&self.compact_config) {
             let provider: Arc<dyn LlmProvider> = match (
                 self.session_journal.as_ref(),
@@ -17877,8 +19668,11 @@ impl AgentEngine {
                     return Err(AgentError::SessionAuthority(error.to_string()));
                 }
                 Err(e) => {
-                    self.output
-                        .emit_error(&format!("Autocompact failed: {}", e), false);
+                    self.output.emit_error(
+                        &format!("Autocompact failed: {}", e),
+                        false,
+                        wcore_protocol::events::FailureCategory::Unknown,
+                    );
                     // AUDIT A4 — restore the carved-out live user turn
                     // on failure so the next turn still sees the task.
                     if let Some(turn) = live_user_turn {
@@ -17910,11 +19704,7 @@ impl AgentEngine {
             // GH#635 — call the SAME extracted function the trigger uses. This
             // was an inline re-derivation of the threshold and would have kept
             // reporting the stale 200k-based number after the fix.
-            let threshold = auto::autocompact_threshold(
-                &self.compact_config,
-                self.compat.provider_type(),
-                &self.model,
-            );
+            let threshold = self.autocompact_threshold_now();
             if self.compact_state.last_real_input_tokens as usize >= threshold {
                 self.output.emit_info(&format!(
                     "Autocompact: disabled (compact.enabled=false, \
@@ -17925,23 +19715,17 @@ impl AgentEngine {
         }
 
         // 3. Emergency check (skip if autocompact just succeeded)
-        if !compacted
-            && emergency::is_at_emergency_limit(
-                self.compact_state.last_input_tokens,
-                &self.compact_config,
-                self.compat.provider_type(),
-                &self.model,
-            )
-        {
+        //
+        // #1210 — ONE window for the test and for the number the user is shown,
+        // and it is the narrowed one `emergency_limit_tokens` reports. Two
+        // calls used to resolve it independently from config + model; both were
+        // blind to a learned served window, so this backstop sat 8x above the
+        // ceiling that had already fired.
+        let emergency_limit = self.emergency_limit_tokens();
+        if !compacted && self.compact_state.last_input_tokens >= emergency_limit {
             return Err(AgentError::ContextTooLong {
                 input_tokens: self.compact_state.last_input_tokens,
-                // GH#635 — the reported limit comes from the SAME extracted
-                // function that just fired, not an inline re-derivation.
-                limit: emergency::emergency_limit(
-                    &self.compact_config,
-                    self.compat.provider_type(),
-                    &self.model,
-                ),
+                limit: emergency_limit as usize,
             });
         }
 
@@ -18066,10 +19850,14 @@ impl AgentEngine {
     ///
     /// Operates on `request_messages` (the per-turn CLONE), never on session
     /// history.
+    ///
+    /// Returns whether anything was appended — #559 c6: the caller must know,
+    /// because the message it landed on cannot be a prompt-cache write point.
     fn apply_pre_prompt_contribution(
-        request_messages: &mut [Message],
+        request_messages: &mut Vec<Message>,
+        compat: &wcore_config::compat::ProviderCompat,
         outcome: &crate::hooks::HookOutcome,
-    ) {
+    ) -> bool {
         // Collect this turn's whole contribution (budget-capped).
         let mut blocks: Vec<String> = Vec::new();
         for msg in &outcome.injected_messages {
@@ -18082,7 +19870,7 @@ impl AgentEngine {
             }
         }
         if blocks.is_empty() {
-            return;
+            return false;
         }
         // Drop blocks that already exist verbatim in the request (e.g. the
         // turn-1 SessionStart prelude carried in the clone). Per-block, scanning
@@ -18095,22 +19883,22 @@ impl AgentEngine {
         };
         let to_append: Vec<String> = blocks.into_iter().filter(|b| !already_present(b)).collect();
         if to_append.is_empty() {
-            return;
+            return false;
         }
         // Cache-safe tail rule: only append onto a user-role tail. If the tail
         // isn't user-role, inject nothing so a later user-role turn can still
-        // surface this content (the clone is regenerated each turn).
-        let Some(last) = request_messages.last_mut() else {
-            return;
+        // surface this content (the clone is regenerated each turn). #559 c6:
+        // on turn 1 that tail is also the FIRST user message, so where the wire
+        // allows it the blocks go onto a carrier of their own instead.
+        let Some(last) = Self::transient_carrier(request_messages, compat) else {
+            return false;
         };
-        if !matches!(last.role, Role::User) {
-            return;
-        }
         for text in to_append {
             // Trusted product/plugin context must not land after the user's
             // own words — see `attach_transient_block`.
             Self::attach_transient_block(last, text);
         }
+        true
     }
 
     /// Move session-tier memory onto the real per-session DB file.
@@ -19537,6 +21325,13 @@ impl AgentEngine {
         if defer_cfg.enabled {
             wcore_tools::registry::apply_cold_deferral(&mut tools, &defer_cfg.hot_allowlist);
         }
+        // FerroxLabs/wayland#1209: sink deferred defs to the tail BEFORE
+        // admitting hydrated ones. In catalog mode the deferred defs are
+        // deleted below, so this is a no-op on the result; with the fold off
+        // they survive as per-tool stubs and a mid-array admission rewrote the
+        // whole wire prefix (measured: first differing index 1). Running it
+        // unconditionally is the single ordering discipline both modes share.
+        wcore_tools::registry::sink_deferred_to_tail(&mut tools);
         wcore_tools::registry::admit_hydrated_tools(&mut tools, &self.hydrated_tool_names);
         if defer_cfg.enabled && defer_cfg.catalog {
             tools = wcore_tools::registry::fold_deferred_into_catalog(
@@ -19761,12 +21556,18 @@ impl AgentEngine {
             // unrestorable forever.
             session.conversation_id = Some(conversation_id);
             if let Err(e) = mgr.save_and_clear_wal(session) {
-                self.output
-                    .emit_error(&format!("Failed to save session: {}", e), false);
+                self.output.emit_error(
+                    &format!("Failed to save session: {}", e),
+                    false,
+                    wcore_protocol::events::FailureCategory::LocalWayland,
+                );
             }
             if let Err(e) = mgr.update_index_for(session) {
-                self.output
-                    .emit_error(&format!("Failed to update session index: {}", e), false);
+                self.output.emit_error(
+                    &format!("Failed to update session index: {}", e),
+                    false,
+                    wcore_protocol::events::FailureCategory::LocalWayland,
+                );
             }
         }
     }
@@ -19922,7 +21723,7 @@ mod streaming_context_gate_tests {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
         fn streaming_tools_advertised(&self) -> bool {
             self.advertised
@@ -20212,7 +22013,7 @@ mod tier_routing_e2e_tests {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
         fn emit_trace(&self, _: &str, trace_json: &Value) {
             self.traces
@@ -20424,7 +22225,7 @@ mod set_config_tests {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
     }
 
@@ -20445,6 +22246,7 @@ mod set_config_tests {
             flux_loop_collisions: 0,
             flux_loop_intent: None,
             provider: Arc::new(NullProvider),
+            spend_guard: super::test_spend_guard(),
             egress_policy: wcore_egress::default_policy(),
             temperature: None,
             tools: Arc::new(ToolRegistry::new()),
@@ -20525,6 +22327,7 @@ mod set_config_tests {
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             narrowed_execution_budget: None,
             unserved_resends: 0,
+            admitted_incomplete_this_turn: false,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -20574,6 +22377,7 @@ mod set_config_tests {
             conversation_id: String::new(),
             flux_served_window: None,
             flux_routed_model: None,
+            forced_reasoning_replay: false,
             flux_context_pressure: None,
             smart_compact_armed: true,
             smart_compact_last_turn: None,
@@ -21404,6 +23208,218 @@ mod set_config_tests {
         assert!(
             wire_stub.contains("(Deferred)"),
             "stub mode serializes per-tool stub entries"
+        );
+    }
+
+    /// FerroxLabs/wayland#1209 probe fixture — the registry order of the
+    /// session the ticket measured, as outbound tool defs.
+    fn prefix_probe_defs() -> Vec<wcore_types::tool::ToolDef> {
+        [
+            "Bash",
+            "Delegate",
+            "Edit",
+            "Forge",
+            "Glob",
+            "Grep",
+            "Read",
+            "Spawn",
+            "ToolSearch",
+            "Workflow",
+            "Write",
+        ]
+        .iter()
+        .map(|name| builtin_tool(name))
+        .collect()
+    }
+
+    /// Everything ahead of the mutable region for that fixture: the eight
+    /// tools of `DeferColdConfig::default_hot_allowlist` it registers.
+    const PREFIX_PROBE_HOT: usize = 8;
+
+    /// An engine in the requested catalog mode whose LIVE registry can
+    /// dispatch the three cold tools — the direct-call hydration recorder
+    /// refuses a name the registry does not hold.
+    fn prefix_probe_engine(catalog: bool) -> super::AgentEngine {
+        let mut engine = make_engine("m");
+        engine.tools = Arc::new(hydration_registry(&["Delegate", "Spawn", "Workflow"]));
+        engine.config.builtin_tools.defer_cold.catalog = catalog;
+        engine
+    }
+
+    /// ONE turn through the engine's OWN per-turn tool pipeline
+    /// (`AgentEngine::apply_tool_deferral`), serialized with the real
+    /// Anthropic wire encoder: the assertion surface is the bytes the
+    /// provider sees, not an internal `Vec` order.
+    fn prefix_probe_wire(engine: &super::AgentEngine) -> Vec<serde_json::Value> {
+        wcore_providers::anthropic_shared::build_tools(
+            &engine.apply_tool_deferral(prefix_probe_defs()),
+        )
+    }
+
+    fn prefix_probe_names(wire: &[serde_json::Value]) -> Vec<String> {
+        wire.iter()
+            .map(|t| t["name"].as_str().unwrap_or_default().to_string())
+            .collect()
+    }
+
+    fn first_differing_wire_index(
+        a: &[serde_json::Value],
+        b: &[serde_json::Value],
+    ) -> Option<usize> {
+        (0..a.len().min(b.len())).find(|&i| a[i] != b[i])
+    }
+
+    /// FerroxLabs/wayland#1209 — with the catalog fold OFF
+    /// (`builtin_tools.defer_cold.catalog = false`, a documented knob) a
+    /// hydration must not rewrite the cached `tools[]` prefix. Turning the
+    /// fold off opts out of a TOKEN optimisation; it must not silently opt
+    /// out of prompt-cache stability.
+    ///
+    /// Measured before the fix, verbatim from the ticket: turn1 `[Bash,
+    /// Delegate, Edit, Forge, Glob, Grep, Read, Spawn, ToolSearch, Workflow,
+    /// Write]` -> turn2 `[Bash, Edit, Forge, Glob, Grep, Read, ToolSearch,
+    /// Write, Delegate, Spawn, Workflow]`, first differing wire index
+    /// `Some(1)`.
+    ///
+    /// Bound to PRODUCTION on purpose: it calls `apply_tool_deferral`, the
+    /// engine's only composition of the ordering helpers, so deleting the
+    /// `sink_deferred_to_tail` step from that call site reddens it. The
+    /// earlier guard re-composed the same helpers in the same order inside
+    /// the test, which graded the helpers and stayed green when the
+    /// production step was removed (verifier arm RA-E).
+    #[test]
+    fn stub_mode_hydration_leaves_the_engine_tools_prefix_byte_identical() {
+        let mut engine = prefix_probe_engine(false);
+        let turn1 = prefix_probe_wire(&engine);
+
+        // The arm is genuinely stub mode, not catalog mode wearing its name:
+        // all eleven tools are on the wire and the cold ones are stubs.
+        assert_eq!(
+            turn1.len(),
+            11,
+            "stub mode must keep every tool on the wire: {:?}",
+            prefix_probe_names(&turn1)
+        );
+        assert!(
+            turn1.iter().any(|t| t["description"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("(Deferred)")),
+            "stub mode must emit per-tool stubs: {:?}",
+            prefix_probe_names(&turn1)
+        );
+
+        // Hydrate through the ENGINE's own recorder — the direct-call path a
+        // lax provider takes — rather than by writing the field.
+        for cold in ["Delegate", "Spawn", "Workflow"] {
+            engine.record_called_deferred_tool(cold);
+        }
+        assert_eq!(
+            engine.hydrated_tool_names,
+            vec![
+                "Delegate".to_string(),
+                "Spawn".to_string(),
+                "Workflow".to_string()
+            ],
+            "the engine must have recorded the hydration it is about to serve"
+        );
+
+        let turn2 = prefix_probe_wire(&engine);
+        assert_eq!(
+            prefix_probe_names(&turn1)[1],
+            prefix_probe_names(&turn2)[1],
+            "wayland#1209: the hydration turn rewrote wire index 1\n \
+             turn 1: {:?}\n turn 2: {:?}",
+            prefix_probe_names(&turn1),
+            prefix_probe_names(&turn2)
+        );
+        assert_eq!(
+            serde_json::to_string(&turn1[..PREFIX_PROBE_HOT]).unwrap(),
+            serde_json::to_string(&turn2[..PREFIX_PROBE_HOT]).unwrap(),
+            "wayland#1209: the hydration turn rewrote the cached tools[] prefix\n \
+             turn 1: {:?}\n turn 2: {:?}",
+            prefix_probe_names(&turn1),
+            prefix_probe_names(&turn2)
+        );
+        assert!(
+            first_differing_wire_index(&turn1, &turn2).is_none_or(|i| i >= PREFIX_PROBE_HOT),
+            "first differing wire index must be inside the tail-mutable region, got {:?}\n \
+             turn 1: {:?}\n turn 2: {:?}",
+            first_differing_wire_index(&turn1, &turn2),
+            prefix_probe_names(&turn1),
+            prefix_probe_names(&turn2)
+        );
+
+        // A PARTIAL hydration is the harder case: two stubs stay behind, so
+        // the admitted one cannot simply be "the whole tail".
+        let mut partial = prefix_probe_engine(false);
+        partial.record_called_deferred_tool("Spawn");
+        let turn_partial = prefix_probe_wire(&partial);
+        assert_eq!(
+            serde_json::to_string(&turn1[..PREFIX_PROBE_HOT]).unwrap(),
+            serde_json::to_string(&turn_partial[..PREFIX_PROBE_HOT]).unwrap(),
+            "a single-tool hydration rewrote the cached prefix: {:?}",
+            prefix_probe_names(&turn_partial)
+        );
+        assert_eq!(
+            prefix_probe_names(&turn_partial).last().map(String::as_str),
+            Some("Spawn"),
+            "the hydrated tool must append at the tail: {:?}",
+            prefix_probe_names(&turn_partial)
+        );
+
+        // Positive control: catalog = true, the path #1171 already fixed. It
+        // holds the same property before and after this change, which is what
+        // proves the arm above measures the mode and not the harness.
+        let mut control = prefix_probe_engine(true);
+        let cat1 = prefix_probe_wire(&control);
+        for cold in ["Delegate", "Spawn", "Workflow"] {
+            control.record_called_deferred_tool(cold);
+        }
+        let cat2 = prefix_probe_wire(&control);
+        assert_eq!(
+            cat1.len(),
+            PREFIX_PROBE_HOT,
+            "control: catalog mode folds the stubs away: {:?}",
+            prefix_probe_names(&cat1)
+        );
+        assert_eq!(
+            serde_json::to_string(&cat1[..PREFIX_PROBE_HOT - 1]).unwrap(),
+            serde_json::to_string(&cat2[..PREFIX_PROBE_HOT - 1]).unwrap(),
+            "control arm broke: catalog mode rewrote its own prefix\n \
+             turn 1: {:?}\n turn 2: {:?}",
+            prefix_probe_names(&cat1),
+            prefix_probe_names(&cat2)
+        );
+    }
+
+    /// The `sink_deferred_to_tail` pass must be invisible to catalog mode —
+    /// the fold deletes exactly the defs the sink moved. Pinning catalog
+    /// mode's wire names against stub mode's hot prefix proves both modes
+    /// share ONE ordering discipline rather than each having its own. Driven
+    /// through `apply_tool_deferral` so it grades the engine, not the helpers.
+    #[test]
+    fn both_catalog_modes_agree_on_the_engine_hot_prefix() {
+        let stub = prefix_probe_wire(&prefix_probe_engine(false));
+        let catalog = prefix_probe_wire(&prefix_probe_engine(true));
+        // Catalog mode carries the deferred inventory on `ToolSearch`, so it
+        // moves that ONE entry to the tail (wayland#1171); stub mode has no
+        // carrier and leaves it in place. Modulo that documented carrier
+        // move, both modes emit the same hot tools in the same registry
+        // order — one discipline, not two.
+        let mut stub_hot = prefix_probe_names(&stub)[..PREFIX_PROBE_HOT].to_vec();
+        let carrier = stub_hot
+            .iter()
+            .position(|name| name == "ToolSearch")
+            .expect("ToolSearch is never deferred, so it is in the hot prefix");
+        let carrier = stub_hot.remove(carrier);
+        stub_hot.push(carrier);
+        assert_eq!(
+            prefix_probe_names(&catalog),
+            stub_hot,
+            "the two modes disagree on the hot prefix\n stub: {:?}\n catalog: {:?}",
+            prefix_probe_names(&stub),
+            prefix_probe_names(&catalog)
         );
     }
 
@@ -22302,7 +24318,7 @@ mod phase6_tests {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
     }
 
@@ -22323,6 +24339,7 @@ mod phase6_tests {
             flux_loop_collisions: 0,
             flux_loop_intent: None,
             provider: Arc::new(NullProvider),
+            spend_guard: super::test_spend_guard(),
             egress_policy: wcore_egress::default_policy(),
             temperature: None,
             tools: Arc::new(ToolRegistry::new()),
@@ -22404,6 +24421,7 @@ mod phase6_tests {
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             narrowed_execution_budget: None,
             unserved_resends: 0,
+            admitted_incomplete_this_turn: false,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -22453,6 +24471,7 @@ mod phase6_tests {
             conversation_id: String::new(),
             flux_served_window: None,
             flux_routed_model: None,
+            forced_reasoning_replay: false,
             flux_context_pressure: None,
             smart_compact_armed: true,
             smart_compact_last_turn: None,
@@ -22627,7 +24646,7 @@ mod compact_tests {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
     }
 
@@ -22652,6 +24671,7 @@ mod compact_tests {
             flux_loop_collisions: 0,
             flux_loop_intent: None,
             provider: Arc::new(NullProvider),
+            spend_guard: super::test_spend_guard(),
             egress_policy: wcore_egress::default_policy(),
             temperature: None,
             tools: Arc::new(ToolRegistry::new()),
@@ -22733,6 +24753,7 @@ mod compact_tests {
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             narrowed_execution_budget: None,
             unserved_resends: 0,
+            admitted_incomplete_this_turn: false,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -22782,6 +24803,7 @@ mod compact_tests {
             conversation_id: String::new(),
             flux_served_window: None,
             flux_routed_model: None,
+            forced_reasoning_replay: false,
             flux_context_pressure: None,
             smart_compact_armed: true,
             smart_compact_last_turn: None,
@@ -23224,7 +25246,375 @@ mod compact_tests {
         );
     }
 
+    // -- #1218: the output ask is sized against the window in force --
+
+    /// FerroxLabs/wayland#1218 c1/c2 — the `max_tokens` a turn ACTUALLY asks
+    /// for must be sized against the window in force, so the admitted input
+    /// plus the asked output cannot exceed it.
+    ///
+    /// This grades [`AgentEngine::turn_output_cap`], not `size_output_cap`.
+    /// The arithmetic was never the defect: `size_output_cap` is pure, has
+    /// twenty-odd unit tests, and every one of them passes `window_in_force`
+    /// itself. The defect is which window the PRODUCTION path hands it, and
+    /// that line — `resolve_preflight_window(..).window` — had exactly one
+    /// call site, inside the turn loop, reachable by no test. Replacing it
+    /// with a literal `None` compiled and left 4,010 tests green. Extracting
+    /// the derivation onto the engine, next to `emergency_limit_tokens` and
+    /// `autocompact_threshold_now`, is what makes it gradeable.
+    ///
+    /// The configuration is the one #1218 measured, and the same one #1210's
+    /// control uses: an unlisted model with a CORROBORATED 8,192-token learned
+    /// served window. The ticket's arithmetic is `ceiling 5,053 + ask 8,192 =
+    /// 13,245 on an 8,192-token slot`, so the input estimate here is that
+    /// 5,053-token ceiling.
+    #[test]
+    fn the_output_ask_is_sized_against_the_window_in_force() {
+        const LEARNED: u32 = 8_192;
+        /// The pre-flight ceiling on the learned slot — the figure the guard
+        /// admits, and therefore the input this ask has to fit beside.
+        const EST_INPUT: usize = 5_053;
+        /// `size_output_cap`'s WINDOW_BUFFER, restated so a re-grade reads the
+        /// same arithmetic rather than trusting a private constant.
+        const WINDOW_BUFFER: u32 = 512;
+        /// The un-windowed ask the defect produced (`UNKNOWN_CAP`).
+        const UNWINDOWED_ASK: u32 = 8_192;
+
+        let config = CompactConfig::default();
+        let mut state = CompactState::new();
+        // Corroborate through the tracker rather than by poking a field: the
+        // Shortfall arm carries its own corroboration, so one qualifying
+        // observation is enough.
+        state
+            .served_window
+            .observe("test/test-model", 20_000, LEARNED as u64)
+            .expect("precondition: a gross shortfall must produce evidence");
+        assert_eq!(
+            state.served_window.sizing_window(),
+            Some(LEARNED as u64),
+            "precondition: the evidence must be CORROBORATED, or this test \
+             grades the un-narrowed path and passes for the wrong reason"
+        );
+
+        let mut engine = make_compact_engine(config, state, vec![]);
+        // A generous user cap, so what is graded is the WINDOW clamp and not
+        // `self.max_tokens` binding first.
+        engine.max_tokens = 64_000;
+        assert!(
+            wcore_config::limits::model_output_ceiling(
+                engine.compat.provider_type(),
+                &engine.model
+            )
+            .is_none(),
+            "precondition: an UNLISTED model — the arm that had no window \
+             clamp at all before #1179, and the arm #1218 measured"
+        );
+        assert_eq!(
+            engine
+                .resolve_preflight_window(EST_INPUT as u64, &engine.model)
+                .window,
+            Some(LEARNED as u64),
+            "precondition: the window in force must BE the learned one"
+        );
+
+        let ask = engine.turn_output_cap(EST_INPUT, false, &engine.model);
+
+        // Graded as an IDENTITY against the window in force, not as an
+        // inequality: any number of wrong windows are "smaller than 8,192".
+        assert_eq!(
+            ask,
+            LEARNED - EST_INPUT as u32 - WINDOW_BUFFER,
+            "the ask must be the room left in the window IN FORCE"
+        );
+        // And the property the ticket actually measures, stated in the
+        // ticket's own terms.
+        assert!(
+            EST_INPUT as u32 + ask <= LEARNED,
+            "#1218: admitted input + asked output must fit the window in force; \
+             got {EST_INPUT} + {ask} on a {LEARNED}-token slot"
+        );
+        assert_ne!(
+            ask,
+            UNWINDOWED_ASK,
+            "the un-windowed ask is what the defect sent: {EST_INPUT} + \
+             {UNWINDOWED_ASK} = {} on a {LEARNED}-token slot",
+            EST_INPUT as u32 + UNWINDOWED_ASK
+        );
+    }
+
+    /// The control `.planning/DECISIONS.md` Q-1218 demands: WRONG REFUSAL
+    /// outranks the leak here, because a cap that comes out too small silently
+    /// TRUNCATES EVERY ANSWER, on every turn, on every large model.
+    ///
+    /// #1218's title reads as an instruction to clamp the ask to the withheld
+    /// `output_reserve`. Done literally that cuts a healthy large-window Claude
+    /// turn from its real 128,000-token output ceiling down to the reserve, to
+    /// fix a defect that only exists below a 49,152-token window. Q-1218
+    /// clamps to the ROOM LEFT in the window instead, which is identity here.
+    ///
+    /// This test must hold at the PRODUCTION path — the pure-function pin
+    /// `a_window_in_force_that_is_the_catalogued_one_changes_no_sizing` covers
+    /// the arithmetic, but it cannot see what the turn loop hands in.
+    #[test]
+    fn a_large_healthy_window_still_gets_the_models_full_output_ceiling() {
+        let config = CompactConfig::default();
+        // No served-window evidence at all: nothing narrows, and the window in
+        // force is the catalogued one.
+        let engine_state = CompactState::new();
+        assert_eq!(
+            engine_state.served_window.sizing_window(),
+            None,
+            "precondition: a HEALTHY route — no truncation has been observed"
+        );
+
+        let mut engine = make_compact_engine(config.clone(), engine_state, vec![]);
+        engine.model = "claude-sonnet-4-6".to_string();
+        // Above the model's real ceiling, so the CEILING binds and not the cap.
+        engine.max_tokens = 200_000;
+
+        let (ceiling, window) = wcore_config::limits::model_output_ceiling(
+            engine.compat.provider_type(),
+            &engine.model,
+        )
+        .expect("precondition: a CATALOGUED model, or this control grades nothing");
+        assert!(
+            window >= 200_000,
+            "precondition: a large healthy window, got {window}"
+        );
+
+        let ask = engine.turn_output_cap(1_000, false, &engine.model);
+
+        assert_eq!(
+            ask, ceiling,
+            "a large healthy window must still get the model's full output \
+             ceiling — #1218's clamp is IDENTITY wherever the window in force \
+             is the catalogued one"
+        );
+        // Named explicitly, because this is the regression the control exists
+        // to catch: clamping to the withheld reserve instead of to the room.
+        let reserve = config.scaled_reserves(window as usize).output_reserve;
+        assert!(
+            (ask as usize) > reserve,
+            "clamping the ask to the withheld reserve would cut this turn from \
+             {ceiling} to {reserve} tokens — every answer, every turn"
+        );
+    }
+
+    /// #1218 c2, at the PRODUCTION path.
+    ///
+    /// `the_output_ask_never_outgrows_the_reserve_the_ceiling_withheld` sweeps
+    /// the same range, but it calls `size_output_cap` directly and hands it the
+    /// window itself, so it grades the arithmetic and cannot see which window
+    /// production supplies. c2's words are "the max_tokens that will be SENT",
+    /// and that is this: `AgentEngine::turn_output_cap`, the function the turn
+    /// loop assigns to `request.max_tokens`, with the window resolved the way
+    /// production resolves it.
+    #[test]
+    fn the_production_ask_never_outgrows_the_reserve_across_the_window_range() {
+        let cfg = CompactConfig::default();
+        for window in (4_096usize..=49_152).step_by(256) {
+            let mut state = CompactState::new();
+            state
+                .served_window
+                .observe("test/test-model", (window * 4) as u64, window as u64)
+                .unwrap_or_else(|| panic!("window {window}: a 4x shortfall must produce evidence"));
+            assert_eq!(
+                state.served_window.sizing_window(),
+                Some(window as u64),
+                "window {window}: the evidence must be CORROBORATED, or this \
+                 iteration grades the un-narrowed path"
+            );
+            let mut engine = make_compact_engine(cfg.clone(), state, vec![]);
+            engine.max_tokens = 64_000;
+            assert!(
+                wcore_config::limits::model_output_ceiling(
+                    engine.compat.provider_type(),
+                    &engine.model
+                )
+                .is_none(),
+                "control: this test is about the UNLISTED arm; if the fixture \
+                 model is ever catalogued the case it grades has moved"
+            );
+
+            let r = cfg.scaled_reserves(window);
+            let withheld = r.output_reserve + r.emergency_buffer;
+            let ceiling = cfg.input_ceiling_for_window(window);
+            assert_eq!(
+                ceiling,
+                window - withheld,
+                "window {window}: the ceiling is exactly what the reserves left"
+            );
+            assert_eq!(
+                engine
+                    .resolve_preflight_window(ceiling as u64, &engine.model)
+                    .window,
+                Some(window as u64),
+                "window {window}: production must resolve the LEARNED window, or \
+                 this test grades a window nothing sends against"
+            );
+
+            let ask = engine.turn_output_cap(ceiling, false, &engine.model) as usize;
+            assert!(
+                ask <= withheld,
+                "window {window}: the guard admits {ceiling} input tokens having \
+                 withheld {withheld} for the output, and the ask actually SENT is \
+                 {ask} — the ceiling certified a request that cannot fit"
+            );
+            // The property the ticket's title is about, over every input the
+            // guard admits rather than only the worst one.
+            for est in [0, 1, ceiling / 2, ceiling.saturating_sub(1), ceiling] {
+                let ask = engine.turn_output_cap(est, false, &engine.model) as usize;
+                assert!(
+                    est + ask <= window,
+                    "window {window}: input {est} + ask {ask} exceeds the window \
+                     actually in force"
+                );
+                assert!(ask > 0, "window {window}: an ask of zero sends nothing");
+            }
+        }
+    }
+
+    /// #1218 c3, at the PRODUCTION path — both measured cases, in the ticket's
+    /// own figures, against the value `request.max_tokens` is actually assigned.
+    ///
+    /// The two the ticket recorded: a LEARNED/narrowed 8,192 window (ceiling
+    /// 5,053, reserve 2,730, max_tokens sent 8,192, total ask 13,245) and a
+    /// CONFIGURED 16,384 window (ceiling 10,104, reserve 5,461, max_tokens
+    /// 8,192, total 18,296). Both arrive at `turn_output_cap` by a DIFFERENT
+    /// route — one through `narrow_to_served_window`, one through
+    /// `[compact] context_window` — so both are graded here rather than only
+    /// the learned one.
+    #[test]
+    fn the_measured_1218_overflows_no_longer_hold_at_the_production_path() {
+        // -- measured case 1: the LEARNED 8,192 window --
+        {
+            const WINDOW: usize = 8_192;
+            let cfg = CompactConfig::default();
+            let mut state = CompactState::new();
+            state
+                .served_window
+                .observe("test/test-model", 20_000, WINDOW as u64)
+                .expect("a gross shortfall must produce evidence");
+            let mut engine = make_compact_engine(cfg.clone(), state, vec![]);
+            engine.max_tokens = 64_000;
+            let ceiling = cfg.input_ceiling_for_window(WINDOW);
+            assert_eq!(ceiling, 5_053, "the ticket's measured ceiling");
+            assert_eq!(
+                cfg.scaled_reserves(WINDOW).output_reserve,
+                2_730,
+                "the ticket's measured reserve"
+            );
+            let ask = engine.turn_output_cap(ceiling, false, &engine.model) as usize;
+            assert_ne!(ask, 8_192, "8,192 is the max_tokens the ticket measured");
+            assert!(
+                ceiling + ask <= WINDOW,
+                "total ask {} on an {WINDOW}-token slot; the ticket measured 13,245",
+                ceiling + ask
+            );
+        }
+        // -- measured case 2: the CONFIGURED 16,384 window --
+        {
+            const WINDOW: usize = 16_384;
+            let cfg = CompactConfig {
+                context_window: Some(WINDOW),
+                ..CompactConfig::default()
+            };
+            let mut engine = make_compact_engine(cfg.clone(), CompactState::new(), vec![]);
+            engine.max_tokens = 64_000;
+            let ceiling = cfg.input_ceiling_for_window(WINDOW);
+            assert_eq!(ceiling, 10_104, "the ticket's measured ceiling");
+            assert_eq!(
+                cfg.scaled_reserves(WINDOW).output_reserve,
+                5_461,
+                "the ticket's measured reserve"
+            );
+            assert_eq!(
+                engine
+                    .resolve_preflight_window(ceiling as u64, &engine.model)
+                    .window,
+                Some(WINDOW as u64),
+                "precondition: the operator's `[compact] context_window` must be \
+                 the window in force, with no learned narrowing involved"
+            );
+            let ask = engine.turn_output_cap(ceiling, false, &engine.model) as usize;
+            assert_ne!(ask, 8_192, "8,192 is the max_tokens the ticket measured");
+            assert!(
+                ceiling + ask <= WINDOW,
+                "total ask {} on a {WINDOW}-token slot; the ticket measured 18,296",
+                ceiling + ask
+            );
+        }
+    }
+
     // -- Emergency check fires when at limit --
+
+    /// FerroxLabs/wayland#1210 c2 - on a CORROBORATED 8,192-token learned
+    /// window the reported emergency limit and the autocompact threshold must
+    /// derive from the SAME window.
+    ///
+    /// The defect was that they did not. `emergency_limit` re-resolved the
+    /// window itself from `config` + `provider` + `model`, so it was the one
+    /// window-derived boundary that never reached `narrow_to_served_window`.
+    /// The ticket measured the gap on exactly this configuration: an unlisted
+    /// model whose `effective_context_window` is `UNVERIFIED_CONTEXT_WINDOW` =
+    /// 32,768, with a corroborated 8,192 served window. Everything else
+    /// narrowed - autocompact threshold 3,688, pre-flight ceiling 5,053 - while
+    /// the emergency limit stayed at 29,768, the unnarrowed 32,768 minus its
+    /// buffer, and 29,768 is the figure operators are SHOWN.
+    ///
+    /// Graded as an IDENTITY against the window, not as an inequality: the
+    /// criterion says "derive from the same window", and any number of wrong
+    /// windows satisfy "smaller than 29,768".
+    #[test]
+    fn the_emergency_limit_and_the_autocompact_threshold_share_one_window() {
+        const LEARNED: usize = 8_192;
+        let config = CompactConfig::default();
+        let mut state = CompactState::new();
+        // Corroborate through the tracker rather than by poking a field: the
+        // Shortfall arm carries its own corroboration, so one qualifying
+        // observation is enough and no private state is reached into.
+        state
+            .served_window
+            .observe("test/test-model", 20_000, LEARNED as u64)
+            .expect("precondition: a gross shortfall must produce evidence");
+        assert_eq!(
+            state.served_window.sizing_window(),
+            Some(LEARNED as u64),
+            "precondition: the evidence must be CORROBORATED, or this test \
+             grades the un-narrowed path and passes for the wrong reason"
+        );
+
+        let engine = make_compact_engine(config.clone(), state, vec![]);
+        let base = config.effective_context_window(engine.compat.provider_type(), &engine.model);
+        assert_eq!(
+            base,
+            wcore_config::compact::UNVERIFIED_CONTEXT_WINDOW,
+            "precondition: an unlisted model, which is the arm #1210 measured"
+        );
+        assert!(
+            base > LEARNED,
+            "precondition: the learned window must actually narrow something"
+        );
+
+        assert_eq!(
+            engine.emergency_limit_tokens() as usize,
+            config.emergency_limit_for_window(LEARNED),
+            "the emergency limit must be derived from the LEARNED window"
+        );
+        assert_eq!(
+            engine.autocompact_threshold_now(),
+            config.autocompact_threshold_for_window(LEARNED),
+            "and so must the threshold - the same window, not merely a smaller \
+             number"
+        );
+        // The measured figure the ticket reported, stated so a re-grade reads
+        // the same arithmetic it did.
+        assert_ne!(
+            engine.emergency_limit_tokens() as usize,
+            config.emergency_limit_for_window(base),
+            "29,768 was the reported and ENFORCED limit while every other \
+             boundary had narrowed to 8,192"
+        );
+    }
 
     #[tokio::test]
     async fn emergency_fires_when_at_limit() {
@@ -23398,6 +25788,96 @@ mod compact_tests {
         }
     }
 
+    /// #388 bullet 4 (c10) - the COMPACTION bail is a terminal exit of the run
+    /// too, and it was the last class of run-ending failure saying nothing
+    /// where the answer goes.
+    ///
+    /// `emergency_stays_conservative_ignoring_real_watermark` above proves the
+    /// bail FIRES; this proves the user is TOLD when it fires, through a real
+    /// `run()`. This path is the reporter own words - "truncates because the
+    /// model runs out of token budget" - and the class was measured on the
+    /// shipped binary: a one-shot run ending on a provider-failure exit wrote
+    /// 177 bytes to stdout WITH the admission and 0 bytes with it stubbed out,
+    /// and the compaction exits were still on the 0-byte side.
+    #[tokio::test]
+    async fn a_compaction_bail_admits_itself_on_the_answer_stream() {
+        let config = CompactConfig {
+            context_window: Some(200_000),
+            emergency_buffer: 3_000,
+            enabled: false,
+            ..Default::default()
+        };
+        let mut state = CompactState::new();
+        state.last_input_tokens = 198_000;
+        state.last_real_input_tokens = 10_000;
+
+        let mut engine = make_compact_engine(config, state, vec![]);
+        let sink = Arc::new(crate::test_utils::TestSink::new());
+        let handle = sink.handle();
+        engine.output = sink;
+        engine.provider = Arc::new(SummaryProvider);
+
+        let result = engine.run("the live task", "m-388-compact").await;
+        assert!(
+            matches!(&result, Err(super::AgentError::ContextTooLong { .. })),
+            "this arm must reach the compaction bail: {result:?}"
+        );
+
+        let answer: String = handle
+            .snapshot()
+            .iter()
+            .filter(|e| e["type"].as_str() == Some("text_delta"))
+            .filter_map(|e| e["text"].as_str().map(str::to_owned))
+            .collect();
+        assert!(
+            answer.contains("[stopped early]"),
+            "#388: a run that ends on a compaction bail must admit it where the \
+             ANSWER went - emit_error is stderr, so stdout is otherwise empty \
+             and the run reads as having produced nothing at all: {answer:?}"
+        );
+        assert!(
+            answer.contains("not an answer"),
+            "the admission must say the partial work is not an answer: {answer:?}"
+        );
+    }
+
+    /// CONTROL for the test above, and not decoration: it stops that test
+    /// passing by admitting on EVERY run. Same fixture, watermarks below the
+    /// emergency limit, provider answers normally - the answer stream must
+    /// carry the answer and no admission.
+    #[tokio::test]
+    async fn a_run_that_does_not_bail_carries_no_admission() {
+        let config = CompactConfig {
+            context_window: Some(200_000),
+            emergency_buffer: 3_000,
+            enabled: false,
+            ..Default::default()
+        };
+        let mut state = CompactState::new();
+        state.last_input_tokens = 1_000;
+        state.last_real_input_tokens = 1_000;
+
+        let mut engine = make_compact_engine(config, state, vec![]);
+        let sink = Arc::new(crate::test_utils::TestSink::new());
+        let handle = sink.handle();
+        engine.output = sink;
+        engine.provider = Arc::new(SummaryProvider);
+
+        let result = engine.run("the live task", "m-388-nobail").await;
+        assert!(result.is_ok(), "the control must complete: {result:?}");
+
+        let answer: String = handle
+            .snapshot()
+            .iter()
+            .filter(|e| e["type"].as_str() == Some("text_delta"))
+            .filter_map(|e| e["text"].as_str().map(str::to_owned))
+            .collect();
+        assert!(
+            !answer.contains("[stopped early]"),
+            "a run that completed must not admit failure: {answer:?}"
+        );
+    }
+
     // -- Microcompact runs when count trigger fires AND pressure is real --
 
     /// Build 12 `Read` results so the count trigger (keep_recent=3 →
@@ -23412,6 +25892,158 @@ mod compact_tests {
         messages
     }
 
+    // ── wayland#1200 — the resolved window must reach the accumulated
+    //    tool-result ceiling on the PRODUCTION path ─────────────────────────
+    //
+    // Both production call sites of `micro::bound_accumulated_tool_results`
+    // (`compact_now` and `run_compaction`) pass
+    // `Some(self.compaction_window_now())`. Every test in `compact/micro.rs`
+    // drives the HELPER and hand-supplies that argument, so the whole suite
+    // stayed green with BOTH sites changed to `None` — the window was passed
+    // but nothing bound it. These two tests grade the engine methods, one per
+    // site, so `None` at either site reddens.
+
+    /// Ten `WebFetch` results of 6,000 bytes: 60,000 bytes carried.
+    ///
+    /// Sized to sit BETWEEN the two bounds, which is what makes the assertions
+    /// discriminating — 60,000 fits the flat `total_budget_bytes` (120,000)
+    /// untouched, and breaks the 32,768-token window's budget (30,832).
+    ///
+    /// `WebFetch` is deliberately NOT in `compactable_tools`, so `microcompact`
+    /// cannot touch these bodies at all: `bound_accumulated_tool_results` is
+    /// the only pass in either pipeline that can mutate them, and any byte
+    /// moved is therefore attributable to it.
+    fn results_over_a_32k_window_but_under_the_flat_budget() -> Vec<Message> {
+        let mut messages = Vec::new();
+        for i in 0..10 {
+            let id = format!("wf{i}");
+            messages.push(tool_use_msg(&id, "WebFetch"));
+            messages.push(tool_result_msg(&id, &"y".repeat(6_000)));
+        }
+        messages
+    }
+
+    fn carried_tool_result_bytes(engine: &super::AgentEngine) -> usize {
+        engine
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter_map(|b| match b {
+                ContentBlock::ToolResult { content, .. } => Some(content.len()),
+                _ => None,
+            })
+            .sum()
+    }
+
+    fn bounded_tool_results(engine: &super::AgentEngine) -> usize {
+        engine
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter(|b| {
+                matches!(b, ContentBlock::ToolResult { content, .. }
+                    if content.starts_with(super::micro::BOUNDED_TOOL_RESULT_PREFIX))
+            })
+            .count()
+    }
+
+    /// The property both #1200 tests assert: the ceiling the pass enforced was
+    /// derived from the engine's window, not from the flat constants.
+    fn assert_the_window_bound_reached_the_pass(
+        engine: &super::AgentEngine,
+        carried_before: usize,
+    ) {
+        let flat = CompactConfig::default().tool_results.total_budget_bytes;
+        let windowed = engine
+            .compact_config
+            .tool_result_bounds(Some(32_768))
+            .total_budget_bytes;
+
+        // Anti-vacuity, checked rather than assumed: at this size the flat
+        // constants alone would have moved NOTHING, and the window's budget is
+        // genuinely exceeded. If a future default breaks either half, this
+        // fails here instead of passing for the wrong reason.
+        assert!(
+            carried_before <= flat,
+            "fixture must fit the flat budget untouched ({carried_before} B vs {flat} B), \
+             or a pass that never saw the window could satisfy the assertions below"
+        );
+        assert!(
+            windowed < carried_before,
+            "fixture must exceed the window budget ({carried_before} B vs {windowed} B)"
+        );
+
+        assert!(
+            bounded_tool_results(engine) > 0,
+            "no result carries the accumulated-ceiling stub: the pass ran with the flat \
+             {flat} B budget, so the window never reached it"
+        );
+        assert!(
+            carried_tool_result_bytes(engine) <= windowed,
+            "carried tool-result bytes ({} B) still exceed the budget the engine's own \
+             32,768-token window allows ({windowed} B)",
+            carried_tool_result_bytes(engine)
+        );
+
+        // The newest result is protected whatever the window says — a stubbed
+        // working set is how #1172's re-read loop starts.
+        let newest = engine
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter_map(|b| match b {
+                ContentBlock::ToolResult { content, .. } => Some(content),
+                _ => None,
+            })
+            .next_back()
+            .expect("fixture carries tool results");
+        assert_eq!(
+            newest.len(),
+            6_000,
+            "the newest tool result must survive the ceiling whole"
+        );
+    }
+
+    /// Site 1 — `compact_now` (the TUI `/compact` command).
+    #[test]
+    fn compact_now_bounds_tool_results_against_the_engines_own_window() {
+        let config = CompactConfig {
+            context_window: Some(32_768),
+            ..Default::default()
+        };
+        let mut engine = make_compact_engine(
+            config,
+            CompactState::new(),
+            results_over_a_32k_window_but_under_the_flat_budget(),
+        );
+        let carried_before = carried_tool_result_bytes(&engine);
+
+        engine.compact_now();
+
+        assert_the_window_bound_reached_the_pass(&engine, carried_before);
+    }
+
+    /// Site 2 — the automatic `run_compaction` pipeline. `last_real_input_tokens`
+    /// stays at zero so the pressure-gated microcompact below step 0b cannot
+    /// fire: the accumulated ceiling is ungated, and it is the only pass under
+    /// test here.
+    #[tokio::test]
+    async fn run_compaction_bounds_tool_results_against_the_engines_own_window() {
+        let config = CompactConfig {
+            context_window: Some(32_768),
+            ..Default::default()
+        };
+        let mut engine = make_compact_engine(
+            config,
+            CompactState::new(),
+            results_over_a_32k_window_but_under_the_flat_budget(),
+        );
+        let carried_before = carried_tool_result_bytes(&engine);
+
+        engine.run_compaction().await.unwrap();
+
+        assert_the_window_bound_reached_the_pass(&engine, carried_before);
+    }
     fn cleared_results(engine: &super::AgentEngine) -> usize {
         engine
             .messages
@@ -24665,7 +27297,7 @@ mod plan_mode_tests {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
     }
 
@@ -24720,6 +27352,7 @@ mod plan_mode_tests {
             flux_loop_collisions: 0,
             flux_loop_intent: None,
             provider: Arc::new(NullProvider),
+            spend_guard: super::test_spend_guard(),
             egress_policy: wcore_egress::default_policy(),
             temperature: None,
             tools: Arc::new(ToolRegistry::new()),
@@ -24801,6 +27434,7 @@ mod plan_mode_tests {
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             narrowed_execution_budget: None,
             unserved_resends: 0,
+            admitted_incomplete_this_turn: false,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -24850,6 +27484,7 @@ mod plan_mode_tests {
             conversation_id: String::new(),
             flux_served_window: None,
             flux_routed_model: None,
+            forced_reasoning_replay: false,
             flux_context_pressure: None,
             smart_compact_armed: true,
             smart_compact_last_turn: None,
@@ -25161,7 +27796,7 @@ mod hook_integration_tests {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
     }
 
@@ -25182,6 +27817,7 @@ mod hook_integration_tests {
             flux_loop_collisions: 0,
             flux_loop_intent: None,
             provider: Arc::new(NullProvider),
+            spend_guard: super::test_spend_guard(),
             egress_policy: wcore_egress::default_policy(),
             temperature: None,
             tools: Arc::new(ToolRegistry::new()),
@@ -25263,6 +27899,7 @@ mod hook_integration_tests {
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             narrowed_execution_budget: None,
             unserved_resends: 0,
+            admitted_incomplete_this_turn: false,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -25312,6 +27949,7 @@ mod hook_integration_tests {
             conversation_id: String::new(),
             flux_served_window: None,
             flux_routed_model: None,
+            forced_reasoning_replay: false,
             flux_context_pressure: None,
             smart_compact_armed: true,
             smart_compact_last_turn: None,
@@ -26334,7 +28972,7 @@ mod approval_bridge_engine_tests {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
     }
 
@@ -26355,6 +28993,7 @@ mod approval_bridge_engine_tests {
             flux_loop_collisions: 0,
             flux_loop_intent: None,
             provider: Arc::new(NullProvider),
+            spend_guard: super::test_spend_guard(),
             egress_policy: wcore_egress::default_policy(),
             temperature: None,
             tools: Arc::new(ToolRegistry::new()),
@@ -26436,6 +29075,7 @@ mod approval_bridge_engine_tests {
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             narrowed_execution_budget: None,
             unserved_resends: 0,
+            admitted_incomplete_this_turn: false,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -26485,6 +29125,7 @@ mod approval_bridge_engine_tests {
             conversation_id: String::new(),
             flux_served_window: None,
             flux_routed_model: None,
+            forced_reasoning_replay: false,
             flux_context_pressure: None,
             smart_compact_armed: true,
             smart_compact_last_turn: None,
@@ -26792,6 +29433,512 @@ mod approval_bridge_engine_tests {
         // The f32 pressure header (≈0.70) wins over the kernel fraction (0.50)
         // via max(); allow for f32→f64 rounding.
         assert!(forced > 0.69, "forced frac was {forced}");
+    }
+
+    /// #1172/#1179 WIRING — a learned served window narrows the pre-flight
+    /// window, but only where it leaves room to work.
+    ///
+    /// This grades the CHOKEPOINT, not the predicate: both the #255 guard and
+    /// the length-finish check call `resolve_preflight_window`, so a window
+    /// this test sees is a window they see.
+    #[test]
+    fn a_learned_served_window_narrows_the_preflight_window_when_it_is_workable() {
+        let mut engine = make_engine();
+        // A model the catalogue knows, so there IS a wider window to narrow.
+        engine.model = "gpt-4o".into();
+
+        let before = engine.resolve_preflight_window(1_000, "gpt-4o");
+        assert_eq!(before.window, Some(128_000), "the catalogued window");
+
+        // 8,192 clears the baseline turn on both boundaries -> it is applied.
+        engine
+            .compact_state
+            .served_window
+            .observe("openai/gpt-4o", 20_000, 8_192);
+        assert_eq!(
+            engine.compact_state.served_window.served_window(),
+            Some(8_192),
+            "the tracker must have learned it, or this arm measures nothing"
+        );
+        let narrowed = engine.resolve_preflight_window(1_000, "gpt-4o");
+        assert_eq!(
+            narrowed.window,
+            Some(8_192),
+            "an observed served window outranks the catalogue"
+        );
+        let ceiling = narrowed
+            .input_ceiling(&engine.compact_config)
+            .expect("a known window");
+        assert!(
+            ceiling > wcore_config::compact::BASELINE_TURN_TOKENS as u64,
+            "narrowing onto {ceiling} would abort the baseline turn"
+        );
+    }
+
+    /// #1172 — the AUTOCOMPACT trigger sees the learned window too, not just
+    /// the pre-flight guard.
+    ///
+    /// This is the "compaction never fires" half of #1172: the static trigger
+    /// resolved its window from the config and the model alone, so on a stock
+    /// Ollama serving 4,096 it sat at 22,937 — five times past anything the
+    /// endpoint would accept. Graded separately from the guard because it is a
+    /// separate call path: `autocompact_threshold_now`, not
+    /// `resolve_preflight_window`.
+    #[test]
+    fn the_autocompact_trigger_moves_onto_a_learned_served_window() {
+        let mut engine = make_engine();
+        engine.model = "gpt-4o".into();
+        assert_eq!(
+            engine.autocompact_threshold_now(),
+            95_000,
+            "128_000 - 20_000 - 13_000, the catalogued window"
+        );
+
+        engine
+            .compact_state
+            .served_window
+            .observe("openai/gpt-4o", 20_000, 8_192);
+        assert_eq!(
+            engine.autocompact_threshold_now(),
+            3_688,
+            "the trigger must follow the window the endpoint actually serves"
+        );
+        assert!(
+            engine.should_autocompact_now(4_000),
+            "4,000 tokens is past the trigger for an 8,192 slot"
+        );
+        assert!(
+            !engine.should_autocompact_now(3_000),
+            "an under-baseline turn must not summarize"
+        );
+    }
+
+    /// #353 —ARM 1— a SINGLE anomalous usage report must not move the trigger.
+    ///
+    /// #1172/#1179 wired the learned served window into
+    /// `autocompact_threshold_now`, which is correct and is what that ticket
+    /// asked for. The side effect is that a tracker false positive was upgraded
+    /// from "a spurious notice" to "a spurious compaction", and a spurious
+    /// compaction silently discards the conversation. The `Regression` arm has
+    /// no absolute-magnitude requirement, so one bad `usage` block — a provider
+    /// bug, an oddly billed retry, a proxy that rewrites usage — used to be
+    /// enough. `cache_ledger_engine_test` caught exactly this shape with a
+    /// scripted sequence whose prompt halves while messages are appended.
+    #[test]
+    fn a_single_anomalous_usage_report_does_not_move_the_autocompact_trigger() {
+        let mut engine = make_engine();
+        engine.model = "gpt-4o".into();
+        let catalogued = engine.autocompact_threshold_now();
+        assert_eq!(catalogued, 95_000, "the catalogued 128,000 window");
+
+        // A baseline turn, then ONE turn whose reported prompt goes backwards
+        // while the prompt we sent grew. Neither is a `Shortfall` (8,192 and
+        // 7,000 are both well above 60% of what was sent), so this is the
+        // `Regression` arm and nothing else.
+        assert_eq!(
+            engine
+                .compact_state
+                .served_window
+                .observe("openai/gpt-4o", 10_000, 8_192),
+            None,
+            "the baseline turn is not evidence"
+        );
+        let evidence = engine
+            .compact_state
+            .served_window
+            .observe("openai/gpt-4o", 11_000, 7_000);
+
+        // NOT VACUOUS, and the constraint the ticket puts on the fix: the
+        // NOTICE still fires on this one observation. Closing #353 by making
+        // the detector quieter would be the wrong fix.
+        let evidence = evidence.expect("the notice must still fire on one observation");
+        assert_eq!(
+            evidence.signal,
+            wcore_config::context_window::TruncationSignal::Regression
+        );
+        assert_eq!(
+            engine.compact_state.served_window.served_window(),
+            Some(8_192),
+            "the telling figure is learned immediately, or this test measures nothing"
+        );
+
+        // ...and 8,192 IS a window the trigger would otherwise move onto, so
+        // this is not passing because `supports_compaction` refused it.
+        assert!(
+            engine.compact_config.supports_compaction(8_192),
+            "8,192 must be workable, or the #1179 gate would explain the result"
+        );
+
+        assert_eq!(
+            engine.autocompact_threshold_now(),
+            catalogued,
+            "one anomalous report moved the autocompact trigger, so the next turn \
+             past it silently discards the user\'s conversation (#353)"
+        );
+        assert!(
+            !engine.should_autocompact_now(4_000),
+            "4,000 tokens is nowhere near the catalogued trigger"
+        );
+    }
+
+    /// #353 —ARM 2— a genuine, REPEATED regression still moves it.
+    ///
+    /// The half that stops the fix from being "disable the tracker". A guard
+    /// that refuses everything is not a guard, and #1172 is a real, measured
+    /// defect: on a truncating endpoint the regression repeats on the very next
+    /// turn, so corroboration costs one turn and nothing else.
+    #[test]
+    fn a_repeated_regression_still_moves_the_autocompact_trigger() {
+        let mut engine = make_engine();
+        engine.model = "gpt-4o".into();
+        assert_eq!(engine.autocompact_threshold_now(), 95_000);
+
+        for (sent, reported) in [(10_000u64, 8_192u64), (11_000, 7_000)] {
+            engine
+                .compact_state
+                .served_window
+                .observe("openai/gpt-4o", sent, reported);
+        }
+        assert_eq!(
+            engine.autocompact_threshold_now(),
+            95_000,
+            "one observation is not yet corroboration"
+        );
+
+        // The SECOND regression on the same route. Same shape, one turn later.
+        engine
+            .compact_state
+            .served_window
+            .observe("openai/gpt-4o", 12_000, 6_500);
+        assert_eq!(
+            engine.autocompact_threshold_now(),
+            3_688,
+            "a corroborated regression must still move the trigger onto the \
+             window the endpoint actually serves — 8,192 here"
+        );
+        assert!(engine.should_autocompact_now(4_000));
+        assert!(!engine.should_autocompact_now(3_000));
+    }
+
+    /// #1172 c3 — the trigger path of the refusal. A served window too small to
+    /// work in must not fire the summarizer (it would run at the top of every
+    /// turn and reclaim nothing), and must not be papered over with a wider
+    /// window either.
+    ///
+    /// The predecessor of this test asserted `autocompact_threshold_now() ==
+    /// 95_000` on a corroborated 4,096 slot — i.e. it PINNED core sizing
+    /// against 31x the window the endpoint had been observed to serve, and
+    /// graded that as the fix. That is the substitution #1172 c3 refused to let
+    /// close.
+    #[test]
+    fn the_autocompact_trigger_refuses_a_served_window_too_small_to_work_in() {
+        let mut engine = make_engine();
+        engine.model = "gpt-4o".into();
+        engine
+            .compact_state
+            .served_window
+            .observe("openai/gpt-4o", 12_000, 4_096);
+        assert_eq!(
+            engine.compaction_window_now(),
+            4_096,
+            "the window in force is the one the endpoint demonstrated, never a \
+             wider guess"
+        );
+        // The summarizer never fires: at 4,096 the threshold (1,844) is below
+        // core's own baseline turn, so firing would summarize an empty
+        // conversation at the top of every turn, forever.
+        assert!(!engine.should_autocompact_now(3_118));
+        assert!(!engine.should_autocompact_now(1_000_000));
+        // And the user is told, once, with the number they have to reach.
+        let refusal = engine
+            .unworkable_window_refusal()
+            .expect("a 4,096 slot cannot hold core's 3,118-token baseline turn");
+        assert!(refusal.contains("4096"), "{refusal}");
+        assert!(
+            refusal.contains("6929"),
+            "the minimum workable window: {refusal}"
+        );
+        assert!(refusal.contains("num_ctx"), "{refusal}");
+        // Round-2 verifier, refutation 2. These literals are source-wrapped
+        // and `cargo fmt` cannot see inside a string, so the space runs need
+        // an assertion. The LEARNED branch builds its own `source` and
+        // `remedy` literals, distinct from the configured branch's, so
+        // asserting this only in
+        // `an_unworkable_window_stops_the_run_and_the_refusal_reaches_the_user`
+        // would leave half the message ungraded.
+        assert!(
+            !refusal.contains("  "),
+            "the operator-facing refusal must not carry a run of spaces from a \
+             wrapped string literal: {refusal:?}"
+        );
+    }
+
+    /// #1172 c3 — the guard path. The window a route has been CORROBORATED to
+    /// serve is what the pre-flight guard sizes against, even when core cannot
+    /// work inside it.
+    ///
+    /// This replaces `a_learned_served_window_too_small_to_work_in_is_not_
+    /// narrowed_onto`, which asserted `Some(128_000)` here. Declining to narrow
+    /// did not avoid a brick, it hid one on the fail-open side: core went on
+    /// sending ~10.5k-token prompts into a 4,096-token slot and the server
+    /// discarded the head of each one without saying so.
+    #[test]
+    fn a_learned_served_window_too_small_to_work_in_is_refused_not_hidden() {
+        let mut engine = make_engine();
+        engine.model = "gpt-4o".into();
+        // 4,096 -- the slot #1172 measured a stock Ollama serving.
+        engine
+            .compact_state
+            .served_window
+            .observe("openai/gpt-4o", 12_000, 4_096);
+        assert_eq!(
+            engine.compact_state.served_window.sizing_window(),
+            Some(4_096),
+            "the tracker must have corroborated it, or this arm measures nothing"
+        );
+        let ctx = engine.resolve_preflight_window(1_000, "gpt-4o");
+        assert_eq!(
+            ctx.window,
+            Some(4_096),
+            "core must size against what the endpoint serves, not 31x it"
+        );
+        assert!(
+            engine.unworkable_window_refusal().is_some(),
+            "and it must refuse rather than dispatch into it"
+        );
+    }
+
+    /// #1179 — a CONFIGURED window below the minimum workable one is refused on
+    /// the same footing as a learned one, and stops the summarizer.
+    ///
+    /// `supports_compaction` had a single call site, inside the learned-window
+    /// narrowing, so `[compact] context_window = 6000` reached the trigger
+    /// untouched: threshold 2,700, below core's own 3,118-token baseline turn,
+    /// so the summarizer fired on an empty conversation at the top of every
+    /// turn. In the band 4,456..6,928 that was strictly WORSE than the
+    /// 0.70-of-window fallback #1179 replaced (6,000 -> 4,200, no fire).
+    #[test]
+    fn a_configured_window_too_small_to_work_in_is_refused_on_the_same_footing() {
+        let mut engine = make_engine();
+        // Above the old fallback's fire point, below the new one's.
+        engine.compact_config.context_window = Some(6_000);
+        assert_eq!(
+            engine
+                .compact_config
+                .autocompact_threshold_for_window(6_000),
+            2_700,
+            "the arithmetic this test is about"
+        );
+        assert!(
+            !engine.should_autocompact_now(3_118),
+            "core's own baseline turn must never trigger the summarizer"
+        );
+        let refusal = engine
+            .unworkable_window_refusal()
+            .expect("6,000 is below the minimum workable window");
+        assert!(refusal.contains("[compact] context_window"), "{refusal}");
+        assert!(
+            !refusal.contains("num_ctx"),
+            "a configured window is the operator's own setting, not the \
+             server's: {refusal}"
+        );
+
+        // One token above the minimum and core works normally again.
+        engine.compact_config.context_window = Some(6_929);
+        assert!(engine.unworkable_window_refusal().is_none());
+        assert!(engine.should_autocompact_now(4_000));
+    }
+
+    /// REPRO #1172 c3 — the headline. With a CORROBORATED 4,096-token served
+    /// window, core must not size the session against 32,768/128,000.
+    #[test]
+    fn repro_1172_c3_core_does_not_size_against_8x_the_served_window() {
+        let mut engine = make_engine();
+        engine.model = "gpt-4o".into();
+        engine
+            .compact_state
+            .served_window
+            .observe("openai/gpt-4o", 12_000, 4_096);
+        assert_eq!(
+            engine.compact_state.served_window.sizing_window(),
+            Some(4_096),
+            "corroborated, or this arm measures nothing"
+        );
+        let ctx = engine.resolve_preflight_window(1_000, "gpt-4o");
+        assert_eq!(
+            ctx.window,
+            Some(4_096),
+            "core must never size against a window the endpoint has been \
+             observed NOT to serve"
+        );
+    }
+    /// wayland-core#382 c3 — the notice's WORDING, graded against the sizing
+    /// state it describes, in the same body.
+    ///
+    /// The existing wording tests in `output_sizing_tests` hand
+    /// `truncation_notice` a `ServedWindowEvidence` they built themselves, so
+    /// they grade the sentence against a `corroborated` flag they chose. That
+    /// cannot see either half of what #382 reported: whether the corroborated
+    /// arm is ever REACHED (the once-per-figure suppression in
+    /// `context_window.rs` used to swallow the second regression, which is the
+    /// only turn the resize claim is true on), or whether the sentence agrees
+    /// with what core is actually sizing against.
+    ///
+    /// So this drives the production pair — `ServedWindowTracker::observe`
+    /// then `truncation_notice`, the two calls the turn loop makes back to
+    /// back — over the real observation sequence, and asserts each notice
+    /// against `sizing_window()` AND `compaction_window_now()` at the moment
+    /// it would be emitted.
+    #[test]
+    fn the_truncation_notice_wording_matches_the_sizing_state_when_it_is_emitted() {
+        let mut engine = make_engine();
+        engine.model = "gpt-4o".into();
+        let route = "openai/gpt-4o";
+        let catalogued = engine.compaction_window_now();
+        assert_eq!(catalogued, 128_000, "the catalogued window for gpt-4o");
+        // 8,192 is a window core CAN work in, so nothing below is explained by
+        // the #1179 unworkable-window arm.
+        assert!(
+            engine.compact_config.supports_compaction(8_192),
+            "8,192 must be workable, or the third arm would explain the wording"
+        );
+
+        // A baseline turn. Not evidence, and no notice.
+        assert_eq!(
+            engine
+                .compact_state
+                .served_window
+                .observe(route, 10_000, 8_192),
+            None,
+            "the baseline turn is not evidence"
+        );
+
+        // FIRST regression: the notice fires on one observation (#1172 keeps
+        // its one-observation sensitivity), and sizing has NOT moved.
+        let first = engine
+            .compact_state
+            .served_window
+            .observe(route, 11_000, 7_000)
+            .expect("the notice must still fire on one observation");
+        let text = super::truncation_notice(&first, &engine.model, &engine.compact_config);
+        assert_eq!(
+            engine.compact_state.served_window.sizing_window(),
+            None,
+            "one observation must not size the session"
+        );
+        assert_eq!(
+            engine.compaction_window_now(),
+            catalogued,
+            "nothing has been resized on this turn, so the notice must not say \
+             it has"
+        );
+        assert!(
+            !text.contains("is now sizing"),
+            "core is still sizing against {catalogued}: {text}"
+        );
+        assert!(
+            text.contains("has NOT changed how it sizes"),
+            "and the user must be told that plainly: {text}"
+        );
+
+        // SECOND regression, at an UNCHANGED figure. This is the turn that
+        // corroborates, and the turn the once-per-figure suppression used to
+        // swallow — leaving the resize claim emitted only on the turn it was
+        // false, and never on the turn it became true.
+        let second = engine
+            .compact_state
+            .served_window
+            .observe(route, 12_000, 6_500)
+            .expect(
+                "corroboration is the state change the user must be told about; \
+                 the once-per-figure suppression must not swallow it",
+            );
+        let text = super::truncation_notice(&second, &engine.model, &engine.compact_config);
+        assert_eq!(
+            engine.compact_state.served_window.sizing_window(),
+            Some(8_192),
+            "the second regression corroborates the figure"
+        );
+        assert_eq!(
+            engine.compaction_window_now(),
+            8_192,
+            "and the session really is sized against it now"
+        );
+        assert!(
+            text.contains("Core is now sizing this session against the 8192-token"),
+            "the claim is true on this turn, so it must be made on this turn: {text}"
+        );
+        assert!(
+            !text.contains("has NOT changed how it sizes"),
+            "and the not-yet wording must be gone: {text}"
+        );
+
+        // THIRD regression: the control. The figure is unchanged and already
+        // announced, so a fix that simply deleted the suppression would notify
+        // on every turn and fail here.
+        assert_eq!(
+            engine
+                .compact_state
+                .served_window
+                .observe(route, 13_000, 6_000),
+            None,
+            "the user has already been told about this figure"
+        );
+    }
+
+    /// wayland-core#382 c3, third arm — when the served window is one core
+    /// cannot work in, "this run will stop" is a claim about a DIFFERENT
+    /// production predicate, so it is graded against that predicate.
+    #[test]
+    fn an_unworkable_notice_says_the_run_will_stop_only_when_it_will() {
+        let mut engine = make_engine();
+        engine.model = "gpt-4o".into();
+        // 4,096 — the slot #1172 measured a stock Ollama serving. A gross
+        // shortfall corroborates on its own turn.
+        let evidence = engine
+            .compact_state
+            .served_window
+            .observe("openai/gpt-4o", 12_000, 4_096)
+            .expect("a 0.34 shortfall is evidence");
+        let text = super::truncation_notice(&evidence, &engine.model, &engine.compact_config);
+        assert_eq!(
+            engine.compact_state.served_window.sizing_window(),
+            Some(4_096),
+            "corroborated, or this arm measures nothing"
+        );
+        assert!(
+            !engine.compact_config.supports_compaction(4_096),
+            "4,096 must be unworkable, or this test is the second arm again"
+        );
+        assert!(
+            !text.contains("is now sizing"),
+            "promising a resize core will not perform: {text}"
+        );
+        assert!(
+            text.contains("cannot size a session against 4096"),
+            "{text}"
+        );
+        assert!(text.contains("run will stop"), "{text}");
+        assert!(
+            engine.unworkable_window_refusal().is_some(),
+            "and the run really does stop, or the notice lies the other way"
+        );
+    }
+
+    /// REPRO #1179 / D36 — a CONFIGURED window below the minimum workable one
+    /// must not summarize an empty conversation at the top of every turn.
+    #[test]
+    fn repro_1179_d36_a_configured_unworkable_window_does_not_autocompact_an_empty_turn() {
+        let mut engine = make_engine();
+        engine.compact_config.context_window = Some(6_000);
+        assert!(
+            !engine.should_autocompact_now(0),
+            "an empty conversation must never trigger the summarizer"
+        );
+        assert!(
+            !engine.should_autocompact_now(wcore_config::compact::BASELINE_TURN_TOKENS as u64),
+            "core's own baseline turn must never trigger the summarizer"
+        );
     }
 
     /// Fire test + the band clamp: an out-of-band trigger (0.95) is clamped to
@@ -27228,7 +30375,7 @@ mod approval_bridge_engine_tests {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
         fn emit_compaction(&self, _: &str, reason: &str, tokens_freed: u64, _: Option<u32>) {
             self.events
@@ -27353,6 +30500,43 @@ pub enum AgentError {
     ContextTooLong { input_tokens: u64, limit: usize },
 }
 
+impl AgentError {
+    /// FerroxLabs/wayland#1237 (from wayland#388 c7) — the typed category of
+    /// this terminal exit of the run loop.
+    ///
+    /// The terminal error exits of `AgentEngine::run` ARE the variants of this
+    /// enum, so classifying them exhaustively here is the enumeration #1237 c2
+    /// asks for rather than a sample of call sites. `wildcard_enum_match_arm`
+    /// is DENIED on this function rather than left to a reviewer: a new
+    /// `AgentError` variant is a new terminal exit, and the failure this
+    /// guards is precisely a `_ =>` arm reporting it as something it is not.
+    /// Adding one now costs a compile error and one deliberate decision.
+    #[deny(clippy::wildcard_enum_match_arm)]
+    pub fn failure_category(&self) -> wcore_protocol::events::FailureCategory {
+        use wcore_protocol::events::FailureCategory;
+        match self {
+            // #388's "context/token limit", and the case the ticket was
+            // written for: a long run that dies here used to reach the host as
+            // English prose and nothing else.
+            AgentError::ContextTooLong { .. } => FailureCategory::ContextLimit,
+            // #388's "local Wayland error". The local persistence authority
+            // failed; nothing upstream is implicated.
+            AgentError::SessionAuthority(_) => FailureCategory::LocalWayland,
+            // Also local, and decided here rather than upstream: the operator
+            // stopped the run.
+            AgentError::UserAborted => FailureCategory::LocalWayland,
+            // Both of these are an OPAQUE upstream response, and whether it
+            // was a provider rate limit or a router failure is wayland#1184's
+            // question, not answerable from inside this repo: both arrive as
+            // the same non-2xx from the same host. So this reports `unknown`
+            // instead of choosing one — #1237 c4 is that refusal, and it is a
+            // property of the type, which has no variant for either.
+            AgentError::ApiError(_) => FailureCategory::Unknown,
+            AgentError::Provider(_) => FailureCategory::Unknown,
+        }
+    }
+}
+
 #[cfg(test)]
 mod user_model_writeback_tests {
     //! v0.8.0 Task M — per-turn observation write-back into
@@ -27396,7 +30580,7 @@ mod user_model_writeback_tests {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
     }
 
@@ -27428,6 +30612,7 @@ mod user_model_writeback_tests {
             flux_loop_collisions: 0,
             flux_loop_intent: None,
             provider: Arc::new(NullProvider),
+            spend_guard: super::test_spend_guard(),
             egress_policy: wcore_egress::default_policy(),
             temperature: None,
             tools: Arc::new(ToolRegistry::new()),
@@ -27504,6 +30689,7 @@ mod user_model_writeback_tests {
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             narrowed_execution_budget: None,
             unserved_resends: 0,
+            admitted_incomplete_this_turn: false,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -27551,6 +30737,7 @@ mod user_model_writeback_tests {
             conversation_id: String::new(),
             flux_served_window: None,
             flux_routed_model: None,
+            forced_reasoning_replay: false,
             flux_context_pressure: None,
             smart_compact_armed: true,
             smart_compact_last_turn: None,
@@ -28216,7 +31403,7 @@ mod audit_2026_05_22_tests {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
     }
 
@@ -28247,7 +31434,7 @@ mod audit_2026_05_22_tests {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
     }
 
@@ -28314,7 +31501,7 @@ mod audit_2026_05_22_tests {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
     }
 
@@ -28508,6 +31695,520 @@ mod audit_2026_05_22_tests {
                 && written.contains(session_id)
                 && written.contains("Paraphrase"),
             "header comment must carry session + mutator provenance"
+        );
+    }
+
+    // --- #1172 c3 / #1179: the refusal is WIRED, not merely constructed ----
+
+    /// #1172 c3 — the criterion is "so the truncation stops", and stopping is
+    /// the TURN LOOP's job, not `unworkable_window_refusal`'s.
+    ///
+    /// The round-2 verifier objection this test exists for: every other test
+    /// on this path asserts `unworkable_window_refusal().is_some()`, which
+    /// grades a function returning a string. Deleting the one production call
+    /// site (the `if let Some(refusal)` block at the turn-loop top) left the
+    /// whole 9,226-test suite byte-identically green — a future edit could
+    /// remove the compensation silently. This drives `run()` end to end and
+    /// fails if that call site goes away.
+    ///
+    /// Three things are asserted, and each one is a different way for the
+    /// wiring to be missing:
+    ///   1. the run STOPS — `FinishReason::Length`, not a normal turn;
+    ///   2. the provider is NEVER called — no truncated prompt is sent, which
+    ///      is the data loss #1172 c3 is about;
+    ///   3. the refusal TEXT reaches the user, via the same error surface the
+    ///      host reads, naming the remedy and the figure to reach.
+    #[tokio::test]
+    async fn an_unworkable_window_stops_the_run_and_the_refusal_reaches_the_user() {
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![
+            LlmEvent::TextDelta("this must never be produced".into()),
+            done_endturn(),
+        ]]));
+        let counter = provider.call_counter();
+        let mut engine = engine_with(provider);
+
+        // An operator-STATED window core cannot work in. 6,000 is the band
+        // #1179 measured: threshold 2,700 against a 3,118-token baseline turn.
+        engine.compact_config.context_window = Some(6_000);
+        assert!(
+            !engine.compact_config.supports_compaction(6_000),
+            "fixture guard: 6000 must be an unworkable window, or this test \
+             proves nothing"
+        );
+
+        let tap: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+        engine.set_error_tap(Arc::clone(&tap));
+
+        let result = engine
+            .run("summarise this repository", "m-unworkable")
+            .await
+            .expect("an unworkable window is a clean stop, not an engine error");
+
+        assert_eq!(
+            result.finish_reason,
+            FinishReason::Length,
+            "the run must TERMINATE on the unworkable window; got {result:?}"
+        );
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "core must not send a prompt the endpoint would silently truncate \
+             - that is the data loss #1172 c3 names"
+        );
+
+        let emitted = tap.lock().expect("error tap").clone();
+        let emitted = emitted.expect(
+            "the refusal must reach the user's error surface; nothing was \
+             emitted, so the run stopped without saying why",
+        );
+        assert!(
+            emitted.starts_with("Run stopped:"),
+            "the refusal, not some other error, must be what stops the run: {emitted:?}"
+        );
+        assert!(
+            emitted.contains("[compact] context_window"),
+            "the configured-source remedy must name the setting the operator \
+             actually set: {emitted:?}"
+        );
+        assert!(
+            !emitted.contains("num_ctx"),
+            "a CONFIGURED window must not be blamed on the server's num_ctx: {emitted:?}"
+        );
+        let minimum = engine.compact_config.minimum_workable_window();
+        assert!(
+            emitted.contains(&minimum.to_string()),
+            "the refusal must name the figure to reach ({minimum}): {emitted:?}"
+        );
+        // The message is read by a human. No run of stray whitespace in it.
+        assert!(
+            !emitted.contains("  "),
+            "the operator-facing refusal must not carry a run of spaces from a \
+             wrapped string literal: {emitted:?}"
+        );
+    }
+
+    // --- #1230: the computed floor, and the decision taken below it -------
+
+    /// A system prompt big enough that core's own floor cannot fit inside a
+    /// 4,096-token slot, which is the condition #1230 is about. 16,000 chars
+    /// is 4,000 estimated tokens against an input ceiling of 2,527 at that
+    /// window -- the same shape as the real measurement (4,091 against 2,527)
+    /// without depending on the production prompt, which the integration test
+    /// `issue_1230_context_floor_test` grades separately and for real.
+    fn engine_with_a_real_floor(provider: Arc<dyn LlmProvider>) -> super::AgentEngine {
+        let mut engine = engine_with(provider);
+        engine.system_prompt = "x".repeat(16_000);
+        engine
+    }
+
+    /// #1230 c1/c3 -- the gate answers on the FLOOR and the STATED slot, and
+    /// it answers both ways.
+    ///
+    /// Swept, not spot-checked. A gate written as "refuse below 4,096" and a
+    /// gate written as "refuse when the ceiling cannot hold the floor" agree
+    /// at 4,096 and disagree everywhere else; only the sweep separates them.
+    /// The sweep is also the WRONG-REFUSAL control: every window above the
+    /// boundary must be allowed, and the count of allowed windows is asserted
+    /// non-zero so a gate that refused everything could not pass.
+    #[test]
+    fn the_floor_gate_refuses_exactly_the_windows_that_cannot_hold_the_floor() {
+        let provider = Arc::new(ScriptedProvider::new(vec![]));
+        let mut engine = engine_with_a_real_floor(provider);
+        let floor = crate::compact::estimate::uncompactable_floor_tokens(
+            &engine.system_prompt,
+            &engine.tools().to_tool_defs(),
+        );
+        assert!(floor > 0, "fixture guard: the floor must be a real number");
+
+        let mut refused = 0usize;
+        let mut allowed = 0usize;
+        for window in (1_024u64..=65_536).step_by(64) {
+            engine.compact_state.stated_window = Some(window);
+            let ceiling = engine
+                .compact_config
+                .input_ceiling_for_window(window as usize) as u64;
+            let refusal = engine.context_floor_refusal(floor, 8);
+            if ceiling <= floor {
+                refused += 1;
+                let text = refusal.unwrap_or_else(|| {
+                    panic!(
+                        "window {window}: ceiling {ceiling} cannot hold the floor \
+                         {floor}, but the gate allowed the turn"
+                    )
+                });
+                assert!(
+                    text.contains(&window.to_string()) && text.contains(&floor.to_string()),
+                    "the refusal must name BOTH numbers ({window} and {floor}): {text:?}"
+                );
+            } else {
+                allowed += 1;
+                assert!(
+                    refusal.is_none(),
+                    "window {window}: ceiling {ceiling} holds the floor {floor}, \
+                     but the turn was refused -- a wrong refusal is worse than \
+                     the truncation it prevents"
+                );
+            }
+        }
+        assert!(refused > 0, "the sweep never exercised the refusing arm");
+        assert!(allowed > 0, "the sweep never exercised the allowing arm");
+
+        // FAIL-OPEN: an endpoint that did not state a slot can never be the
+        // reason a run stops, however large the floor.
+        engine.compact_state.stated_window = None;
+        assert!(
+            engine.context_floor_refusal(u64::MAX, 8).is_none(),
+            "an unknown slot must not refuse anything"
+        );
+    }
+
+    /// #1230 c3/c4 -- the criterion is that the RUN STOPS before the first
+    /// truncated request, and stopping is the turn loop's job, not
+    /// `context_floor_refusal`'s.
+    ///
+    /// Modelled on `an_unworkable_window_stops_the_run_and_the_refusal_reaches_
+    /// the_user`, and for the same reason: a test that asserts the helper
+    /// returns `Some` grades a function that builds a string. Deleting the
+    /// production call site would leave it green. This drives `run()` and
+    /// asserts (1) the run terminates, (2) THE PROVIDER IS NEVER CALLED --
+    /// which is what "before the first truncated request" means in code, and
+    /// (3) the text reaches the user naming both numbers and the remedy.
+    #[tokio::test]
+    async fn a_slot_below_the_computed_floor_stops_the_run_before_any_request() {
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![
+            LlmEvent::TextDelta("this must never be produced".into()),
+            done_endturn(),
+        ]]));
+        let counter = provider.call_counter();
+        let mut engine = engine_with_a_real_floor(provider);
+        // The slot #1230 measured a stock Ollama serving.
+        engine.compact_state.stated_window = Some(4_096);
+        engine.model = "qwen3:8b".to_string();
+
+        let floor = crate::compact::estimate::uncompactable_floor_tokens(
+            &engine.system_prompt,
+            &engine.tools().to_tool_defs(),
+        );
+        assert!(
+            engine.compact_config.input_ceiling_for_window(4_096) < floor as usize,
+            "fixture guard: 4096 must be unable to hold this floor, or the test \
+             proves nothing"
+        );
+
+        let tap: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+        engine.set_error_tap(Arc::clone(&tap));
+
+        let result = engine
+            .run("read big.txt and tell me how many lines it has", "m-floor")
+            .await
+            .expect("a slot below the floor is a clean stop, not an engine error");
+
+        assert_eq!(
+            result.finish_reason,
+            FinishReason::Length,
+            "the run must TERMINATE below the floor; got {result:?}"
+        );
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "core must not send a prompt it can predict the server will \
+             truncate - sending it and explaining afterwards is the data loss \
+             #1230 names"
+        );
+
+        let emitted = tap
+            .lock()
+            .expect("error tap")
+            .clone()
+            .expect("the refusal must reach the user's error surface");
+        assert!(
+            emitted.starts_with("Run stopped:"),
+            "the refusal, not some other error, must stop the run: {emitted:?}"
+        );
+        for expected in ["4096", &floor.to_string(), "num_ctx", "qwen3:8b"] {
+            assert!(
+                emitted.contains(expected),
+                "the refusal must name {expected}: {emitted:?}"
+            );
+        }
+        let needed = engine
+            .compact_config
+            .minimum_window_for_input_floor(floor as usize);
+        assert!(
+            emitted.contains(&needed.to_string()),
+            "the refusal must name the figure to reach ({needed}): {emitted:?}"
+        );
+        assert!(
+            !emitted.contains("  "),
+            "the operator-facing refusal must not carry a run of spaces: {emitted:?}"
+        );
+    }
+
+    /// THE WRONG-REFUSAL CONTROL for the test above, in the same shape and on
+    /// the same engine: a slot that CAN hold the floor must still complete the
+    /// turn. Without this half, a gate that refused every session would pass
+    /// the test above perfectly.
+    ///
+    /// 8,192 is the figure #1230 c5 names, and #1179 measured it as the first
+    /// workable window.
+    #[tokio::test]
+    async fn a_slot_that_can_hold_the_floor_still_completes_the_turn() {
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![
+            LlmEvent::TextDelta("eight thousand tokens is enough".into()),
+            done_endturn(),
+        ]]));
+        let counter = provider.call_counter();
+        let mut engine = engine_with_a_real_floor(provider);
+        engine.compact_state.stated_window = Some(8_192);
+
+        let tap: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+        engine.set_error_tap(Arc::clone(&tap));
+
+        let result = engine
+            .run(
+                "read big.txt and tell me how many lines it has",
+                "m-control",
+            )
+            .await
+            .expect("a workable slot must run");
+
+        assert_ne!(
+            result.finish_reason,
+            FinishReason::Length,
+            "a slot that holds the floor must not be refused: {result:?}"
+        );
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the control must actually reach the provider, or it proves nothing"
+        );
+        assert!(
+            tap.lock().expect("error tap").is_none(),
+            "no error may be emitted for a workable slot: {:?}",
+            tap.lock().expect("error tap")
+        );
+    }
+
+    /// #1230 c3 -- the probe is BOUNDED and FAIL-OPEN.
+    ///
+    /// Pointed at a closed port, so every attempt genuinely fails. Two things
+    /// must hold: the attempt count stops at the budget (an endpoint that will
+    /// never answer must not be asked once per turn forever), and a failed
+    /// probe leaves the slot unknown rather than refusing anything.
+    #[tokio::test]
+    async fn the_stated_window_probe_is_bounded_and_fails_open() {
+        let provider = Arc::new(ScriptedProvider::new(vec![]));
+        let mut engine = engine_with(provider);
+        engine.compat = wcore_config::compat::ProviderCompat::ollama_defaults();
+        // Port 1 is not listening; the connection is refused immediately.
+        engine.config.base_url = "http://127.0.0.1:1/v1".to_string();
+
+        for _ in 0..5 {
+            engine.refresh_stated_served_window().await;
+        }
+        assert_eq!(
+            engine.compact_state.stated_window_probes,
+            super::AgentEngine::STATED_WINDOW_PROBE_ATTEMPTS,
+            "the probe budget must bound the attempts"
+        );
+        assert_eq!(
+            engine.compact_state.stated_window, None,
+            "a failed probe must leave the slot UNKNOWN"
+        );
+        assert!(
+            engine.context_floor_refusal(u64::MAX, 8).is_none(),
+            "an unreachable endpoint must not be refused"
+        );
+    }
+
+    /// A provider the operator did NOT declare as Ollama is never probed at
+    /// all -- not even once. This is the half of the gate that keeps the probe
+    /// from being endpoint sniffing: the decision is read off configuration,
+    /// so a mock server on 127.0.0.1 (which is every mock server in this
+    /// workspace) is never contacted.
+    #[tokio::test]
+    async fn a_non_ollama_provider_is_never_probed() {
+        let provider = Arc::new(ScriptedProvider::new(vec![]));
+        let mut engine = engine_with(provider);
+        engine.compat = wcore_config::compat::ProviderCompat::openai_defaults();
+        engine.config.base_url = "http://127.0.0.1:1/v1".to_string();
+
+        for _ in 0..5 {
+            engine.refresh_stated_served_window().await;
+        }
+        assert_eq!(
+            engine.compact_state.stated_window_probes, 0,
+            "a non-Ollama endpoint must not be probed even once"
+        );
+    }
+
+    /// #1179 c6 — "a window core has judged too small to compact in never
+    /// fires a summarization, BY EITHER TRIGGER", graded on the ENGINE's own
+    /// two triggers.
+    ///
+    /// The criterion's previous evidence
+    /// (`no_configured_window_anywhere_fires_on_the_baseline_turn`) called the
+    /// free function `wcore_config::compact::auto::should_autocompact`, which
+    /// resolves its own window from the config and the model. The engine does
+    /// not use it: the static trigger is `should_autocompact_now`
+    /// -> `should_autocompact_at(compaction_window_now(), ..)`, and the #280
+    /// trigger is `smart_compact_fraction` -> `smart_compact_should_fire`.
+    /// So that test graded an adjacent function — the same substituted-property
+    /// defect the round-2 objection raised against c3, in the criterion added
+    /// in answer to it. This grades the two triggers the loop actually
+    /// consults, and the refusal that runs before them.
+    ///
+    /// `smart_enabled` is forced ON: it is default-OFF, so leaving it alone
+    /// would make the second trigger vacuously quiet and the "either" in the
+    /// criterion unearned.
+    #[test]
+    fn no_configured_window_too_small_to_compact_in_can_reach_either_trigger() {
+        const BASELINE: u64 = wcore_config::compact::BASELINE_TURN_TOKENS as u64;
+        let provider = Arc::new(ScriptedProvider::new(vec![]));
+        let mut engine = engine_with(provider);
+        engine.compact_config.smart_enabled = true;
+
+        // ONE pressure point through BOTH engine triggers, with every
+        // anti-thrash latch reset first, so a previous probe's fire cannot be
+        // what silences this one.
+        fn probe(engine: &mut crate::engine::AgentEngine, tokens: u64) -> (bool, bool) {
+            engine.compact_state.last_real_input_tokens = tokens;
+            engine.smart_compact_armed = true;
+            engine.smart_compact_exhausted = false;
+            engine.smart_compact_last_turn = None;
+            let static_fires = engine.should_autocompact_now(tokens);
+            let smart_fires = match engine.smart_compact_fraction() {
+                Some(f) => engine.smart_compact_should_fire(1, f),
+                None => false,
+            };
+            (static_fires, smart_fires)
+        }
+
+        let mut unworkable = 0usize;
+        let mut workable = 0usize;
+        let mut overloaded_fired_static = 0usize;
+        let mut overloaded_fired_smart = 0usize;
+
+        for window in 1_024usize..=16_384 {
+            engine.compact_config.context_window = Some(window);
+            let too_small = !engine.compact_config.supports_compaction(window);
+
+            if too_small {
+                unworkable += 1;
+                // The turn loop refuses at its top, BEFORE either trigger is
+                // consulted - `an_unworkable_window_stops_the_run_and_the_
+                // refusal_reaches_the_user` is what proves that stop is wired.
+                assert!(
+                    engine.unworkable_window_refusal().is_some(),
+                    "window {window}: too small to compact in, but no refusal - \
+                     the run would continue into the triggers"
+                );
+            } else {
+                workable += 1;
+                assert!(
+                    engine.unworkable_window_refusal().is_none(),
+                    "window {window}: workable, but refused"
+                );
+            }
+
+            // The criterion's word is NEVER, not "not on the baseline turn".
+            // An unworkable window is unworkable at EVERY pressure, so sweep
+            // it: empty, core's own baseline turn, a full window, and four
+            // times the window. A gate written as "this fraction is absurd"
+            // rather than "this window is unworkable" passes at BASELINE and
+            // fails at 4x.
+            let overloaded = (window as u64).saturating_mul(4);
+            for tokens in [0, BASELINE, window as u64, overloaded] {
+                let (static_fires, smart_fires) = probe(&mut engine, tokens);
+                if too_small {
+                    assert!(
+                        !static_fires,
+                        "window {window}: the static autocompact trigger fired \
+                         at {tokens} tokens in a window core refuses as too \
+                         small to compact in"
+                    );
+                    assert!(
+                        !smart_fires,
+                        "window {window}: the #280 smart trigger fired at \
+                         {tokens} tokens in a window core refuses as too small \
+                         to compact in"
+                    );
+                } else if tokens <= BASELINE {
+                    assert!(
+                        !static_fires,
+                        "window {window}: the static autocompact trigger fired \
+                         on core's own {BASELINE}-token baseline turn, before \
+                         the user typed anything"
+                    );
+                    assert!(
+                        !smart_fires,
+                        "window {window}: the #280 smart trigger fired on \
+                         core's own {BASELINE}-token baseline turn, before the \
+                         user typed anything"
+                    );
+                } else if tokens == overloaded {
+                    overloaded_fired_static += usize::from(static_fires);
+                    overloaded_fired_smart += usize::from(smart_fires);
+                }
+            }
+        }
+
+        assert!(
+            unworkable > 0 && workable > 0,
+            "control: the band must contain BOTH refused and workable windows, \
+             or one of the two arms above is vacuous (unworkable={unworkable}, \
+             workable={workable})"
+        );
+        // VACUITY CONTROL, one per trigger. The silence above has to be the
+        // window being unworkable / the turn being small - not either trigger
+        // being wedged off through this fixture. At 4x the window a WORKABLE
+        // window must fire both, at every single window in the band.
+        assert_eq!(
+            overloaded_fired_static, workable,
+            "control: the static trigger must fire at 4x a WORKABLE window \
+             (fired {overloaded_fired_static} of {workable}), else every \
+             negative above is vacuous"
+        );
+        assert_eq!(
+            overloaded_fired_smart, workable,
+            "control: the #280 trigger must fire at 4x a WORKABLE window \
+             (fired {overloaded_fired_smart} of {workable}), else every \
+             negative above is vacuous"
+        );
+    }
+
+    /// CONTROL for
+    /// `an_unworkable_window_stops_the_run_and_the_refusal_reaches_the_user`:
+    /// with a workable window the same fixture runs normally. Without this, an
+    /// engine that refused EVERY run would pass that wiring test.
+    #[tokio::test]
+    async fn a_workable_window_is_not_refused_and_the_run_proceeds() {
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![
+            LlmEvent::TextDelta("hello".into()),
+            done_endturn(),
+        ]]));
+        let counter = provider.call_counter();
+        let mut engine = engine_with(provider);
+        engine.compact_config.context_window = Some(200_000);
+        assert!(engine.compact_config.supports_compaction(200_000));
+
+        let tap: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+        engine.set_error_tap(Arc::clone(&tap));
+
+        let result = engine
+            .run("say hello", "m-workable")
+            .await
+            .expect("clean run");
+        assert_eq!(result.text, "hello");
+        assert_ne!(
+            result.finish_reason,
+            FinishReason::Length,
+            "a workable window must not be refused"
+        );
+        assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(
+            tap.lock().expect("error tap").is_none(),
+            "no refusal may be emitted on a workable window"
         );
     }
 
@@ -28938,11 +32639,13 @@ mod audit_2026_05_22_tests {
         let connect = wcore_providers::http_client::CONNECT_TIMEOUT;
         assert_eq!(
             sends, 2,
-            "a stalled endpoint was dialled {sends} times at {connect:?} each;              the measured 92.4 s of #1077 is exactly what 3 buys"
+            "a stalled endpoint was dialled {sends} times at {connect:?} each; \
+                the measured 92.4 s of #1077 is exactly what 3 buys"
         );
         assert!(
             elapsed < connect * 3,
-            "the turn spent {elapsed:?}, at or past the three full connect              deadlines this ceiling exists to stop"
+            "the turn spent {elapsed:?}, at or past the three full connect \
+                deadlines this ceiling exists to stop"
         );
         // KNOWN-POSITIVE CONTROL for the bound above: an assertion that the
         // turn took LESS than something is satisfied for free by a turn that
@@ -28950,7 +32653,8 @@ mod audit_2026_05_22_tests {
         // in the wall clock.
         assert!(
             elapsed >= connect * 2,
-            "control: two full connect deadlines must be IN this {elapsed:?} —              otherwise the bound above is measuring a turn that never dialled"
+            "control: two full connect deadlines must be IN this {elapsed:?} — \
+                otherwise the bound above is measuring a turn that never dialled"
         );
     }
 
@@ -35003,7 +38707,7 @@ mod session_start_apply_tests {
             _: wcore_types::message::FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
     }
 
@@ -35398,7 +39102,11 @@ mod session_start_apply_tests {
     fn pre_prompt_applies_into_user_tail() {
         let mut messages = vec![user_msg("hello")];
         let outcome = pre_prompt_outcome("RECALL-A");
-        super::AgentEngine::apply_pre_prompt_contribution(&mut messages, &outcome);
+        super::AgentEngine::apply_pre_prompt_contribution(
+            &mut messages,
+            &wcore_config::compat::ProviderCompat::anthropic_defaults(),
+            &outcome,
+        );
 
         assert_eq!(
             messages.len(),
@@ -35439,12 +39147,20 @@ mod session_start_apply_tests {
 
         // Turn N: fresh clone.
         let mut turn_n = vec![user_msg("hello")];
-        super::AgentEngine::apply_pre_prompt_contribution(&mut turn_n, &outcome);
+        super::AgentEngine::apply_pre_prompt_contribution(
+            &mut turn_n,
+            &wcore_config::compat::ProviderCompat::anthropic_defaults(),
+            &outcome,
+        );
         assert_eq!(turn_n[0].content.len(), 2, "appended on turn N");
 
         // Turn N+1: a NEW fresh clone (regenerated from self.messages each turn).
         let mut turn_n1 = vec![user_msg("hello")];
-        super::AgentEngine::apply_pre_prompt_contribution(&mut turn_n1, &outcome);
+        super::AgentEngine::apply_pre_prompt_contribution(
+            &mut turn_n1,
+            &wcore_config::compat::ProviderCompat::anthropic_defaults(),
+            &outcome,
+        );
         assert_eq!(
             turn_n1[0].content.len(),
             2,
@@ -35464,7 +39180,11 @@ mod session_start_apply_tests {
         };
         // The block is already present as a prior message in the request.
         let mut messages = vec![user_msg(&injected_text), user_msg("hello")];
-        super::AgentEngine::apply_pre_prompt_contribution(&mut messages, &outcome);
+        super::AgentEngine::apply_pre_prompt_contribution(
+            &mut messages,
+            &wcore_config::compat::ProviderCompat::anthropic_defaults(),
+            &outcome,
+        );
 
         assert_eq!(
             messages[1].content.len(),
@@ -35490,7 +39210,11 @@ mod session_start_apply_tests {
             ),
         ];
         let outcome = pre_prompt_outcome("RECALL-A");
-        super::AgentEngine::apply_pre_prompt_contribution(&mut messages, &outcome);
+        super::AgentEngine::apply_pre_prompt_contribution(
+            &mut messages,
+            &wcore_config::compat::ProviderCompat::anthropic_defaults(),
+            &outcome,
+        );
 
         assert_eq!(messages.len(), 2, "must not push a new message");
         assert_eq!(
@@ -35508,7 +39232,11 @@ mod session_start_apply_tests {
         let huge = "z".repeat(max_chars * 6);
         let mut messages = vec![user_msg("hello")];
         let outcome = pre_prompt_outcome(&huge);
-        super::AgentEngine::apply_pre_prompt_contribution(&mut messages, &outcome);
+        super::AgentEngine::apply_pre_prompt_contribution(
+            &mut messages,
+            &wcore_config::compat::ProviderCompat::anthropic_defaults(),
+            &outcome,
+        );
 
         let appended = match messages[0].content.first() {
             Some(ContentBlock::Text { text }) => text,
@@ -35579,7 +39307,7 @@ mod ijfw_session_start_e2e_tests {
             _: wcore_types::message::FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
     }
 
@@ -35777,7 +39505,7 @@ mod overflow_retry_tests {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
     }
 
@@ -35928,7 +39656,7 @@ mod retry_wedge_protection_tests {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
     }
 
@@ -36349,6 +40077,419 @@ mod retry_wedge_protection_tests {
             1,
             "same messages under a changed system prompt are a DIFFERENT wire \
              request and must not be refused as an unchanged wedge"
+        );
+    }
+
+    // --- #388: the clean retry and the progress gate on a DURABLE session ---
+
+    /// A scripted provider that goes through a real physical send boundary
+    /// first, which a durable session requires before any scripted event
+    /// becomes visible, and counts the sends it was asked for.
+    struct DurableScriptedProvider {
+        scripts: Mutex<std::collections::VecDeque<Vec<LlmEvent>>>,
+        sends: Arc<std::sync::atomic::AtomicUsize>,
+        url: Option<String>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for DurableScriptedProvider {
+        async fn stream(
+            &self,
+            _: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            self.sends.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if let Some(url) = self.url.as_deref() {
+                let client = wcore_egress::EgressClient::new()
+                    .with_policy(Arc::new(wcore_egress::AllowAllPolicy));
+                let response = wcore_providers::retry::scope_max_retries(
+                    0,
+                    wcore_providers::retry::builder_send_with_retry(client.get(url)),
+                )
+                .await?;
+                if !response.status().is_success() {
+                    return Err(ProviderError::Api {
+                        status: response.status().as_u16(),
+                        message: "fixture".into(),
+                    });
+                }
+            }
+            let script = self.scripts.lock().unwrap().pop_front().unwrap_or_default();
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            tokio::spawn(async move {
+                for ev in script {
+                    let _ = tx.send(ev).await;
+                }
+            });
+            Ok(rx)
+        }
+    }
+
+    /// The same history shape as [`failed_tool_round_history`], with the tool
+    /// round's outcome as the only variable. `is_error = false` is the arm the
+    /// retry stub does not touch.
+    fn tool_round_history(body: &str, is_error: bool) -> Vec<Message> {
+        vec![
+            Message::now(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "do the thing".into(),
+                }],
+            ),
+            Message::now(
+                Role::Assistant,
+                vec![ContentBlock::ToolUse {
+                    id: "t1".into(),
+                    name: "BigTool".into(),
+                    input: json!({}),
+                    extra: None,
+                }],
+            ),
+            Message::now(
+                Role::User,
+                vec![ContentBlock::ToolResult {
+                    tool_use_id: "t1".into(),
+                    content: body.into(),
+                    is_error,
+                }],
+            ),
+        ]
+    }
+
+    struct RetryArm {
+        result: String,
+        sends: usize,
+    }
+
+    async fn drive_retry_arm(
+        scripts: Vec<Vec<LlmEvent>>,
+        history: Vec<Message>,
+        durable: Option<&str>,
+    ) -> RetryArm {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let sends = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        // Held for the lifetime of the run: dropping the server or the session
+        // root mid-run would fail the arm for a reason that is not the subject.
+        let (server, dir) = if durable.is_some() {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(200))
+                .mount(&server)
+                .await;
+            let dir = tempfile::tempdir().unwrap();
+            (Some(server), Some(dir))
+        } else {
+            (None, None)
+        };
+        let provider = Arc::new(DurableScriptedProvider {
+            scripts: Mutex::new(scripts.into_iter().collect()),
+            sends: Arc::clone(&sends),
+            url: server.as_ref().map(|s| s.uri()),
+        });
+        let mut engine = wedge_engine(provider);
+        engine.output = Arc::new(TestSink::new());
+        if let (Some(sid), Some(dir)) = (durable, dir.as_ref()) {
+            let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+            let active = manager
+                .create_for_run("test", "m", "/tmp", Some(sid))
+                .unwrap();
+            engine.session_manager = Some(manager);
+            engine.current_session = Some(active.session);
+            engine.session_journal = Some(active.journal);
+        }
+        engine.messages = history;
+        let result = engine.run("try again", "m-388-retry").await;
+        let rendered = match &result {
+            Ok(ok) => format!("Ok({:?}/{:?})", ok.stop_reason, ok.finish_reason),
+            Err(e) => format!("Err({e})"),
+        };
+        drop(engine);
+        drop(server);
+        drop(dir);
+        RetryArm {
+            result: rendered.chars().take(300).collect(),
+            sends: sends.load(std::sync::atomic::Ordering::SeqCst),
+        }
+    }
+
+    /// #388, Expected-Behavior bullets 2 and 3, on the exit that fires on this
+    /// ticket's own symptom.
+    ///
+    /// The output-stall gate is the engine's answer to "it stalls and burns
+    /// tokens without progress". Until the retry-stub fix above it could not
+    /// run at all on a durable session — the run died on the provider-dispatch
+    /// proof first — so this asserts BOTH that it is now reachable there and
+    /// that it does what a terminal exit owes:
+    ///
+    ///  * the work the turn produced is written down (bullet: "preserve a
+    ///    checkpoint and allow the user to continue"), and
+    ///  * the ANSWER stream says the run did not finish (bullet: "clearly mark
+    ///    the task as failed/incomplete"). `emit_error` reaches stderr only, so
+    ///    without this a `-p` run's stdout ends on the model's narration.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn an_output_stall_stop_is_reachable_and_admits_itself() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "m", "/tmp", Some("38800000c6c3"))
+            .unwrap();
+
+        let sends = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider = Arc::new(DurableScriptedProvider {
+            scripts: Mutex::new(
+                vec![
+                    vec![LlmEvent::Error("boom".into())],
+                    vec![LlmEvent::Error("boom again".into())],
+                    // Only reached if the gate failed to stop the run.
+                    vec![
+                        LlmEvent::TextDelta("must not run".into()),
+                        done(StopReason::EndTurn, FinishReason::Stop, 0),
+                    ],
+                ]
+                .into(),
+            ),
+            sends: Arc::clone(&sends),
+            url: Some(server.uri()),
+        });
+        let sink = Arc::new(TestSink::new());
+        let handle = sink.handle();
+        let mut engine = wedge_engine(provider);
+        engine.output = sink;
+        engine.session_manager = Some(manager);
+        engine.current_session = Some(active.session);
+        engine.session_journal = Some(active.journal);
+        engine.messages = tool_round_history("BigTool blew up", true);
+        let result = engine.run("try again", "m-388-stall").await;
+        drop(engine);
+
+        match &result {
+            Err(super::AgentError::ApiError(msg)) => assert!(
+                msg.contains("BigTool"),
+                "the stall gate's error must name the failing tool: {msg}"
+            ),
+            other => panic!(
+                "#388: the output-stall gate must be REACHABLE on a durable session — \
+                 before the retry-stub fix the run died on the provider-dispatch proof \
+                 instead and this gate never ran. Got: {other:?}"
+            ),
+        }
+        assert_eq!(
+            sends.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "the gate must stop after 2 no-output failures, not burn a third \
+             full-context send"
+        );
+
+        let events = handle.snapshot();
+        let answer_stream: String = events
+            .iter()
+            .filter(|e| e["type"].as_str() == Some("text_delta"))
+            .filter_map(|e| e["text"].as_str().map(str::to_owned))
+            .collect();
+        assert!(
+            answer_stream.contains("[stopped early]"),
+            "#388: a run that ends on a provider stall must admit it where the \
+             ANSWER went — `emit_error` is stderr, so stdout otherwise ends \
+             mid-narration and reads as a finished answer. Answer stream: \
+             {answer_stream:?}"
+        );
+        assert!(
+            answer_stream.contains("not an answer"),
+            "the admission must say the partial work is not an answer: \
+             {answer_stream:?}"
+        );
+    }
+
+    /// #388, Expected-Behavior bullet 2 — "preserve a checkpoint and allow the
+    /// user to continue" — on the exit that fires on this ticket's own symptom.
+    ///
+    /// A regression guard, not a fix: the conversation is ALREADY canonical
+    /// when the gate stops the run, because `sync_journal_conversation` runs
+    /// once per attempt. That was measured rather than assumed — a candidate
+    /// `save_session_mirror()` at the gate left every arm green and was dropped
+    /// instead of shipped. What this pins is that the property keeps holding,
+    /// because it is the only thing standing between a stalled long task and
+    /// work the user has to redo from scratch.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_stalled_run_leaves_its_conversation_durable() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "m", "/tmp", Some("38800000c6e5"))
+            .unwrap();
+        let journal = active.journal.clone();
+
+        let provider = Arc::new(DurableScriptedProvider {
+            scripts: Mutex::new(
+                vec![
+                    vec![LlmEvent::Error("boom".into())],
+                    vec![LlmEvent::Error("boom again".into())],
+                ]
+                .into(),
+            ),
+            sends: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            url: Some(server.uri()),
+        });
+        let mut engine = wedge_engine(provider);
+        engine.output = Arc::new(TestSink::new());
+        engine.session_manager = Some(manager);
+        engine.current_session = Some(active.session);
+        engine.session_journal = Some(active.journal);
+        engine.messages = tool_round_history("BigTool blew up", true);
+        let result = engine.run("try again", "m-388-durable").await;
+        drop(engine);
+
+        assert!(
+            matches!(&result, Err(super::AgentError::ApiError(msg)) if msg.contains("BigTool")),
+            "this arm must reach the output-stall gate: {result:?}"
+        );
+        let conversation = journal.state().expect("journal state").conversation;
+        let carries_the_turn = conversation.iter().any(|value| {
+            serde_json::from_value::<Message>(value.clone())
+                .map(|message| {
+                    message.content.iter().any(
+                        |b| matches!(b, ContentBlock::ToolUse { name, .. } if name == "BigTool"),
+                    )
+                })
+                .unwrap_or(false)
+        });
+        assert!(
+            carries_the_turn,
+            "#388: a run the stall gate stopped must leave its conversation \
+             canonical — without it a provider stall becomes work redone from \
+             scratch. Durable conversation held {} message(s)",
+            conversation.len()
+        );
+        assert!(
+            conversation.iter().any(|value| {
+                serde_json::from_value::<Message>(value.clone())
+                    .map(|message| {
+                        message.content.iter().any(
+                            |b| matches!(b, ContentBlock::Text { text } if text == "try again"),
+                        )
+                    })
+                    .unwrap_or(false)
+            }),
+            "the prompt that started the stopped turn must be durable too, else \
+             a resume cannot continue from it. Held: {conversation:?}"
+        );
+    }
+
+    /// #388 — a stream failure on a turn whose last tool round FAILED must
+    /// still retry on a durable session.
+    ///
+    /// `stub_failed_tool_results_for_retry` rewrites that failed tool-result
+    /// body in the OUTBOUND copy of the request. On the next attempt
+    /// `commit_provider_recovery_checkpoint` proves the prepared request
+    /// against the durable conversation, and a rewritten `ToolResult` body is
+    /// exactly what that proof refuses — so on every durable session the retry
+    /// never leaves the engine. The run dies with an internal journal-authority
+    /// error instead of the provider's own failure, and the output-stall
+    /// progress gate written for this scenario is never reached.
+    ///
+    /// Two controls, and neither is decoration. Control A changes ONE bit of
+    /// the history — the tool round succeeded — so the stub does not fire; it
+    /// passing proves the durable retry path is otherwise sound and that a red
+    /// subject is the stub, not the journal. Control B runs the subject's exact
+    /// scripts with no journal at all; it passing proves the gate is alive off
+    /// the durable path, so this is a durable-session defect and not a broken
+    /// harness.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_failed_tool_round_still_retries_on_a_durable_session() {
+        let body = format!("CONTAMINATED-MARKER {}", "x".repeat(1_000));
+
+        let subject = drive_retry_arm(
+            vec![
+                vec![LlmEvent::Error("boom".into())],
+                vec![
+                    LlmEvent::TextDelta("recovered".into()),
+                    done(StopReason::EndTurn, FinishReason::Stop, 10),
+                ],
+            ],
+            tool_round_history(&body, true),
+            Some("38800000c6a1"),
+        )
+        .await;
+
+        let control_a = drive_retry_arm(
+            vec![
+                vec![LlmEvent::Error("boom".into())],
+                vec![
+                    LlmEvent::TextDelta("recovered".into()),
+                    done(StopReason::EndTurn, FinishReason::Stop, 10),
+                ],
+            ],
+            tool_round_history(&body, false),
+            Some("38800000c6b2"),
+        )
+        .await;
+
+        let control_b = drive_retry_arm(
+            vec![
+                vec![LlmEvent::Error("boom".into())],
+                vec![
+                    LlmEvent::TextDelta("recovered".into()),
+                    done(StopReason::EndTurn, FinishReason::Stop, 10),
+                ],
+            ],
+            tool_round_history(&body, true),
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            control_a.sends, 2,
+            "CONTROL A: a durable session whose last tool round SUCCEEDED must \
+             retry a failed stream — if this is 1 the durable retry path is \
+             broken for a reason that is not the subject: {}",
+            control_a.result
+        );
+        assert!(
+            control_a.result.starts_with("Ok("),
+            "CONTROL A must recover on the retry: {}",
+            control_a.result
+        );
+        assert_eq!(
+            control_b.sends, 2,
+            "CONTROL B: with no journal the same scripts must retry — if this \
+             is 1 the harness never reached the retry at all: {}",
+            control_b.result
+        );
+
+        assert!(
+            !subject.result.contains("changes durable content"),
+            "#388: the clean-retry stub rewrites a durable ToolResult body in \
+             the outbound request, and the provider-dispatch checkpoint refuses \
+             it — so on a durable session a stream failure after a FAILED tool \
+             round cannot retry, and the user is handed an internal journal \
+             error in place of the provider's. Got: {}",
+            subject.result
+        );
+        assert_eq!(
+            subject.sends, 2,
+            "#388: the retry must reach the provider on a durable session too. \
+             sends={} result={}",
+            subject.sends, subject.result
         );
     }
 
@@ -37453,7 +41594,8 @@ mod stream_retry_budget_tests {
         );
         assert!(
             budget < super::DEFAULT_MAX_STREAM_RETRIES,
-            "a stalled attempt still gets the full {} retries: that is              {:?} of wall clock for an endpoint that has already answered              the same way — the measured 92.4 s of #1077",
+            "a stalled attempt still gets the full {} retries: that is {:?} of wall clock for an endpoint that has already answered \
+                the same way — the measured 92.4 s of #1077",
             super::DEFAULT_MAX_STREAM_RETRIES,
             connect * (super::DEFAULT_MAX_STREAM_RETRIES + 1),
         );
@@ -38563,6 +42705,197 @@ mod issue_434_routed_model_tests {
         );
     }
 
+    /// A router that refuses a tier-alias request the way a strict reasoner
+    /// does when the conversation's earlier `reasoning_content` is absent, and
+    /// serves it once the replay is there. The refusal is the ONLY signal —
+    /// this provider never reports a `routed_model`, which is exactly the turn
+    /// #434 c2 is about: the alias has not resolved anywhere the engine can
+    /// read it yet.
+    struct StrictReasonerBehindAnAlias {
+        seen: Arc<Mutex<Vec<LlmRequest>>>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for StrictReasonerBehindAnAlias {
+        async fn stream(
+            &self,
+            request: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            self.seen
+                .lock()
+                .expect("captured requests")
+                .push(request.clone());
+            if !request.replay_reasoning_content {
+                return Err(ProviderError::Api {
+                    status: 400,
+                    message: "messages[1]: missing field `reasoning_content`; the last \
+                              assistant message must contain reasoning_content"
+                        .to_string(),
+                });
+            }
+            let (tx, rx) = tokio::sync::mpsc::channel(8);
+            tokio::spawn(async move {
+                let _ = tx.send(LlmEvent::TextDelta("ok".to_string())).await;
+                let _ = tx
+                    .send(LlmEvent::Done {
+                        stop_reason: StopReason::EndTurn,
+                        finish_reason: FinishReason::Stop,
+                        usage: TokenUsage::default(),
+                    })
+                    .await;
+            });
+            Ok(rx)
+        }
+    }
+
+    fn engine_behind_alias(provider: Arc<dyn LlmProvider>, model: &str) -> super::AgentEngine {
+        let mut engine = super::AgentEngine::new_with_provider(
+            provider,
+            wcore_config::config::Config::default(),
+            ToolRegistry::new(),
+            Arc::new(crate::output::null_sink::NullSink),
+        );
+        engine.max_turns = Some(2);
+        engine.compat = wcore_config::compat::ProviderCompat::flux_router_defaults();
+        engine.model = model.to_string();
+        engine
+    }
+
+    /// #434 c2 — THE criterion. On the turn the alias first resolves there is
+    /// no `x-flux-routed-model` to read (the router answers on the way back),
+    /// so the request goes out unshaped and is refused. The turn must still
+    /// COMPLETE, by learning the contract from the refusal and re-issuing the
+    /// same turn with the replay — not merely by covering turn N+1.
+    #[tokio::test]
+    async fn the_turn_the_alias_first_resolves_recovers_from_the_refusal() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let provider = Arc::new(StrictReasonerBehindAnAlias {
+            seen: Arc::clone(&seen),
+        });
+        let mut engine = engine_behind_alias(provider, "flux-auto");
+
+        engine
+            .run("first", "")
+            .await
+            .expect("the FIRST turn must complete, not only the one after it");
+
+        let seen = seen.lock().expect("captured requests");
+        assert_eq!(
+            seen.len(),
+            2,
+            "exactly one extra send: the refused shape, then the replayed one"
+        );
+        assert!(
+            !seen[0].replay_reasoning_content,
+            "CONTROL: the first send is the unshaped one — if it already carried \
+             the replay the provider would never have refused and this test would \
+             prove nothing"
+        );
+        assert!(
+            seen[0].routed_model_hint.is_none(),
+            "CONTROL: no route signal exists on this turn, which is why the \
+             #434 c1 socket cannot cover it"
+        );
+        assert!(
+            seen[1].replay_reasoning_content,
+            "the re-issued request must carry the replay the refusal asked for"
+        );
+    }
+
+    /// The recovery is sticky for the conversation: having paid one extra send
+    /// to learn the contract, the NEXT turn must be shaped correctly from its
+    /// very first send.
+    #[tokio::test]
+    async fn the_learned_contract_outlives_the_turn_that_paid_for_it() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let provider = Arc::new(StrictReasonerBehindAnAlias {
+            seen: Arc::clone(&seen),
+        });
+        let mut engine = engine_behind_alias(provider, "flux-auto");
+
+        engine.run("first", "").await.expect("first turn completes");
+        engine
+            .run("second", "")
+            .await
+            .expect("second turn completes");
+
+        let seen = seen.lock().expect("captured requests");
+        assert_eq!(
+            seen.len(),
+            3,
+            "the second turn must NOT re-earn the 400: {} sends",
+            seen.len()
+        );
+        assert!(
+            seen[2].replay_reasoning_content,
+            "the second turn's first send already carries the learned contract"
+        );
+    }
+
+    /// The gate is narrow. A 400 that is not about a missing `reasoning_content`
+    /// fails identically on a second send, so it must be billed once.
+    struct AlwaysRefuses {
+        message: String,
+        seen: Arc<Mutex<Vec<LlmRequest>>>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for AlwaysRefuses {
+        async fn stream(
+            &self,
+            request: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            self.seen
+                .lock()
+                .expect("captured requests")
+                .push(request.clone());
+            Err(ProviderError::Api {
+                status: 400,
+                message: self.message.clone(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unrelated_400_is_not_re_sent() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let provider = Arc::new(AlwaysRefuses {
+            message: "invalid_api_key: incorrect API key provided".to_string(),
+            seen: Arc::clone(&seen),
+        });
+        let mut engine = engine_behind_alias(provider, "flux-auto");
+
+        let outcome = engine.run("first", "").await;
+        assert!(outcome.is_err(), "an auth refusal must still fail the turn");
+        assert_eq!(
+            seen.lock().expect("captured requests").len(),
+            1,
+            "a refusal that is not about reasoning_content must be billed once"
+        );
+    }
+
+    /// A model that REJECTS the field must never be answered by sending more of
+    /// it. This is the polarity trap in the classifier, pinned.
+    #[tokio::test]
+    async fn a_not_supported_refusal_is_not_re_sent() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let provider = Arc::new(AlwaysRefuses {
+            message: "reasoning_content is required by this endpoint but is not supported \
+                      for this model"
+                .to_string(),
+            seen: Arc::clone(&seen),
+        });
+        let mut engine = engine_behind_alias(provider, "flux-auto");
+
+        let outcome = engine.run("first", "").await;
+        assert!(outcome.is_err());
+        assert_eq!(
+            seen.lock().expect("captured requests").len(),
+            1,
+            "\"not supported\" wins over the absence wording in the same sentence"
+        );
+    }
+
     /// A concrete model id is its own contract: a stale route from an earlier
     /// alias turn must never reshape it.
     #[tokio::test]
@@ -38579,6 +42912,515 @@ mod issue_434_routed_model_tests {
         assert!(
             seen[1].routed_model_hint.is_none(),
             "the hint only resolves a tier alias; a named model decides for itself"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// #388 bullet 4 (c10) — the orchestration graph's FAILURE exit.
+//
+// The census behind c10 missed this exit. Every `Node::AgentCall` the walker
+// runs is `tokio::spawn`ed, so a panic in tool dispatch that falls outside the
+// per-tool `catch_unwind` comes back as a `JoinError` and ends the run at
+// `GraphExit::Failed` — a terminal `Err` of the run loop on the ordinary
+// tool-dispatch path (the graph runs on every turn that has tool calls).
+// That arm called no emit at all, so stdout ended on the model's narration.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod issue_388_graph_failure_admission_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use async_trait::async_trait;
+    use serde_json::{Value, json};
+    use wcore_protocol::events::ToolCategory;
+    use wcore_providers::{LlmProvider, ProviderError};
+    use wcore_tools::Tool;
+    use wcore_tools::registry::ToolRegistry;
+    use wcore_types::llm::{LlmEvent, LlmRequest};
+    use wcore_types::message::{FinishReason, StopReason, TokenUsage};
+    use wcore_types::tool::ToolResult;
+
+    /// Turn 1 asks for a tool; turn 2 answers and ends. The arm under test
+    /// dies inside turn 1's dispatch, so the second script only ever runs in
+    /// the control.
+    struct ToolThenAnswer {
+        turn: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LlmProvider for ToolThenAnswer {
+        async fn stream(
+            &self,
+            _: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            let first = self.turn.fetch_add(1, Ordering::SeqCst) == 0;
+            let (tx, rx) = tokio::sync::mpsc::channel(8);
+            tokio::spawn(async move {
+                if first {
+                    let _ = tx
+                        .send(LlmEvent::TextDelta("let me look that up".into()))
+                        .await;
+                    let _ = tx
+                        .send(LlmEvent::ToolUse {
+                            id: "t1".into(),
+                            name: "mock_tool".into(),
+                            input: json!({}),
+                            extra: None,
+                        })
+                        .await;
+                    let _ = tx
+                        .send(LlmEvent::Done {
+                            stop_reason: StopReason::ToolUse,
+                            finish_reason: FinishReason::from_stop_reason(StopReason::ToolUse),
+                            usage: TokenUsage::default(),
+                        })
+                        .await;
+                } else {
+                    let _ = tx.send(LlmEvent::TextDelta("the answer".into())).await;
+                    let _ = tx
+                        .send(LlmEvent::Done {
+                            stop_reason: StopReason::EndTurn,
+                            finish_reason: FinishReason::from_stop_reason(StopReason::EndTurn),
+                            usage: TokenUsage::default(),
+                        })
+                        .await;
+                }
+            });
+            Ok(rx)
+        }
+    }
+
+    /// A tool that panics in `is_concurrency_safe` when armed.
+    ///
+    /// That is deliberately NOT the `execute` panic: the dispatcher wraps
+    /// `prepare_effect` and `execute` in `catch_unwind` (orchestration/mod.rs,
+    /// "Wave RB RELIABILITY MAJOR"), and nothing wraps the synchronous trait
+    /// methods. `partition()` calls `is_concurrency_safe` at
+    /// orchestration/mod.rs:697, inside `dispatch_once`, inside the spawned
+    /// `AgentCall` task - so a panic there is the class that actually reaches
+    /// the walker as a `JoinError`. Unarmed, the same tool answers normally,
+    /// which is what makes the control a control.
+    struct QuietTool {
+        panics_in_partition: bool,
+    }
+
+    #[async_trait]
+    impl Tool for QuietTool {
+        fn name(&self) -> &str {
+            "mock_tool"
+        }
+        fn description(&self) -> &str {
+            "mock tool for the #388 graph-failure arm"
+        }
+        fn input_schema(&self) -> Value {
+            json!({"type": "object"})
+        }
+        fn category(&self) -> ToolCategory {
+            ToolCategory::Info
+        }
+        fn is_concurrency_safe(&self, _input: &Value) -> bool {
+            assert!(
+                !self.panics_in_partition,
+                "injected tool-runtime panic in is_concurrency_safe"
+            );
+            true
+        }
+        async fn execute(&self, _input: Value) -> ToolResult {
+            ToolResult {
+                content: "tool ok".to_string(),
+                is_error: false,
+            }
+        }
+    }
+
+    /// Build a real engine over the production `run()` path.
+    fn engine(panics_in_partition: bool) -> (super::AgentEngine, Arc<crate::test_utils::TestSink>) {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(QuietTool {
+            panics_in_partition,
+        }));
+        let sink = Arc::new(crate::test_utils::TestSink::new());
+        let mut engine = super::AgentEngine::new_with_provider(
+            Arc::new(ToolThenAnswer {
+                turn: AtomicUsize::new(0),
+            }),
+            wcore_config::config::Config::default(),
+            registry,
+            sink.clone(),
+        );
+        engine.max_turns = Some(4);
+        (engine, sink)
+    }
+
+    fn answer_stream(handle: &crate::test_utils::TestSinkHandle) -> String {
+        handle
+            .snapshot()
+            .iter()
+            .filter(|e| e["type"].as_str() == Some("text_delta"))
+            .filter_map(|e| e["text"].as_str().map(str::to_owned))
+            .collect()
+    }
+
+    /// The arm under test. The armed tool panics inside the spawned
+    /// `AgentCall` task, outside the per-tool `catch_unwind`, so the walker
+    /// gets a `JoinError` and returns `GraphError::AgentFailed`.
+    #[tokio::test]
+    async fn a_graph_failure_exit_admits_itself_on_the_answer_stream() {
+        let (mut engine, sink) = engine(true);
+        let handle = sink.handle();
+
+        let err = engine
+            .run("do the thing", "m-388-graph")
+            .await
+            .expect_err("the graph failure arm must end the run as Err");
+        assert!(
+            matches!(&err, super::AgentError::ApiError(m)
+                if m.starts_with("orchestration graph failed:")),
+            "this arm must be the GraphExit::Failed exit, not another Err: {err:?}"
+        );
+
+        let answer = answer_stream(&handle);
+        assert!(
+            answer.contains("let me look that up"),
+            "the narration must have reached the answer stream, or this test is \
+             not measuring an answer stream at all: {answer:?}"
+        );
+        assert!(
+            answer.contains("[stopped early]"),
+            "#388: a run that ends on a tool/runtime failure must admit it where \
+             the ANSWER went - the cause travels out as Err and is rendered on \
+             stderr, so stdout otherwise ends on the narration and reads as a \
+             finished answer: {answer:?}"
+        );
+        assert!(
+            answer.contains("not an answer"),
+            "the admission must say the partial work is not an answer: {answer:?}"
+        );
+    }
+
+    /// CONTROL, and not decoration: same engine, same tool, same provider
+    /// script, crash cut NOT armed. It stops the test above passing by
+    /// admitting on every run, and it proves the fixture reaches a real
+    /// tool-dispatch turn rather than failing before the graph.
+    #[tokio::test]
+    async fn the_same_run_without_the_crash_carries_no_admission() {
+        let (mut engine, sink) = engine(false);
+        let handle = sink.handle();
+
+        let result = engine
+            .run("do the thing", "m-388-graph-control")
+            .await
+            .expect("the control must complete");
+        assert_eq!(
+            result.turns, 2,
+            "the control must have dispatched the tool and come back for a \
+             second turn, or it never entered the graph at all"
+        );
+
+        let answer = answer_stream(&handle);
+        assert!(
+            answer.contains("the answer"),
+            "the control must carry the real answer: {answer:?}"
+        );
+        assert!(
+            !answer.contains("[stopped early]"),
+            "a run that completed must not admit failure: {answer:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// #388 bullet 4 (c12) — the exits no per-site census covers.
+//
+// c8, c10 and c11 each closed one bucket of `run_inner_impl`'s terminal `Err`
+// exits by editing the exit itself, and each rested on a census asserting that
+// nothing else was left. That census was wrong twice (29 -> 32 sites), so the
+// property is re-stated here as something a census cannot get wrong: EVERY
+// `Err` a turn ends on says so on the answer stream, enforced once in
+// `run_inner` rather than 32 times inside it.
+//
+// The arm measured below is a `SessionAuthority` exit — the bucket all three
+// earlier criteria excluded on the reasoning that internal faults have "no
+// answer stream guaranteed live". This test is the disproof: the narration
+// reaches the stream and then the run dies, so before the backstop stdout
+// ended on the model's last sentence and read as a finished answer. That is
+// the reported defect, on the bucket that was argued away.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod issue_388_silent_internal_exit_tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use wcore_providers::{LlmProvider, ProviderError};
+    use wcore_tools::registry::ToolRegistry;
+    use wcore_types::llm::{LlmEvent, LlmRequest};
+    use wcore_types::message::{FinishReason, StopReason, TokenUsage};
+
+    const NARRATION: &str = "let me look that up";
+
+    /// What the provider does after it has narrated.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Tail {
+        /// An `LlmEvent::Error` carrying `JOURNAL_AUTHORITY_ERROR_PREFIX`.
+        /// `run_inner_impl` turns exactly this into
+        /// `AgentError::SessionAuthority` (engine.rs, the `LlmEvent::Error`
+        /// arm guarded by `is_journal_authority_error`) — a terminal `Err`
+        /// exit reached mid-stream, after the narration is already out.
+        JournalAuthorityFailure,
+        /// Cancel the run's own token and then go quiet, so the turn ends on
+        /// `AgentError::UserAborted` from the cancel arm of the receive
+        /// `select!` — also mid-stream, also after the narration.
+        CancelMidStream,
+        /// End the turn normally.
+        EndTurn,
+    }
+
+    struct NarrateThen {
+        tail: Tail,
+        cancel: tokio_util::sync::CancellationToken,
+        /// Read by the cancel arm ONLY, so the cancel lands strictly after the
+        /// narration has reached the sink. Cancelling straight after `send`
+        /// races the engine's receive loop and exits at an earlier cancel
+        /// check with an empty answer stream — which would make this control
+        /// pass for the wrong reason.
+        sink: Arc<crate::test_utils::TestSink>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for NarrateThen {
+        async fn stream(
+            &self,
+            _: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            let (tx, rx) = tokio::sync::mpsc::channel(8);
+            let tail = self.tail;
+            let cancel = self.cancel.clone();
+            let handle = self.sink.handle();
+            tokio::spawn(async move {
+                let _ = tx.send(LlmEvent::TextDelta(NARRATION.into())).await;
+                match tail {
+                    Tail::JournalAuthorityFailure => {
+                        let _ = tx
+                            .send(LlmEvent::Error(format!(
+                                "{}the writer lease was revoked",
+                                crate::journal_provider::JOURNAL_AUTHORITY_ERROR_PREFIX
+                            )))
+                            .await;
+                    }
+                    Tail::CancelMidStream => {
+                        for _ in 0..2000 {
+                            if narration_landed(&handle) {
+                                break;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                        }
+                        assert!(
+                            narration_landed(&handle),
+                            "the cancel control must cancel AFTER the narration is on the \
+                             stream, or it is not testing a mid-stream abort"
+                        );
+                        cancel.cancel();
+                        // Hold the channel open so the receive `select!` has
+                        // to choose the cancel branch rather than end-of-
+                        // stream. Dropped when the run returns.
+                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    }
+                    Tail::EndTurn => {
+                        let _ = tx
+                            .send(LlmEvent::Done {
+                                stop_reason: StopReason::EndTurn,
+                                finish_reason: FinishReason::from_stop_reason(StopReason::EndTurn),
+                                usage: TokenUsage::default(),
+                            })
+                            .await;
+                    }
+                }
+            });
+            Ok(rx)
+        }
+    }
+
+    /// A provider that refuses the dispatch outright, the way an HTTP 400
+    /// does. This is c8's own exit — the one that ALREADY admits from inside
+    /// `run_inner_impl` — and it is here to hold the backstop to exactly one
+    /// admission.
+    struct RefusesDispatch;
+
+    #[async_trait]
+    impl LlmProvider for RefusesDispatch {
+        async fn stream(
+            &self,
+            _: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            Err(ProviderError::Api {
+                status: 400,
+                message: "malformed request".into(),
+            })
+        }
+    }
+
+    fn narration_landed(handle: &crate::test_utils::TestSinkHandle) -> bool {
+        answer_stream(handle).contains(NARRATION)
+    }
+
+    fn engine_over(
+        provider: Arc<dyn LlmProvider>,
+    ) -> (super::AgentEngine, Arc<crate::test_utils::TestSink>) {
+        let sink = Arc::new(crate::test_utils::TestSink::new());
+        engine_over_with_sink(provider, sink)
+    }
+
+    fn engine_over_with_sink(
+        provider: Arc<dyn LlmProvider>,
+        sink: Arc<crate::test_utils::TestSink>,
+    ) -> (super::AgentEngine, Arc<crate::test_utils::TestSink>) {
+        let mut engine = super::AgentEngine::new_with_provider(
+            provider,
+            wcore_config::config::Config::default(),
+            ToolRegistry::new(),
+            sink.clone(),
+        );
+        engine.max_turns = Some(2);
+        (engine, sink)
+    }
+
+    fn narrating_engine(tail: Tail) -> (super::AgentEngine, Arc<crate::test_utils::TestSink>) {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let sink = Arc::new(crate::test_utils::TestSink::new());
+        let (mut engine, sink) = engine_over_with_sink(
+            Arc::new(NarrateThen {
+                tail,
+                cancel: cancel.clone(),
+                sink: sink.clone(),
+            }),
+            sink,
+        );
+        if tail == Tail::CancelMidStream {
+            engine.set_cancel_token(cancel);
+        }
+        (engine, sink)
+    }
+
+    fn answer_stream(handle: &crate::test_utils::TestSinkHandle) -> String {
+        handle
+            .snapshot()
+            .iter()
+            .filter(|e| e["type"].as_str() == Some("text_delta"))
+            .filter_map(|e| e["text"].as_str().map(str::to_owned))
+            .collect()
+    }
+
+    /// SUBJECT. An internal-authority failure mid-stream is a terminal `Err`
+    /// exit of the run loop that no `emit_incomplete_run_admission` call site
+    /// covers, so without the `run_inner` backstop stdout ends on the
+    /// narration and reads as a finished answer.
+    #[tokio::test]
+    async fn an_internal_authority_exit_admits_itself_on_the_answer_stream() {
+        let (mut engine, sink) = narrating_engine(Tail::JournalAuthorityFailure);
+        let handle = sink.handle();
+
+        let err = engine
+            .run("do the thing", "m-388-authority")
+            .await
+            .expect_err("the authority arm must end the run as Err");
+        assert!(
+            matches!(&err, super::AgentError::SessionAuthority(m)
+                if m.contains("writer lease was revoked")),
+            "this arm must be a SessionAuthority exit, not another Err: {err:?}"
+        );
+
+        let answer = answer_stream(&handle);
+        assert!(
+            answer.contains("let me look that up"),
+            "the narration must have reached the answer stream, or this test is \
+             not measuring an answer stream at all: {answer:?}"
+        );
+        assert!(
+            answer.contains("[stopped early]"),
+            "#388 bullet 4: a run that ends on ANY terminal Err must say so \
+             where the answer went. The cause travels out as Err and is \
+             rendered on stderr, so stdout otherwise ends on the narration: \
+             {answer:?}"
+        );
+    }
+
+    /// CONTROL. The same fixture, same narration, no failure. Stops the
+    /// subject passing by admitting on every run, and proves the backstop is
+    /// not simply appended to every turn.
+    #[tokio::test]
+    async fn the_same_stream_without_the_authority_failure_carries_no_admission() {
+        let (mut engine, sink) = narrating_engine(Tail::EndTurn);
+        let handle = sink.handle();
+
+        engine
+            .run("do the thing", "m-388-authority-control")
+            .await
+            .expect("the control must complete");
+
+        let answer = answer_stream(&handle);
+        assert!(
+            answer.contains("let me look that up"),
+            "the control must carry the narration: {answer:?}"
+        );
+        assert!(
+            !answer.contains("[stopped early]"),
+            "a run that completed must not admit failure: {answer:?}"
+        );
+    }
+
+    /// CONTROL, and the one criterion-bearing exclusion. `UserAborted` is the
+    /// one terminal `Err` the backstop deliberately stays silent on: the stop
+    /// was the user's own, the receive arm already emits "Run cancelled while
+    /// receiving provider output.", and the host is told through
+    /// `RecoveryLifecycle::Cancelled` rather than through an error. The
+    /// exclusion is a decision, so it is graded rather than asserted in prose.
+    #[tokio::test]
+    async fn a_cancelled_run_carries_no_admission() {
+        let (mut engine, sink) = narrating_engine(Tail::CancelMidStream);
+        let handle = sink.handle();
+
+        let err = engine
+            .run("do the thing", "m-388-cancel")
+            .await
+            .expect_err("the cancel arm must end the run as Err");
+        assert!(
+            matches!(&err, super::AgentError::UserAborted),
+            "this control must be the abort exit, not another Err: {err:?}"
+        );
+
+        let answer = answer_stream(&handle);
+        assert!(
+            answer.contains("let me look that up"),
+            "the abort must still have reached a real mid-stream exit: {answer:?}"
+        );
+        assert!(
+            !answer.contains("[stopped early]"),
+            "an abort the user asked for is announced as a cancellation, not \
+             as an unexplained stop: {answer:?}"
+        );
+    }
+
+    /// OVER-CORRECTION GUARD. c8's exit already admits from inside
+    /// `run_inner_impl`. A backstop that does not notice would append a
+    /// second admission to the same answer stream, so the count is asserted,
+    /// not the presence.
+    #[tokio::test]
+    async fn an_exit_that_already_admitted_admits_exactly_once() {
+        let (mut engine, sink) = engine_over(Arc::new(RefusesDispatch));
+        let handle = sink.handle();
+
+        engine
+            .run("do the thing", "m-388-once")
+            .await
+            .expect_err("a refused dispatch must end the run as Err");
+
+        let answer = answer_stream(&handle);
+        assert_eq!(
+            answer.matches("[stopped early]").count(),
+            1,
+            "the run must admit exactly once: the exit's own admission, not \
+             that one plus the backstop's: {answer:?}"
         );
     }
 }

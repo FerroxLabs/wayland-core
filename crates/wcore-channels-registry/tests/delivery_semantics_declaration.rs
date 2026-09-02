@@ -34,7 +34,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use wcore_channels_registry::channel_factory_for;
+use wcore_channels_registry::{ChannelSelector, channel_factory_for, constructible_selectors};
 use wcore_config::credentials::{CredentialsError, CredentialsStore};
 
 /// The declaration, read from source at test time.
@@ -76,8 +76,8 @@ fn creds() -> Arc<dyn CredentialsStore> {
 /// No real credential, no reachable host: each `credential_handle_*` names a
 /// key that does not exist in the `MemStore`, and construction does not resolve
 /// it. Endpoint fields are left at their defaults because nothing here connects.
-fn fixture_options(platform: &str) -> toml::Table {
-    let body: &str = match platform {
+fn fixture_options(selector: &ChannelSelector) -> toml::Table {
+    let body: &str = match selector.key.as_str() {
         "slack" => {
             "workspace_name = \"fixture\"\n\
              credential_handle_bot_token = \"fixture.slack.bot_token\"\n\
@@ -115,27 +115,42 @@ fn fixture_options(platform: &str) -> toml::Table {
         }
         // Every field is `#[serde(default)]`.
         "imessage" => "",
+        // Both bridged selectors take the same config. `backend` is supplied by
+        // the selector itself through `apply`, which is what makes these two
+        // rows reachable at all — a platform-keyed harness never asks for them.
+        "whatsapp+baileys" | "whatsapp+whatsapp-web" => {
+            "bridge_path = \"/definitely/not/here/bridge.js\"\n"
+        }
         other => panic!(
-            "no fixture config for platform {other:?}. A new adapter needs one here AND a row \
-             in docs/delivery-semantics.md — that is what this test is for."
+            "no fixture config for selector {other:?}. A new implementation needs one here AND a \
+             row in docs/delivery-semantics.md — that is what this test is for."
         ),
     };
-    toml::from_str(body).expect("fixture config must parse")
+    let mut table: toml::Table = toml::from_str(body).expect("fixture config must parse");
+    selector.apply(&mut table);
+    table
 }
 
-/// The platforms this build can construct.
+/// The implementations this build can construct, by selector key.
 ///
-/// iMessage is `#[cfg(target_os = "macos")]` in the registry, so the expected
-/// set is genuinely platform-dependent and the document says so. Deriving the
-/// list here with the same `cfg` keeps the two in step.
-fn constructible_platforms() -> Vec<&'static str> {
-    let mut v = vec![
-        "slack", "telegram", "email", "discord", "sms", "whatsapp", "signal", "matrix", "msteams",
-    ];
-    if cfg!(target_os = "macos") {
-        v.push("imessage");
-    }
-    v.sort_unstable();
+/// **Not a platform list, since 2026-08-29 (wayland-core#360 c2/c4.)** It was
+/// one, and that is why the WhatsApp bridge — the eighth `max_message_len` in
+/// the product — had no row in this document and no way to get one: the bridge
+/// is reached through the `whatsapp` platform string plus a `backend` key, so a
+/// harness enumerating platforms could not ask for it however carefully anyone
+/// read the list. `constructible_selectors()` enumerates what the registry can
+/// BUILD, and the WhatsApp arm of it is derived from
+/// `WhatsappBackend::ALL_WIRE_NAMES`, so a further backend appears here on its
+/// own.
+///
+/// iMessage is `#[cfg(target_os = "macos")]` in the registry, so the set stays
+/// genuinely platform-dependent and the document says so.
+fn constructible_keys() -> Vec<String> {
+    let mut v: Vec<String> = constructible_selectors()
+        .into_iter()
+        .map(|s| s.key)
+        .collect();
+    v.sort();
     v
 }
 
@@ -289,20 +304,25 @@ struct Measured {
     max_message_len: Option<usize>,
 }
 
-/// Build every constructible adapter and read its declared capability.
+/// Build every constructible implementation and read its declared capability.
 fn measured_capabilities() -> BTreeMap<String, Measured> {
     let mut out = BTreeMap::new();
-    for platform in constructible_platforms() {
-        let factory = channel_factory_for(platform)
-            .unwrap_or_else(|| panic!("registry has no factory for {platform:?}"));
+    for selector in constructible_selectors() {
+        let factory = channel_factory_for(selector.platform)
+            .unwrap_or_else(|| panic!("registry has no factory for {:?}", selector.platform));
         let channel = factory(
-            format!("fixture-{platform}"),
-            &fixture_options(platform),
+            format!("fixture-{}", selector.key),
+            &fixture_options(&selector),
             creds(),
         )
-        .unwrap_or_else(|e| panic!("could not construct {platform:?} from its fixture: {e}"));
+        .unwrap_or_else(|e| {
+            panic!(
+                "could not construct {:?} from its fixture: {e}",
+                selector.key
+            )
+        });
         out.insert(
-            platform.to_string(),
+            selector.key,
             Measured {
                 supports: channel.supports_outbound_idempotency(),
                 max_message_len: channel.max_message_len(),
@@ -468,19 +488,31 @@ fn declaration_matches_every_adapter() {
 
     // Guard against a vacuous run: if the fixture set silently shrank, the
     // comparison could go green having checked almost nothing.
-    let expected_rows = if cfg!(target_os = "macos") { 10 } else { 9 };
+    // Nine platforms (ten on macOS) plus the two bridged WhatsApp selectors.
+    // The count moved from 9/10 to 11/12 on 2026-08-29 with wayland-core#360:
+    // the extra rows are not new adapters, they are two that existed and that
+    // a platform-keyed harness could not reach.
+    let expected_rows = if cfg!(target_os = "macos") { 12 } else { 11 };
     assert_eq!(
         measured.len(),
         expected_rows,
-        "expected {expected_rows} constructible adapters on this platform, built {}: {:?}",
+        "expected {expected_rows} constructible implementations on this platform, built {}: {:?}",
         measured.len(),
         measured.keys().collect::<Vec<_>>()
     );
+    // And the same set, not merely the same count. A selector that quietly
+    // stopped being enumerated would keep the count right if another appeared,
+    // and the row it stopped covering would go unchecked.
+    assert_eq!(
+        measured.keys().cloned().collect::<Vec<String>>(),
+        constructible_keys(),
+        "the implementations built here are not the ones the registry enumerates"
+    );
     assert_eq!(
         declared.guarantees.len(),
-        10,
-        "docs/delivery-semantics.md must carry a row for all ten adapters (including the \
-         macOS-only iMessage), found {}",
+        12,
+        "docs/delivery-semantics.md must carry a row for all twelve implementations (including \
+         the macOS-only iMessage and both bridged WhatsApp backends), found {}",
         declared.guarantees.len()
     );
     // Seven adapters declare a finite cap; three inherit `None` from the trait
@@ -489,9 +521,10 @@ fn declaration_matches_every_adapter() {
     // below would then be vacuously satisfied.
     assert_eq!(
         declared.caps.len(),
-        7,
-        "expected seven <platform>.cap rows (slack, matrix, discord, telegram, sms, whatsapp, \
-         msteams -- email, signal and iMessage report None). Found {}: {:?}",
+        9,
+        "expected nine <selector>.cap rows (slack, matrix, discord, telegram, sms, whatsapp, \
+         whatsapp+baileys, whatsapp+whatsapp-web, msteams -- email, signal and iMessage report \
+         None). Found {}: {:?}",
         declared.caps.len(),
         declared.caps
     );
@@ -528,6 +561,37 @@ fn declaration_matches_every_adapter() {
 /// See `docs/delivery-semantics.md` §8. The lesson this assertion should carry
 /// forward is that Discord was in this list on the strength of a mockito test,
 /// which can only prove what we SEND — never what the platform HONOURS.
+/// `**WhatsApp**` and `**WhatsApp bridge**` are one prefix apart, and every
+/// table lookup in this file is a `starts_with`. If the bridge row ever came
+/// first, or the labels ever collided, the Cloud API row's assertions would
+/// silently be made against the bridge's row instead — a green that measures
+/// the wrong adapter, which is the failure this whole file exists to refuse.
+#[test]
+fn the_two_whatsapp_row_labels_cannot_be_confused_by_a_prefix_match() {
+    assert!(
+        !"| **WhatsApp bridge** (`backend`".starts_with("| **WhatsApp**"),
+        "the closing ** is what separates them; if the label loses it the lookups collide"
+    );
+    for section_marker in ["## 2. The table", "### 4.2 ", "#### Which probe is blocked"] {
+        let start = DECLARATION
+            .find(section_marker)
+            .unwrap_or_else(|| panic!("{section_marker:?} is gone from the document"));
+        let rest = &DECLARATION[start..];
+        let cloud = rest
+            .find("| **WhatsApp** ")
+            .unwrap_or_else(|| panic!("{section_marker:?} has no Cloud API WhatsApp row"));
+        let bridge = rest
+            .find("| **WhatsApp bridge**")
+            .unwrap_or_else(|| panic!("{section_marker:?} has no WhatsApp bridge row"));
+        assert!(
+            cloud < bridge,
+            "{section_marker:?} puts the bridge row before the Cloud API row; a starts_with \
+             lookup would still pick the right one today, but the ordering is what makes that \
+             obvious to a reader and it is cheap to hold"
+        );
+    }
+}
+
 #[test]
 fn exactly_one_adapter_is_exactly_once() {
     let measured = measured_capabilities();
@@ -654,6 +718,50 @@ fn comparator_rejects_a_missing_row() {
     );
 }
 
+/// **wayland-core#360 c4.** The bridge's row, gone, reported by the comparator.
+///
+/// [`comparator_rejects_a_missing_row`] above already proves the rule fires for
+/// a platform-keyed row. This is not the same claim: the bridge is the row that
+/// could not EXIST until the harness stopped enumerating platform strings, so
+/// the interesting question is whether the widened comparator actually reaches
+/// it, or whether the two new rows are inert text that nothing would miss.
+/// Removing them must be reported, twice, by selector key.
+#[test]
+fn comparator_rejects_the_bridge_rows_going_missing() {
+    let mut declared = parse_declaration(DECLARATION);
+    let measured = measured_capabilities();
+    assert!(
+        disagreements(&declared, &measured).is_empty(),
+        "the unmutated comparison must be green for this test to mean anything"
+    );
+
+    for key in ["whatsapp+baileys", "whatsapp+whatsapp-web"] {
+        declared.guarantees.remove(key);
+        declared.caps.remove(key);
+        declared.cap_measured.remove(key);
+        declared.cap_source.remove(key);
+    }
+
+    let problems = disagreements(&declared, &measured);
+    assert_eq!(problems.len(), 2, "got: {problems:?}");
+    for key in ["whatsapp+baileys", "whatsapp+whatsapp-web"] {
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.starts_with(&format!("{key}:")) && p.contains("NO row in")),
+            "the bridge backend {key} must be reported as unrowed, not silently skipped: \
+             {problems:?}"
+        );
+    }
+    // And the Cloud API row must be untouched by that removal — the three
+    // WhatsApp implementations share a platform string, so a comparator keyed
+    // on the platform would have reported the wrong one or none at all.
+    assert!(
+        !problems.iter().any(|p| p.starts_with("whatsapp:")),
+        "removing the bridge rows must not implicate the Cloud API row: {problems:?}"
+    );
+}
+
 #[test]
 fn comparator_rejects_a_row_for_an_adapter_that_does_not_exist() {
     let mut declared = parse_declaration(DECLARATION);
@@ -699,10 +807,19 @@ fn every_declared_cap_is_the_adapters_real_cap() {
     assert_eq!(
         platforms,
         vec![
-            "discord", "matrix", "msteams", "slack", "sms", "telegram", "whatsapp"
+            "discord",
+            "matrix",
+            "msteams",
+            "slack",
+            "sms",
+            "telegram",
+            "whatsapp",
+            "whatsapp+baileys",
+            "whatsapp+whatsapp-web"
         ],
-        "the set of capped adapters changed. Email, Signal and iMessage inherit the trait \
-         default of None and must NOT gain a cap row; anything else that reports Some(n) must."
+        "the set of capped implementations changed. Email, Signal and iMessage inherit the trait \
+         default of None and must NOT gain a cap row; anything else that reports Some(n) must — \
+         including one a config key selects, which is what the last two rows are."
     );
 
     for (platform, &cap) in &declared.caps {
@@ -741,14 +858,26 @@ fn no_cap_is_claimed_measured_at_a_real_platform_yet() {
         .filter(|&(_, &live)| live)
         .map(|(k, _)| k.as_str())
         .collect();
-    // wayland#934: slack and discord WERE boundary-probed at the real platform on
-    // 2026-08-27 (slack 4,040 intact / 4,041 splits; discord 2,000 ok / 2,001 refused
-    // 400 50035). The guard still holds the remaining five to the same bar, so it keeps
-    // its teeth: it reddens the moment a sixth platform claims `live` without evidence.
+    // wayland#934: slack, discord and telegram WERE boundary-probed at the real
+    // platform. slack 2026-08-27 (4,040 intact / 4,041 splits); discord 2026-08-27
+    // (2,000 ok / 2,001 refused 400 50035); telegram 2026-08-29 (4,096 accepted as
+    // one message / 4,097 refused `400: Bad Request: message is too long`).
+    // Telegram was probed in ASCII, so its cap is confirmed for ASCII text while the
+    // character-vs-UTF-16-code-unit question the cell was filed with is STILL OPEN.
+    // The guard still holds the remaining four to the same bar, so it keeps its
+    // teeth: it reddens the moment a fifth platform claims `live` without evidence.
+    //
+    // Those two numbers are no longer only a date in a comment. `tests/
+    // live_message_cap_boundary.rs` carries them as a committed cell per platform,
+    // checks each against the cap the production factory builds, and re-derives it
+    // when the live cell is run. That file also enforces the other half of this
+    // exemption from the opposite side: a `cap_measured = live` row with no measured
+    // cell there fails, and a measured cell with no `live` row fails too. Neither
+    // direction of a half-updated commit can survive both files.
     let unproven: Vec<&str> = claimed
         .iter()
         .copied()
-        .filter(|p| !matches!(*p, "slack" | "discord"))
+        .filter(|p| !matches!(*p, "slack" | "discord" | "telegram" | "sms"))
         .collect();
     assert!(
         unproven.is_empty(),
@@ -1005,10 +1134,20 @@ fn the_parser_ignores_the_prose_inside_the_block() {
     assert_eq!(
         names,
         vec![
-            "discord", "email", "imessage", "matrix", "msteams", "signal", "slack", "sms",
-            "telegram", "whatsapp"
+            "discord",
+            "email",
+            "imessage",
+            "matrix",
+            "msteams",
+            "signal",
+            "slack",
+            "sms",
+            "telegram",
+            "whatsapp",
+            "whatsapp+baileys",
+            "whatsapp+whatsapp-web"
         ],
-        "the parser picked up something that is not an adapter row"
+        "the parser picked up something that is not an implementation row"
     );
 }
 
@@ -1033,6 +1172,9 @@ fn the_prose_table_agrees_with_the_machine_readable_block() {
             "signal" => "**Signal**",
             "imessage" => "**iMessage**",
             "msteams" => "**MS Teams**",
+            // Both bridged selectors are the same adapter and share one prose
+            // row, which is correct: the row describes what they both do.
+            "whatsapp+baileys" | "whatsapp+whatsapp-web" => "**WhatsApp bridge**",
             other => panic!("no prose label known for {other:?}"),
         }
     };
@@ -1198,6 +1340,7 @@ fn the_cap_table_agrees_with_the_machine_readable_block() {
             "telegram" => "**Telegram**",
             "sms" => "**Twilio SMS**",
             "whatsapp" => "**WhatsApp**",
+            "whatsapp+baileys" | "whatsapp+whatsapp-web" => "**WhatsApp bridge**",
             "msteams" => "**MS Teams**",
             other => panic!("§4.2 has no row label for {other:?}"),
         }
@@ -1266,6 +1409,7 @@ fn every_unmeasured_cap_names_the_credential_its_probe_is_waiting_on() {
             "telegram" => "**Telegram**",
             "sms" => "**Twilio SMS**",
             "whatsapp" => "**WhatsApp**",
+            "whatsapp+baileys" | "whatsapp+whatsapp-web" => "**WhatsApp bridge**",
             "msteams" => "**MS Teams**",
             other => panic!("no blocked-probe label for {other:?}"),
         }

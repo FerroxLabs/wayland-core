@@ -54,27 +54,76 @@ pub const DEFAULT_CONTEXT_WINDOW: usize = 200_000;
 /// that already exists, whereas the silent-truncation case is none of those.
 pub const UNVERIFIED_CONTEXT_WINDOW: usize = 32_768;
 
-/// Autocompact threshold, as a fraction of the window, for the ONE degenerate
-/// case: `window - output_reserve - autocompact_buffer` saturating to zero.
+/// FerroxLabs/wayland#1179 — the largest share of a context window the
+/// ABSOLUTE reserve buffers may consume before they are scaled down.
 ///
-/// Those buffers are ABSOLUTE and were tuned for a 200k window — 33,000 tokens
-/// of headroom, 16.5% there but 100.7% of a 32,768-token window. Zero is not
-/// "no threshold" anywhere in the trigger path, it is "always fire":
-/// `should_autocompact` tests `tokens >= threshold`
-/// (`wcore_agent::compact::auto`) and `ContextPressure::admits_trigger`
-/// short-circuits to `true` on a zero threshold by name
-/// (`wcore_agent::compact::micro`). An operator who took the unknown-window
-/// notice at its word and set `context_window = 32768` would have got an LLM
-/// summarization at the top of every single turn.
+/// # The problem this replaces
 ///
-/// It is a REPLACEMENT for the saturated value, not a floor applied to every
-/// window: `wcore_agent::compact::auto::autocompact_threshold` reaches for it
-/// only when the subtraction already collapsed. A general floor at this
-/// fraction would also have moved windows between ~33,000 and ~110,000, and
-/// #1150 is no evidence about that band. Every window above 33,000 tokens —
-/// which is every model in the `limits` catalogue, the smallest being
-/// 128,000 — keeps exactly the threshold it had.
-pub const MIN_AUTOCOMPACT_WINDOW_FRACTION: f64 = 0.70;
+/// `output_reserve` + `autocompact_buffer` is 33,000 tokens by default, tuned
+/// when the only window in play was 200,000. That is 16.5% of a 200k window,
+/// 100.7% of a 32,768-token one, and 806% of the 4,096-token slot #1172
+/// measured a stock Ollama actually serving. Subtracting an absolute figure
+/// from a window an order of magnitude smaller does not produce a conservative
+/// boundary, it produces a degenerate one: `input_ceiling()` saturates to zero
+/// (the #255 pre-flight guard then fires on EVERY turn and aborts the run) and
+/// the autocompact threshold saturates to zero, which on that path means
+/// ALWAYS FIRE, not "no threshold".
+///
+/// #1150 patched the second of those with a 0.70-of-window replacement used
+/// only when the subtraction had already collapsed. That closed the cliff and
+/// left the slope: at 32,768 the threshold became 22,937 while the pre-flight
+/// ceiling stayed at 32,768 − 23,000 = 9,768, so the guard shed and aborted
+/// at 9,768 and autocompact — sitting 13,169 tokens ABOVE it — could never
+/// fire at all. Two boundaries derived from the same window disagreed about
+/// which came first.
+///
+/// # Why 0.55, and why it is not a picked fraction
+///
+/// Scaling ALL THREE reserves by one factor keeps them ordered by
+/// construction, because the ordering only ever depended on their relative
+/// sizes: `threshold = w − s(output_reserve + autocompact_buffer)` is below
+/// `ceiling = w − s(output_reserve + emergency_buffer)` for every `s > 0`
+/// exactly when `autocompact_buffer > emergency_buffer`, which is the
+/// invariant the absolute figures already encoded. That is the part #1150's
+/// notes correctly warned about: a proportional floor applied to the THRESHOLD
+/// ALONE would have raised a pinned 60,000-token window's trigger from 27,000
+/// to 42,000, past its own pre-flight shed ceiling of 37,000 — an inversion.
+/// Scaling the ceiling with it cannot invert.
+///
+/// The fraction itself is then FORCED, not chosen. The scale engages below
+/// `(output_reserve + autocompact_buffer) / MAX_RESERVE_FRACTION`, which at the
+/// default reserves is `33,000 / 0.55 = 60,000`. 0.55 is the LARGEST fraction
+/// that leaves that 60,000 window at a scale of exactly 1.0 — i.e. the largest
+/// one for which the case #1150 named as the thing not to disturb is
+/// byte-for-byte unchanged. Anything larger keeps eating small windows;
+/// anything smaller pulls the crossover UP and starts retuning windows nobody
+/// has evidence about. Every window at or above 60,000 — which is every model
+/// in the [`crate::limits`] catalogue, the smallest being 128,000 — is
+/// therefore untouched.
+///
+/// Measured consequences, at the five points #1179 asks for (default reserves,
+/// `BASELINE_TURN_TOKENS` = 3,118):
+///
+/// | window | ceiling before → after | threshold before → after | verdict |
+/// |---|---|---|---|
+/// | 4,096 | 0 → 2,527 | 2,867 → 1,844 | still below the baseline turn: unusable |
+/// | 8,192 | 0 → 5,053 | 5,734 → 3,688 | workable, 570 tokens of room |
+/// | 32,768 | 9,768 → 20,208 | 22,937 → 14,747 | inversion fixed |
+/// | 60,000 | 37,000 → 37,000 | 27,000 → 27,000 | unchanged |
+/// | 200,000 | 177,000 → 177,000 | 167,000 → 167,000 | unchanged |
+pub const MAX_RESERVE_FRACTION: f64 = 0.55;
+
+/// Core's OWN baseline turn, in real prompt tokens — the system prompt plus
+/// eight tool schemas, before the user has said anything.
+///
+/// MEASURED, not modelled: #1172 drove a real `qwen3:8b` through a logging
+/// reverse proxy and read the figure off the endpoint's own `usage` block. It
+/// is the floor under every boundary in this module, because a threshold below
+/// it fires on an empty conversation and a ceiling below it aborts the run
+/// before the user has typed anything. It is what makes
+/// [`CompactConfig::supports_compaction`] answerable with a number instead of
+/// a guess.
+pub const BASELINE_TURN_TOKENS: usize = 3_118;
 
 /// #1150's whole claim, enforced by the compiler rather than by a runtime
 /// assertion that could never fail: the window assumed for a model we cannot
@@ -83,11 +132,16 @@ pub const MIN_AUTOCOMPACT_WINDOW_FRACTION: f64 = 0.70;
 /// the build here rather than silently restoring the runaway.
 const _: () = assert!(UNVERIFIED_CONTEXT_WINDOW < DEFAULT_CONTEXT_WINDOW);
 
-/// The floor must stay a floor: a fraction at or above 1.0 would put the
-/// autocompact threshold at or past the window itself, and a non-positive one
-/// would re-open the zero-threshold "always fire" cliff.
-const _: () =
-    assert!(MIN_AUTOCOMPACT_WINDOW_FRACTION > 0.0 && MIN_AUTOCOMPACT_WINDOW_FRACTION < 1.0);
+/// The reserves must stay a MINORITY of the window they are taken out of. At
+/// or above 1.0 the scaled reserves would consume the whole window and every
+/// boundary would saturate to zero again — the exact cliff this replaces; at or
+/// below 0 they would vanish and the pre-flight guard would never fire.
+const _: () = assert!(MAX_RESERVE_FRACTION > 0.0 && MAX_RESERVE_FRACTION < 1.0);
+
+/// The scale is only ever a REDUCTION, and it must not reorder the buffers:
+/// `autocompact_buffer > emergency_buffer` is what puts the autocompact
+/// threshold below the pre-flight ceiling, and one common factor preserves it.
+const _: () = assert!(default_autocompact_buffer_const() > default_emergency_buffer_const());
 
 /// Configuration for the multi-level context compaction system.
 ///
@@ -280,6 +334,67 @@ pub struct CompactConfig {
     /// with a compact stub. TOML table: `[compact.tool_call_args]`.
     #[serde(default)]
     pub tool_call_args: ToolCallArgsConfig,
+
+    /// Ceiling on the TOTAL size of accumulated tool RESULT bodies carried in
+    /// history (FerroxLabs/wayland#1150 c4). TOML table:
+    /// `[compact.tool_results]`.
+    #[serde(default)]
+    pub tool_results: ToolResultsConfig,
+}
+
+/// Config for the accumulated tool-RESULT ceiling (wayland#1150 c4).
+///
+/// Per-result truncation already exists: every tool declares
+/// `Tool::max_result_size()` (50,000 chars by default) and the orchestration
+/// layer truncates at it before the result enters history. What did not exist
+/// is a bound on the SUM. Twenty results at the per-result cap is a megabyte
+/// of history re-sent whole on every turn, and the recency pass that clears
+/// old results (`micro_keep_recent`) is gated on context pressure, so nothing
+/// touches them until the window is nearly full.
+///
+/// This pass is therefore UNGATED — it runs on every compaction pipeline pass
+/// like the tool-call-argument pass, and it applies to every tool rather than
+/// only `compactable_tools`: a ceiling a tool can opt out of is not a ceiling.
+///
+/// **The guarantee**: carried tool-result bytes never exceed
+/// `total_budget_bytes` plus the `keep_recent` newest results. Both terms are
+/// constants, so the carried size stops growing with session length — which
+/// is the property #1150 is about, not any particular number.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolResultsConfig {
+    /// Master gate for the pass. Default ON.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Total budget, in bytes of tool-result body text, for the whole
+    /// conversation. Once the sum exceeds this, the OLDEST results are
+    /// replaced with a stub until it fits again.
+    #[serde(default = "default_tr_total_budget_bytes")]
+    pub total_budget_bytes: usize,
+
+    /// Newest tool results that are never bounded, however large — the
+    /// model's live working set. Counted over tool results, not turns.
+    #[serde(default = "default_tr_keep_recent")]
+    pub keep_recent: usize,
+
+    /// Epoch quantization of the stub boundary, exactly as
+    /// [`ToolCallArgsConfig::epoch_turns`]: the boundary advances in batches
+    /// of this many results, so between ticks the pass changes ZERO bytes and
+    /// the provider's contiguous prefix cache holds end-to-end. `1` = advance
+    /// as tightly as the budget requires. Floored to 1 at the use site.
+    #[serde(default = "default_tr_epoch_results")]
+    pub epoch_results: usize,
+}
+
+impl Default for ToolResultsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_true(),
+            total_budget_bytes: default_tr_total_budget_bytes(),
+            keep_recent: default_tr_keep_recent(),
+            epoch_results: default_tr_epoch_results(),
+        }
+    }
 }
 
 /// Config for continuous tool-call-argument compaction (parity gap 2).
@@ -415,6 +530,350 @@ impl CompactConfig {
         self.known_context_window(provider, model)
             .unwrap_or(UNVERIFIED_CONTEXT_WINDOW)
     }
+
+    /// #1179 — the reserve buffers this config applies AT `window`.
+    ///
+    /// Identity whenever `output_reserve + autocompact_buffer` already fits
+    /// inside [`MAX_RESERVE_FRACTION`] of the window, which is every window at
+    /// or above 60,000 with the default reserves. Below that all three are
+    /// scaled by ONE common factor, so their ordering — and therefore the
+    /// ordering of every boundary derived from them — is preserved.
+    pub fn scaled_reserves(&self, window: usize) -> ScaledReserves {
+        let nominal = self.output_reserve.saturating_add(self.autocompact_buffer);
+        let budget = window as f64 * MAX_RESERVE_FRACTION;
+        if nominal == 0 || nominal as f64 <= budget {
+            return ScaledReserves {
+                output_reserve: self.output_reserve,
+                autocompact_buffer: self.autocompact_buffer,
+                emergency_buffer: self.emergency_buffer,
+            };
+        }
+        let scale = budget / nominal as f64;
+        let apply = |v: usize| (v as f64 * scale) as usize;
+        ScaledReserves {
+            output_reserve: apply(self.output_reserve),
+            autocompact_buffer: apply(self.autocompact_buffer),
+            emergency_buffer: apply(self.emergency_buffer),
+        }
+    }
+
+    /// The autocompact trigger for `window`:
+    /// `window − scaled output_reserve − scaled autocompact_buffer`.
+    ///
+    /// THE definition. `wcore_agent::compact::auto::autocompact_threshold`
+    /// resolves the window and delegates here, so a reporter and an enforcer
+    /// cannot end up on different arithmetic.
+    ///
+    /// Cannot saturate to zero for any positive window: the scaled reserves are
+    /// at most [`MAX_RESERVE_FRACTION`] of it, so this is at least
+    /// `(1 − MAX_RESERVE_FRACTION) × window`. That is why #1150's
+    /// `MIN_AUTOCOMPACT_WINDOW_FRACTION` replacement — which existed only for
+    /// the saturated case — is gone rather than kept as an unreachable branch.
+    pub fn autocompact_threshold_for_window(&self, window: usize) -> usize {
+        let r = self.scaled_reserves(window);
+        window
+            .saturating_sub(r.output_reserve)
+            .saturating_sub(r.autocompact_buffer)
+    }
+
+    /// The #255 pre-flight input ceiling for `window`:
+    /// `window − scaled output_reserve − scaled emergency_buffer`.
+    pub fn input_ceiling_for_window(&self, window: usize) -> usize {
+        let r = self.scaled_reserves(window);
+        window
+            .saturating_sub(r.output_reserve)
+            .saturating_sub(r.emergency_buffer)
+    }
+
+    /// The emergency hard stop for `window`: `window − scaled emergency_buffer`.
+    pub fn emergency_limit_for_window(&self, window: usize) -> usize {
+        window.saturating_sub(self.scaled_reserves(window).emergency_buffer)
+    }
+
+    /// FerroxLabs/wayland#1200 — the accumulated tool-result ceiling AT
+    /// `window`, or today's flat constants when no window is known.
+    ///
+    /// [`ToolResultsConfig::total_budget_bytes`] and
+    /// [`ToolResultsConfig::keep_recent`] are ABSOLUTE figures, and at their
+    /// shipped defaults their worst case is 120,000 + 4 x
+    /// [`MAX_TOOL_RESULT_BYTES`] = 320,000 bytes, about 80,000 tokens - roughly
+    /// 2.4x the entire 32,768-token window this release assumes for an unlisted
+    /// model. The pass's guarantee ("carried bytes stop growing with the
+    /// session") was true; the guarantee a 32k user needs ("carried bytes fit
+    /// the window") was neither claimed nor delivered.
+    ///
+    /// Two terms, so both are bounded here. Bounding only the budget leaves the
+    /// protected tail dominating at a small window, which is why #1150 c4 left
+    /// this open rather than half-closing it:
+    ///
+    /// 1. **The budget** is capped at half the bytes the pre-flight guard will
+    ///    actually admit ([`Self::input_ceiling_for_window`] x
+    ///    [`CHARS_PER_TOKEN`]). The ceiling, not the raw window, because
+    ///    carried results are INPUT and the ceiling is the boundary that admits
+    ///    input; a bound the guard aborts past is not a bound.
+    /// 2. **The protected tail** keeps its COUNT and gains a BYTE cap, the
+    ///    other half. Capping the count instead would drop the tail to one
+    ///    result on any window under ~100k even when the results are small,
+    ///    and a stubbed working set is how #1172's re-read loop starts. Capping
+    ///    the bytes leaves a normal session's four results all protected and
+    ///    bites only on the pathological one this ticket measured.
+    ///
+    /// The newest result is protected unconditionally at the use site, so the
+    /// worst case carries one result at the ingestion cap however small the
+    /// window is - see [`Self::worst_case_carried_tool_result_bytes`] and the
+    /// named gap recorded with it.
+    ///
+    /// Identity wherever the guard admits at least 2 x
+    /// `total_budget_bytes` of input (a ceiling of about 60,000 tokens), so no
+    /// large-window sizing moves - pinned by
+    /// `a_large_window_keeps_todays_flat_tool_result_constants`.
+    pub fn tool_result_bounds(&self, window: Option<usize>) -> ToolResultBounds {
+        let tr = &self.tool_results;
+        let Some(window) = window else {
+            return ToolResultBounds {
+                total_budget_bytes: tr.total_budget_bytes,
+                protected_tail_bytes: None,
+                keep_recent: tr.keep_recent,
+            };
+        };
+        let admissible = self
+            .input_ceiling_for_window(window)
+            .saturating_mul(CHARS_PER_TOKEN);
+        let half = admissible / 2;
+        // The budget is sized against the DECLARED tail cap (`half`), not
+        // against a worst-case `half.max(MAX_TOOL_RESULT_BYTES)`.
+        //
+        // The worst-case form was tried and REVERTED, and the reason is worth
+        // keeping because it is not obvious: it reserved a whole 50,000-byte
+        // newest result unconditionally, so on any window whose guard admits
+        // less than that the subtraction saturated and the budget became ZERO.
+        // Measured, on the shipped defaults:
+        //
+        //     window   4,096 -> admissible  10,108 -> budget 0
+        //     window   8,192 -> admissible  20,212 -> budget 0
+        //     window  16,384 -> admissible  40,416 -> budget 0
+        //
+        // A zero budget stubs EVERY accumulated tool result, including small
+        // ones that already fit -- ten 500-byte results, 5,000 bytes total, all
+        // replaced by stubs on a 16k model. That is precisely the small-window
+        // population #1150 and this ticket exist to serve, and the stub text
+        // invites the model to re-run the tool, so mass-stubbing risks
+        // RE-EXECUTING MUTATING TOOLS. The fix was worse for its own users than
+        // the leak it closed.
+        //
+        // And it did not buy the property it named. `bound_accumulated_tool_results`
+        // shrinks the protected tail to a MINIMUM OF ONE and retains the newest
+        // result "unconditionally, however large" (micro.rs:691-693). So a
+        // MAX_TOOL_RESULT_BYTES newest result is carried whatever this budget
+        // says: zeroing the budget never prevented that overshoot, it only
+        // removed the ability to carry anything alongside it.
+        //
+        // That overshoot is real and remains a NAMED gap rather than a silent
+        // one -- `worst_case_carried_tool_result_bytes` reports it, and it is
+        // bounded by the per-result ingestion cap, which is not window-derived
+        // (recorded as Q-1200 in .planning/DECISIONS.md). Closing it means
+        // sizing that cap to the window, which is a separate change with its
+        // own wrong-refusal surface. Budget + declared tail now sums to exactly
+        // `admissible`, which is the strongest statement this function can make
+        // without reaching into the ingestion cap.
+        let worst_tail = half.max(MAX_TOOL_RESULT_BYTES);
+        let sized = if admissible > worst_tail {
+            // The worst case IS reachable here, so hold it: budget plus one
+            // unconditional MAX_TOOL_RESULT_BYTES result fits what the guard
+            // admits. This is the branch `the_worst_case_carried_tool_results_
+            // fit_a_32k_window` pins, and it is unchanged.
+            admissible - worst_tail
+        } else {
+            // Below the per-result ingestion cap the worst-case property is
+            // UNSATISFIABLE AT ANY BUDGET: one unconditionally-retained result
+            // may be 50,000 bytes while the guard admits 10,108 (a 4,096-token
+            // window), so no choice of budget makes the sum fit. Reserving the
+            // worst case anyway drove the budget to ZERO and stubbed results
+            // that already fit -- see the note above. Size against the declared
+            // tail instead, so budget + tail == admissible exactly, and let
+            // `worst_case_carried_tool_result_bytes` report the residual
+            // overshoot as the named gap it is.
+            admissible.saturating_sub(half)
+        };
+        ToolResultBounds {
+            total_budget_bytes: tr.total_budget_bytes.min(sized),
+            protected_tail_bytes: Some(half),
+            keep_recent: tr.keep_recent,
+        }
+    }
+
+    /// #1200 c2 — the WORST-CASE bytes a bounded conversation can still carry
+    /// in tool results, stated as the arithmetic the ticket stated it in:
+    /// `total_budget_bytes + keep_recent x max_result_size`.
+    ///
+    /// The tail term is `min(cap, keep_recent x MAX_TOOL_RESULT_BYTES)` raised
+    /// to at least [`MAX_TOOL_RESULT_BYTES`], because
+    /// `bound_accumulated_tool_results` protects the newest result
+    /// unconditionally. NAMED GAP: below a window whose admissible input is
+    /// under [`MAX_TOOL_RESULT_BYTES`] (about 25,000 tokens of ceiling), that
+    /// one result is the binding term and it is NOT window-derived - the
+    /// per-result ingestion cap lives in `wcore_tools::Tool::max_result_size`
+    /// and is a fixed 50,000 chars. Nothing here can close that.
+    pub fn worst_case_carried_tool_result_bytes(&self, window: Option<usize>) -> usize {
+        let b = self.tool_result_bounds(window);
+        let tail = match b.protected_tail_bytes {
+            Some(cap) => cap
+                .min(b.keep_recent.saturating_mul(MAX_TOOL_RESULT_BYTES))
+                .max(MAX_TOOL_RESULT_BYTES),
+            None => b.keep_recent.saturating_mul(MAX_TOOL_RESULT_BYTES),
+        };
+        b.total_budget_bytes.saturating_add(tail)
+    }
+
+    /// #1179 — is `window` big enough for compaction to be worth pointing at?
+    ///
+    /// Both boundaries must clear core's own [`BASELINE_TURN_TOKENS`]. A
+    /// threshold below it summarizes an empty conversation at the top of every
+    /// turn; a ceiling below it aborts the run before the user has typed
+    /// anything. Neither is a fix, and both are what a naively-applied learned
+    /// window would have produced.
+    ///
+    /// At the 4,096-token slot #1172 measured it answers `false` — core's
+    /// baseline turn alone is 76% of that window and no division of it leaves
+    /// room to work. #1172 c3: `false` here does NOT mean the window is
+    /// ignored. The learned window is still applied
+    /// (`AgentEngine::narrow_to_served_window` has no escape hatch), and
+    /// `AgentEngine::unworkable_window_refusal` stops the run out loud naming
+    /// [`Self::minimum_workable_window`], rather than sizing the session
+    /// against a window the endpoint was observed not to serve.
+    pub fn supports_compaction(&self, window: usize) -> bool {
+        self.autocompact_threshold_for_window(window) > BASELINE_TURN_TOKENS
+            && self.input_ceiling_for_window(window) > BASELINE_TURN_TOKENS
+    }
+
+    /// #1179 — THE autocompact DECISION at `window`, refusal included.
+    ///
+    /// [`Self::autocompact_threshold_for_window`] stays a plain number because
+    /// the cache ledger and the context gauge report it. This is the decision,
+    /// and the decision carries [`Self::supports_compaction`] with it.
+    ///
+    /// # Why the gate lives here and not only where a learned window enters
+    ///
+    /// The refusal is a property of the WINDOW, not of the route the window
+    /// arrived by. #1179 first shipped it inside
+    /// `AgentEngine::narrow_to_served_window`, the single place #1172's LEARNED
+    /// figure is admitted, which left the CONFIGURED path — the one #1150's own
+    /// notice tells operators to use — running unguarded. A `[compact]
+    /// context_window` of 6,000 (a local Ollama `num_ctx` of 6,144 lands in the
+    /// same band) yields a threshold of 2,700 against a 3,118-token baseline
+    /// turn: the trigger is already true before the user has typed anything,
+    /// the summarizer cannot reclaim a system prompt or a tool schema, and the
+    /// next turn asks again. That is an LLM call at the top of every turn,
+    /// forever.
+    ///
+    /// Refusing is not compaction failing to fire. Below the crossover there is
+    /// no trigger value that both clears the baseline turn and stays under the
+    /// pre-flight ceiling, so firing is a loop and refusing is the only honest
+    /// answer — the same answer the learned path already gives at 4,096. The
+    /// emergency hard stop (`emergency_limit`) is untouched and still bounds the
+    /// run, and the operator is told at bootstrap rather than left to infer it.
+    pub fn should_autocompact_at(&self, window: usize, tokens: usize) -> bool {
+        self.enabled
+            && self.supports_compaction(window)
+            && tokens >= self.autocompact_threshold_for_window(window)
+    }
+
+    /// #1172 — the smallest window this config CAN work in: the least `w` for
+    /// which [`Self::supports_compaction`] holds.
+    ///
+    /// Derived from the reserves rather than hardcoded, so a non-default
+    /// `[compact] output_reserve` moves it with them. It exists so the refusal
+    /// core raises on an unworkable window can name the number the operator has
+    /// to reach — "raise `num_ctx`" without a target leaves them to bisect it
+    /// against a symptom that only appears several turns in.
+    ///
+    /// `supports_compaction` is monotone in `w`, so the bisection below is
+    /// exact rather than a heuristic: below the [`MAX_RESERVE_FRACTION`]
+    /// crossover both boundaries are fixed fractions of the window, above it
+    /// they are the window minus a constant, and the two agree at the crossover
+    /// by construction (that is what fixes the fraction at 0.55).
+    pub fn minimum_workable_window(&self) -> usize {
+        self.least_window_satisfying(|window| self.supports_compaction(window))
+    }
+
+    /// FerroxLabs/wayland#1230 c3 - the smallest window whose INPUT CEILING
+    /// clears a caller-computed `floor`.
+    ///
+    /// [`Self::minimum_workable_window`] answers the same question for the
+    /// hardcoded [`BASELINE_TURN_TOKENS`] snapshot and for BOTH boundaries.
+    /// This one is parameterised on the floor the caller actually measured
+    /// from its own assembled request
+    /// (`wcore_agent::compact::estimate::uncompactable_floor_tokens`), and it
+    /// tests the input ceiling ALONE, because that is the boundary the
+    /// refusal it feeds is about: whether the request core is holding can be
+    /// sent at all. Whether compaction would additionally thrash inside the
+    /// window is [`Self::supports_compaction`]'s question and it has its own
+    /// refusal.
+    ///
+    /// Naming a number the operator must reach is the entire point - "raise
+    /// num_ctx" without a target leaves them bisecting against a symptom that
+    /// only shows up several turns in.
+    pub fn minimum_window_for_input_floor(&self, floor: usize) -> usize {
+        self.least_window_satisfying(|window| self.input_ceiling_for_window(window) > floor)
+    }
+
+    /// The least `window` for which `holds` is true, by doubling then
+    /// bisection.
+    ///
+    /// Every predicate passed here is monotone in the window - below the
+    /// [`MAX_RESERVE_FRACTION`] crossover both boundaries are fixed fractions
+    /// of the window, above it they are the window minus a constant, and the
+    /// two agree at the crossover by construction (that is what fixes the
+    /// fraction at 0.55). So the bisection is exact rather than a heuristic.
+    fn least_window_satisfying(&self, holds: impl Fn(usize) -> bool) -> usize {
+        let mut hi = 1usize;
+        while !holds(hi) {
+            let Some(next) = hi.checked_mul(2) else {
+                // Reserves so large no window satisfies them. The caller is
+                // reporting a refusal either way; saturating is honest.
+                return usize::MAX;
+            };
+            hi = next;
+        }
+        let mut lo = hi / 2;
+        while hi - lo > 1 {
+            let mid = lo + (hi - lo) / 2;
+            if holds(mid) {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        hi
+    }
+}
+
+/// The reserve buffers as they apply at one particular window.
+///
+/// A distinct type rather than a tuple so a caller cannot silently swap two of
+/// three same-typed fields — the failure would be a boundary that is merely
+/// wrong rather than one that does not compile.
+/// FerroxLabs/wayland#1200 — the accumulated tool-result ceiling in force for
+/// one window. See [`CompactConfig::tool_result_bounds`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolResultBounds {
+    /// Byte ceiling on the SUM of every tool result outside the protected tail.
+    pub total_budget_bytes: usize,
+    /// Byte ceiling on the protected tail itself, or `None` when no window is
+    /// known and the tail is bounded by its COUNT alone (today's behaviour).
+    pub protected_tail_bytes: Option<usize>,
+    /// Newest tool results eligible for protection, as a count.
+    pub keep_recent: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScaledReserves {
+    /// Tokens held back for the model's output.
+    pub output_reserve: usize,
+    /// Additional headroom below the input ceiling at which autocompact fires.
+    pub autocompact_buffer: usize,
+    /// The last-resort headroom below the window itself.
+    pub emergency_buffer: usize,
 }
 
 impl Default for CompactConfig {
@@ -442,19 +901,41 @@ impl Default for CompactConfig {
             smart_min_shrink_tokens: default_smart_min_shrink_tokens(),
             smart_handoff_to_memory: true,
             tool_call_args: ToolCallArgsConfig::default(),
+            tool_results: ToolResultsConfig::default(),
         }
     }
 }
 
 // --- Default value functions ---
 
+/// Bytes per token, at the char/4 heuristic every estimator in the workspace
+/// uses. Owned HERE because wcore-config sits below every consumer:
+/// `wcore_skills::prompt::CHARS_PER_TOKEN` re-exports it rather than restating
+/// it, which is what stopped the skills budget drifting onto a different
+/// window (FerroxLabs/wayland#1199).
+pub const CHARS_PER_TOKEN: usize = 4;
+
+/// Worst-case bytes a SINGLE tool result can carry: the per-result truncation
+/// cap applied at ingestion. `wcore_tools::Tool::max_result_size` returns this,
+/// so the ceiling arithmetic in [`CompactConfig::tool_result_bounds`] and the
+/// cap it is sized against cannot drift apart (FerroxLabs/wayland#1200).
+pub const MAX_TOOL_RESULT_BYTES: usize = 50_000;
+
 fn default_output_reserve() -> usize {
     20_000
 }
 fn default_autocompact_buffer() -> usize {
-    13_000
+    default_autocompact_buffer_const()
 }
 fn default_emergency_buffer() -> usize {
+    default_emergency_buffer_const()
+}
+/// `const` mirrors, so the ordering the scaling relies on is checked by the
+/// compiler rather than by a runtime assertion that could never fail.
+const fn default_autocompact_buffer_const() -> usize {
+    13_000
+}
+const fn default_emergency_buffer_const() -> usize {
     3_000
 }
 fn default_max_failures() -> u32 {
@@ -507,10 +988,89 @@ fn default_tca_min_args_bytes() -> usize {
 fn default_tca_epoch_turns() -> usize {
     4
 }
+/// ~30k tokens of accumulated tool-result body at the ~4 bytes/token
+/// heuristic. Chosen against the per-result cap it sits above: one result may
+/// still be 50,000 bytes, so the ceiling holds at least two full-size results
+/// plus the protected tail, and only bites once a session has genuinely
+/// accumulated a working set larger than that.
+fn default_tr_total_budget_bytes() -> usize {
+    120_000
+}
+fn default_tr_keep_recent() -> usize {
+    4
+}
+fn default_tr_epoch_results() -> usize {
+    4
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #1230 c3 - the remedy figure must be DERIVED from the floor the caller
+    /// measured, not from the snapshot constant, and it must be exact at the
+    /// boundary in both directions.
+    ///
+    /// Swept rather than spot-checked: a bisection that is off by one passes
+    /// any single spot check that happens to sit away from the boundary.
+    #[test]
+    fn the_minimum_window_for_a_floor_is_exact_at_the_boundary() {
+        let cfg = CompactConfig::default();
+        for floor in [0usize, 1_000, 3_118, 3_619, 8_000, 20_000] {
+            let min = cfg.minimum_window_for_input_floor(floor);
+            assert!(
+                cfg.input_ceiling_for_window(min) > floor,
+                "floor {floor}: the answer {min} does not itself clear the floor"
+            );
+            assert!(
+                cfg.input_ceiling_for_window(min - 1) <= floor,
+                "floor {floor}: {} also clears it, so {min} was not the LEAST",
+                min - 1
+            );
+        }
+    }
+
+    /// The refactor guard: `minimum_workable_window` is now expressed through
+    /// the shared bisection, so its answer must be unchanged. 6,929 is the
+    /// figure #1179 measured and every refusal message quotes.
+    #[test]
+    fn the_shared_bisection_did_not_move_the_workable_minimum() {
+        let cfg = CompactConfig::default();
+        assert_eq!(cfg.minimum_workable_window(), 6_929);
+        // The floor-parameterised form agrees with the constant one on the
+        // CEILING boundary at the same floor -- a positive control that the
+        // two share a bisection rather than merely both returning something.
+        assert_eq!(
+            cfg.minimum_window_for_input_floor(BASELINE_TURN_TOKENS),
+            cfg.least_window_satisfying(|w| cfg.input_ceiling_for_window(w) > BASELINE_TURN_TOKENS)
+        );
+    }
+
+    /// #1172 — the refusal has to name a number, and that number has to be
+    /// exact: it is what the operator sets `num_ctx` to.
+    #[test]
+    fn the_minimum_workable_window_is_the_least_one_that_supports_compaction() {
+        let cfg = CompactConfig::default();
+        let min = cfg.minimum_workable_window();
+        assert_eq!(min, 6_929, "0.45w > BASELINE_TURN_TOKENS at the defaults");
+        assert!(cfg.supports_compaction(min));
+        assert!(!cfg.supports_compaction(min - 1));
+        // The slot #1172 measured, and the band #1179's own notes call out.
+        assert!(!cfg.supports_compaction(4_096));
+        assert!(!cfg.supports_compaction(6_000));
+        assert!(cfg.supports_compaction(8_192));
+
+        // Derived from the reserves, not hardcoded: halving them halves it.
+        let lean = CompactConfig {
+            output_reserve: 10_000,
+            autocompact_buffer: 6_500,
+            emergency_buffer: 1_500,
+            ..CompactConfig::default()
+        };
+        let lean_min = lean.minimum_workable_window();
+        assert!(lean.supports_compaction(lean_min));
+        assert!(!lean.supports_compaction(lean_min - 1));
+    }
 
     #[test]
     fn default_values_match_spec() {
@@ -813,6 +1373,135 @@ epoch_turns = 6
     /// `UNVERIFIED_CONTEXT_WINDOW` arm of
     /// `CompactConfig::effective_context_window` (compact.rs) back to
     /// `DEFAULT_CONTEXT_WINDOW`.
+    /// FerroxLabs/wayland#1200 c2 - on a 32,768-token window the WORST-CASE
+    /// carried tool-result payload must fit the window.
+    ///
+    /// The ticket's arithmetic, verbatim: `total_budget_bytes` = 120,000 and
+    /// `keep_recent` = 4, each protected result able to carry
+    /// `Tool::max_result_size()` = 50,000 chars, so the worst case is
+    /// 120,000 + 4 x 50,000 = 320,000 bytes, about 80,000 tokens - 2.4x the
+    /// entire 32,768-token window the same release assumes for an unlisted
+    /// model. Both terms are absolute, so no window makes either smaller.
+    ///
+    /// Graded against the CEILING rather than the raw window: carried results
+    /// are input, and the boundary that admits input is
+    /// `input_ceiling_for_window`. A payload that fits the window but not the
+    /// ceiling is aborted by the #255 guard, which is not "fits".
+    #[test]
+    fn the_worst_case_carried_tool_results_fit_a_32k_window() {
+        const WINDOW: usize = 32_768;
+        let cfg = CompactConfig::default();
+
+        // The RED figure, stated as the ticket stated it, and asserted as a
+        // precondition so this test cannot silently start grading a config
+        // whose flat constants already fit.
+        let unbounded = cfg.worst_case_carried_tool_result_bytes(None);
+        assert_eq!(
+            unbounded,
+            120_000 + 4 * MAX_TOOL_RESULT_BYTES,
+            "precondition: the unknown-window fallback is still the ticket's \
+             120,000 + 4 x 50,000"
+        );
+        assert!(
+            unbounded / CHARS_PER_TOKEN > WINDOW,
+            "precondition: the flat constants really do overflow a {WINDOW}-token \
+             window ({} tokens), or this test grades nothing",
+            unbounded / CHARS_PER_TOKEN
+        );
+
+        let bounded = cfg.worst_case_carried_tool_result_bytes(Some(WINDOW));
+        let ceiling = cfg.input_ceiling_for_window(WINDOW);
+        assert!(
+            bounded / CHARS_PER_TOKEN <= ceiling,
+            "the worst-case carried payload is {} bytes = {} tokens, and the \
+             pre-flight guard admits only {ceiling} tokens on a {WINDOW}-token \
+             window",
+            bounded,
+            bounded / CHARS_PER_TOKEN
+        );
+        // And a fortiori inside the window itself, which is the sentence the
+        // criterion is written in.
+        assert!(bounded / CHARS_PER_TOKEN <= WINDOW);
+    }
+
+    /// #1200 - NO REAL WINDOW MAY GET A ZERO TOOL-RESULT BUDGET.
+    ///
+    /// This is the regression guard for a defect that shipped on
+    /// `lane/f13-arc-integrate` and was caught by adversarial verification
+    /// rather than by any test: reserving a worst-case 50,000-byte tail drove
+    /// the budget to 0 at every window at or below 16,384, which stubs results
+    /// that already fit. A single assertion at one window would not have caught
+    /// it -- 32,768 was fine and 16,384 was not -- so the table is the test.
+    ///
+    /// The numbers are pinned, not merely `> 0`, because the failure mode is a
+    /// silent drift toward zero and only an exact table registers it.
+    ///
+    /// 32,768 is the hinge: at and above it the worst case is reachable and is
+    /// held (30,832 = 80,832 admitted - 50,000 worst tail), which is what
+    /// `the_worst_case_carried_tool_results_fit_a_32k_window` grades. Below it
+    /// the worst case is unsatisfiable at any budget, so the budget is sized
+    /// against the declared tail and stays positive.
+    #[test]
+    fn no_real_window_gets_a_zero_tool_result_budget() {
+        let cfg = CompactConfig::default();
+        let table = [
+            (4_096usize, 5_054usize),
+            (8_192, 10_106),
+            (16_384, 20_208),
+            (32_768, 30_832),
+            (65_536, 85_072),
+            (131_072, 120_000),
+            (200_000, 120_000),
+        ];
+        for (window, expected) in table {
+            let b = cfg.tool_result_bounds(Some(window));
+            assert_eq!(
+                b.total_budget_bytes, expected,
+                "window {window}: tool-result budget drifted"
+            );
+            assert!(
+                b.total_budget_bytes > 0,
+                "window {window}: a zero budget stubs every accumulated tool \
+                 result, including ones that already fit"
+            );
+            // Budget plus the DECLARED tail cap never exceeds what the guard
+            // admits. The unconditionally-retained newest result can still
+            // exceed it -- that is the named gap, reported by
+            // `worst_case_carried_tool_result_bytes`, not this one.
+            let admissible = cfg.input_ceiling_for_window(window) * CHARS_PER_TOKEN;
+            let tail = b
+                .protected_tail_bytes
+                .expect("a sized window declares a tail cap");
+            assert!(
+                b.total_budget_bytes + tail <= admissible,
+                "window {window}: budget {} + tail {tail} exceeds admissible {admissible}",
+                b.total_budget_bytes
+            );
+        }
+    }
+
+    /// #1200 - the bound must be IDENTITY on a large window, or it is a
+    /// regression dressed as a fix. A 200,000-token window admits far more
+    /// than 120,000 bytes of results, so the shipped constants must survive
+    /// untouched there.
+    #[test]
+    fn a_large_window_keeps_todays_flat_tool_result_constants() {
+        let cfg = CompactConfig::default();
+        let big = cfg.tool_result_bounds(Some(200_000));
+        assert_eq!(
+            big.total_budget_bytes, cfg.tool_results.total_budget_bytes,
+            "a 200k window must not shrink the shipped budget"
+        );
+        assert_eq!(big.keep_recent, cfg.tool_results.keep_recent);
+        // The small window is the one that moves.
+        let small = cfg.tool_result_bounds(Some(32_768));
+        assert!(
+            small.total_budget_bytes < cfg.tool_results.total_budget_bytes,
+            "control: the bound must actually bite somewhere, or the identity \
+             above is vacuous"
+        );
+    }
+
     #[test]
     fn unknown_model_falls_back_to_the_unverified_window() {
         let cfg = CompactConfig::default();

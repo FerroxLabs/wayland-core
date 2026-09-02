@@ -111,15 +111,24 @@ impl ContextWindow {
     }
 
     /// Pre-flight input ceiling = window − output_reserve − emergency_buffer,
-    /// saturating (never underflows). `None` when the window is unknown — the
-    /// overflow guard then SKIPS (fail open), identical to today's `window > 0`
-    /// skip, with `size_output_cap`'s UNKNOWN_CAP + the provider 400 as backstops.
-    pub fn input_ceiling(&self, output_reserve: u64, emergency_buffer: u64) -> Option<u64> {
+    /// with both reserves SCALED to this window
+    /// ([`CompactConfig::scaled_reserves`]). `None` when the window is unknown —
+    /// the overflow guard then SKIPS (fail open), identical to the old
+    /// `window > 0` skip, with `size_output_cap`'s UNKNOWN_CAP + the provider
+    /// 400 as backstops.
+    ///
+    /// # Why this takes the config and not two numbers (#1179)
+    ///
+    /// It used to take `output_reserve` and `emergency_buffer` as bare `u64`s,
+    /// and every caller passed `config.output_reserve` / `config.emergency_buffer`
+    /// unscaled. Those absolutes were tuned for a 200,000-token window; against
+    /// the 4,096-token slot #1172 measured they saturate the ceiling to zero and
+    /// the guard fires on every turn. Taking the config means there is no
+    /// unscaled spelling of this left for a caller to reach for by accident —
+    /// the scaling is not something a call site can forget.
+    pub fn input_ceiling(&self, config: &crate::compact::CompactConfig) -> Option<u64> {
         let w = self.window?;
-        Some(
-            w.saturating_sub(output_reserve)
-                .saturating_sub(emergency_buffer),
-        )
+        Some(config.input_ceiling_for_window(w as usize) as u64)
     }
 }
 
@@ -158,6 +167,29 @@ pub const SERVED_SHORTFALL_RATIO: f64 = 0.60;
 /// truncated turn was 6,371 tokens short.
 pub const MIN_SHORTFALL_TOKENS: u64 = 1_024;
 
+/// How many [`TruncationSignal::Regression`] verdicts one route must produce
+/// before its learned window may SIZE the session — FerroxLabs/wayland-core#353.
+///
+/// The `Regression` arm is the one with no absolute-magnitude requirement of
+/// its own. [`TruncationSignal::Shortfall`] must miss by at least
+/// [`MIN_SHORTFALL_TOKENS`] AND fall below [`SERVED_SHORTFALL_RATIO`], which is
+/// corroboration inside a single turn; a `Regression` fires on any backwards
+/// step past [`MIN_OBSERVABLE_INPUT_TOKENS`]. One anomalous report — a provider
+/// bug, a retried request billed oddly, a proxy that rewrites usage — produces
+/// it, and since #1172/#1179 the learned window no longer only produces a
+/// NOTICE: it moves the autocompact trigger and the pre-flight ceiling. A false
+/// positive there silently discards the user's conversation. The likelihood did
+/// not change; the blast radius did.
+///
+/// Two, not more. This is a truncating endpoint, so a genuine regression
+/// repeats on the very next turn — the `proxylog3` sequence #1172 was
+/// calibrated on regresses on every turn past the slot. A higher bar would
+/// delay a real narrowing without making a false one less likely.
+///
+/// A `Shortfall` on the same route also satisfies it — agreement with a second
+/// signal — because it carries the absolute magnitude this arm lacks.
+pub const REGRESSION_CORROBORATION_OBSERVATIONS: u32 = 2;
+
 /// Turns reporting fewer prompt tokens than this carry no usable evidence:
 /// integer noise dominates, and no real served slot is this small.
 pub const MIN_OBSERVABLE_INPUT_TOKENS: u64 = 512;
@@ -193,6 +225,15 @@ pub struct ServedWindowEvidence {
     /// Best LOWER BOUND on the served slot: the largest prompt the endpoint
     /// has been observed to actually process on this route.
     pub served_window: u64,
+    /// Whether this figure is now CORROBORATED, i.e. whether
+    /// [`ServedWindowTracker::sizing_window`] answers with it.
+    ///
+    /// wayland-core#353 split telling from sizing and left the notice claiming
+    /// the sizing half unconditionally, so on every first `Regression` — the
+    /// only turn the notice ever fires for that arm — the user was told "core
+    /// is now sizing this session against N" at the one moment it was not.
+    /// The caller picks its wording from this.
+    pub corroborated: bool,
 }
 
 /// Learns an endpoint's SERVED context window from the `usage` it already
@@ -230,6 +271,13 @@ pub struct ServedWindowTracker {
     /// Set once truncation has been OBSERVED. `None` means "no evidence" —
     /// never "the window is fine".
     served_window: Option<u64>,
+    /// [`TruncationSignal::Regression`] verdicts seen on this route.
+    /// See [`REGRESSION_CORROBORATION_OBSERVATIONS`].
+    regressions: u32,
+    /// Whether the evidence is strong enough to SIZE the session on, as opposed
+    /// to strong enough to TELL the user about. See
+    /// [`ServedWindowTracker::sizing_window`].
+    corroborated: bool,
 }
 
 impl ServedWindowTracker {
@@ -283,17 +331,47 @@ impl ServedWindowTracker {
             return None;
         };
 
+        // #353 — CORROBORATION, decided here where the verdict is computed,
+        // and BEFORE the notice suppression below: a second regression at an
+        // unchanged ceiling is exactly what corroborates the first, and that
+        // early return would swallow it.
+        //
+        // This gates only what SIZES the session ([`Self::sizing_window`]).
+        // Everything the user is TOLD keeps its one-observation sensitivity —
+        // this function still returns evidence on the first qualifying turn and
+        // `served_window()` still answers from it. A notice on one observation
+        // is useful and cheap to be wrong about; a compaction is neither.
+        let was_corroborated = self.corroborated;
+        match signal {
+            TruncationSignal::Shortfall => self.corroborated = true,
+            TruncationSignal::Regression => {
+                self.regressions = self.regressions.saturating_add(1);
+                if self.regressions >= REGRESSION_CORROBORATION_OBSERVATIONS {
+                    self.corroborated = true;
+                }
+            }
+        }
+        let newly_corroborated = !was_corroborated && self.corroborated;
+
         let served_window = self.max_reported;
-        if self.served_window == Some(served_window) {
+        if self.served_window == Some(served_window) && !newly_corroborated {
             // Already established and unchanged — the user has been told.
             return None;
         }
+        // wayland-core#353 — a second observation at an UNCHANGED figure is the
+        // one that flips this route from telling to sizing, and it used to be
+        // swallowed by the line above. That made the notice's sizing sentence
+        // unfalsifiable: it was emitted on the first observation (when sizing
+        // had NOT moved) and never again (when it had). Corroboration is a
+        // state change the caller must be able to announce, so it re-opens the
+        // gate exactly once.
         self.served_window = Some(served_window);
         Some(ServedWindowEvidence {
             signal,
             sent_estimate,
             reported_input,
             served_window,
+            corroborated: self.corroborated,
         })
     }
 
@@ -301,6 +379,19 @@ impl ServedWindowTracker {
     /// has seen no truncation. `None` is "no evidence", never "fine".
     pub fn served_window(&self) -> Option<u64> {
         self.served_window
+    }
+
+    /// The learned window, but only once the evidence for it is CORROBORATED —
+    /// FerroxLabs/wayland-core#353.
+    ///
+    /// The sizing figure, as against the telling figure
+    /// [`Self::served_window`] answers with. This is the only one allowed to
+    /// move the autocompact trigger and the pre-flight ceiling, which act on the
+    /// conversation rather than describe it. `None` here does not mean "no
+    /// truncation"; it means "not yet enough evidence to shrink the user's
+    /// context over". See [`REGRESSION_CORROBORATION_OBSERVATIONS`].
+    pub fn sizing_window(&self) -> Option<u64> {
+        self.corroborated.then_some(self.served_window).flatten()
     }
 }
 
@@ -430,11 +521,14 @@ mod tests {
 
     #[test]
     fn input_ceiling_known_fires_on_gpt4o_where_200k_would_not() {
+        let cfg = crate::compact::CompactConfig::default();
         let ctx = ContextWindow {
             used_tokens: 110_000,
             window: Some(128_000),
         };
-        let ceiling = ctx.input_ceiling(20_000, 3_000);
+        let ceiling = ctx.input_ceiling(&cfg);
+        // 128_000 is far above the #1179 scaling crossover (60_000), so the
+        // reserves apply in full and this is the number it always was.
         assert_eq!(ceiling, Some(105_000));
         // 110_000 >= 105_000 -> the #255 guard fires; the old 200k-based
         // ceiling (177_000) would have let it through (false negative).
@@ -443,19 +537,41 @@ mod tests {
 
     #[test]
     fn input_ceiling_unknown_is_none() {
+        let cfg = crate::compact::CompactConfig::default();
         let ctx = ContextWindow {
             used_tokens: 110_000,
             window: None,
         };
-        assert_eq!(ctx.input_ceiling(20_000, 3_000), None);
+        assert_eq!(ctx.input_ceiling(&cfg), None);
     }
 
+    /// #1179 — this used to assert `Some(0)`, i.e. that a window smaller than
+    /// the absolute reserves produced a ceiling of zero "without underflowing".
+    /// Zero is not a safe answer on this path: `used >= ceiling` is true of
+    /// every turn, including an empty one, so the #255 guard fires immediately
+    /// and aborts the run. The saturating subtraction never underflowed and
+    /// never helped.
+    ///
+    /// With the reserves scaled to the window the case cannot arise: the
+    /// ceiling is at least `(1 - MAX_RESERVE_FRACTION)` of the window for any
+    /// positive window, so it is positive whenever the window is.
     #[test]
-    fn input_ceiling_saturates_no_underflow() {
-        let ctx = ContextWindow {
-            used_tokens: 0,
-            window: Some(1_000),
-        };
-        assert_eq!(ctx.input_ceiling(20_000, 3_000), Some(0));
+    fn input_ceiling_is_positive_for_every_positive_window() {
+        let cfg = crate::compact::CompactConfig::default();
+        for window in [1_000u64, 4_096, 8_192, 32_768, 60_000, 128_000, 200_000] {
+            let ctx = ContextWindow {
+                used_tokens: 0,
+                window: Some(window),
+            };
+            let ceiling = ctx.input_ceiling(&cfg).expect("a known window");
+            assert!(
+                ceiling > 0,
+                "a zero ceiling fires the #255 guard on an empty turn; window {window}"
+            );
+            assert!(
+                ceiling as f64 >= window as f64 * (1.0 - crate::compact::MAX_RESERVE_FRACTION),
+                "window {window} kept only {ceiling} tokens of input budget"
+            );
+        }
     }
 }

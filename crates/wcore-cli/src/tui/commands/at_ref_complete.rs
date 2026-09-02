@@ -102,10 +102,23 @@ fn complete_paths(body: &str, root: &Path) -> Vec<Completion> {
             continue;
         }
         let path = entry.path();
-        if is_secret_path(&path) {
+        let file_type = entry.file_type().ok();
+        // core#339: a benign-named symlink to a credential store clears the
+        // lexical name check, and accepting the completion then inlines the
+        // store. Judge the RESOLVED target too.
+        //
+        // Only for a symlink: for every other entry the name IS the target, and
+        // this loop runs on each keystroke over a whole directory, so the
+        // syscall is spent exactly where it can change the answer.
+        let resolved = if file_type.is_some_and(|t| t.is_symlink()) {
+            fs::canonicalize(&path).ok()
+        } else {
+            None
+        };
+        if is_secret_path(&path) || resolved.as_deref().is_some_and(is_secret_path) {
             continue;
         }
-        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        let is_dir = file_type.map(|t| t.is_dir()).unwrap_or(false);
         let rel = if dir_part.is_empty() {
             name.to_string()
         } else {
@@ -270,5 +283,51 @@ mod tests {
         assert_eq!(human_size(512), "512 B");
         assert_eq!(human_size(2048), "2 KB");
         assert_eq!(human_size(3 * 1024 * 1024), "3.0 MB");
+    }
+
+    /// core#339 — completion offers a benign-named symlink whose target is a
+    /// credential store, because the guard matched the LEXICAL name. Accepting
+    /// the completion then inlines the store.
+    #[cfg(unix)]
+    #[test]
+    fn completion_never_offers_a_symlink_to_a_credential_store() {
+        let outside = TempDir::new().expect("tempdir");
+        let secret = outside.path().join(".git-credentials");
+        fs::write(&secret, "https://user:s3cr3t-token@git.example.com\n").expect("write secret");
+
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::write(root.join("notes-real.txt"), "ok").expect("write ordinary");
+        std::os::unix::fs::symlink(&secret, root.join("notes.txt")).expect("symlink");
+
+        let inserts: Vec<String> = complete("@notes", root)
+            .into_iter()
+            .map(|c| c.insert)
+            .collect();
+        assert!(
+            !inserts.iter().any(|i| i == "@notes.txt"),
+            "completion offered a symlink to a credential store: {inserts:?}"
+        );
+        assert!(
+            inserts.iter().any(|i| i == "@notes-real.txt"),
+            "the ordinary sibling must still be offered: {inserts:?}"
+        );
+    }
+
+    /// core#339 negative control for the completion surface — an ordinary
+    /// symlink stays offerable. Passes on BOTH arms.
+    #[cfg(unix)]
+    #[test]
+    fn completion_still_offers_a_symlink_to_an_ordinary_file() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::write(root.join("real.md"), "real").expect("write");
+        std::os::unix::fs::symlink(root.join("real.md"), root.join("link.md")).expect("symlink");
+
+        let inserts: Vec<String> = complete("@link", root)
+            .into_iter()
+            .map(|c| c.insert)
+            .collect();
+        assert!(inserts.iter().any(|i| i == "@link.md"), "{inserts:?}");
     }
 }

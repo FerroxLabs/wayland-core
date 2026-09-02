@@ -211,7 +211,13 @@ jobs:
       checks: write
       pull-requests: write
     steps:
+      # ADMITTED ON THE SAME TERMS AS THE GATE BELOW. A gate that runs from a
+      # tree no checkout made, over artifacts no download fetched, cannot grade
+      # anything -- ci.yml's report job did exactly that on run 33320774111 and
+      # exited 127. Enforced by gate-admission.py for every step at or before
+      # the last gate in a job that itself runs unconditionally.
       - uses: actions/checkout@v6
+        if: ${{ !cancelled() }}
 
       # NO `merge-multiple: true`: both legs upload their report under the same
       # filename (`junit.xml`, the path baked into the `e2e` nextest profile),
@@ -220,6 +226,7 @@ jobs:
       # and leave the assertion below unable to see a half-run suite. ci.yml
       # removed the same flag for the same reason on 2026-08-02.
       - name: Download E2E JUnit reports
+        if: ${{ !cancelled() }}
         uses: actions/download-artifact@v8
         with:
           pattern: e2e-junit-*
@@ -228,6 +235,10 @@ jobs:
 
       - name: How many legs were in scope
         id: scope
+        # The gate reads EXPECTED_MIN from this step's output. Skipping it hands
+        # the gate an empty EXPECTED_MIN, which assert-test-evidence.sh fails
+        # closed on -- correct, and a red naming the wrong cause.
+        if: ${{ !cancelled() }}
         env:
           EVENT_NAME: ${{ github.event_name }}
           DISPATCH_PROVIDER: ${{ github.event.inputs.provider }}
@@ -245,13 +256,30 @@ jobs:
       # check went green on PR #315 with both legs' test steps skipped for a
       # missing credential (wayland#1115). Second net behind the leg-level
       # failure above: it also catches a leg that dies after its credential
-      # check but before writing a report. Skipped only on a CANCELLED `e2e` —
-      # a run the user or the concurrency gate stopped was never going to
-      # produce evidence and must not be re-reported as a defect. Deliberately
-      # NOT skipped when `e2e` is itself `skipped`: "no leg ran at all" is the
-      # failure this exists to catch.
+      # check but before writing a report. Deliberately NOT skipped when `e2e`
+      # is itself `skipped`: "no leg ran at all" is the failure this exists to
+      # catch.
+      #
+      # THE CONDITION NAMES NO JOB, and that is enforced rather than intended.
+      # It read `needs.e2e.result != 'cancelled'` until 2026-08-31 — the same
+      # shape ci.yml's evidence gate carried when it switched ITSELF off on run
+      # 33303418632 with the evidence already downloaded (wayland#1177 c1). A
+      # plain expression is also skipped outright once any earlier step in the
+      # job has failed, so `Download E2E JUnit reports` failing took this gate
+      # with it. `!cancelled()` is a status-check function: it survives both.
+      # assert-test-evidence.sh carries `ADMISSION: unconditional` and
+      # report-gate-wiring.test.sh reds if any of its callers is admitted by
+      # anything but `always()` / `!cancelled()`.
+      #
+      # ONE BEHAVIOUR CHANGE, STATED RATHER THAN SMUGGLED, and it matches the
+      # change ci.yml already made: a CANCELLED `e2e` no longer suppresses this
+      # gate. A cancelled leg leaves no evidence, and this step's own name says
+      # a suite that did not run is not a pass. The workflow run being
+      # cancelled is still excluded, because that is what `cancelled()` means.
+      # Evidence destroyed by a cancellation at the time budget is tracked as
+      # FerroxLabs/wayland-core#404.
       - name: Assert E2E evidence exists (a skipped suite is not a pass)
-        if: ${{ needs.e2e.result != 'cancelled' }}
+        if: ${{ !cancelled() }}
         env:
           EVIDENCE_DIR: e2e-reports
           EXPECTED_MIN: ${{ steps.scope.outputs.expected }}

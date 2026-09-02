@@ -290,6 +290,12 @@ pub struct McpConfig {
     /// `wcore_agent::mcp_curator::McpCurator`. Default `TopK(15)`.
     #[serde(default)]
     pub curation: McpCurationPolicy,
+    /// wayland-core#354 -- posture of the pre-spawn OSV malware gate when the
+    /// check cannot be performed (backend error, or an OSV endpoint that
+    /// fails the SSRF gate). Defaults to [`McpMalwareGateMode::Permissive`],
+    /// which is the behaviour every existing install already has.
+    #[serde(default)]
+    pub malware_gate: McpMalwareGateMode,
 }
 
 impl McpConfig {
@@ -306,6 +312,53 @@ impl McpConfig {
             .filter(|(_, cfg)| cfg.is_visible_to_assistant(active))
             .map(|(name, cfg)| (name.clone(), cfg.clone()))
             .collect()
+    }
+}
+
+/// wayland-core#354 — what the pre-spawn MCP malware gate does when the OSV
+/// check **could not be performed**.
+///
+/// This is only about the indeterminate answer. A package with known malware
+/// advisories is refused in both modes, and an argv the gate cannot read is
+/// refused in both modes; neither is a "check failure", both are answers.
+///
+/// * [`Permissive`](Self::Permissive) — the default, and the behaviour of
+///   every release before this key existed. An unreachable OSV endpoint logs
+///   at ERROR and the server still launches. Refusing every MCP server the
+///   moment the machine goes offline is a real product regression for anyone
+///   working on a plane, so this stays the default.
+/// * [`Strict`](Self::Strict) — a check that could not run is not a pass. The
+///   launch is refused with `McpError::MalwareBlocked`. Choose this where an
+///   unreachable malware feed is more likely to be an attacker holding the
+///   feed down than a flaky cafe network.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpMalwareGateMode {
+    /// Fail OPEN on an unperformable check, loudly (today's behaviour).
+    #[default]
+    Permissive,
+    /// Fail CLOSED on an unperformable check.
+    Strict,
+}
+
+impl McpMalwareGateMode {
+    /// The operator-facing spelling, matching the `config.toml` value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Permissive => "permissive",
+            Self::Strict => "strict",
+        }
+    }
+
+    /// The stricter of two layers. Used when a project config is merged over
+    /// the global one: a project file may TIGHTEN the gate but must never be
+    /// able to loosen an operator's `strict` back to `permissive` -- the same
+    /// asymmetry `trust_project_hooks` already applies to hook dispatch.
+    pub fn stricter_of(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Strict, _) | (_, Self::Strict) => Self::Strict,
+            _ => Self::Permissive,
+        }
     }
 }
 
@@ -1012,6 +1065,29 @@ impl ApprovalMode {
 /// costs more than it can ever save (and Anthropic ignores cache segments
 /// under its own per-model minimum anyway).
 pub const DEFAULT_CACHE_MIN_PREFIX_TOKENS: usize = 1024;
+
+/// Whether `prompt_caching` defaults ON for `provider` when the user has not
+/// said (wayland#559 c3).
+///
+/// The whole Anthropic FAMILY — native Anthropic, Anthropic-on-Bedrock,
+/// Anthropic-on-Vertex — speaks the same `cache_control` dialect and is
+/// already handed the same breakpoint hints: all three set
+/// `cache_message_breakpoints: Some(true)` in `ProviderCompat`. Before this,
+/// only native Anthropic flipped the flag, so on Bedrock and Vertex the engine
+/// computed cache boundaries every turn and the adapter dropped the system and
+/// tools markers on the floor — prompt caching was OFF at two of the three
+/// sites that support it. #559's "caching is already on" measurement was taken
+/// against one provider and generalized; this is the rest of the enumeration.
+///
+/// Providers outside the family are untouched: OpenAI-shaped endpoints cache
+/// implicitly (nothing to enable) and Gemini does not honour explicit
+/// breakpoints at all.
+pub fn prompt_caching_on_by_default(provider: ProviderType) -> bool {
+    matches!(
+        provider,
+        ProviderType::Anthropic | ProviderType::Bedrock | ProviderType::Vertex
+    )
+}
 
 /// Prompt-caching preference for a provider entry. Accepts both TOML shapes:
 ///
@@ -2602,12 +2678,16 @@ impl Config {
                 .map(|e| CredentialSource::CatalogEnvVar(e.env_var.clone()))
                 .unwrap_or(CredentialSource::OutOfBand)
         };
-        // #1173 — the three conditions of the keyless self-hosted exemption,
-        // named once. See the `None if` arm below for why each is required.
-        let declared_keyless_self_hosted_endpoint = (cli.base_url.is_some()
-            || provider_config.base_url.is_some())
-            && compat.keyless_self_hosted()
-            && crate::self_hosted::is_self_hosted_base_url(&base_url);
+        // #1173 — the keyless self-hosted exemption. The three conditions live
+        // in `self_hosted::declared_keyless_self_hosted_endpoint` and nowhere
+        // else; #1212 was this gate and `resolve_council_provider` deciding
+        // differently because only one of them spelled them out.
+        let declared_keyless_self_hosted_endpoint =
+            crate::self_hosted::declared_keyless_self_hosted_endpoint(
+                cli.base_url.is_some() || provider_config.base_url.is_some(),
+                &compat,
+                &base_url,
+            );
         let (mut api_key, mut credential_source) = match resolve_api_key_with_source(
             cli.api_key.as_deref(),
             account_id.as_deref(),
@@ -2711,12 +2791,13 @@ impl Config {
         };
         let execution_policy = merged.execution.baseline_policy(requested_approvals);
 
-        // Resolve prompt_caching: default true for Anthropic
+        // Resolve prompt_caching: default ON for the whole Anthropic FAMILY.
+        // See `prompt_caching_on_by_default`.
         let prompt_caching = provider_config
             .prompt_caching
             .as_ref()
             .and_then(PromptCachingConfig::enabled)
-            .unwrap_or(matches!(provider, ProviderType::Anthropic));
+            .unwrap_or(prompt_caching_on_by_default(provider));
         let prompt_caching_min_prefix_tokens = provider_config
             .prompt_caching
             .as_ref()
@@ -3222,7 +3303,7 @@ pub fn credentials_storage_path() -> PathBuf {
         .join("credentials.toml")
 }
 
-fn parse_builtin_provider(s: &str) -> Option<ProviderType> {
+pub(crate) fn parse_builtin_provider(s: &str) -> Option<ProviderType> {
     match s {
         "anthropic" => Some(ProviderType::Anthropic),
         "openai" => Some(ProviderType::OpenAI),
@@ -3490,6 +3571,26 @@ pub fn resolve_council_provider(
         .map(str::to_string)
         .unwrap_or(raw_model);
 
+    let compat_defaults = if let Some(entry) = catalog_entry.as_ref() {
+        ProviderCompat::from_catalog_entry(&entry.id, entry.api_path.as_deref())
+    } else {
+        compat_defaults_for(provider)
+    };
+    let user_compat = provider_config.compat.clone().unwrap_or_default();
+    let mut compat = ProviderCompat::merge(compat_defaults, user_compat.clone());
+
+    // F-088: align the advertised effort capability with what the resolved
+    // model actually accepts (only when the user hasn't pinned it explicitly).
+    if provider == ProviderType::OpenAI
+        && user_compat.supports_effort.is_none()
+        && compat.supports_effort.unwrap_or(false)
+        && !model.is_empty()
+        && !openai_model_accepts_effort(&model)
+    {
+        compat.supports_effort = Some(false);
+        compat.effort_levels = Some(vec![]);
+    }
+
     // Credentials: inline config key → store → env var (per provider), plus the
     // catalog entry's own env var as a fallback — exactly Config::resolve's
     // chain, with no CLI key (the council never takes a CLI `--api-key`).
@@ -3525,6 +3626,21 @@ pub fn resolve_council_provider(
         // keyless BYO member the council skips (not fatal).
         Err(_) => match catalog_env_key.clone() {
             Some(key) => key,
+            // #1212 — except when it is the same keyless self-hosted endpoint
+            // `Config::resolve` now starts happily on. A council member pointed
+            // at a local Ollama has no remote credential to find and must not be
+            // dropped before spawn for lacking one. Same predicate, same three
+            // conditions, so the two gates cannot drift apart again. There is no
+            // CLI rung here, so the declaration can only come from
+            // `[providers.<name>] base_url`.
+            None if crate::self_hosted::declared_keyless_self_hosted_endpoint(
+                provider_config.base_url.is_some(),
+                &compat,
+                &base_url,
+            ) =>
+            {
+                String::new()
+            }
             None => return Err(CouncilProviderError::Keyless(provider_id.to_string())),
         },
     };
@@ -3533,32 +3649,12 @@ pub fn resolve_council_provider(
         .prompt_caching
         .as_ref()
         .and_then(PromptCachingConfig::enabled)
-        .unwrap_or(matches!(provider, ProviderType::Anthropic));
+        .unwrap_or(prompt_caching_on_by_default(provider));
     let prompt_caching_min_prefix_tokens = provider_config
         .prompt_caching
         .as_ref()
         .and_then(PromptCachingConfig::min_prefix_tokens)
         .unwrap_or(DEFAULT_CACHE_MIN_PREFIX_TOKENS);
-
-    let compat_defaults = if let Some(entry) = catalog_entry.as_ref() {
-        ProviderCompat::from_catalog_entry(&entry.id, entry.api_path.as_deref())
-    } else {
-        compat_defaults_for(provider)
-    };
-    let user_compat = provider_config.compat.clone().unwrap_or_default();
-    let mut compat = ProviderCompat::merge(compat_defaults, user_compat.clone());
-
-    // F-088: align the advertised effort capability with what the resolved
-    // model actually accepts (only when the user hasn't pinned it explicitly).
-    if provider == ProviderType::OpenAI
-        && user_compat.supports_effort.is_none()
-        && compat.supports_effort.unwrap_or(false)
-        && !model.is_empty()
-        && !openai_model_accepts_effort(&model)
-    {
-        compat.supports_effort = Some(false);
-        compat.effort_levels = Some(vec![]);
-    }
 
     let resolved_model = if model.is_empty() {
         None
@@ -5662,6 +5758,14 @@ fn merge_config_files_with_trust(
     let mcp = McpConfig {
         servers: mcp_servers,
         curation: project.mcp.curation,
+        // wayland-core#354 — security posture, so NOT a plain project-wins
+        // override: the stricter layer wins. A checked-out repo must not be
+        // able to hand itself back the fail-open by writing
+        // `malware_gate = "permissive"` into its own config.
+        malware_gate: global
+            .mcp
+            .malware_gate
+            .stricter_of(project.mcp.malware_gate),
     };
 
     // Plan: project overrides global if any field differs from default
@@ -5786,6 +5890,15 @@ fn merge_config_files_with_trust(
             global.budget.max_daily_cost_usd,
         ) {
             (Some(project), Some(global)) => Some(project.min(global)),
+            (Some(value), None) | (None, Some(value)) => Some(value),
+            (None, None) => None,
+        },
+        // STRICTEST wins, for the same reason as `max_daily_cost_usd`: the
+        // spend MODE is a machine-owner guarantee ("nothing paid", "nothing
+        // leaves this box"), and a repo-local config file must never be able
+        // to relax one.
+        mode: match (project.budget.mode, global.budget.mode) {
+            (Some(project), Some(global)) => Some(project.strictest(global)),
             (Some(value), None) | (None, Some(value)) => Some(value),
             (None, None) => None,
         },
@@ -8810,6 +8923,83 @@ gate = ["attacker-command"]
         assert!(merged.anvil.gate.is_empty());
     }
 
+    // -- wayland-core#354: the malware-gate mode is a config key ---------
+
+    /// c1. The key exists, both spellings parse, and OMITTING it leaves an
+    /// existing install exactly where it was. A default that silently became
+    /// `strict` would refuse every MCP server on any machine that cannot
+    /// reach `api.osv.dev`.
+    #[test]
+    fn malware_gate_defaults_to_permissive_and_parses_both_modes() {
+        let omitted: ConfigFile = toml::from_str(
+            r#"
+[mcp.servers.local]
+transport = "stdio"
+command = "local-mcp"
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            omitted.mcp.malware_gate,
+            McpMalwareGateMode::Permissive,
+            "omitting the key must not change behaviour for an existing user"
+        );
+        assert_eq!(
+            McpConfig::default().malware_gate,
+            McpMalwareGateMode::Permissive
+        );
+
+        let strict: ConfigFile = toml::from_str("[mcp]\nmalware_gate = \"strict\"\n").unwrap();
+        assert_eq!(strict.mcp.malware_gate, McpMalwareGateMode::Strict);
+
+        let permissive: ConfigFile =
+            toml::from_str("[mcp]\nmalware_gate = \"permissive\"\n").unwrap();
+        assert_eq!(permissive.mcp.malware_gate, McpMalwareGateMode::Permissive);
+
+        // A value that is neither must be a load error, not a silent default:
+        // a typo'd `malware_gate = "strcit"` that quietly means permissive is
+        // the fail-open wearing a different hat.
+        assert!(toml::from_str::<ConfigFile>("[mcp]\nmalware_gate = \"strcit\"\n").is_err());
+    }
+
+    /// c1. The posture round-trips through serialization, so a config the CLI
+    /// writes back does not lose an operator's `strict`.
+    #[test]
+    fn malware_gate_survives_a_serialize_round_trip() {
+        let mut cfg = ConfigFile::default();
+        cfg.mcp.malware_gate = McpMalwareGateMode::Strict;
+        let text = toml::to_string(&cfg).unwrap();
+        let back: ConfigFile = toml::from_str(&text).unwrap();
+        assert_eq!(back.mcp.malware_gate, McpMalwareGateMode::Strict);
+    }
+
+    /// c1. The cascade is asymmetric on purpose. A project file may TIGHTEN
+    /// the gate; it must never be able to hand a checked-out repository the
+    /// fail-open back by writing `permissive` over the operator's `strict`.
+    #[test]
+    fn a_project_config_cannot_loosen_the_malware_gate() {
+        let mut global = ConfigFile::default();
+        global.mcp.malware_gate = McpMalwareGateMode::Strict;
+        let project: ConfigFile = toml::from_str("[mcp]\nmalware_gate = \"permissive\"\n").unwrap();
+
+        let merged = merge_config_files_with_trust(global, project, true);
+        assert_eq!(
+            merged.mcp.malware_gate,
+            McpMalwareGateMode::Strict,
+            "a project file loosened the operator's malware gate"
+        );
+
+        // ...and the other direction still works: tightening is allowed.
+        let global = ConfigFile::default();
+        let project: ConfigFile = toml::from_str("[mcp]\nmalware_gate = \"strict\"\n").unwrap();
+        assert_eq!(
+            merge_config_files_with_trust(global, project, true)
+                .mcp
+                .malware_gate,
+            McpMalwareGateMode::Strict
+        );
+    }
+
     #[test]
     fn current_fingerprint_trust_activates_eligible_project_configuration() {
         let mut global = ConfigFile::default();
@@ -11805,5 +11995,128 @@ require_priced = true
         both.browser.stealth.preferred_provider = crate::browser::BrowserProvider::Camoufox;
         both.browser.stealth.allow_cloud_fallback = true;
         assert_eq!(inert_config_keys(&both).len(), 2);
+    }
+}
+
+// --- wayland#559 c3: prompt caching defaults, enumerated -------------------
+
+#[cfg(test)]
+mod prompt_caching_default_tests {
+    use super::*;
+
+    /// Every provider whose compat says it honours explicit cache breakpoints
+    /// must also default `prompt_caching` ON. That pairing is the whole point:
+    /// `cache_message_breakpoints` makes the engine COMPUTE boundaries every
+    /// turn, `prompt_caching` decides whether the adapter emits them. Bedrock
+    /// and Vertex sat on the wrong side of that pairing — the engine marked,
+    /// the adapter dropped the system and tools markers — so prompt caching
+    /// was OFF at two of the three sites that support it while a measurement
+    /// against the third said it was on.
+    ///
+    /// This is an ENUMERATION, not a spot check: a new Anthropic-family
+    /// provider that sets `cache_message_breakpoints` and forgets the default
+    /// fails here rather than shipping silently uncached.
+    /// Every `ProviderType`, kept honest by `exhaustive_guard` below: adding a
+    /// variant breaks that match, which is the prompt to extend this list.
+    const ALL: [ProviderType; 23] = [
+        ProviderType::Anthropic,
+        ProviderType::OpenAI,
+        ProviderType::Bedrock,
+        ProviderType::Vertex,
+        ProviderType::Gemini,
+        ProviderType::AzureOpenAI,
+        ProviderType::Together,
+        ProviderType::Fireworks,
+        ProviderType::Nvidia,
+        ProviderType::Perplexity,
+        ProviderType::Cerebras,
+        ProviderType::OpenRouter,
+        ProviderType::FluxRouter,
+        ProviderType::Sakana,
+        ProviderType::Deepseek,
+        ProviderType::Xai,
+        ProviderType::Groq,
+        ProviderType::Moonshot,
+        ProviderType::Qwen,
+        ProviderType::Mistral,
+        ProviderType::Cohere,
+        ProviderType::OpenAIChatGpt,
+        ProviderType::MiniMax,
+    ];
+
+    /// Position of `p` in [`ALL`]. Exhaustive, so a new `ProviderType`
+    /// variant fails to compile here until it is added to the list — and
+    /// [`all_is_complete_and_correctly_ordered`] proves the two agree, so a
+    /// duplicated or misplaced entry cannot silently shrink the enumeration.
+    fn index_in_all(p: ProviderType) -> usize {
+        match p {
+            ProviderType::Anthropic => 0,
+            ProviderType::OpenAI => 1,
+            ProviderType::Bedrock => 2,
+            ProviderType::Vertex => 3,
+            ProviderType::Gemini => 4,
+            ProviderType::AzureOpenAI => 5,
+            ProviderType::Together => 6,
+            ProviderType::Fireworks => 7,
+            ProviderType::Nvidia => 8,
+            ProviderType::Perplexity => 9,
+            ProviderType::Cerebras => 10,
+            ProviderType::OpenRouter => 11,
+            ProviderType::FluxRouter => 12,
+            ProviderType::Sakana => 13,
+            ProviderType::Deepseek => 14,
+            ProviderType::Xai => 15,
+            ProviderType::Groq => 16,
+            ProviderType::Moonshot => 17,
+            ProviderType::Qwen => 18,
+            ProviderType::Mistral => 19,
+            ProviderType::Cohere => 20,
+            ProviderType::OpenAIChatGpt => 21,
+            ProviderType::MiniMax => 22,
+        }
+    }
+
+    #[test]
+    fn all_is_complete_and_correctly_ordered() {
+        for (i, p) in ALL.iter().enumerate() {
+            assert_eq!(index_in_all(*p), i, "{p:?} is out of place in ALL");
+        }
+    }
+
+    #[test]
+    fn every_breakpoint_provider_defaults_prompt_caching_on() {
+        for provider in ALL {
+            let compat = compat_defaults_for(provider);
+            if compat.cache_message_breakpoints() {
+                assert!(
+                    prompt_caching_on_by_default(provider),
+                    "{provider:?} honours cache breakpoints but defaults prompt_caching OFF — \
+                     the engine would mark boundaries the adapter then drops"
+                );
+            }
+        }
+    }
+
+    /// Named arms, so the enumeration above cannot pass vacuously if the
+    /// compat presets ever stop advertising breakpoints.
+    #[test]
+    fn the_anthropic_family_defaults_on_and_the_rest_do_not() {
+        for on in [
+            ProviderType::Anthropic,
+            ProviderType::Bedrock,
+            ProviderType::Vertex,
+        ] {
+            assert!(prompt_caching_on_by_default(on), "{on:?} must default ON");
+        }
+        for off in [
+            ProviderType::OpenAI,
+            ProviderType::Gemini,
+            ProviderType::FluxRouter,
+        ] {
+            assert!(
+                !prompt_caching_on_by_default(off),
+                "{off:?} has no explicit cache_control dialect and must stay OFF"
+            );
+        }
     }
 }

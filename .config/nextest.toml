@@ -185,6 +185,95 @@ slow-timeout = { period = "120s", terminate-after = 2 }
 filter = 'binary(packaged_driver_gate)'
 slow-timeout = { period = "60s", terminate-after = 5 }
 
+# `bash_unsaved_guard_bound_live` — the SAME shape as the override above, found
+# the same way, and recorded here rather than left to be rediscovered.
+#
+# Its three bounded-guard cases each grow a real workspace fixture on disk and
+# then measure the guard against a caller budget. On NTFS that CONSTRUCTION is
+# the whole cost, and it lands within a few seconds of the default profile's
+# 60s hard kill.
+#
+# MEASURED on SEANDESKTOP (Windows 11 build 10.0.26200.9168, real msvc), the
+# binary alone with nothing else scheduled, the two profiles back to back on
+# one tree (b52fb934) with the interpreter and the binaries identical:
+#     default profile  Summary [  60.026s] 4 tests run: 1 passed, 3 timed out
+#                      each killed at exactly 60.024-60.025s
+#     --profile ci     Summary [  52.485s] 4 tests run: 4 passed
+#                      the three finish at 52.482-52.484s
+# So the work takes ~52s and the default budget is 60s. Nothing is wrong with
+# the tests; the budget is inside the noise.
+#
+# Why this matters beyond one binary: `just test-ci` and the ci.yml legs pass
+# `--profile ci` (90s x 2 = 180s) and these pass there, but
+# `scripts/wayland-e2e-windows-soak.ps1` PHASE G invokes nextest with NO
+# `--profile`, so the soak — the one job whose green is #350's close condition —
+# graded them at 60s. That is a gate that cannot reach a pass state, which is
+# the failure this file's `packaged_driver_gate` note already names.
+#
+# `terminate-after = 3` gives a 180s hard kill, matching the ci profile's own
+# ceiling so the two agree, and `period` stays at 60s so nextest keeps printing
+# the "running for over 60 seconds" notice and the cost stays visible.
+[[profile.default.overrides]]
+filter = 'binary(bash_unsaved_guard_bound_live)'
+slow-timeout = { period = "60s", terminate-after = 3 }
+
+# `deterministic_openai_loop` — the THIRD instance of the shape the two notes
+# above describe, and it is currently costing the `-p wcore-cli` gate a red on
+# a test that passes.
+#
+# `packaged_f04_run_is_repeatable_and_content_addressed` seals and replays a
+# whole repository TWICE and compares the two content addresses. That is real
+# work, and on a contended host it lands just past the default profile's 60s
+# hard kill, so nextest reports `TRY 2 TMT` and the run fails with no assertion
+# having failed at all.
+#
+# MEASURED on hetzner-dsm, the binary invoked DIRECTLY (so libtest, not
+# nextest, is the only clock) on tree 1a15ae64a, four runs, load average
+# recorded per run because that is the variable:
+#     WALL=88.69s  loadavg 150.09      test result: ok
+#     WALL=60.76s  loadavg 118.28      test result: ok
+#     WALL=70.62s  loadavg  66.22      test result: ok
+#     WALL=69.23s  loadavg  70.65      test result: ok
+# Four of four PASS; the work simply takes 61-89s. The same timeout was
+# reproduced on a PRISTINE `origin/integ/f13` checkout of this worktree, so it
+# is the budget and not any change on this branch.
+#
+# `period` stays at 60s, deliberately below the slowest measured run, so
+# nextest keeps printing the "running for over 60 seconds" notice and the cost
+# stays visible in the log. `terminate-after = 4` gives a 240s hard kill, 2.7x
+# the slowest measured run — headroom for a contended scheduler slot, and still
+# a real ceiling rather than an unbounded wait.
+#
+# Scoped to the binary: nothing else's budget moves.
+[[profile.default.overrides]]
+filter = 'binary(deterministic_openai_loop)'
+slow-timeout = { period = "60s", terminate-after = 4 }
+
+# THE DATA-LOSS ARMS MUST NOT BE RETRYABLE IN THE SOAK EITHER (FerroxLabs/wayland-core#350).
+#
+# The block at the bottom of this file pins `inv2_round5_adversarial_test` to
+# `retries = 0`, and explains at length why: every assertion in that binary is a
+# data-loss assertion, so a race that loses a save on one attempt and wins on the
+# next must NOT report the run as SUCCESS. That reasoning is not repeated here.
+#
+# What was missed is that the pin is `[[profile.ci.overrides]]` ONLY.
+# `scripts/wayland-e2e-windows-soak.ps1` PHASE G invokes nextest with NO
+# `--profile`, so it runs under `[profile.default]`, where `retries = 1` (line 70)
+# applies. MEASURED, not argued: soak run 33266413002 PHASE G shows
+# `TRY 1 TMT [  60.010s]` then `TRY 2 TMT [  60.019s]` for each of three timeouts,
+# so the default profile really is spending a retry on that job. The soak is the
+# one job whose green is #350's close condition, and it could have retried a lost
+# save into a pass.
+#
+# KNOWN RESIDUAL, stated rather than left to be found: the other four `retries = 0`
+# overrides in this file (`pipeline_test`, the two deny-walk timing tests, and the
+# three harness-ownership binaries) are still ci-only, so the soak can still retry
+# THOSE. Only the data-loss binary is mirrored here, because only it went red on a
+# Windows leg this cycle (core#387 c3).
+[[profile.default.overrides]]
+filter = 'binary(=inv2_round5_adversarial_test)'
+retries = 0
+
 # `walk_parallel_identity_test`'s two TIMING cases build a 15,000-file fixture
 # before they measure anything (`a_disjoint_grant_really_does_cost_a_second_walk`
 # builds two), and on NTFS that CONSTRUCTION, not the measurement, is the whole
@@ -222,6 +311,94 @@ slow-timeout = { period = "60s", terminate-after = 5 }
 [[profile.default.overrides]]
 filter = 'binary(walk_parallel_identity_test)'
 slow-timeout = { period = "60s", terminate-after = 3 }
+
+# `packaged_f04_run_is_repeatable_and_content_addressed` drives the sealed F04
+# artifact through two complete packaged runs. `[[profile.ci.overrides]]` below
+# already names it explicitly and gives it 120s x 4 = 480s. `[profile.default]`
+# had NO matching override, so locally it got 30s x 2 = a 60s hard kill against
+# a measured 58.7s best case -- a 1.9% margin -- and every lane running the
+# release brief's own gate command (`cargo nextest run -p <crate>`) uses the
+# default profile.
+#
+# MEASURED, and the measurement is why this is a mirror and not a guess. On
+# hetzner-dsm at origin/integ/f13, recorded on wayland-core#378: four
+# consecutive runs on a quiet host (load 27-34) under `default` PASS at 58.868 /
+# 58.922 / 58.676 / 58.989 s; the same tree on a busy host (load 57-104) is
+# KILLED at 60.006 s twice, including run-alone; the same tree under `ci` PASSES
+# at 67.08 s. The spread across the same host is at least 58.7 s -> 85.6 s, i.e.
+# it can exceed the default budget by 43% while remaining perfectly correct.
+# It killed THIS lane's own gate run on 2026-08-30: `TRY 1 TMT [60.005s]`,
+# `TRY 2 TMT [60.005s]`, `Summary [135.783s] 7657 tests run: 7656 passed, 1
+# timed out`.
+#
+# The four tight 58.9s samples were all taken inside one quiet window and were
+# first read as evidence that a branch had regressed the test. That reading is
+# RETRACTED on #378: a commit touching no production source at all measured
+# 72.47 s on the same host. The spread is the host, not the tree.
+#
+# Mirrors the ci override exactly rather than inventing a third number, so the
+# two profiles cannot drift apart again.
+[[profile.default.overrides]]
+filter = 'test(=packaged_f04_run_is_repeatable_and_content_addressed)'
+slow-timeout = { period = "120s", terminate-after = 4 }
+
+# The two mock-turn tests that carry a large tool result through a full
+# `AgentEngine::run()`. FerroxLabs/wayland#1235 reported the first of these
+# being killed 3/3 by the default budget; FerroxLabs/wayland-core#395 asked
+# whether the cost was real. It is, and it is now MEASURED, so this entry
+# records a known price rather than hiding an unknown one.
+#
+# WHERE THE TIME GOES, measured not inferred. Bisecting instrumentation inside
+# the turn (hetzner-dsm, host load recorded with every reading) attributes
+# essentially the whole runtime to ONE function:
+#
+#   engine.run(), 480,000-char tool result, shed forced OFF
+#     release:  run 3.018s   of which PIIScrubber::scrub 3.004s (99.8%)
+#                            of which decoded_contains_secret 2.981s (98.8%)
+#     debug:    run 46.530s  of which PIIScrubber::scrub 46.446s (99.8%)
+#                            of which decoded_contains_secret 46.106s (99.1%)
+#
+# `decoded_contains_secret` base64-decodes the ENTIRE candidate run under four
+# alphabets and re-scans each decode; the engine scrubs each tool result twice
+# per turn, so a turn costs ~2 whole-payload scrub passes. Ruled out by the
+# same measurement, so nobody re-derives them: `estimate_tokens_from_messages`
+# 0.0000s, the #636 shed 0.0013s, `scrub_direct` 0.0015s, fixture construction
+# and the read-back through the jail 0.001s each.
+#
+# THE SHAPE, four payload sizes 60,000 -> 480,000 chars, shed off so every
+# size takes one identical path (log-log least-squares fit):
+#     release  exponent 0.986  R^2 0.9987   6.49 s per MB of tool output
+#     debug    exponent 1.022  R^2 0.9996  97.18 s per MB of tool output
+# So it is LINEAR, not superlinear (#1235's body suspected otherwise; that
+# table's non-monotonicity was the 120,000-char case taking a different path,
+# not a superlinear term), and it SURVIVES --release at 15x less cost. It is a
+# product cost a real user pays on a large `Read` or a verbose `Bash`, not a
+# test-profile artifact.
+#
+# MEASURED RUNTIMES, this tree, debug (which is what CI runs), each test alone
+# on hetzner-dsm at host load 41-54:
+#     the_engine_spills_where_this_session_can_read_it_back   44.08 / 45.04 / 45.47 s
+#     tc_2_6_context_overflow_sheds_tool_output_and_continues 49.60 / 44.59 s
+# Against 30s x terminate-after 2 = 60s, both sit ~20% under the hard kill, so
+# any co-tenant load crosses it -- which is exactly the 3/3 kill #1235 reports
+# and the FLAKY 2/2 recorded on #395.
+#
+# `period` is deliberately left at the profile default of 30s rather than
+# raised: these tests SHOULD keep printing the SLOW notice on every run, so the
+# price above stays visible in the log. Only the hard kill moves, 60s -> 120s,
+# which is 2.4x the slowest measured run. `retries` is left at the profile
+# default for the same reason as the entries above.
+#
+# NOT an entry in .config/flaky-allowlist.txt, deliberately. #1235 is explicit
+# that allowlisting would suppress the symptom of a product cost nobody had
+# measured. The cost is now measured, named and guarded
+# (crates/wcore-agent/tests/turn_cost_per_byte_guard.rs fails if the per-byte
+# term grows), so this is a budget for a known price, not a suppression.
+#
+# Scoped to the two tests by name: nothing else's budget moves.
+[[profile.default.overrides]]
+filter = 'test(=the_engine_spills_where_this_session_can_read_it_back) + test(=tc_2_6_context_overflow_sheds_tool_output_and_continues)'
+slow-timeout = { period = "30s", terminate-after = 4 }
 
 # ── CI profile ─────────────────────────────────────────────────────────────
 [profile.ci]
@@ -596,4 +773,103 @@ retries = 0
 # move any of the three.
 [[profile.ci.overrides]]
 filter = 'test(=bash::tests::the_bash_timeout_bounds_the_secret_deny_walk) + test(=bash::tests::the_streaming_bash_timeout_bounds_the_secret_deny_walk) + test(=matching_assistant_dials_scoped_deferred_server)'
+retries = 0
+
+# ── #1155: the TOCTOU race whose regression must not be retryable ───────────
+#
+# FerroxLabs/wayland#1155 is "an Edit can overwrite a save that arrives while
+# the guard is checking it (TOCTOU), AND retries=2 hides it". The first half is
+# fixed (`atomic_write_checked` publishes through `RENAME_EXCHANGE`); this block
+# is the second half. Without it `inv2_round5_adversarial_test` sat under
+# `[profile.ci] retries = 2` with no override at all, so a reintroduced race
+# that lost a save on one attempt and won on the next would report the RUN as
+# SUCCESS — the number release gates, dashboards and humans read — with the
+# evidence buried in a `TRY 1 FAIL` line.
+#
+# MEASURED on hetzner-dsm, `--profile ci`, a probe in THIS binary that fails on
+# its first attempt and passes on any retry (the exact shape a race takes):
+#   * without this block: `TRY 1 FAIL`, `TRY 2 PASS`,
+#     `Summary 1 test run: 1 passed (1 flaky)`, cargo exit 0 — laundered green.
+#   * with this block:    `FAIL`, `Summary 1 test run: 0 passed, 1 failed`,
+#     cargo exit 100 — the failure reaches the run conclusion.
+#
+# The same tree also reddens the real thing: with the exchange withdrawn and the
+# check window held open, `an_in_place_save_is_not_lost_to_the_final_rename`
+# fails with "4 of 12 interleavings lost". A regression here is signal.
+#
+# Scoped to the binary, same discipline as the three blocks above: every other
+# test in the suite keeps `retries = 2`. Every assertion in this file is a
+# data-loss assertion, so none of them may be retried into a pass.
+[[profile.ci.overrides]]
+filter = 'binary(=inv2_round5_adversarial_test)'
+retries = 0
+
+# ── #358 c4: a containment verdict must not be retried into a pass ──────────
+#
+# MECHANISM, not instance. These three binaries are the whole of this crate's
+# RUNTIME process-containment grading: they each end in "this pid is / is not a
+# process any more" after a guard was dropped. Both directions of that verdict
+# are races against the scheduler, and both are laundered by a retry:
+#
+#   * OVER-kill (harness_guard_kills_only_its_own_tree) — the guard reaps a
+#     sibling tree. `kill(pid, SIGKILL)` returns while the signal is merely
+#     pending, so the victim still looks live for a scheduling quantum.
+#   * UNDER-kill (harness_owns_spawned_trees, ..._windows) — the guard leaks a
+#     descendant. Detected by a process still being there after a 10s budget,
+#     which a loaded box can turn into a slow pass.
+#
+# MEASURED on hetzner-dsm (96 cores), `--retries 0`, guard mutated to walk from
+# the child's PPid so it reaps its sibling — an over-broad kill the control is
+# supposed to catch every time:
+#   * sampled liveness, sequential:     n=20, 19 detected, 1 missed (5.0 %)
+#   * sampled liveness, 8 concurrent:   n=80, 71 detected, 9 missed (11.3 %)
+# At `[profile.ci] retries = 2` an 11.3 % per-attempt miss is a 30 % chance the
+# run CONCLUSION — the number release gates, dashboards and humans read —
+# reports a guard that reaped the build agent's siblings as PASSED, with the
+# evidence buried in a `TRY 1 FAIL` line. That is the same laundering
+# FerroxLabs/wayland#1101 and #1155 were filed about.
+#
+# The per-attempt miss is now 0 (the control probes the bystander with a round
+# trip instead of sampling its liveness — see the module docs), so this block is
+# not compensating for a flake: it is what keeps a REINTRODUCED one visible
+# instead of retried away. `every_spawn_site_owns_its_tree` is deliberately NOT
+# here — it is a static source ratchet with no process in it and nothing for a
+# retry to hide.
+#
+# Scoped to three binaries, same discipline as the four blocks above: every
+# other test in the suite keeps `retries = 2`.
+[[profile.ci.overrides]]
+filter = 'binary(=harness_guard_kills_only_its_own_tree) + binary(=harness_owns_spawned_trees) + binary(=harness_owns_spawned_trees_windows)'
+retries = 0
+
+# ── #362 c4: a containment test that never ran its probe must not be retried ─
+#
+# MECHANISM, not instance. Every test in these two binaries grades a CONTAINMENT
+# property by running a probe INSIDE the sandbox — `run_contained_probe` in
+# `crates/wcore-sandbox/src/test_support.rs`. That helper panics, deliberately
+# and loudly, when the backend refuses to spawn at all:
+#
+#   the sandbox backend refused to run the containment probe, so no containment
+#   property was tested
+#
+# It is the right panic and it was laundered anyway. MEASURED, CI run
+# 33240249894 (linux-containerized): `bwrap_confines_filesystem_writes_outside_
+# allowlist` failed with exactly that message out of the sandbox's own
+# process-tree ownership path, was RETRIED under `[profile.ci] retries = 2`,
+# passed on a later attempt, and the run conclusion said SUCCESS. A containment
+# test that could not start its probe proved NOTHING, and the number release
+# gates and humans read reported it as a containment property held.
+#
+# That is strictly worse than an ordinary flake. A retried assertion failure at
+# least means the assertion ran; a retried probe refusal means the run reported
+# a security property it never measured.
+#
+# Scoped to the two binaries that call the helper, same discipline as the five
+# blocks above: every other test in the suite keeps `retries = 2`. The
+# membership is not maintained by hand — `wcore-sandbox`'s
+# `containment_probes_are_not_retryable` scans this file against the crate's own
+# test sources, so a new binary that calls `run_contained_probe` and is not
+# listed here reddens before it can be retried into a pass.
+[[profile.ci.overrides]]
+filter = 'binary(=backend_integration) + binary(=secret_read_deny)'
 retries = 0

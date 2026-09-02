@@ -381,10 +381,12 @@ impl IntakePolicy {
 /// Delegates to [`wcore_config::network_path::has_unc_prefix`], the single
 /// implementation. The local copy this replaces matched any `\\`/`//` prefix,
 /// so it also called `\\?\C:\Users\x` — a verbatim path to a **local disk** —
-/// a network path, and reported it as `IntakeError::NetworkPath`. That input
-/// is still refused, by `validate_user_path` on the next line, but now as
-/// `DeviceOrVerbatimPath`: the accurate reason. No input that was rejected
-/// before is accepted now.
+/// a network path, and reported it as `IntakeError::NetworkPath`. It is not
+/// one. Since core#409 c2 it is not refused for its namespace at all: a
+/// verbatim path to a local disk is an ordinary local file, and it is the form
+/// `std::fs::canonicalize` returns on Windows. `\\.\…` and
+/// `\\?\GLOBALROOT\…` are still refused on the next line, as
+/// `DeviceOrVerbatimPath`.
 ///
 /// Spelling, not storage: a file on a mounted share is deliberately still
 /// admitted. See `wcore_config::network_path` for why, and for the other
@@ -1001,32 +1003,49 @@ mod tests {
         ));
     }
 
-    /// The one input whose CLASSIFICATION the UNC consolidation changed.
+    /// The one input whose CLASSIFICATION the UNC consolidation changed — and
+    /// which core#409 c2 then changed again.
     ///
     /// `\\?\C:\…` is a verbatim path to a **local disk**. The local
     /// `is_network_path` this file used to carry matched any `\\` prefix, so it
-    /// called that a network path and refused it as `NetworkPath` — the right
-    /// refusal for the wrong reason. It is now correctly not-UNC, and the
-    /// refusal comes from `validate_user_path`'s device/verbatim guard instead.
+    /// called that a network path and refused it as `NetworkPath`. The
+    /// consolidation made it correctly not-UNC, and `validate_user_path`'s
+    /// namespace guard then refused it as device/verbatim instead — still the
+    /// wrong refusal, just an accurately named one. core#409 c2 measured that
+    /// refusal reaching real workspaces (`std::fs::canonicalize` RETURNS this
+    /// form on Windows), so the namespace guard now admits the verbatim DISK
+    /// form and refuses only the device spellings.
     ///
-    /// The assertion that matters is **still rejected**: a consolidation that
-    /// tightened the naming while opening a hole would be a bad trade, so the
-    /// rejection is asserted here rather than reasoned about in a comment.
+    /// Both directions are pinned here, because widening the admit half
+    /// without keeping the device half would be a bad trade.
     #[test]
-    fn a_verbatim_local_path_is_still_refused_but_no_longer_as_a_network_path() {
+    fn a_verbatim_local_path_is_refused_for_neither_namespace() {
+        // No such file on this host, so intake still fails — but it must never
+        // fail for being a network path or a device path.
         let p = PathBuf::from(r"\\?\C:\Users\alice\image.png");
-        let err = admit_path(&p, &any()).expect_err("verbatim paths must stay refused");
+        if let Err(err) = admit_path(&p, &any()) {
+            assert!(
+                !matches!(err, IntakeError::NetworkPath(_)),
+                "a verbatim path to a local disk is not a network path; got {err:?}"
+            );
+            let msg = err.to_string();
+            assert!(
+                !msg.contains("device namespace") && !msg.contains("verbatim root"),
+                "the verbatim DISK form must not be refused for its namespace \
+                 (core#409 c2); got: {msg}"
+            );
+        }
+
+        // The DEVICE namespace is still refused, and still on its namespace.
+        let device = admit_path(&PathBuf::from(r"\\.\PhysicalDrive0"), &any())
+            .expect_err("the device namespace must stay refused");
         assert!(
-            !matches!(err, IntakeError::NetworkPath(_)),
-            "a verbatim path to a local disk is not a network path; got {err:?}"
-        );
-        assert!(
-            err.to_string().contains("device") || err.to_string().contains("verbatim"),
-            "expected the device/verbatim refusal, got: {err}"
+            device.to_string().contains("device namespace"),
+            "expected the device-namespace refusal, got: {device}"
         );
 
         // And the verbatim UNC form is the opposite case: it IS a network
-        // path, and must not fall into the device/verbatim bucket.
+        // path, and must not fall into the device bucket.
         assert!(matches!(
             admit_path(&PathBuf::from(r"\\?\UNC\server\share\image.png"), &any()),
             Err(IntakeError::NetworkPath(_))

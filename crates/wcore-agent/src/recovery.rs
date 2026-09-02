@@ -350,12 +350,57 @@ impl RecoveryCheckpoint {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        if request.messages.len() != durable_messages.len() {
-            return Err(JournalError::InvalidTransition(
-                "prepared request message count does not match the durable conversation"
-                    .to_string(),
-            ));
+        // #559 c6 — the ONE message request assembly may ADD. When the tail
+        // user message is also the first one (turn 1), the per-turn transient
+        // injections go onto a carrier message of their own rather than into
+        // the durable first message, so that message stays byte-stable and
+        // turn 1's cache entry survives. The carrier admits nothing the
+        // append-onto-the-tail form below did not already admit — user role,
+        // text blocks only — and less: it holds no durable content, so there
+        // is nothing in it a prepared request could rewrite.
+        match request.messages.len().checked_sub(durable_messages.len()) {
+            Some(0) => {}
+            Some(1) if !durable_messages.is_empty() => {
+                let carrier = request
+                    .messages
+                    .last()
+                    .expect("checked_sub proved the prepared request is longer");
+                let text_only = !carrier.content.is_empty()
+                    && carrier
+                        .content
+                        .iter()
+                        .all(|block| matches!(block, ContentBlock::Text { .. }));
+                if !matches!(carrier.role, Role::User) || !text_only {
+                    return Err(JournalError::InvalidTransition(
+                        "prepared request adds a trailing message that is not a transient \
+                         text carrier"
+                            .to_string(),
+                    ));
+                }
+            }
+            _ => {
+                return Err(JournalError::InvalidTransition(
+                    "prepared request message count does not match the durable conversation"
+                        .to_string(),
+                ));
+            }
         }
+        // #388 — the ONE rewrite request assembly makes to a durable block:
+        // `stub_failed_tool_results_for_retry` replaces the body of a FAILED
+        // tool result in the outbound copy with the compact stub derived from
+        // it, so a stream retry does not re-bill the full contaminated
+        // transcript. Accepting it needs the tool's own name, which lives in
+        // the `ToolUse` that opened the call; it is read from the DURABLE
+        // conversation, never from the prepared request, so nothing the
+        // prepared request carries can widen what is admitted here.
+        let durable_tool_names: std::collections::HashMap<String, String> = durable_messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .filter_map(|block| match block {
+                ContentBlock::ToolUse { id, name, .. } => Some((id.clone(), name.clone())),
+                _ => None,
+            })
+            .collect();
         for (index, (prepared, durable)) in
             request.messages.iter().zip(&durable_messages).enumerate()
         {
@@ -381,11 +426,15 @@ impl RecoveryCheckpoint {
                 }
                 for (prepared_block, durable_block) in prepared.content.iter().zip(&durable.content)
                 {
-                    if Self::block_value(prepared_block)? != Self::block_value(durable_block)? {
-                        return Err(JournalError::InvalidTransition(format!(
-                            "prepared request message {index} changes durable content"
-                        )));
+                    if Self::block_value(prepared_block)? == Self::block_value(durable_block)? {
+                        continue;
                     }
+                    if Self::is_retry_stub_of(prepared_block, durable_block, &durable_tool_names) {
+                        continue;
+                    }
+                    return Err(JournalError::InvalidTransition(format!(
+                        "prepared request message {index} changes durable content"
+                    )));
                 }
                 continue;
             }
@@ -424,6 +473,51 @@ impl RecoveryCheckpoint {
         }
 
         Ok(request)
+    }
+
+    /// #388 — is `prepared` the clean-retry stub of the FAILED tool result
+    /// `durable`?
+    ///
+    /// This is the only difference the proof above tolerates in a durable
+    /// block, and it adds no degrees of freedom: the accepted body is
+    /// recomputed here as a pure function of the durable body and the tool's
+    /// own name, so a prepared request cannot smuggle anything through it — a
+    /// body that is not exactly that stub is still refused.
+    ///
+    /// Without it, `stub_failed_tool_results_for_retry` makes the retry
+    /// unprovable and every durable session loses its stream retry after a
+    /// failed tool round: the run ends on this function's `InvalidTransition`
+    /// in place of the provider's own error, and the output-stall progress
+    /// gate written for exactly that scenario is never reached.
+    fn is_retry_stub_of(
+        prepared: &ContentBlock,
+        durable: &ContentBlock,
+        durable_tool_names: &std::collections::HashMap<String, String>,
+    ) -> bool {
+        let (
+            ContentBlock::ToolResult {
+                tool_use_id: prepared_id,
+                content: prepared_body,
+                is_error: true,
+            },
+            ContentBlock::ToolResult {
+                tool_use_id: durable_id,
+                content: durable_body,
+                is_error: true,
+            },
+        ) = (prepared, durable)
+        else {
+            return false;
+        };
+        if prepared_id != durable_id {
+            return false;
+        }
+        // The same fallback the engine uses when the opening `ToolUse` is no
+        // longer in the conversation, so the two agree on every history.
+        let name = durable_tool_names
+            .get(durable_id.as_str())
+            .map_or("unknown", String::as_str);
+        *prepared_body == crate::engine::retry_stub(name, durable_body)
     }
 
     /// Canonical JSON for one content block, used to compare a prepared

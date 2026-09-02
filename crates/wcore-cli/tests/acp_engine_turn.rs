@@ -82,6 +82,7 @@ async fn acp_turn_streams_text_then_done() {
             text: "say hi".to_string(),
             tools: Vec::new(),
             agent: None,
+            mcp_servers: Vec::new(),
         })
         .await
         .expect("run_turn establishes a stream");

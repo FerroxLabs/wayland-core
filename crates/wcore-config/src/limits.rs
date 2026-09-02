@@ -25,16 +25,193 @@
 //! listed; everything else is `None`.
 
 mod catalogue;
+#[cfg(test)]
+mod passthrough;
 
 use catalogue::CATALOGUE_CEILINGS;
+
+/// The endpoint identities operated by each open-weights family's vendor, as
+/// `ProviderCompat::provider_type()` spells them -- the only string
+/// `model_output_ceiling` ever sees.
+///
+/// WHY A SET, AND WHY PREFIXES. The first cut of #1232 keyed each gated arm on
+/// ONE provider name, and that shape cannot be right: a vendor reaches this
+/// function under several identities at once, and every identity it is not
+/// spelled as loses the arm and takes the 47x cut (`UNKNOWN_CAP` 8,192 output /
+/// `UNVERIFIED_CONTEXT_WINDOW` 32,768 window) that #1157 was filed to remove.
+/// DeepSeek V4 is the worked example, and all four routes below are real:
+///
+///   * `deepseek` -- `ProviderType::Deepseek`, the vendor's own API;
+///   * `qwen` -- `parse_builtin_provider` maps `"qwen" | "alibaba" |
+///     "dashscope"` onto `ProviderType::Qwen`, whose slug is `"qwen"`.
+///     Builtins resolve BEFORE the bundled catalog, so `--provider alibaba` --
+///     the DEFAULT DashScope route -- arrives here spelled `qwen` and never as
+///     `alibaba` at all;
+///   * `alibaba-*` -- `alibaba-cn`, `alibaba-token-plan`, `alibaba-coding-plan`
+///     and `alibaba-coding-plan-cn` are bundled catalog ids, and
+///     `from_catalog_entry` stamps `provider_type` = the catalog id verbatim;
+///   * tenant spellings models.dev publishes that the catalog has not adopted
+///     yet (`alibaba-token-plan-cn` appeared between two pulls of this table).
+///
+/// That last bullet is why the members are PREFIXES matched at a `-` boundary
+/// rather than exact names: a vendor adds a region/plan tenant far more often
+/// than this table is edited, and an exact list silently drops each new one.
+/// The `-` boundary is what keeps `minimaxproxy` and `deepseekproxy` out -- a
+/// reseller whose name merely STARTS with the vendor's is not the vendor.
+///
+/// MiniMax needs no second member: its tenants (`minimax-cn`,
+/// `minimax-coding-plan`, `minimax-cn-coding-plan`) all sit under the `minimax`
+/// prefix, and `provider_type_slug(ProviderType::MiniMax)` is `"minimax"` too.
+/// That is luck, not design -- which is exactly why DeepSeek's first-party
+/// tenants, branded `alibaba*`, were the ones that broke.
+///
+/// GRADED AGAINST ARTEFACTS THIS ONE DOES NOT WRITE:
+/// `vendor_operated_catalog_endpoints_keep_their_arm` re-derives the answer
+/// from `providers.toml` base-URL hosts, and `check-model-limits-freshness.py`
+/// re-derives it live from models.dev. A test that reads this const for both
+/// the question AND the answer cannot catch a wrong member here, and the one
+/// that did read it that way did not.
+const VENDOR_OPERATED_ENDPOINTS: &[(&str, &[&str])] = &[
+    ("deepseek", &["deepseek", "qwen", "alibaba"]),
+    ("minimax", &["minimax"]),
+];
+
+/// The DNS suffixes each family's vendor serves its own API from. Used only by
+/// `vendor_operated_catalog_endpoints_keep_their_arm`, to re-derive the
+/// endpoint set from `providers.toml` rather than from
+/// [`VENDOR_OPERATED_ENDPOINTS`].
+#[cfg(test)]
+const VENDOR_API_DOMAINS: &[(&str, &[&str])] = &[
+    ("deepseek", &["deepseek.com", "aliyuncs.com"]),
+    ("minimax", &["minimax.io", "minimaxi.com"]),
+];
+
+/// FerroxLabs/wayland#1232 -- every open-weights id carried by the `if`-chain
+/// families, tagged with the FAMILY whose vendor operates it when its hosts
+/// disagree too widely for one static figure to be true of all of them. The
+/// tag is a key into [`VENDOR_OPERATED_ENDPOINTS`], never a single provider
+/// name: "the vendor that operates this family" is a SET of endpoint
+/// identities in every case, and naming one member of that set is the defect
+/// this const was rewritten to make unrepresentable.
+///
+/// WHY A GATE AND NOT A DELETION. AGENTS.md's third model-limits rule forbids a
+/// static arm for an open-weights id served at wildly different limits by
+/// different hosts, and on the 2026-08-30 models.dev pull seven of these span
+/// 3.5x-8.2x across 19-64 endpoints. Deleting those arms is NOT free, and not
+/// symmetric with the Qwen precedent: an arm revokes `should_omit_max_tokens`,
+/// but that omission only exists on an OMIT-SAFE preset (`gemini`,
+/// `openrouter`, `flux-router`). DeepSeek's and MiniMax's own endpoints are
+/// plain `openai_compat_provider` presets, which are NOT omit-safe -- so on the
+/// vendor's own API a missing arm restores no natural ceiling at all. It drops
+/// output to `UNKNOWN_CAP` (8,192) and the window to `UNVERIFIED_CONTEXT_WINDOW`
+/// (32,768): the 47x cut #1157 was filed to fix, re-introduced.
+///
+/// So the defect is not the figures, it is the KEY -- #1232's own words, "keyed
+/// on the model id alone, with no provider in the key". Scoping the seven to
+/// their vendor gives every caller the right answer at once:
+///
+///   * the vendor's endpoint keeps the vendor's verified figures, unchanged;
+///   * an omit-safe reseller route (`openrouter` / `flux-router`) resolves
+///     `None`, which RESTORES the omission and lets that host apply its own
+///     natural ceiling -- the outcome a deletion was wanted for;
+///   * any other host resolves `None` too, so the window falls to
+///     `UNVERIFIED_CONTEXT_WINDOW` (32,768, below every measured host) and the
+///     output to `UNKNOWN_CAP` (8,192, which IS the measured host floor for
+///     both families: nebius serves minimax-m2.5 at 8,192 and deepinfra serves
+///     deepseek-v4-pro at 8,192). It errs LOW, where a wrong high number is
+///     ceiling death (#165).
+///
+/// THE FIVE ROWS THAT ARE NOT GATED are the point of measuring instead of
+/// exempting the family: `deepseek-v4-flash-vision-exp` (1.05x),
+/// `deepseek-v4-pro-0813` (1.05x), `minimax-m2.5-highspeed` (1.0x),
+/// `minimax-m2.7` (1.3x) and `minimax-m2.7-highspeed` (1.02x) have hosts that
+/// AGREE, so gating them would replace a real ceiling with a low guess for no
+/// benefit -- the harm this rule exists to prevent, in the other direction.
+///
+/// ORDERED LONGEST-FRAGMENT-FIRST, and the ordering is load-bearing: the lookup
+/// is a substring match, so `deepseek-v4-flash-vision-exp` must be tested
+/// BEFORE `deepseek-v4-flash` or it inherits the gated row's verdict and loses
+/// an arm its hosts agree on. `open_weights_rows_are_longest_fragment_first`
+/// asserts that structurally rather than trusting this sentence.
+///
+/// Spreads measured on the 2026-08-30 models.dev pull (`host_spread` over every
+/// provider, vendor and third-party alike); control: `claude-opus-5` is
+/// 1,000,000 -> 1,000,000 across 31 hosts, i.e. 1.0x, and is not an
+/// open-weights id at all.
+const OPEN_WEIGHTS_HOST_SPREAD: &[(&str, Option<&str>)] = &[
+    // --- hosts AGREE: the arm stays keyed on the id alone. ---
+    ("deepseek-v4-flash-vision-exp", None), // 1.05x over 12 hosts
+    ("deepseek-v4-pro-0813", None),         // 1.05x over 27 hosts
+    ("minimax-m2.5-highspeed", None),       // 1.00x over 11 hosts
+    ("minimax-m2.7-highspeed", None),       // 1.02x over 15 hosts
+    ("minimax-m2.7", None),                 // 1.30x over 38 hosts
+    // --- hosts DISAGREE: vendor-operated providers only. ---
+    ("deepseek-v4-flash-0731", Some("deepseek")), // 5.1x over 35 hosts
+    ("deepseek-v4-flash", Some("deepseek")),      // 8.0x over 61 hosts
+    ("deepseek-v4-pro", Some("deepseek")),        // 8.2x over 64 hosts
+    ("minimax-m2.1", Some("minimax")),            // 5.1x over 24 hosts
+    ("minimax-m2.5", Some("minimax")),            // 3.5x over 44 hosts
+    ("minimax-m3", Some("minimax")),              // 4.0x over 43 hosts
+    ("minimax-m2", Some("minimax")),              // 5.1x over 19 hosts
+];
+
+/// The open-weights FAMILY `m` belongs to, when that family's hosts disagree
+/// widely enough that a globally-keyed arm is forbidden. `None` for every other
+/// id, including the open-weights ids whose hosts agree.
+///
+/// `m` must already be lowercased, as `model_output_ceiling` does.
+pub(crate) fn host_variable_open_weights_family(m: &str) -> Option<&'static str> {
+    OPEN_WEIGHTS_HOST_SPREAD
+        .iter()
+        .find(|(fragment, _)| m.contains(fragment))
+        .and_then(|&(_, family)| family)
+}
+
+/// Every endpoint identity `family`'s vendor operates. Empty for a family that
+/// is not in [`VENDOR_OPERATED_ENDPOINTS`], so an unknown family fails CLOSED
+/// (`provider_operates` false everywhere, the arm resolves `None`, sizing errs
+/// low) rather than open. `every_gated_family_has_vendor_endpoints` makes that
+/// state unreachable in the first place.
+pub(crate) fn vendor_operated_endpoints(family: &str) -> &'static [&'static str] {
+    VENDOR_OPERATED_ENDPOINTS
+        .iter()
+        .find(|(f, _)| *f == family)
+        .map_or(&[], |&(_, endpoints)| endpoints)
+}
+
+/// Whether `provider` is one of the identities the family's vendor operates.
+///
+/// Prefix-matched at a `-` boundary against EVERY member of the family's set,
+/// so all of the vendor's tenant spellings keep the arm while a third-party
+/// host whose id merely starts with (or contains) a vendor name does not.
+fn provider_operates(provider: &str, family: &str) -> bool {
+    let p = provider.to_ascii_lowercase();
+    vendor_operated_endpoints(family).iter().any(|vendor| {
+        p == *vendor
+            || p.strip_prefix(vendor)
+                .is_some_and(|rest| rest.starts_with('-'))
+    })
+}
 
 /// Returns `(max_output_tokens, context_window)` for a known model, or `None`
 /// when the model is unknown (caller must fail open).
 ///
-/// `provider` is accepted for future provider-scoped disambiguation; today the
-/// model id is distinctive enough to match on alone.
-pub fn model_output_ceiling(_provider: &str, model: &str) -> Option<(u32, u32)> {
+/// `provider` disambiguates the open-weights families whose hosts disagree --
+/// see [`OPEN_WEIGHTS_HOST_SPREAD`]. Every other family is served by its vendor
+/// alone (or by resellers that republish the vendor's figures), so the model id
+/// is distinctive enough to match on alone and `provider` is not consulted.
+pub fn model_output_ceiling(provider: &str, model: &str) -> Option<(u32, u32)> {
     let m = model.to_ascii_lowercase();
+
+    // FerroxLabs/wayland#1232 -- the provider-scoped gate, ahead of EVERY arm
+    // below so no later arm can hand one of these figures to a host that does
+    // not serve it. `None` here is the honest answer, not a fallback: the
+    // caller then fails open exactly as it does for any unlisted model.
+    if let Some(family) = host_variable_open_weights_family(&m)
+        && !provider_operates(provider, family)
+    {
+        return None;
+    }
 
     // --- Anthropic Claude (4.x/5 era; older 3.x deliberately excluded) ---
     // The 1M-context generation (Opus 4.6/4.7/4.8, Opus 5, Sonnet 4.6, Sonnet 5,
@@ -818,6 +995,618 @@ mod tests {
              model_output_ceiling and would silently fall to the conservative \
              default (#165) — add their verified window/output above:\n  {}",
             missing.join("\n  ")
+        );
+    }
+
+    /// #1176 DRIFT GUARD -- the other half of #165, and the half both guards
+    /// were blind to.
+    ///
+    /// `every_routed_catalog_model_has_a_known_window` walks ROUTED ALIASES
+    /// only, and the release-time freshness script grades only the ordered
+    /// `CATALOGUE_CEILINGS` table -- it says in its own output that the
+    /// `if`-chain families above cannot be evaluated by a text parser. An id
+    /// that is in an `if` chain AND reaches users through provider-native
+    /// `--model` passthrough was therefore graded by nothing but a hand check,
+    /// and the hand check is what found `claude-opus-5` (no arm at all: 32,768
+    /// substituted for a 1,000,000 window), `gpt-4o-2024-05-13` (output
+    /// over-claimed 4x into a hard 400) and the `gemini-*-latest` aliases (32x
+    /// undersized).
+    ///
+    /// This walks the vendor catalogue instead. It is the half a text parser
+    /// could never do -- the chain evaluates ITSELF -- and it runs on every
+    /// PR, not once per release.
+    #[test]
+    fn every_passthrough_vendor_model_resolves_its_arm() {
+        use super::passthrough::PASSTHROUGH_VENDOR_MODELS;
+
+        let mut wrong = Vec::new();
+        for &(id, want_out, want_ctx) in PASSTHROUGH_VENDOR_MODELS {
+            // #1232 -- the host-variable open-weights ids are provider-scoped,
+            // so probe them under EVERY identity the family's vendor operates,
+            // not just one. Probing a single name is what let the first cut of
+            // the scoping pass while `qwen` and the four `alibaba-*` tenants --
+            // DeepSeek V4's own first-party endpoints -- all resolved `None`.
+            let probes: Vec<&str> =
+                match super::host_variable_open_weights_family(&id.to_ascii_lowercase()) {
+                    Some(family) => super::vendor_operated_endpoints(family).to_vec(),
+                    None => vec!["passthrough"],
+                };
+            assert!(
+                !probes.is_empty(),
+                "{id} is gated to a family with no vendor endpoints, so its arm \
+                 is dead on every route"
+            );
+            for probe in probes {
+                match model_output_ceiling(probe, id) {
+                    Some((out, ctx)) if (out, ctx) == (want_out, want_ctx) => {}
+                    Some((out, ctx)) => wrong.push(format!(
+                        "{id} on `{probe}`: the chain resolves output {out} / \
+                         context {ctx}, but the vendor figure is output \
+                         {want_out} / context {want_ctx}"
+                    )),
+                    None => wrong.push(format!(
+                        "{id} on `{probe}`: NO ARM AT ALL. A missing arm is not a \
+                         safe default -- `known_context_window` substitutes \
+                         UNVERIFIED_CONTEXT_WINDOW (32,768) and a non-omit-safe \
+                         preset clamps output to UNKNOWN_CAP (8,192). Expected \
+                         output {want_out} / context {want_ctx}"
+                    )),
+                }
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "these provider-native passthrough ids no longer resolve their \
+             verified vendor limits (#1176). Add or correct the arm in \
+             `model_output_ceiling`, or -- if the VENDOR changed the figure -- \
+             update `limits/passthrough.rs` and say which vendor rows you \
+             checked:\n  {}",
+            wrong.join("\n  ")
+        );
+    }
+
+    /// #1232 -- the lookup is a substring match, so the ORDER of
+    /// `OPEN_WEIGHTS_HOST_SPREAD` is semantics, not tidiness: a fragment that
+    /// contains another must be tested first or the longer id can never reach
+    /// its own row and silently inherits the shorter one's verdict. Asserted
+    /// structurally so the claim in that const's doc cannot quietly go false --
+    /// this is the exact shape that let `deepseek-v4-flash-vision-exp` be
+    /// mistaken for `deepseek-v4-flash` in the first draft of the gate.
+    #[test]
+    fn open_weights_rows_are_longest_fragment_first() {
+        let rows = super::OPEN_WEIGHTS_HOST_SPREAD;
+        let mut shadowed = Vec::new();
+        for (i, (long, _)) in rows.iter().enumerate() {
+            for (j, (short, _)) in rows.iter().enumerate() {
+                if i == j || !long.contains(short) {
+                    continue;
+                }
+                if i > j {
+                    shadowed.push(format!(
+                        "`{long}` contains `{short}` but is listed after it, so \
+                         `{long}` can never reach its own row"
+                    ));
+                }
+            }
+        }
+        assert!(shadowed.is_empty(), "{}", shadowed.join("\n  "));
+    }
+
+    /// #1232 -- the seven open-weights ids whose hosts disagree resolve their
+    /// vendor's figures ON THE VENDOR'S OWN ENDPOINT and nothing anywhere else.
+    ///
+    /// This is the test the issue's third acceptance box asks for: it fails if
+    /// a later change re-globalises one of the seven (the third-party arm
+    /// stops being `None`) AND it fails if a later change deletes one outright
+    /// (the vendor arm stops resolving). Both directions matter, because
+    /// deletion is the obvious reading of AGENTS.md rule 3 and it is the wrong
+    /// one here -- DeepSeek's and MiniMax's own presets are not omit-safe, so a
+    /// deleted arm gives their users `UNKNOWN_CAP` (8,192), not a natural
+    /// ceiling.
+    #[test]
+    fn host_variable_open_weights_arms_are_provider_scoped() {
+        use super::passthrough::PASSTHROUGH_VENDOR_MODELS;
+        use std::collections::BTreeMap;
+
+        let vendor_figures: BTreeMap<&str, (u32, u32)> = PASSTHROUGH_VENDOR_MODELS
+            .iter()
+            .map(|&(id, out, ctx)| (id, (out, ctx)))
+            .collect();
+
+        let gated: Vec<&str> = super::OPEN_WEIGHTS_HOST_SPREAD
+            .iter()
+            .filter(|(_, vendor)| vendor.is_some())
+            .map(|&(fragment, _)| fragment)
+            .collect();
+        let ungated: Vec<&str> = super::OPEN_WEIGHTS_HOST_SPREAD
+            .iter()
+            .filter(|(_, vendor)| vendor.is_none())
+            .map(|&(fragment, _)| fragment)
+            .collect();
+
+        // NON-VACUITY. Both arms of this test loop over a list; an empty list
+        // asserts nothing, and a gate that scoped EVERYTHING would pass the
+        // first loop while destroying the five rows the second loop protects.
+        assert_eq!(
+            gated.len(),
+            7,
+            "the 2026-08-30 pull measured SEVEN rule-3 violations: {gated:?}"
+        );
+        assert_eq!(
+            ungated.len(),
+            5,
+            "five open-weights rows have hosts that AGREE and must stay \
+             globally keyed: {ungated:?}"
+        );
+
+        // Third-party shapes: two omit-safe reseller routes (where `None`
+        // restores `should_omit_max_tokens` and the host's own ceiling), and
+        // three non-omit-safe ones (where `None` errs low instead of high).
+        const THIRD_PARTY: [&str; 5] = [
+            "openrouter",
+            "flux-router",
+            "openai-compat",
+            "nebius",
+            "deepinfra",
+        ];
+
+        for id in &gated {
+            let family = super::host_variable_open_weights_family(id)
+                .expect("a gated row reports its family");
+            let endpoints = super::vendor_operated_endpoints(family);
+            assert!(
+                !endpoints.is_empty(),
+                "{id} names family `{family}`, which has no VENDOR_OPERATED_ENDPOINTS \
+                 entry -- the arm would be dead on every route including the vendor's"
+            );
+            let want = *vendor_figures
+                .get(id)
+                .unwrap_or_else(|| panic!("{id} must have a PASSTHROUGH_VENDOR_MODELS row"));
+            for vendor in endpoints {
+                assert_eq!(
+                    model_output_ceiling(vendor, id),
+                    Some(want),
+                    "{id}: `{vendor}` is a {family} vendor endpoint and must keep \
+                     its verified figures -- losing the arm hands its users \
+                     UNKNOWN_CAP (8,192), because that preset is not omit-safe"
+                );
+                // Tenant spellings the vendor adds without asking us. These are
+                // exactly the rows the single-name key dropped, so they are
+                // asserted rather than trusted to the prefix's doc comment.
+                for suffix in ["-cn", "-coding-plan", "-token-plan-cn"] {
+                    let tenant = format!("{vendor}{suffix}");
+                    assert_eq!(
+                        model_output_ceiling(&tenant, id),
+                        Some(want),
+                        "{id}: `{tenant}` is a {family} vendor tenant and must keep \
+                         the arm -- the `-` boundary match exists for this case"
+                    );
+                }
+            }
+            for host in THIRD_PARTY {
+                assert_eq!(
+                    model_output_ceiling(host, id),
+                    None,
+                    "{id} resolved an arm on `{host}`, which does not operate \
+                     it. AGENTS.md rule 3: this id is served from {} to {} \
+                     across dozens of endpoints, so one static figure reaches \
+                     hosts that serve neither",
+                    "its floor",
+                    "its ceiling"
+                );
+            }
+        }
+
+        // CONTROL 1 -- the five whose hosts AGREE are untouched on every
+        // provider. Without this the test would pass just as well against a
+        // gate that scoped the whole family, which is the over-correction
+        // AGENTS.md's rule warns about in its second half.
+        for id in &ungated {
+            let want = *vendor_figures
+                .get(id)
+                .unwrap_or_else(|| panic!("{id} must have a PASSTHROUGH_VENDOR_MODELS row"));
+            for host in [
+                "deepseek",
+                "minimax",
+                "openrouter",
+                "openai-compat",
+                "nebius",
+            ] {
+                assert_eq!(
+                    model_output_ceiling(host, id),
+                    Some(want),
+                    "{id} lost its arm on `{host}`, but its hosts agree within \
+                     1.3x -- gating it replaces a real ceiling with a low guess"
+                );
+            }
+        }
+
+        // CONTROL 2 -- a vendor-only id is outside this gate entirely, on any
+        // provider string. Proves the gate is keyed on the id, not on the
+        // provider argument suddenly mattering everywhere.
+        for host in ["anthropic", "openrouter", "nebius", "passthrough"] {
+            assert_eq!(
+                model_output_ceiling(host, "claude-opus-5"),
+                Some((128_000, 1_000_000)),
+                "claude-opus-5 is not open-weights; `{host}` must not change it"
+            );
+        }
+
+        // CONTROL 3 -- vendor tenants keep the arm; a host whose NAME merely
+        // contains the vendor's does not. `provider_operates` is a prefix match
+        // for exactly this reason.
+        assert_eq!(
+            model_output_ceiling("minimax-coding-plan", "minimax-m2.5"),
+            Some((128_000, 204_800)),
+            "the vendor's own tenant rows publish the vendor's figures"
+        );
+        assert_eq!(
+            model_output_ceiling("minimaxproxy", "minimax-m2.5"),
+            None,
+            "a reseller whose id merely starts with the vendor's name must not \
+             inherit the vendor's ceiling"
+        );
+    }
+
+    /// #1232 -- a gated row may not name a family that has no endpoint set.
+    ///
+    /// This is the state that makes an arm dead on EVERY route, vendor
+    /// included: `vendor_operated_endpoints` returns `&[]`, `provider_operates`
+    /// is false for every provider string, and the id falls to UNKNOWN_CAP
+    /// (8,192) / UNVERIFIED_CONTEXT_WINDOW (32,768) for everybody. Failing
+    /// closed at runtime is the right default; making the state unreachable is
+    /// better, and that is what this test does.
+    #[test]
+    fn every_gated_family_has_vendor_endpoints() {
+        let mut dangling = Vec::new();
+        let mut used: Vec<&str> = Vec::new();
+        for &(fragment, family) in super::OPEN_WEIGHTS_HOST_SPREAD {
+            let Some(family) = family else { continue };
+            used.push(family);
+            let endpoints = super::vendor_operated_endpoints(family);
+            if endpoints.is_empty() {
+                dangling.push(format!(
+                    "`{fragment}` is gated to family `{family}`, which has no \
+                     VENDOR_OPERATED_ENDPOINTS entry"
+                ));
+            }
+            for e in endpoints {
+                assert!(
+                    !e.is_empty() && *e == e.to_ascii_lowercase() && !e.ends_with('-'),
+                    "{family}: `{e}` is not a usable provider-identity prefix \
+                     (`provider_type()` is compared lowercased and the `-` \
+                     boundary is appended by the matcher)"
+                );
+            }
+        }
+        assert!(dangling.is_empty(), "{}", dangling.join("\n  "));
+
+        // NON-VACUITY, both directions: the loop above asserts nothing over an
+        // empty table, and a family nobody references is dead weight that will
+        // be trusted by the next reader.
+        assert_eq!(
+            used.len(),
+            7,
+            "the seven gated rows must each name a family: {used:?}"
+        );
+        for &(family, _) in super::VENDOR_OPERATED_ENDPOINTS {
+            assert!(
+                used.contains(&family),
+                "VENDOR_OPERATED_ENDPOINTS names `{family}`, which no gated row \
+                 uses -- delete it or gate the row that needs it"
+            );
+        }
+    }
+
+    /// Every endpoint name `family`'s vendor is known to answer on, derived
+    /// from `providers.toml` base-URL hosts plus the family key itself -- and
+    /// never from [`VENDOR_OPERATED_ENDPOINTS`], so a test built on this can
+    /// still fail when that const is wrong.
+    fn vendor_endpoint_names(family: &str) -> Vec<String> {
+        use crate::catalog::ProviderCatalog;
+
+        let catalog = ProviderCatalog::bundled().expect("the bundled catalog parses");
+        let domains = super::VENDOR_API_DOMAINS
+            .iter()
+            .find(|(f, _)| *f == family)
+            .map_or(&[] as &[&str], |&(_, d)| d);
+        let mut names = vec![family.to_string()];
+        for e in &catalog.providers {
+            let host = e
+                .base_url
+                .split_once("://")
+                .map_or(e.base_url.as_str(), |(_, rest)| rest)
+                .split('/')
+                .next()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if domains
+                .iter()
+                .any(|d| host == *d || host.ends_with(&format!(".{d}")))
+                && !names.contains(&e.id)
+            {
+                names.push(e.id.clone());
+            }
+        }
+        names
+    }
+
+    /// #1232 -- the identity axis a catalog-shaped test cannot see: a builtin
+    /// provider ALIAS that resolves onto a DIFFERENT canonical slug.
+    ///
+    /// `--provider alibaba` is the default DashScope route, and it never
+    /// reaches `model_output_ceiling` spelled `alibaba` at all:
+    /// `parse_builtin_provider` folds `qwen | alibaba | dashscope` onto
+    /// `ProviderType::Qwen`, whose slug is `qwen`, and builtins resolve BEFORE
+    /// the bundled catalog. `vendor_operated_catalog_endpoints_keep_their_arm`
+    /// grades catalog ids, so it is structurally blind to this route -- and
+    /// this is the N+1: fixing the catalog ids alone would still have left the
+    /// commonest first-party DeepSeek route on `UNKNOWN_CAP`.
+    ///
+    /// The oracle is the product's OWN resolver, not a list: every vendor
+    /// endpoint name is pushed through `parse_builtin_provider` ->
+    /// `provider_type_slug` and the resulting slug must keep the arm. A new
+    /// alias added to the resolver is graded the day it lands.
+    #[test]
+    fn builtin_alias_routes_to_a_vendor_endpoint_keep_their_arm() {
+        let gated: Vec<(&str, &str)> = super::OPEN_WEIGHTS_HOST_SPREAD
+            .iter()
+            .filter_map(|&(frag, family)| family.map(|f| (frag, f)))
+            .collect();
+        assert_eq!(gated.len(), 7, "the gated set changed shape: {gated:?}");
+
+        let mut respelled: Vec<String> = Vec::new();
+        let mut checked = 0usize;
+        for family in ["deepseek", "minimax"] {
+            for name in vendor_endpoint_names(family) {
+                let Some(kind) = crate::config::parse_builtin_provider(&name) else {
+                    continue;
+                };
+                let slug = crate::config::provider_type_slug(kind);
+                if slug != name {
+                    respelled.push(format!("{name} -> {slug}"));
+                }
+                for &(fragment, gated_family) in &gated {
+                    if gated_family != family {
+                        continue;
+                    }
+                    checked += 1;
+                    assert!(
+                        model_output_ceiling(slug, fragment).is_some(),
+                        "`--provider {name}` resolves to the builtin slug \
+                         `{slug}`, which is the ONLY string \
+                         `model_output_ceiling` ever sees on that route -- and \
+                         `{fragment}` resolves NO arm there, so a first-party \
+                         user gets UNKNOWN_CAP (8,192) output and a 32,768 \
+                         window. Add `{slug}` to VENDOR_OPERATED_ENDPOINTS."
+                    );
+                }
+            }
+        }
+
+        // NON-VACUITY. Without a RE-SPELLING this test is just a slower copy of
+        // the catalog one: the whole class it exists for is the alias whose
+        // slug differs from the endpoint's own name.
+        assert!(
+            !respelled.is_empty(),
+            "no vendor endpoint name was re-spelled by `parse_builtin_provider`, \
+             so this test graded nothing it exists for (`alibaba` -> `qwen` is \
+             the route that broke)"
+        );
+        assert!(
+            checked >= 7,
+            "only {checked} (endpoint, id) pairs graded, and {respelled:?} \
+             re-spelled -- the derivation stopped finding the vendor's routes"
+        );
+    }
+
+    /// #1232 -- the check that does NOT read `VENDOR_OPERATED_ENDPOINTS` for
+    /// its answer, and the reason the first cut of the scoping shipped.
+    ///
+    /// The verifier's point stands and is the whole design of this test: a test
+    /// whose "correct" provider is read from the artefact under test cannot
+    /// discover that the artefact names the wrong provider. So the oracle here
+    /// is `providers.toml` -- a different file, curated from models.dev by the
+    /// catalog process -- and specifically its `base_url` host. An endpoint
+    /// served from the vendor's own DNS is the vendor's endpoint, whatever it
+    /// is branded: that is how `alibaba-cn`, `alibaba-token-plan`,
+    /// `alibaba-coding-plan` and `alibaba-coding-plan-cn` are identified here
+    /// as DeepSeek V4 first-party routes without `deepseek` appearing anywhere
+    /// in their ids.
+    ///
+    /// Run against the commit that introduced the scoping, this test fails on
+    /// all five Alibaba rows.
+    #[test]
+    fn vendor_operated_catalog_endpoints_keep_their_arm() {
+        use crate::catalog::ProviderCatalog;
+        use std::collections::BTreeMap;
+
+        let catalog = ProviderCatalog::bundled().expect("the bundled catalog parses");
+        let host_of = |base_url: &str| -> String {
+            base_url
+                .split_once("://")
+                .map_or(base_url, |(_, rest)| rest)
+                .split('/')
+                .next()
+                .unwrap_or_default()
+                .to_ascii_lowercase()
+        };
+
+        // family -> the catalog ids served from that vendor's own DNS.
+        let mut derived: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for &(family, domains) in super::VENDOR_API_DOMAINS {
+            for e in &catalog.providers {
+                let host = host_of(&e.base_url);
+                if domains
+                    .iter()
+                    .any(|d| host == *d || host.ends_with(&format!(".{d}")))
+                {
+                    derived.entry(family).or_default().push(&e.id);
+                }
+            }
+        }
+
+        // NON-VACUITY. The derivation must actually find the rows that broke;
+        // if the catalog drops them this test must fail loudly rather than
+        // quietly assert nothing. `minimax*` is deliberately NOT in the catalog
+        // (it speaks the Anthropic wire, see the file header), so its endpoint
+        // identities come from `ProviderType::MiniMax` and are covered by
+        // `host_variable_open_weights_arms_are_provider_scoped` instead.
+        let deepseek_ids = derived.get("deepseek").cloned().unwrap_or_default();
+        for must in [
+            "deepseek",
+            "alibaba",
+            "alibaba-cn",
+            "alibaba-coding-plan",
+            "alibaba-coding-plan-cn",
+            "alibaba-token-plan",
+        ] {
+            assert!(
+                deepseek_ids.contains(&must),
+                "providers.toml no longer yields `{must}` as a DeepSeek-family \
+                 vendor endpoint, so this test has stopped grading the rows it \
+                 exists for. Derived: {deepseek_ids:?}"
+            );
+        }
+
+        let mut lost = Vec::new();
+        for &(fragment, family) in super::OPEN_WEIGHTS_HOST_SPREAD {
+            let Some(family) = family else { continue };
+            for id in derived.get(family).into_iter().flatten() {
+                if model_output_ceiling(id, fragment).is_none() {
+                    lost.push(format!(
+                        "`{id}` serves {family} from the vendor's own DNS \
+                         ({}), but `{fragment}` resolves NO arm there -- that \
+                         endpoint's users get UNKNOWN_CAP (8,192) and a 32,768 \
+                         window, the #1157 cut",
+                        catalog.get(id).map(|e| e.base_url.as_str()).unwrap_or("?")
+                    ));
+                }
+            }
+        }
+        assert!(
+            lost.is_empty(),
+            "vendor-operated endpoints lost their arm -- add the missing \
+             identity prefix to VENDOR_OPERATED_ENDPOINTS:\n  {}",
+            lost.join("\n  ")
+        );
+
+        // CONTROL -- a catalog id that is NOT on a vendor domain must still
+        // resolve `None`, or this test would pass just as well against a table
+        // with no scoping at all.
+        let third_party: Vec<&str> = catalog
+            .providers
+            .iter()
+            .map(|e| e.id.as_str())
+            .filter(|id| !deepseek_ids.contains(id))
+            .collect();
+        assert!(
+            third_party.len() > 50,
+            "control set is too small to mean anything"
+        );
+        for id in third_party {
+            assert_eq!(
+                model_output_ceiling(id, "deepseek-v4-pro"),
+                None,
+                "`{id}` is not served from a DeepSeek-family vendor domain but \
+                 resolved the vendor's arm"
+            );
+        }
+    }
+
+    /// The table records one canonical spelling per model because the lookup
+    /// is a substring match. That claim is load-bearing -- it is why 83 rows
+    /// cover the ~160 provider-specific spellings models.dev publishes -- so
+    /// it is asserted, not assumed.
+    #[test]
+    fn provider_specific_spellings_resolve_through_the_same_arm() {
+        for (canonical, dressed) in [
+            ("claude-opus-5", "us.anthropic.claude-opus-5"),
+            ("claude-opus-5", "claude-opus-5@default"),
+            (
+                "claude-sonnet-4-5-20250929",
+                "anthropic.claude-sonnet-4-5-20250929-v1:0",
+            ),
+            ("claude-opus-4-6", "eu.anthropic.claude-opus-4-6-v1"),
+            ("grok-4.3", "xai.grok-4.3"),
+            ("gemini-flash-latest", "google/gemini-flash-latest"),
+        ] {
+            assert_eq!(
+                model_output_ceiling("passthrough", canonical),
+                model_output_ceiling("passthrough", dressed),
+                "{dressed} must resolve through the same arm as {canonical}"
+            );
+            assert!(
+                model_output_ceiling("passthrough", dressed).is_some(),
+                "{dressed} must resolve at all"
+            );
+        }
+    }
+
+    /// A shadowed or duplicated row would make the release script's
+    /// containment lookup disagree with the chain, which is the drift this
+    /// whole guard exists to prevent.
+    #[test]
+    fn passthrough_table_is_populated_and_free_of_duplicates() {
+        use super::passthrough::PASSTHROUGH_VENDOR_MODELS;
+        assert!(
+            PASSTHROUGH_VENDOR_MODELS.len() >= 50,
+            "the table parsed to {} rows -- a table this small is not covering \
+             the vendor catalogue",
+            PASSTHROUGH_VENDOR_MODELS.len()
+        );
+        let mut seen = std::collections::BTreeSet::new();
+        for &(id, _, _) in PASSTHROUGH_VENDOR_MODELS {
+            assert!(
+                id.chars().all(|c| c.is_ascii_lowercase()
+                    || c.is_ascii_digit()
+                    || matches!(c, '.' | '-' | '_' | '@' | ':' | '/')),
+                "{id} is not a lowercased model id"
+            );
+            assert!(seen.insert(id), "{id} appears twice in the table");
+        }
+    }
+
+    /// The PREMISE, asserted rather than asserted-about: these ids really are
+    /// invisible to the routed-alias drift guard. If the routing catalogue
+    /// ever gains one, this test says so and the row moves.
+    #[test]
+    fn the_passthrough_table_covers_ids_the_routed_guard_cannot_see() {
+        use super::passthrough::PASSTHROUGH_VENDOR_MODELS;
+        use wcore_types::model_aliases::{known_providers, models_for_provider};
+
+        let mut routed = Vec::new();
+        for provider in known_providers() {
+            for (_alias, model_id) in models_for_provider(provider) {
+                routed.push(model_id.to_ascii_lowercase());
+            }
+        }
+        let unseen: Vec<&str> = PASSTHROUGH_VENDOR_MODELS
+            .iter()
+            .map(|&(id, _, _)| id)
+            .filter(|id| !routed.iter().any(|r| r.contains(*id)))
+            .collect();
+
+        // The three ids the hand check caught last cycle. Each must be in the
+        // passthrough table AND absent from the routed catalogue -- that
+        // combination is precisely the gap #1176 reports.
+        for id in ["claude-opus-5", "gpt-4o-2024-05-13", "gemini-flash-latest"] {
+            assert!(
+                PASSTHROUGH_VENDOR_MODELS.iter().any(|&(t, _, _)| t == id),
+                "{id} cost a real defect last cycle and must stay in the table"
+            );
+            assert!(
+                unseen.contains(&id),
+                "{id} is now in the routed catalogue too -- good, but move it \
+                 out of this list so the premise stays honest"
+            );
+        }
+        assert!(
+            unseen.len() >= 20,
+            "only {} passthrough ids are outside the routed catalogue; if the \
+             two catalogues have converged, say so here rather than leaving a \
+             guard that grades nothing new",
+            unseen.len()
         );
     }
 

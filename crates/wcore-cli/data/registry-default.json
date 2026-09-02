@@ -15,7 +15,7 @@
     "name": "wayland-browser",
     "version": "0.6.0",
     "requires_sandbox": true,
-    "description": "Browser tool plugin shell (Camoufox / chromiumoxide / Browserbase)"
+    "description": "Browser tool plugin shell (Camoufox / Browserbase)"
   },
   {
     "name": "wayland-cua",

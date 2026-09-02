@@ -87,6 +87,16 @@ test-ci:
 flake-gate:
     EVIDENCE_DIR=target/nextest/ci bash .github/scripts/grade-retry-flakes.sh
 
+# Compare a local CI-profile run's failing-test SET against the named
+# allowlist (wayland-core#367).
+#
+# This is the one to run before calling an integration branch clean. `N failed`
+# is not `the known N failed`: a red-arm instrument reached integ/f13 and
+# survived three commits because the count matched and nobody opened the names.
+# Reads target/nextest/ci/junit.xml, which only `--profile ci` writes.
+failing-set-gate:
+    EVIDENCE_DIR=target/nextest/ci bash .github/scripts/grade-failing-set.sh
+
 # Run a single test by name
 test-one NAME:
     vx cargo nextest run --workspace -E 'test({{ NAME }})'
@@ -127,6 +137,80 @@ test-acceptance-compact:
 # ── Lint / Format ─────────────────────────────────────────────────────────
 lint:
     vx cargo clippy --workspace --all-targets -- -D warnings
+
+# Type-check the Windows-only code, and the Windows-only TESTS, from Linux.
+#
+# # The hole this closes
+#
+# `#![cfg(windows)]` test files compile to NOTHING on the hosts our gates
+# actually execute on. `crates/wcore-cli/tests/quarantine_process_tree_windows.rs`
+# and `quarantine_console_authority_windows.rs` (FerroxLabs/wayland-core#393),
+# `harness_owns_spawned_trees_windows.rs` (#358) and
+# `quarantine_terminal_authority_windows.rs` (#338) are all in that state: on
+# Linux and macOS `cargo test` reports them as zero tests and exits 0, so they
+# can be broken -- or deleted -- with every green staying green until a Windows
+# runner picks it up, hours later and on a different leg.
+#
+# MEASURED, hetzner, 2026-08-31, on the tree this recipe was added to, with a
+# deliberate type error appended to `quarantine_process_tree_windows.rs` and
+# then reverted. Both polarities of THIS recipe's own command, so it is on
+# record that the gate can fail as well as pass:
+#
+#   cargo check -p wcore-cli --tests                    -> RC=0    (the hole)
+#   cargo test  -p wcore-cli --test issue_393_...guard  -> RC=0    (the hole)
+#   just check-windows-compile, error present           -> RC=101
+#     error[E0308]: mismatched types
+#     error: could not compile `wcore-cli` (test "quarantine_process_tree_windows")
+#   just check-windows-compile, error reverted          -> RC=0
+#
+# So this is not a redundant re-run of the Linux check: it is the only
+# Linux-side instrument that can see those files at all. ~1m04s cold against a
+# warm dep graph, 1-3s warm, and 668 MB of `target/x86_64-pc-windows-gnu`.
+#
+# # Why this ONE recipe does not use `vx cargo`
+#
+# Everything else here routes through `vx` for a pinned toolchain. This recipe
+# must not, and the reason is measured rather than assumed: `vx` keeps its own
+# rustup store at `~/.vx/store/rust/<ver>/rustup`, whose only installed target
+# is `x86_64-unknown-linux-gnu`. `rustup target add` -- with or without a `vx`
+# prefix -- resolves to the SYSTEM rustup (`vx sh -c "command -v rustup"` ->
+# `/root/.cargo/bin/rustup`, because the vx store ships `rustup-init` and no
+# `rustup`), so it installs into `~/.rustup` where `vx cargo` will never look.
+# The result is a gate that cannot pass on any box:
+#
+#   vx just check-windows-compile  -> RC=101
+#     error[E0463]: can't find crate for `std`
+#     = note: the `x86_64-pc-windows-gnu` target may not be installed
+#
+# A gate that cannot PASS is worth no more than one that cannot fail, so the
+# recipe calls `cargo` directly. That is not a loss of determinism: bare
+# `cargo` is the rustup shim, which honours this repo's `rust-toolchain.toml`
+# (`channel = "1.95.0"`) and resolves to cargo 1.95.0 -- the version `vx.toml`
+# pins -- whereas `vx cargo` resolved to 1.97.0 out of the vx store. Measured
+# side by side in the same directory:
+#
+#   vx sh -c "cargo --version"  -> cargo 1.95.0, sysroot ~/.rustup/toolchains/1.95.0-...
+#   vx cargo --version          -> cargo 1.97.0, sysroot ~/.vx/store/rust/1.95.0/rustup/...
+#
+# # gnu is NOT msvc, and this does not pretend otherwise
+#
+# We ship `x86_64-pc-windows-msvc`. This uses the `gnu` target because that is
+# what cross-compiles from Linux without the MSVC toolchain. It shares the
+# `cfg(windows)` / `cfg(target_os = "windows")` arms -- which is the whole
+# point -- but NOT the ABI, the linker, or the C runtime. It therefore catches
+# a type error, a moved API, a missing import or a stale call in Windows-gated
+# code, and it does NOT substitute for the msvc legs in `ci.yml`, which stay
+# the release-blocking arm. A green here is "the Windows source still compiles
+# as source", never "Windows works".
+#
+# `rustup target add` is idempotent and runs first so the recipe is
+# self-sufficient on a fresh box rather than a gate that reds for a missing
+# target.
+#
+# Run: `just check-windows-compile`
+check-windows-compile:
+    rustup target add x86_64-pc-windows-gnu
+    cargo check --workspace --all-targets --target x86_64-pc-windows-gnu
 
 lint-fix:
     vx cargo fix --allow-dirty --allow-staged
@@ -241,7 +325,17 @@ _auto-commit-fixes:
 # muting it is TRUE against the real graph. See the recipe above.
 # `check-no-personal-identifiers` added 2026-08-02 (lane identifier-scrub): a
 # ~3s pure text scan, no toolchain, so it runs first and costs nothing.
-check-all: check-no-personal-identifiers check-model-limits check-windows-attribution fmt-check lint test-ci hakari-verify audit deny verify-suppressions
+# `ledger-check` added 2026-08-29 (lane ledger): the OFFLINE arm only. The
+# coverage arm needs `gh` against two repos and lives in `ledger-check-live`,
+# because a network dependency inside `check-all` buys flakiness for nothing.
+# `release-readiness-selftest` added 2026-08-29 (lane f13-relgate): the
+# SELF-TEST only, deliberately not the gate. The gate is red by design while
+# any defect is open, so putting it here would make every in-progress lane
+# red, and a gate everyone bypasses is a gate nobody reads. The gate itself
+# runs on the release path (`release-readiness-live`, and the
+# `prepare-release` job in release.yml). This arm only proves the gate can
+# still fail — which is the half that rots silently between releases.
+check-all: check-no-personal-identifiers check-model-limits check-windows-attribution ledger-check release-readiness-selftest fmt-check lint check-windows-compile test-ci hakari-verify audit deny verify-suppressions
 
 # ── User-flow harness (CLI + TUI + failure injection) ────────────────────
 # Drives the COMPILED wayland-core binary the way a user does:
@@ -334,6 +428,105 @@ check-no-assertion-todos:
         exit 1
     fi
     echo "OK: no todo!() in eval-scenarios assertion paths"
+
+# ── Criteria-ledger gate ──────────────────────────────────────────────────
+# `.planning/ledger/<repo>-<number>.md` is one file per open issue, on BOTH
+# trackers, saying what must be TRUE for that issue to close and pointing each
+# `met` claim at something a machine can resolve. It exists because handoffs
+# in this repo are narratives of what was DONE, so every session re-derives
+# "is this done?" from prose and gets a different answer: v0.13.10 shipped
+# claiming 22 issues closed and grading found 9.
+#
+# The largest contributor was structural. The sweep that produced 0.13.9
+# filtered `FerroxLabs/wayland` on `area:core`, and the whole second tracker
+# (`FerroxLabs/wayland-core`, 17 open issues) was invisible for a full
+# release. Nothing went red, because nothing could.
+#
+# TWO recipes, for the same reason `check-model-limits` has two:
+#   * `ledger-check`      — self-test THEN the structural gate. No network.
+#     Catches the rot (a `met` criterion whose test was deleted), a malformed
+#     entry, a `blocked` owned by core, and scanning nothing. Chained into
+#     `check-all`, so it costs a second and cannot be shadowed.
+#   * `ledger-check-live` — adds tracker COVERAGE and ledger/GitHub
+#     DIVERGENCE. Needs `gh` with read access to BOTH repos. This is the arm
+#     that catches a tracker going missing, so run it before any release.
+#
+# The offline arm prints, in as many words, that it did NOT check coverage.
+# A skip that reads as a pass is the defect class this repo keeps finding.
+# `--self-test` builds throwaway ledgers in a temp dir and proves the gate
+# fires on each defect and stays silent on the control, both directions.
+# Run: `just ledger-check`
+ledger-check:
+    python3 scripts/check-criteria-ledger.py --self-test
+    python3 scripts/check-criteria-ledger.py --offline
+
+# Run: `just ledger-check-live` — the coverage arm; needs gh on both trackers
+ledger-check-live:
+    python3 scripts/check-criteria-ledger.py --self-test
+    python3 scripts/check-criteria-ledger.py
+
+# ── Release-readiness gate ────────────────────────────────────────────────
+# `ledger-check` above gates the BOOKKEEPING: a malformed entry, a `met` with
+# no evidence, evidence that no longer resolves, a `blocked` owned by core, an
+# open issue with no ledger file. Every one of those asks whether the RECORD is
+# honest. NONE of them ask whether the WORK is done.
+#
+# On the tree this recipe was added to, 67 criteria were `not-met` and owned by
+# `core`, and `just ledger-check` was completely green. It has never been
+# possible for this repo to go red because a release was INCOMPLETE — only
+# because a ledger lied about it. That is the mechanism behind every partial
+# release here, v0.13.10 included: 22 issues claimed closed, 9 met on grading.
+#
+# This gate refuses to cut a release while any in-scope DEFECT still has
+# core-owned work outstanding. Errors, problems and issues block; feature
+# requests do not, and the split is a required `kind: defect|feature` field in
+# each ledger file rather than a GitHub label, so the offline arm needs no
+# network. A MISSING `kind` is a hard failure: a field that defaults is a field
+# nobody ever types, and it would default into whichever bucket was convenient.
+#
+# It also refuses a remainder that was handed out and then lost. A criterion
+# `blocked` or `not-met` under desktop/flux/maintainer must carry a
+# `handoff: <owner>/<repo>#<number>` naming the ticket that now owns it. A
+# ticket ends CLOSED or DECOMPOSED; "partial" is a ticket nobody split, and an
+# untracked remainder is what makes a partial invisible.
+#
+# DELIBERATELY NOT IN `check-all`. Every lane runs `check-all`, and this gate is
+# red BY DESIGN for as long as any defect is open — which is always, mid-cycle.
+# A gate that is red on every in-progress lane gets bypassed, then gets ignored,
+# then gets deleted, and that is how a ratchet dies. It belongs on the release
+# path, where red means "do not cut", and it is wired into the `prepare-release`
+# job in .github/workflows/release.yml so a FAIL actually stops the publish
+# instead of being advisory. The SELF-TEST, by contrast, is cheap and always
+# meaningful — see `release-readiness-selftest` below, which ci.yml runs, so the
+# gate cannot rot in between releases.
+#
+# TWO recipes, the same split as `ledger-check`:
+#   * `release-readiness`      — structure only, no network. Prints in as many
+#     words that it did NOT resolve handoff targets and did NOT corroborate
+#     `kind:` against tracker labels. A skip that reads as a pass is the exact
+#     defect class this repo keeps finding.
+#   * `release-readiness-live` — adds both. Fails when a `handoff:` names an
+#     issue that is closed or does not exist, and when an entry marked
+#     `kind: feature` is labelled `bug` on its tracker — the one direction of
+#     misclassification that shrinks the blocking set.
+#
+# Run: `just release-readiness`
+release-readiness:
+    python3 scripts/check-release-readiness.py --self-test
+    python3 scripts/check-release-readiness.py --offline
+
+# Run: `just release-readiness-live` — before cutting. Needs gh on both trackers
+release-readiness-live:
+    python3 scripts/check-release-readiness.py --self-test
+    python3 scripts/check-release-readiness.py
+
+# Proves the gate can FAIL. No network, and it does not read .planning/ledger at
+# all, so it is safe in `check-all` where the gate itself is not: it says nothing
+# about whether a release is ready, only that the thing which would say so still
+# works. That is the half which rots silently between releases.
+# Run: `just release-readiness-selftest`
+release-readiness-selftest:
+    python3 scripts/check-release-readiness.py --self-test
 
 # ── Vacuous-green gate ─────────────────────────────────────────────────────
 # `cargo nextest` fails closed on a zero-test run (`no-tests = "fail"` in
@@ -447,3 +640,29 @@ smoke:
 proving-ground:
     vx cargo nextest run -p wcore-cli --test proving_ground --test build_provenance
     vx cargo nextest run -p wcore-providers --test detection_registry
+
+# ── THE PLAN ───────────────────────────────────────────────────────────
+# `.planning/THE-PLAN.md` is GENERATED, never written by hand. Every handoff this
+# project produced was a narrative of what somebody did rather than a record of
+# what is true, so each session re-derived "what is done" from prose and got a
+# different answer: v0.13.10 shipped claiming 22 issues closed and grading found
+# 9. A hand-maintained plan is that same failure with better formatting.
+#
+# It joins three sources and has no facts of its own: `.planning/ledger/` for
+# criterion STATE, `plan-verification.json` for INDEPENDENT verification, and
+# `PLAN-ROUTING.json` for ASSIGNMENT.
+#
+# `plan-check` FAILS on an unrouted criterion. That is the point: core#113 and
+# wayland#863 sat outside every lane in this cycle purely because nothing forced
+# them to be assigned, and an unrouted criterion is how work goes missing.
+#
+# `met` is NOT `done`. A criterion is DONE only when an independent adversarial
+# verifier confirmed the lane; until then it renders CLAIMED, because a
+# criterion written thin reads `met` while the reported bug is still live.
+# Run: `just plan`
+plan:
+    python3 scripts/render-plan.py
+
+# Run: `just plan-check` — fails on an unrouted criterion or outstanding defect work
+plan-check:
+    python3 scripts/render-plan.py --check

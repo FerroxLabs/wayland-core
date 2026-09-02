@@ -41,7 +41,7 @@ use crate::{
     LlmProvider, ModelInfo, ProviderError, alias_models, dump_request_body, dump_response_chunk,
     reset_response_dump,
 };
-use wcore_config::compat::ProviderCompat;
+use wcore_config::compat::{ProviderCompat, join_endpoint};
 use wcore_config::debug::DebugConfig;
 
 /// Default Google Generative Language API base URL.
@@ -698,7 +698,7 @@ impl LlmProvider for GeminiProvider {
     /// /v1beta/models` endpoint. On any HTTP/parse failure we fall back to the
     /// static alias catalog — `/model` must never hard-fail.
     async fn list_models(&self) -> anyhow::Result<Vec<ModelInfo>> {
-        let url = format!("{}/v1beta/models", self.base_url.trim_end_matches('/'));
+        let url = join_endpoint(&self.base_url, "/v1beta/models");
         // H-2 / secrets-26: the API key rides in the `x-goog-api-key` header,
         // NOT the `?key=` query string, so it cannot leak into a URL-bearing
         // error, the `[retry]` trace, or across a 302. `build_headers` is the
@@ -1156,6 +1156,7 @@ mod tests {
             temperature: None,
             omit_max_tokens: false,
             routed_model_hint: None,
+            replay_reasoning_content: false,
         }
     }
 

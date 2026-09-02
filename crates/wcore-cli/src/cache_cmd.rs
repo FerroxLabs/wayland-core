@@ -48,6 +48,13 @@ use wcore_agent::cache_ledger::{
 pub const EXIT_COST_NOT_TRUSTWORTHY: u8 = 7;
 /// Exit code: `verify` found no ledger to check.
 pub const EXIT_NO_LEDGER: u8 = 8;
+/// Exit code: wayland#1205 c3 — `verify` was handed a ledger written before
+/// [`wcore_agent::cache_ledger::LEDGER_SCHEMA`] 2, carrying at least one
+/// counterfactual whose meaning this build had to demote on load. Distinct
+/// from [`EXIT_COST_NOT_TRUSTWORTHY`]: the BILLED figure may be perfectly
+/// good, and the operator's remedy is different — a legacy file cannot be
+/// repaired by pricing anything, only by re-running the session.
+pub const EXIT_LEGACY_SCHEMA: u8 = 9;
 
 #[derive(Args, Debug)]
 pub struct CacheArgs {
@@ -200,12 +207,30 @@ pub fn run(args: CacheArgs) -> anyhow::Result<ExitCode> {
                 };
             let s = ledger.summarize();
             let truth = s.cost_truth();
+            // wayland#1205 c3 — a ledger an older build wrote is not
+            // certifiable, however good its BILLED figure is. v1 had no way to
+            // record where its uncached-equivalent baseline came from: a bare
+            // number there may be a catalog price or a provider-family
+            // CEILING, and `0.0` meant "nothing could price this" — three
+            // facts this build cannot tell apart, so `load` drops all of them.
+            // `verify` is the certification surface, and certifying a file
+            // whose field meanings we had to guess at is the one place that
+            // must not happen.
+            //
+            // The refusal keys on the SCHEMA (`is_migrated`), and the demoted
+            // row count is printed beside it so an operator can tell this
+            // refusal from an unpriced-model one. Narrow where it matters: a
+            // CURRENT-schema session on an unlisted model is merely unpriced,
+            // not laundered, and still verifies.
+            let laundered = s.laundered_counterfactual_round_trips;
+            let certified = truth.is_trustworthy() && !ledger.is_migrated();
             println!(
                 "F23_CACHE=verify trustworthy={} cost_truth={} saving_truth={} \
+                 laundered_counterfactual_round_trips={} legacy_schema={} \
                  provider_reported_round_trips={} catalog_priced_round_trips={} \
                  estimated_round_trips={} unpriced_round_trips={} cost_usd={} \
                  session_complete={} session={} path={}",
-                truth.is_trustworthy(),
+                certified,
                 truth.as_str(),
                 // Reported, not enforced: `verify`'s documented contract and
                 // exit code 7 are about whether the BILLED figure is spend. A
@@ -213,6 +238,11 @@ pub fn run(args: CacheArgs) -> anyhow::Result<ExitCode> {
                 // price its counterfactual, so #1163 must not start failing CI
                 // for every session on an unlisted model.
                 s.saving_truth().as_str(),
+                laundered,
+                match ledger.migrated_from_schema {
+                    Some(v) => v.to_string(),
+                    None => "none".to_string(),
+                },
                 s.provider_reported_round_trips,
                 s.catalog_priced_round_trips,
                 s.estimated_round_trips,
@@ -222,8 +252,23 @@ pub fn run(args: CacheArgs) -> anyhow::Result<ExitCode> {
                 s.session_id,
                 path.display(),
             );
-            if truth.is_trustworthy() {
+            if certified {
                 Ok(ExitCode::SUCCESS)
+            } else if let Some(found) = ledger.migrated_from_schema {
+                eprintln!(
+                    "wayland-core cache verify: the ledger at {} was written at schema {} and \
+                     migrated on read — v1 stored no provenance for its uncached-equivalent \
+                     baseline, so a bare figure there may be a catalog price or a \
+                     provider-family ceiling and a 0.0 meant \"nothing could price this\". \
+                     {laundered} of {} round-trips lost that figure on load. The billed cost is \
+                     {}, but the saving this file recorded cannot be recovered and this session \
+                     must not be certified.",
+                    path.display(),
+                    found,
+                    s.round_trips,
+                    truth.as_str(),
+                );
+                Ok(ExitCode::from(EXIT_LEGACY_SCHEMA))
             } else {
                 eprintln!(
                     "wayland-core cache verify: cost is {} — of {} round-trips, {} were priced \
@@ -473,7 +518,8 @@ fn resolve(
             Ok(ledger) => return Ok((path, ledger)),
             Err(e) => {
                 anyhow::bail!(
-                    "session '{id}' recorded conversation id '{conversation_id}', but its ledger                      could not be read: {e}"
+                    "session '{id}' recorded conversation id '{conversation_id}', but its ledger \
+                        could not be read: {e}"
                 );
             }
         }
@@ -483,7 +529,10 @@ fn resolve(
     // the keys. The old message named a path that had never existed and said
     // nothing else.
     anyhow::bail!(
-        "no cache ledger for '{id}' in {}. Ledgers are keyed by the engine's internal          conversation id, not by the session id you set with --session-id; session '{id}' is          either unknown to the session store at {} or was recorded by a build that did not          persist its conversation id. Run `wayland-core cache list` to see the ids that exist.",
+        "no cache ledger for '{id}' in {}. Ledgers are keyed by the engine's internal \
+            conversation id, not by the session id you set with --session-id; session '{id}' is \
+            either unknown to the session store at {} or was recorded by a build that did not \
+            persist its conversation id. Run `wayland-core cache list` to see the ids that exist.",
         dir.display(),
         manager.directory().display(),
     )

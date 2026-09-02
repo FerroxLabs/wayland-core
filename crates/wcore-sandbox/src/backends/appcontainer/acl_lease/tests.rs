@@ -864,17 +864,36 @@ fn zero_length_lease_is_reclaimed_not_refused_forever() {
     fs::remove_file(&quarantined[0]).unwrap();
 }
 
+/// A non-empty unparseable lease is QUARANTINED and reported, not refused
+/// forever — the guard rail on the 0-byte fix above, restated by `#369` c1.
+///
+/// # This test used to assert the opposite, and the reversal is deliberate
+///
+/// It read: "a non-empty lease that will not parse is indistinguishable from a
+/// tampered one -- it may carry real ACL grants -- so it must keep refusing."
+/// The premise is true; the conclusion does not follow, and `#369` is the
+/// measurement that shows why. **Refusing revokes nothing.** It leaves exactly
+/// the same ACEs on disk as quarantining does, and adds a permanent, total
+/// outage of sandboxed execution on the machine — twelve days on SEANDESKTOP,
+/// with `is_available()` returning a bare `false` and the cause visible only
+/// to someone who provoked an `execute()` and read the error. So the old
+/// disposition was dominated on both axes: same grants, worse availability.
+///
+/// What the old test was really protecting is kept in full, and is what this
+/// one asserts:
+///
+/// * the file is MOVED, never deleted, so a tampered or truncated lease stays
+///   inspectable and the recorded grants are not destroyed;
+/// * the operator is TOLD, loudly, at `ERROR` — this is not the silent
+///   conversion into a reclaim the old comment warned about;
+/// * and the residual is reported as UNKNOWN. A lease that could not be parsed
+///   must never be described as having granted nothing, which is the one way
+///   this reversal could actually lose something.
 #[test]
-fn a_non_empty_unreadable_lease_still_fails_closed() {
-    // The guard rail on the fix above. Reclamation is keyed on zero LENGTH
-    // only. A non-empty lease that will not parse is indistinguishable from a
-    // tampered one -- it may carry real ACL grants -- so it must keep refusing.
-    // Widening the 0-byte reclamation to "anything unreadable" would silently
-    // convert this deliberate fail-closed into a reclaim, which is why this
-    // test sits next to it rather than in the existing ignore-gated suite.
-    // No reclamation-sink lock: this sweep fails closed before it reclaims
-    // anything, so it can never emit a report.
+fn a_non_empty_unreadable_lease_is_quarantined_and_reported() {
+    let _lock = reclamation_sink_lock();
     let (_local, directory) = private_lease_root();
+    let _ = take_emitted_reclamations();
     let path = write_raw_lease(
         &directory,
         "malformed",
@@ -882,17 +901,45 @@ fn a_non_empty_unreadable_lease_still_fails_closed() {
     );
     assert!(fs::metadata(&path).unwrap().len() > 0);
 
-    let result = unsafe { recover_dead_leases_locked(&directory) };
+    unsafe { recover_dead_leases_locked(&directory) }
+        .expect("one unparseable lease must not disable the whole backend (#369 c1)");
 
     assert!(
-        result.is_err(),
-        "a non-empty unparseable lease must still fail closed, not be reclaimed"
+        !path.exists(),
+        "the unparseable lease is still in the lease directory, so the next acquisition meets \
+         it again and the backend stays down"
+    );
+    let quarantined = quarantined_for(&path);
+    assert_eq!(
+        quarantined.len(),
+        1,
+        "it must be MOVED to quarantine, not deleted -- a tampered or truncated lease has to \
+         stay inspectable: {quarantined:?}"
+    );
+
+    let reports = take_emitted_reclamations();
+    assert_eq!(
+        reports.len(),
+        1,
+        "the quarantine must be reported; a silent conversion into a reclaim is exactly what \
+         the previous disposition warned about: {reports:?}"
     );
     assert!(
-        path.exists(),
-        "a non-empty unparseable lease must NOT be quarantined: it may hold real grants"
+        reports[0].contains("could not be read"),
+        "the report must say the contents could not be read: {}",
+        reports[0]
     );
-    fs::remove_file(&path).unwrap();
+    assert!(
+        !reports[0].contains("nothing was left behind"),
+        "a lease that could not be parsed must NEVER be reported as having granted nothing: \
+         {}",
+        reports[0]
+    );
+
+    // Permanence was the finding, so prove the SECOND pass is clean too.
+    unsafe { recover_dead_leases_locked(&directory) }
+        .expect("recovery must stay clean after quarantining an unparseable lease");
+    fs::remove_file(&quarantined[0]).unwrap();
 }
 
 #[test]
@@ -1001,4 +1048,175 @@ fn measure_concurrent_lifecycles() {
             total_ms as f64 / threads as f64
         );
     }
+}
+
+/// `#369` c1 — ONE lease that cannot be recovered must not disable the whole
+/// backend.
+///
+/// # The incident this is the regression test for
+///
+/// A single abandoned lease sat in `%LOCALAPPDATA%\Wayland\Core\
+/// AppContainerLeases\v1` on SEANDESKTOP from 2026-08-17. Every `execute()`
+/// refused, fail-closed, for TWELVE DAYS; `is_available()` returned a bare
+/// `false`; and moving that one file aside flipped the probe to available on
+/// the next run with no other change. The mechanism is that any `Err` raised
+/// while recovering one lease propagated out of `recover_dead_leases_locked`,
+/// out of `ExecutionIdentity::start`, and therefore out of every sandboxed
+/// command — and nothing expired the file, so every later process re-read it
+/// and failed identically.
+///
+/// # Why the fixture is an UNREADABLE lease
+///
+/// The lease that actually wedged that machine failed inside
+/// `remove_and_verify_exact_sid`, which needs a real AppContainer profile
+/// whose SID digest matches — not constructible here. An unreadable lease
+/// reaches the same `?` through `read_validated_lease`, on the SAME production
+/// path, with no test seam substituting anything: this drives
+/// `recover_dead_leases_locked` itself. The fix is at the loop, not at either
+/// call site, precisely so that both shapes and the ones nobody has hit yet
+/// are covered by one bound.
+///
+/// # Non-vacuity
+///
+/// A well-formed sibling is swept in the same pass and asserted to have been
+/// REACHED. Without it, "the sweep returned Ok" is satisfied by a sweep that
+/// stopped early and quietly, which is the defect wearing a different face.
+#[test]
+fn a_lease_that_cannot_be_recovered_is_quarantined_instead_of_wedging_the_backend() {
+    let _lock = reclamation_sink_lock();
+    let (_local, directory) = private_lease_root();
+    let _ = take_emitted_reclamations();
+
+    // Sorted first by `paths.sort()`, so the sibling below is reached only if
+    // this one did not abort the pass.
+    let unreadable = directory.join("WCore-aaaa-unreadable.toml");
+    fs::write(&unreadable, b"this file is not a lease at all\n").unwrap();
+    let sibling = write_unreconcilable_lease(&directory, "zzsibling", false, Vec::new());
+    assert!(
+        unreadable < sibling,
+        "the unreadable lease must sort BEFORE the sibling, or this test cannot show that \
+         the sweep continued past it: {} vs {}",
+        unreadable.display(),
+        sibling.display()
+    );
+
+    unsafe { recover_dead_leases_locked(&directory) }
+        .expect("one unrecoverable lease must not fail the whole sweep (#369 c1)");
+
+    assert!(
+        !unreadable.exists(),
+        "the unrecoverable lease is still in the lease directory, so the next acquisition \
+         meets it again and the backend stays down"
+    );
+    assert!(
+        !sibling.exists(),
+        "the sweep never reached the sibling lease, so it stopped at the bad one -- which is \
+         the defect, not the fix"
+    );
+
+    let reports = take_emitted_reclamations();
+    let quarantine = reports
+        .iter()
+        .find(|report| report.contains("could not be recovered"))
+        .unwrap_or_else(|| {
+            panic!(
+                "the unrecoverable lease was moved but the operator was told nothing: {reports:?}"
+            )
+        });
+    assert!(
+        quarantine.contains(&unreadable.display().to_string()),
+        "the report must name the lease it quarantined: {quarantine}"
+    );
+    assert!(
+        quarantine.contains("could not be read"),
+        "a lease whose contents could not be parsed must be reported as UNKNOWN residual, \
+         never as having granted nothing: {quarantine}"
+    );
+    assert!(
+        !quarantine.contains("nothing was left behind"),
+        "the report claims nothing was left behind for a lease it could not even read: \
+         {quarantine}"
+    );
+
+    for stale in quarantined_for(&unreadable) {
+        fs::remove_file(stale).unwrap();
+    }
+    for stale in quarantined_for(&sibling) {
+        fs::remove_file(stale).unwrap();
+    }
+}
+
+/// `#369` c3 — the whole-home package grant is refused at the point it would
+/// be recorded.
+///
+/// FOUND, not modelled. The quarantined lease preserved from SEANDESKTOP has
+/// as its first intent `path = '\\?\C:\Users\<user>'  kind = "allow"
+/// mask = 1180095`, and 1180095 is [`ACL_WRITE_MASK`] to the bit — so it came
+/// from `fs_write_allow`, i.e. the workspace root, because wayland-core was
+/// started in the user's profile directory. The other 4366 intents in that
+/// same file are per-secret DENIES beneath it, which is the shape of the
+/// problem: one inheritable ALLOW on the profile root confers the subtree, and
+/// what claws it back is an enumeration taken at one instant.
+///
+/// Both directions are asserted. A refusal that refused everything would pass
+/// the first half and break the product, so a project directory UNDER the
+/// profile root must still be granted.
+#[test]
+fn a_package_allow_on_the_users_whole_profile_is_refused() {
+    let Ok(profile) = std::env::var("USERPROFILE") else {
+        panic!("USERPROFILE is unset, so this test cannot grade #369 c3 at all");
+    };
+    let profile = fs::canonicalize(&profile).expect("the user profile directory must exist");
+
+    let refused = canonical_intents(&SandboxManifest {
+        fs_write_allow: vec![profile.clone()],
+        ..Default::default()
+    })
+    .expect_err("granting the AppContainer package the whole user profile must be refused");
+    let refused = refused.to_string();
+    assert!(
+        refused.contains("entire profile directory"),
+        "the refusal must say WHY it refused, so an operator can act on it: {refused}"
+    );
+    assert!(
+        refused.contains("#369"),
+        "the refusal must carry the tracker it comes from: {refused}"
+    );
+
+    // CONTROL. The guard must bound the grant, not abolish it: a real
+    // workspace under the same profile root is still granted, and a refusal
+    // that also caught this would be a product outage rather than a fix.
+    let workspace = tempfile::tempdir_in(&profile).expect("a workspace under the profile root");
+    let granted = canonical_intents(&SandboxManifest {
+        fs_write_allow: vec![workspace.path().to_path_buf()],
+        ..Default::default()
+    })
+    .expect("an ordinary workspace directory must still be granted");
+    assert_eq!(
+        granted.len(),
+        1,
+        "the control granted {granted:?} rather than exactly the workspace"
+    );
+
+    // And the two roots that strictly CONTAIN the observed one.
+    let all_profiles = profile
+        .parent()
+        .expect("a user profile always has a parent")
+        .to_path_buf();
+    canonical_intents(&SandboxManifest {
+        fs_write_allow: vec![all_profiles],
+        ..Default::default()
+    })
+    .expect_err("granting the directory holding every user profile must be refused");
+
+    let drive_root = profile
+        .ancestors()
+        .last()
+        .expect("a canonical path always has a root")
+        .to_path_buf();
+    canonical_intents(&SandboxManifest {
+        fs_read_allow: vec![drive_root],
+        ..Default::default()
+    })
+    .expect_err("granting a drive root must be refused");
 }

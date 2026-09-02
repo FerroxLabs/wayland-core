@@ -52,6 +52,7 @@ fn make_request() -> LlmRequest {
         temperature: None,
         omit_max_tokens: false,
         routed_model_hint: None,
+        replay_reasoning_content: false,
     }
 }
 
@@ -114,11 +115,15 @@ fn spawn_hanging_provider(connections: Arc<AtomicUsize>) -> String {
 }
 
 /// A port nothing is listening on: every connect is refused.
-fn dead_port_url() -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-    let addr = listener.local_addr().expect("local addr");
-    drop(listener);
-    format!("http://{addr}")
+///
+/// The guard is returned with the URL and must be kept alive by the caller.
+/// Binding and DROPPING a listener does not give a dead port on a busy host —
+/// it gives a port that was dead a moment ago, which another process may
+/// already be listening on by the time the connect happens.
+fn dead_port_url() -> (wcore_egress::refused_port::RefusedPort, String) {
+    let refused = wcore_egress::refused_port::RefusedPort::reserve().expect("bind loopback");
+    let url = format!("http://{}", refused.addr());
+    (refused, url)
 }
 
 fn physical_attempts(evidence: &[wcore_providers::retry::ProviderAttemptEvidence]) -> usize {
@@ -279,7 +284,10 @@ async fn client_side_mistakes_are_builder_errors_not_request_errors() {
 /// a second or so rather than after the long broken-connection window.
 #[tokio::test]
 async fn connect_refused_keeps_the_default_ceiling() {
-    let provider = provider(&dead_port_url());
+    // `_refused` is bound, not `_`: dropping the guard would free the port and
+    // reopen the race this helper exists to close.
+    let (_refused, url) = dead_port_url();
+    let provider = provider(&url);
 
     let started = std::time::Instant::now();
     let (result, evidence) =

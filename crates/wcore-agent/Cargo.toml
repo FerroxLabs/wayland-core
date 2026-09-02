@@ -241,6 +241,9 @@ voice          = ["dep:cpal", "dep:hound"]
 # integration tests can use ScriptedProvider/TestSink/build_for_test
 # (W7 Pre-flight 0.0d).
 wcore-agent = { path = ".", features = ["test-utils"] }
+# wayland#1280 c1: the skills-listing ceiling is stated in DISPLAY COLUMNS, so
+# the test that grades it has to measure the same unit wcore-skills renders in.
+unicode-width.workspace = true
 wcore-mcp = { path = "../wcore-mcp", features = ["test-utils"] }
 # Wave OL: end-to-end wiremock smoke through `OllamaProvider`
 # (`tests/ollama_e2e_test.rs`). Dev-only — no runtime dep edge.

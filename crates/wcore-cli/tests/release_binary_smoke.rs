@@ -40,6 +40,10 @@ use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
+#[path = "support/mod.rs"]
+mod support;
+use support::owned_tree::OwnedTree;
+
 /// Walk up from `CARGO_MANIFEST_DIR` (= `<workspace>/crates/wcore-cli`)
 /// to the workspace root so we can locate `target/release/<bin>`.
 fn workspace_root() -> PathBuf {
@@ -280,9 +284,10 @@ fn first_ready_event_release(bin: &PathBuf, backends: Backends) -> serde_json::V
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());
     apply_backend_env(&mut cmd, backends);
-    let mut child = cmd
-        .spawn()
-        .expect("spawn release wayland-core --json-stream");
+    let mut child = OwnedTree::new(
+        cmd.spawn()
+            .expect("spawn release wayland-core --json-stream"),
+    );
 
     let mut stdout = child.stdout.take().expect("capture stdout");
     let (tx, rx) = std::sync::mpsc::channel();

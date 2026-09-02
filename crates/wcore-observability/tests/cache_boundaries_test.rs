@@ -28,6 +28,7 @@ fn req_with_messages(messages: Vec<Message>) -> LlmRequest {
         temperature: None,
         omit_max_tokens: false,
         routed_model_hint: None,
+        replay_reasoning_content: false,
     }
 }
 
@@ -49,7 +50,7 @@ fn anthropic_build_messages_places_cache_control_on_marked_message() {
     ]);
     let compat = ProviderCompat::anthropic_defaults();
 
-    mark_cache_boundaries(&mut req, &compat, None);
+    mark_cache_boundaries(&mut req, &compat, None, false);
     let built = anthropic_shared::build_messages(&req.messages, &compat);
 
     // Last message's last content block must carry cache_control.
@@ -79,7 +80,7 @@ fn openai_compat_results_in_no_cache_control_anywhere() {
     )]);
     let compat = ProviderCompat::openai_defaults();
 
-    mark_cache_boundaries(&mut req, &compat, None);
+    mark_cache_boundaries(&mut req, &compat, None, false);
     let built = anthropic_shared::build_messages(&req.messages, &compat);
 
     for msg in built {

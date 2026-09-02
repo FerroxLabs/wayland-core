@@ -152,6 +152,32 @@ fn format_event(msg: &AgentMessage) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// Block until `bus` reports at least `n` live subscribers, or fail.
+    ///
+    /// REPLACES a fixed `sleep`, which is not a synchronisation primitive.
+    /// `tokio::broadcast` DROPS anything published while no receiver exists,
+    /// so a publisher that starts before the subscriber installs its receiver
+    /// sends into the void. The old code slept 20ms and hoped; under the
+    /// shared-process lib suite (`cargo test`, ~2,700 tests in ONE process)
+    /// the spawned task is not reliably scheduled inside that window, and
+    /// `await_completion_returns_on_match` failed for it on CI runs
+    /// 33565695499 and 33569... -- the SAME COMMIT passing in one job and
+    /// failing in another, which is what makes it a flake rather than a break.
+    ///
+    /// Bounded so a genuinely broken subscribe fails loudly instead of hanging
+    /// the suite.
+    async fn await_subscribers(bus: &AgentBus, n: usize) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while bus.sender().receiver_count() < n {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no subscriber installed within 10s (wanted {n}, saw {})",
+                bus.sender().receiver_count(),
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    }
     use super::*;
     use crate::agents::bus::{AgentBus, AgentBusError, now_ms};
     use std::sync::Arc;
@@ -195,7 +221,13 @@ mod tests {
             _finish_reason: FinishReason,
         ) {
         }
-        fn emit_error(&self, _msg: &str, _retryable: bool) {}
+        fn emit_error(
+            &self,
+            _msg: &str,
+            _retryable: bool,
+            _category: wcore_protocol::events::FailureCategory,
+        ) {
+        }
         fn emit_info(&self, msg: &str) {
             self.count.fetch_add(1, Ordering::Relaxed);
             *self.last.lock() = Some(msg.to_string());
@@ -214,11 +246,13 @@ mod tests {
         let (sink, count) = CountingSink::new();
         let observer = AgentBusObserver::spawn(Arc::clone(&bus), sink as Arc<dyn OutputSink>);
 
-        // Give the spawned task a tick to install its subscription
-        // before we publish; otherwise the broadcast channel drops the
-        // events that arrive before `rx` exists.
-        tokio::task::yield_now().await;
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        // Wait for the subscription to EXIST. The old fixed sleep made this
+        // assertion VACUOUS in the other direction: this test asserts the sink
+        // count stays ZERO, so if the events were dropped for want of a
+        // subscriber it passed while proving nothing about the observer at all.
+        // Now the burst below is guaranteed to reach the observer, so a zero
+        // count is evidence that it does not forward to the sink.
+        await_subscribers(&bus, 1).await;
 
         // Fire a representative cross-section of lifecycle events —
         // the v0.9.1 leak hit all of them.
@@ -284,8 +318,9 @@ mod tests {
                 .await
         });
 
-        // Give the waiter a moment to install its subscription.
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        // Wait for the subscription to EXIST rather than sleeping and hoping;
+        // see `await_subscribers`. This is the line that flaked.
+        await_subscribers(&bus, 1).await;
 
         // Publish an unrelated event first, then the matching one.
         bus.publish(AgentMessage::Spawned {

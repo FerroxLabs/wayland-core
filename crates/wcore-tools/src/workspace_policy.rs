@@ -79,11 +79,44 @@ const SECRET_DIR_SEGMENTS: &[&str] = &["/.ssh/", "/.gnupg/", "/.aws/", "/.azure/
 /// a floor underneath the sandbox, not a substitute for one.
 const REPO_CONTROL_DIRS: &[&str] = &[".git", ".wayland-core"];
 
-const SECRET_EXTENSIONS: &[&str] = &["pem", "key", "p12", "pfx", "tfstate"];
+/// Secret file EXTENSIONS, matched case-insensitively on the effective final
+/// component. `keystore` / `jks` (Java + Android signing stores) arrived with
+/// core#323 — see [`SECRET_BASENAMES`] for why they were somewhere else.
+const SECRET_EXTENSIONS: &[&str] = &["pem", "key", "p12", "pfx", "tfstate", "keystore", "jks"];
 
-/// Extension-less secret basenames (SSH keys), matched on the final path
-/// component.
-const SECRET_BASENAMES: &[&str] = &["id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"];
+/// Secret basenames matched on the final path component, case-insensitively.
+///
+/// ONE LIST, ONE OWNER (FerroxLabs/wayland-core#323). The eleven names below
+/// the SSH keys used to live in a SECOND denylist, `wcore-cli`'s `@`-attach
+/// guard, and the two drifted apart in both directions. #323's first cut taught
+/// the `@` surface to consult BOTH lists — which closed the `@` half and left
+/// the more dangerous half open: a user typing `@.pgpass` was refused while the
+/// MODEL could read the same file through `Read` / `Grep` / `Bash cat`, because
+/// those consult this predicate alone. Two lists that must agree drift again,
+/// so the file-name rules moved HERE and the `@` guard now delegates. The only
+/// thing it still contributes is a leading separator, because a user types a
+/// relative path and the fragment rules below need an anchored one.
+const SECRET_BASENAMES: &[&str] = &[
+    // SSH private keys.
+    "id_rsa",
+    "id_ed25519",
+    "id_ecdsa",
+    "id_dsa",
+    // core#323 — folded in from the `@`-attach guard.
+    ".envrc",
+    ".pgpass",
+    "credentials",
+    "credentials.json",
+    "secrets.json",
+    "secrets.yaml",
+    "secrets.yml",
+];
+
+/// File-name SUFFIXES that mark a secret whatever the stem: the conventional
+/// spelling of a NAMED SSH key (`deploy_rsa`, `ci_ed25519`), which
+/// [`SECRET_BASENAMES`] cannot express because it matches the whole name.
+/// core#323, folded in from the `@`-attach guard alongside the basenames above.
+const SECRET_NAME_SUFFIXES: &[&str] = &["_rsa", "_ed25519"];
 
 /// Cache vars redirected into `<root>/.wcache/<tool>` in `Contained` mode.
 const CACHE_ENV_DIRS: &[(&str, &str)] = &[
@@ -237,6 +270,93 @@ pub struct WorkspacePolicy {
     /// injected counter #1111 asks the repeated-walk assertion to be made with,
     /// so the grade does not rest on a wall clock.
     deny_walks: Arc<AtomicU64>,
+    /// FerroxLabs/wayland-core#376 — the memoised arm-2 VCS store list, with the
+    /// stamp that proves it is still what a fresh scan would produce.
+    /// Interior-mutable and `Arc`-shared for the reason `deny_cache` is: the
+    /// policy is held behind an `Arc` by every consumer and cannot be replaced.
+    vcs_store_cache: Arc<RwLock<Option<VcsStoreCache>>>,
+    /// #376 c3 — the injected counters the per-operation cost is graded with. A
+    /// wall clock cannot tell a skipped scan from a fast one, and this guard
+    /// runs on every Read/exists/list/metadata of every sub-agent.
+    guard_counters: Arc<GuardCounters>,
+    /// FerroxLabs/wayland-core#390/#394 — arm 4's discovered nested store set,
+    /// computed at most ONCE per policy and then never touched again.
+    ///
+    /// Computed once and then answered by prefix at ZERO filesystem cost, with
+    /// a witness set that is O(nested checkouts) rather than O(directories) —
+    /// which is the whole point. Which directories under the root DECLARE a
+    /// store is a whole-tree fact, and the shape #398 was filed about is a memo
+    /// of that fact revalidating one witness per DESCENDED DIRECTORY on every
+    /// guard. This one stamps only the DECLARATION SITES the walk actually read
+    /// (a nested gitfile, a `commondir`, an `objects/info/alternates`, a store
+    /// leaf that may be re-pointed), never the directories it merely walked
+    /// through, and revalidates them only on the branch that is about to ADMIT.
+    /// A workspace with no nested checkout therefore has an EMPTY witness set
+    /// and pays nothing at all, which is what holds #398 c1's slope at zero and
+    /// #398 c2's three warm probes. See
+    /// [`nested_stores_cover`](Self::nested_stores_cover) and
+    /// [`nested_declarations_moved`](Self::nested_declarations_moved).
+    nested_stores: Arc<RwLock<Option<NestedStoreCache>>>,
+}
+
+/// #376 c3 — what one `SecretDenyFs` guard actually costs, counted rather than
+/// timed.
+#[derive(Debug, Default)]
+pub(crate) struct GuardCounters {
+    /// Path resolutions (`canon_existing_ancestor`) performed by the guard
+    /// predicates. One per guard is the target; it was two before the
+    /// predicates were given a shared resolved path.
+    resolves: AtomicU64,
+    /// Full rebuilds of the arm-2 store list from the filesystem.
+    scans: AtomicU64,
+    /// Filesystem probes (`exists` / `canonicalize` / `symlink_metadata` /
+    /// `read_to_string`) charged by scans AND by cache revalidations.
+    probes: AtomicU64,
+    /// Arm-4 nested-discovery walks. Counted APART from `scans` because the two
+    /// mean different things: `scans` is the arm-2 rebuild whose return to the
+    /// common path is core#376's regression, while this one is a per-policy
+    /// one-off by construction and asserting it stays at 1 is what proves that.
+    nested_walks: AtomicU64,
+}
+
+/// #376 — one memoised store list plus everything needed to decide whether it
+/// is stale.
+#[derive(Debug)]
+struct VcsStoreCache {
+    /// The instant the scan that produced `stores` started.
+    stamped_at: SystemTime,
+    /// Every path whose state decided the answer, with the modification time
+    /// the scan saw (`None` when the path was absent).
+    ///
+    /// Deliberately the DIRECTORY that owns each decision rather than the
+    /// decided path itself, wherever one exists: whether `<root>/.git/objects`
+    /// is present, absent or re-pointed is settled by `<root>/.git`'s mtime, so
+    /// one stamp covers all three of `.git`'s store leaves instead of three.
+    /// The exception is a file whose CONTENT is read (`objects/info/alternates`,
+    /// a gitfile, a `commondir`) — content changes leave the parent untouched,
+    /// so those are stamped in their own right.
+    witnesses: Vec<(PathBuf, Option<SystemTime>)>,
+    stores: Vec<PathBuf>,
+}
+
+/// FerroxLabs/wayland-core#406 — arm 4's discovered store set plus the
+/// DECLARATION SITES whose state decided it.
+///
+/// Deliberately NOT the directories the walk descended: that set is
+/// O(workspace) and re-`stat`ing it per guard is the measured regression #398
+/// records. The declaration sites are the files and store leaves the walk
+/// actually READ — one gitfile, one `commondir`, one `alternates` and three
+/// store leaves per nested checkout — so the set is O(nested checkouts) and is
+/// EMPTY for a workspace that has none.
+#[derive(Debug)]
+struct NestedStoreCache {
+    /// The instant the walk that produced `stores` started.
+    stamped_at: SystemTime,
+    /// Each declaration site with the modification time the walk saw (`None`
+    /// when it was absent — which is the stamp that catches an `alternates`
+    /// file being CREATED after the walk, the #406 residual).
+    witnesses: Vec<(PathBuf, Option<SystemTime>)>,
+    stores: Vec<PathBuf>,
 }
 
 /// #1111 — one memoised deny set plus everything needed to decide whether it is
@@ -500,6 +620,9 @@ impl WorkspacePolicy {
             fs_confinement_backend: None,
             deny_cache: Arc::new(RwLock::new(None)),
             deny_walks: Arc::new(AtomicU64::new(0)),
+            vcs_store_cache: Arc::new(RwLock::new(None)),
+            guard_counters: Arc::new(GuardCounters::default()),
+            nested_stores: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -553,6 +676,9 @@ impl WorkspacePolicy {
             fs_confinement_backend: None,
             deny_cache: Arc::new(RwLock::new(None)),
             deny_walks: Arc::new(AtomicU64::new(0)),
+            vcs_store_cache: Arc::new(RwLock::new(None)),
+            guard_counters: Arc::new(GuardCounters::default()),
+            nested_stores: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -659,6 +785,9 @@ impl WorkspacePolicy {
             fs_confinement_backend: None,
             deny_cache: Arc::new(RwLock::new(None)),
             deny_walks: Arc::new(AtomicU64::new(0)),
+            vcs_store_cache: Arc::new(RwLock::new(None)),
+            guard_counters: Arc::new(GuardCounters::default()),
+            nested_stores: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -810,21 +939,6 @@ impl WorkspacePolicy {
         self.fs_confinement_backend.as_deref()
     }
 
-    /// True when `path` is inside a standing grant that confers WRITE.
-    ///
-    /// The write sibling of
-    /// [`is_session_read_granted`](Self::is_session_read_granted), and the
-    /// predicate `SandboxedFs`'s mutating operations ask.
-    pub fn is_session_write_granted(&self, path: &Path) -> bool {
-        let canon = canon_for_scope(path);
-        let now = SystemTime::now();
-        self.session_path_grants
-            .read()
-            .iter()
-            .filter(|grant| grant.confers(now, true))
-            .any(|grant| canon.starts_with(&grant.root))
-    }
-
     /// Override the network posture. Used at bootstrap to grant `Inherit` to a
     /// genuinely-local session (see [`local_bash_network`]); the bare
     /// constructors stay on the fail-safe Deny default.
@@ -867,8 +981,31 @@ impl WorkspacePolicy {
     /// exactly the canonical path the Workspace jail already feeds in, so the
     /// Contained deployment is unchanged.
     pub fn is_project_secret(&self, path: &Path) -> bool {
-        let canon = canon_for_scope(path);
-        is_secret_path_static(&canon) && canon.starts_with(&self.root)
+        // #383 — WHICH resolver, named here for the same reason #356 named it
+        // on the two predicates next door: this file held two with different
+        // escape properties and this one kept the weaker of them.
+        // `canon_for_scope` resolves only the IMMEDIATE parent and returns the
+        // RAW path when the leaf cannot be canonicalized, so a DANGLING symlink
+        // (`notes.txt` -> a `.env` that does not exist yet) was judged where the
+        // LINK sits rather than where the write would land. That is exactly the
+        // shape of a Full-posture session CREATING the project's secret, and
+        // exactly what the doc comment above already claimed was closed.
+        // `canon_existing_ancestor` hops the link by hand (`resolve_prefix`), so
+        // the claim is now true as written. Graded by
+        // `tests::a_dangling_symlink_to_a_not_yet_existing_project_secret_is_refused`.
+        self.is_project_secret_resolved(&self.resolve(path))
+    }
+
+    /// [`is_project_secret`](Self::is_project_secret) on an ALREADY-RESOLVED
+    /// path.
+    ///
+    /// Split out so [`denies_read_content`](Self::denies_read_content) can pay
+    /// for the resolution once and ask both halves of the `SecretDenyFs` guard
+    /// against the same answer. Two independent resolutions of one path is not
+    /// merely wasted work (FerroxLabs/wayland-core#376): it is two chances for
+    /// the guard's halves to disagree about where the operation lands.
+    fn is_project_secret_resolved(&self, canon: &Path) -> bool {
+        is_secret_path_static(canon) && canon.starts_with(&self.root)
     }
 
     /// FerroxLabs/wayland-core#244 + #322: true when `path` is inside a VCS
@@ -900,13 +1037,366 @@ impl WorkspacePolicy {
     /// `crates/wcore-tools/tests/vfs_secret_deny_backend_independent.rs` pins:
     /// this refusal is enforced by THIS process.
     pub fn is_vcs_content_store(&self, path: &Path) -> bool {
-        let canon = canon_for_scope(path);
-        if canon.starts_with(&self.root) && inside_vcs_store(&canon) {
+        // #383 c3 — the SAME resolver
+        // [`is_project_secret`](Self::is_project_secret) uses, for the same
+        // reason and with the same escape closed. `SecretDenyFs::guard` asks
+        // both predicates about one path; resolving that path two different
+        // ways is how one of them ends up refusing a write the other admits.
+        // Graded by `tests::a_dangling_symlink_into_a_vcs_content_store_is_refused`.
+        self.is_vcs_content_store_resolved(&self.resolve(path))
+    }
+
+    /// [`is_vcs_content_store`](Self::is_vcs_content_store) on an
+    /// ALREADY-RESOLVED path. See
+    /// [`is_project_secret_resolved`](Self::is_project_secret_resolved) for why
+    /// the split exists.
+    fn is_vcs_content_store_resolved(&self, canon: &Path) -> bool {
+        // Arm 1 — lexical, zero syscalls.
+        if canon.starts_with(&self.root) && inside_vcs_store(canon) {
             return true;
         }
-        vcs_content_stores(&self.root)
+        // Arm 4 — the nested discovery. Zero syscalls once warm, so it is asked
+        // before the two arms that cost probes.
+        if self.nested_stores_cover(canon) {
+            return true;
+        }
+        // Arm 3 — repository shape, path-local and always fresh. Zero syscalls
+        // for a path with no store-leaf component, which is every ordinary
+        // path.
+        if self.encloses_repository_store(canon) {
+            return true;
+        }
+        // Arm 2 — the stores this root's own `.git` names.
+        if self
+            .vcs_stores_memoized()
             .iter()
             .any(|store| canon.starts_with(store))
+        {
+            return true;
+        }
+        // FerroxLabs/wayland-core#406 c1 — every arm has missed and this call
+        // is about to ADMIT. Only now is arm 4's memo worth a freshness check:
+        // a store the walk FOUND was already refused above without a probe, so
+        // the sole answer staleness can corrupt is this one. Costs nothing at
+        // all when the walk found no nested checkout to declare anything.
+        if !self.nested_declarations_moved() {
+            return false;
+        }
+        self.nested_store_walk(canon)
+    }
+
+    /// Arm 3 — **is some ancestor of `canon` the object database of a
+    /// repository that is actually there?**
+    ///
+    /// FerroxLabs/wayland-core#396. Arms 1 and 2 both decide from a NAME: arm 1
+    /// from the query path's spelling, arm 2 from what `<root>/.git` names. A
+    /// BARE repository vendored under the root (`git clone --bare|--mirror`, a
+    /// submodule object cache, a vendored mirror) has no control directory at
+    /// all — `objects/`, `HEAD` and `refs/` sit at its top level — so neither
+    /// name-based arm can see it, and `<root>/vendor/pkg.git/objects/ab/cd`
+    /// was read straight back through the VFS.
+    ///
+    /// This arm asks the filesystem instead, about the ancestors of the path in
+    /// hand and nothing else:
+    ///
+    /// * cost is O(depth), never O(workspace) — the regression
+    ///   FerroxLabs/wayland-core#398 records came from gating a whole-tree walk
+    ///   on a path SPELLING, and there is no whole-tree walk here to gate;
+    /// * an ordinary path pays ZERO probes, because no ancestor of
+    ///   `src/deep/deeper/main.rs` carries a store leaf name;
+    /// * nothing is memoised, so a repository that comes into being mid-session
+    ///   is refused on the very next guard. `WorkspacePolicy` is built once at
+    ///   bootstrap and `Arc`-cloned into `SecretDenyFs` for the whole session,
+    ///   so "the state at construction" is NOT a safe answer to give for the
+    ///   rest of that session.
+    ///
+    /// The confirmation is deliberately a REPOSITORY test and not a leaf-name
+    /// test: `objects/`, `modules/`, `store/` and `lfs/` are ordinary project
+    /// directory names (Terraform modules, a Redux store, an asset pipeline),
+    /// and refusing them on the name alone would be a wrong refusal on real
+    /// user data. Graded against that negative control by
+    /// `tests::an_ordinary_directory_named_objects_is_not_a_repository`.
+    fn encloses_repository_store(&self, canon: &Path) -> bool {
+        if !canon.starts_with(&self.root) {
+            return false;
+        }
+        for ancestor in canon.ancestors() {
+            if ancestor == self.root {
+                break;
+            }
+            let Some(name) = ancestor.file_name() else {
+                break;
+            };
+            if !is_vcs_store_leaf_name(name) {
+                continue;
+            }
+            let Some(parent) = ancestor.parent() else {
+                continue;
+            };
+            if self.is_repository_dir(parent) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// True when `dir` is the top level of a git repository — a BARE repository
+    /// or the gitdir a `.git` file points at, which have the same layout.
+    ///
+    /// `HEAD` plus one of `refs`/`config`, which is what `git` itself requires
+    /// of a directory before it will treat it as a repository, and two `stat`s
+    /// at most. A single marker is not enough: `HEAD` alone is a plausible
+    /// name for an ordinary data file.
+    ///
+    /// Git-shaped only, and that is a scope decision rather than an oversight.
+    /// `.hg`/`.svn`/`.bzr` keep their stores INSIDE the control directory in
+    /// every layout they support, so arm 1 already sees them at any depth;
+    /// git is the only one of the four with a documented bare layout that
+    /// hoists a content store to a directory's top level.
+    fn is_repository_dir(&self, dir: &Path) -> bool {
+        self.probe_exists(&dir.join("HEAD"))
+            && (self.probe_exists(&dir.join("refs")) || self.probe_exists(&dir.join("config")))
+    }
+
+    /// One counted filesystem existence probe. Counted through the same
+    /// [`GuardCounters`] the cost tests read, so an arm that starts probing
+    /// cannot do it invisibly.
+    fn probe_exists(&self, path: &Path) -> bool {
+        self.guard_counters.probes.fetch_add(1, Ordering::Relaxed);
+        std::fs::symlink_metadata(path).is_ok()
+    }
+
+    /// Arm 4 — every content store DECLARED by a control directory nested under
+    /// the root, discovered once and cached for the life of the policy.
+    ///
+    /// FerroxLabs/wayland-core#390 c1/c2 and #394 c1. Arm 2 resolves what
+    /// `<root>/.git` names and nothing else, so a VENDORED checkout fell
+    /// between the arms: `<root>/vendor/pkg/.git` is the file
+    /// `gitdir: ../pkg-git`, its store at `<root>/vendor/pkg-git/objects` is
+    /// not lexically a `(control, store)` pair, and the root's `.git` never
+    /// mentions it. The same hole admits an `objects/info/alternates` borrow
+    /// declared by a nested checkout — and that one is admitted REGARDLESS of
+    /// how the borrow target is spelled, because an alternates entry names an
+    /// arbitrary directory.
+    ///
+    /// The store set is resolved EAGERLY at discovery time and tested by
+    /// prefix, so a store's own directory name never enters the decision. That
+    /// is what makes #394's class (a borrow target called `odb`, a `.git/objects`
+    /// symlink pointing at one) impossible rather than enumerated.
+    ///
+    /// **Once, and never revalidated.** Stated plainly because it is the cost
+    /// this design pays: a store DECLARED after this walk, at a path arms 1 and
+    /// 3 cannot see path-locally, stays admitted for the rest of the session
+    /// (FerroxLabs/wayland-core#406). The alternative — stamping every
+    /// descended directory and re-`stat`ing them per guard — is the measured
+    /// regression #398 was filed about, and it scales with the tree.
+    fn nested_stores_cover(&self, canon: &Path) -> bool {
+        // Tested UNDER the read lock rather than through a clone: this runs on
+        // every guard, and handing the caller an owned `Vec<PathBuf>` would put
+        // one allocation per store on the hot path that #376 exists to keep
+        // flat.
+        if let Some(cache) = self.nested_stores.read().as_ref() {
+            return cache.stores.iter().any(|store| canon.starts_with(store));
+        }
+        self.nested_store_walk(canon)
+    }
+
+    /// Run arm 4's walk, replace the memo, and report whether the set it
+    /// produced covers `canon`. Counted.
+    fn nested_store_walk(&self, canon: &Path) -> bool {
+        let scan = discover_nested_content_stores(&self.root);
+        self.guard_counters
+            .nested_walks
+            .fetch_add(1, Ordering::Relaxed);
+        self.guard_counters
+            .probes
+            .fetch_add(scan.probes, Ordering::Relaxed);
+        let covered = scan.stores.iter().any(|store| canon.starts_with(store));
+        *self.nested_stores.write() = Some(NestedStoreCache {
+            stamped_at: scan.stamped_at,
+            witnesses: scan.witnesses,
+            stores: scan.stores,
+        });
+        covered
+    }
+
+    /// FerroxLabs/wayland-core#406 c1 — has any DECLARATION SITE arm 4 read
+    /// changed since the walk read it?
+    ///
+    /// Asked only on the branch that is about to ADMIT, because that is the
+    /// only branch whose answer a stale memo can get wrong: a store the walk
+    /// FOUND is refused from the set with no probe at all, and #406's own body
+    /// locates the tension exactly here — any per-call freshness check for a
+    /// whole-tree fact costs at least one probe, and the ordinary-path guard is
+    /// pinned at three.
+    ///
+    /// The cost is therefore stated precisely: **zero probes when the walk
+    /// found no nested checkout** (the witness set is empty, so an ordinary
+    /// workspace's guard is byte-for-byte what it was), and **one probe per
+    /// declaration site otherwise** — O(nested checkouts), independent of the
+    /// directory count, which is what keeps #398 c1's slope at zero.
+    ///
+    /// `<root>/.git`'s own declarations are deliberately NOT in this set: arm 2
+    /// (`vcs_stores_memoized`) already stamps and revalidates that gitfile, its
+    /// `commondir` and its `alternates` on every guard, and they are three of
+    /// the three probes #398 c2 pins. Witnessing them twice would move that
+    /// number for no extra denial.
+    ///
+    /// **What this does NOT see, stated rather than implied.** A control
+    /// directory that did not exist when the walk ran and that declares a
+    /// borrow at a target which is neither repository-shaped (arm 3) nor
+    /// lexically a store (arm 1) has no declaration site in this set to move.
+    /// Seeing that needs a witness per DESCENDED DIRECTORY, which is #398's
+    /// regression. Pinned as a measurement by
+    /// `vfs_nested_store_deny.rs::a_borrow_declared_by_a_control_dir_created_after_the_walk_is_still_admitted`.
+    fn nested_declarations_moved(&self) -> bool {
+        let guard = self.nested_stores.read();
+        let Some(cache) = guard.as_ref() else {
+            return false;
+        };
+        for (path, seen) in &cache.witnesses {
+            self.guard_counters.probes.fetch_add(1, Ordering::Relaxed);
+            let now = std::fs::symlink_metadata(path)
+                .and_then(|meta| meta.modified())
+                .ok();
+            if now != *seen {
+                return true;
+            }
+            // Same same-tick hazard `vcs_store_cache_hit` documents (#1145): a
+            // write inside the walk's own window cannot be witnessed by an
+            // mtime at all, so an unsettled stamp is treated as moved.
+            if let Some(now) = now
+                && !stamp_is_settled(now, cache.stamped_at)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// The arm-2 store list, memoised behind a witness stamp
+    /// (FerroxLabs/wayland-core#376 c2).
+    ///
+    /// MEASURED before the memo, by differential `strace` over the release
+    /// example `secret_deny_cost`: arm 2 cost **12 filesystem syscalls on every
+    /// ordinary-path operation** (6 `exists` for the root-relative store leaves,
+    /// 1 `metadata` for the gitfile probe, 1 `openat` for the `alternates` read,
+    /// and 4 `readlink` canonicalizing the one leaf that exists), out of 18 for
+    /// the whole guard and 32 for a complete `SandboxedFs`+`SecretDenyFs`
+    /// `exists()`. `SecretDenyFs` is installed unconditionally for every
+    /// sub-agent (`spawner.rs`) and every channel/remote session
+    /// (`channel_tools.rs`), and sub-agents are read-heavy.
+    ///
+    /// Revalidation is NOT a weaker answer than a rescan:
+    ///
+    /// * A witness that was PRESENT must still report the exact mtime the scan
+    ///   saw, and that mtime must lag the scan's own start instant by more than
+    ///   one filesystem tick — the #1145 granularity rule, shared verbatim with
+    ///   [`deny_cache_hit`](Self::deny_cache_hit) through
+    ///   [`stamp_is_settled`].
+    /// * A witness that was ABSENT must still be absent, checked NOW. A store
+    ///   that exists now has a witness that exists now, so it cannot be missed;
+    ///   a store that appeared and vanished between the scan and now is not
+    ///   there to be read either.
+    ///
+    /// Any unreadable witness, any difference, any unsettled mtime is a miss,
+    /// and a miss rescans. The cache is never trusted through a hole in its
+    /// stamp.
+    fn vcs_stores_memoized(&self) -> Vec<PathBuf> {
+        if let Some(hit) = self.vcs_store_cache_hit() {
+            return hit;
+        }
+        let scan = scan_vcs_content_stores(&self.root);
+        self.guard_counters.scans.fetch_add(1, Ordering::Relaxed);
+        self.guard_counters
+            .probes
+            .fetch_add(scan.probes, Ordering::Relaxed);
+        *self.vcs_store_cache.write() = Some(VcsStoreCache {
+            stamped_at: scan.stamped_at,
+            witnesses: scan.witnesses,
+            stores: scan.stores.clone(),
+        });
+        scan.stores
+    }
+
+    /// The memoised store list, but ONLY if a fresh scan would produce the same
+    /// one. See [`vcs_stores_memoized`](Self::vcs_stores_memoized).
+    fn vcs_store_cache_hit(&self) -> Option<Vec<PathBuf>> {
+        let guard = self.vcs_store_cache.read();
+        let cache = guard.as_ref()?;
+        for (path, seen) in &cache.witnesses {
+            self.guard_counters.probes.fetch_add(1, Ordering::Relaxed);
+            let now = std::fs::symlink_metadata(path)
+                .and_then(|meta| meta.modified())
+                .ok();
+            if now != *seen {
+                return None;
+            }
+            // An absent witness is decided at THIS instant, so there is no
+            // window for it to be unsettled in. A present one carries the same
+            // same-tick hazard `deny_cache_hit` documents.
+            if let Some(now) = now
+                && !stamp_is_settled(now, cache.stamped_at)
+            {
+                return None;
+            }
+        }
+        Some(cache.stores.clone())
+    }
+
+    /// THE read-content refusal: true when the in-process file tools must not
+    /// hand `path`'s bytes to the model.
+    ///
+    /// The whole of what [`crate::vfs::SecretDenyFs`] asks, in one place, so
+    /// every OTHER call site that has to agree with that boundary can ask the
+    /// identical question instead of assembling its own conjunction. `GrepTool`
+    /// is the call site that forced this (FerroxLabs/wayland-core#375): it
+    /// spawns `rg` OUTSIDE the VFS and outside the OS sandbox, so the store
+    /// deny reached it through neither layer, and a second name list in
+    /// `grep_policy.rs` would have been one more thing to drift.
+    ///
+    /// Resolves the path ONCE and hands the result to both halves — see
+    /// [`is_project_secret_resolved`](Self::is_project_secret_resolved).
+    pub fn denies_read_content(&self, path: &Path) -> bool {
+        let canon = self.resolve(path);
+        self.is_project_secret_resolved(&canon) || self.is_vcs_content_store_resolved(&canon)
+    }
+
+    /// [`canon_existing_ancestor`], counted. See [`GuardCounters`].
+    fn resolve(&self, path: &Path) -> PathBuf {
+        // #356 c4 — resolver: `canon_existing_ancestor`, because both predicates this feeds
+        // (`is_project_secret_resolved`, `is_vcs_content_store_resolved`) are
+        // security REFUSALS, and a refusal must judge where a path lands, not
+        // where its spelling sits. #383 moved them here from the weak one.
+        self.guard_counters.resolves.fetch_add(1, Ordering::Relaxed);
+        canon_existing_ancestor(path)
+    }
+
+    /// #376 c3 — (path resolutions, store scans, filesystem probes) charged by
+    /// the `SecretDenyFs` guard predicates since this policy was constructed.
+    ///
+    /// The instrument the per-operation cost is pinned with. Counted, not
+    /// timed: on a loaded host a wall clock cannot tell a skipped scan from a
+    /// fast one, and the regression this guards against (a rebuild returning to
+    /// the common path) is invisible in a timing that is dominated by
+    /// scheduling noise.
+    /// FerroxLabs/wayland-core#398 — how many times arm 4's nested-store
+    /// discovery walk has run for this policy. One, for the life of the
+    /// policy; the assertion that it stays at one is what makes arm 4's
+    /// per-guard cost independent of the workspace size a fact rather than a
+    /// claim.
+    #[doc(hidden)]
+    pub fn nested_walk_count(&self) -> u64 {
+        self.guard_counters.nested_walks.load(Ordering::Relaxed)
+    }
+
+    #[doc(hidden)]
+    pub fn guard_cost(&self) -> (u64, u64, u64) {
+        (
+            self.guard_counters.resolves.load(Ordering::Relaxed),
+            self.guard_counters.scans.load(Ordering::Relaxed),
+            self.guard_counters.probes.load(Ordering::Relaxed),
+        )
     }
 
     /// True when `path` names this workspace's own REPOSITORY-CONTROL surface
@@ -929,19 +1419,29 @@ impl WorkspacePolicy {
     /// business, and a benign-named symlink into the control surface resolves
     /// before the prefix match so it cannot be used to smuggle a write through.
     pub fn is_repo_control_path(&self, path: &Path) -> bool {
-        // `canon_deep`, not `canon_for_scope`: the root is canonicalized at
-        // construction, so a candidate that resolves to something shallower
-        // never matches it. `canon_for_scope` resolves only the IMMEDIATE
-        // parent and returns the RAW path when that parent is missing —
-        // which is exactly the shape of a NEW control file
+        // `canon_existing_ancestor`, not `canon_for_scope`: the root is
+        // canonicalized at construction, so a candidate that resolves to
+        // something shallower never matches it. `canon_for_scope` resolves only
+        // the IMMEDIATE parent and returns the RAW path when that parent is
+        // missing — which is exactly the shape of a NEW control file
         // (`.wayland-core/skills/<new>/SKILL.md`, `.git/<new>/hook`), and
         // exactly the write this guard exists to refuse. Measured on this
-        // tree before the change: with the workspace addressed through a
+        // tree before that change: with the workspace addressed through a
         // symlink, `Write` of `<link>/.git/hooks/pre-commit` (parent not yet
         // created) reported `Created`, while the same write addressed through
         // the real root was refused. See
         // `crates/wcore-tools/tests/repo_control_symlink.rs`.
-        let canon = canon_deep(path);
+        //
+        // #356 c4 — resolver: `canon_existing_ancestor`.
+        // It was `canon_deep` until this line, and the doc comment above
+        // claims a benign-named symlink "resolves before the prefix match".
+        // That was only true of a link whose target already exists —
+        // `std::fs::canonicalize` fails on a DANGLING one, and the walk-up form
+        // then judged where the LINK sits. `canon_existing_ancestor` hops the
+        // link by hand (`resolve_prefix`), so the claim above is now true as
+        // written. Graded by
+        // `tests::a_dangling_symlink_into_the_skill_load_path_is_refused`.
+        let canon = canon_existing_ancestor(path);
         REPO_CONTROL_DIRS
             .iter()
             .any(|dir| canon.starts_with(self.root.join(dir)))
@@ -980,13 +1480,26 @@ impl WorkspacePolicy {
     /// their `SKILL.md` files through `wcore_config::atomic_write` / `std::fs`,
     /// never the tool VFS, so skill installation and drafting are unaffected.
     pub fn is_skill_source_path(&self, path: &Path) -> bool {
-        let canon = canon_deep(path);
+        // #356 c4 — resolver: `canon_existing_ancestor`: WHICH resolver, stated
+        // here rather than only at its definition, because this file used to hold two with different escape
+        // properties seventy lines apart and a reader here could not see that a
+        // choice had been made. `canon_existing_ancestor` walks DOWN and
+        // re-resolves after every component; the walk-UP-and-append-verbatim
+        // form this call site used until #356 (`canon_deep`) could not see a
+        // path that reaches a load path through a DANGLING symlink, because
+        // `std::fs::canonicalize` fails on one and the component was then kept
+        // verbatim. Both escapes #1097 was written for are graded on THIS
+        // predicate by `tests::a_dangling_symlink_into_the_skill_load_path_is_refused`
+        // and `tests::a_parent_dir_after_a_missing_component_still_reaches_the_skill_load_path`,
+        // and end to end through the real `Write` tool by
+        // `wcore-agent/tests/skill_source_write_refusal.rs`.
+        let canon = canon_existing_ancestor(path);
         if under_project_load_path(&canon) {
             return true;
         }
         wcore_config::config::user_skill_source_dirs()
             .iter()
-            .any(|dir| canon.starts_with(canon_deep(dir)))
+            .any(|dir| canon.starts_with(canon_existing_ancestor(dir)))
     }
 
     /// Refuse a write target this session could never read back
@@ -1016,6 +1529,11 @@ impl WorkspacePolicy {
     /// that hands its path to the model should keep the target under
     /// [`root`](Self::root).
     pub fn ensure_write_target_readable(&self, path: &Path) -> Result<(), WriteTargetNotReadable> {
+        // #356 c4 — resolver: `canon_existing_ancestor`, on BOTH sides of the
+        // comparison. A write target whose directories do not exist yet must
+        // still be judged on where it would land, and a readable root reached
+        // through a symlink must be compared as its target; resolving only one
+        // side would make the prefix match answer on spelling.
         let resolved = canon_existing_ancestor(path);
         let covered = self
             .readable_roots()
@@ -1419,20 +1937,7 @@ impl WorkspacePolicy {
             // boundary is misread here, and falls in the conservative
             // direction - a walk that was not strictly needed, never a hit that
             // was not earned.
-            let granularity = if now
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .map_or(0, |since_epoch| since_epoch.subsec_nanos())
-                == 0
-            {
-                WHOLE_SECOND_MTIME_GRANULARITY
-            } else {
-                SUBSECOND_MTIME_GRANULARITY
-            };
-            let settled = cache
-                .stamped_at
-                .duration_since(now)
-                .is_ok_and(|behind| behind > granularity);
-            if now != *seen || !settled {
+            if now != *seen || !stamp_is_settled(now, cache.stamped_at) {
                 return None;
             }
         }
@@ -1630,12 +2135,21 @@ impl WorkspacePolicy {
     /// the layer that will actually do the refusing: a prompt keyed to the
     /// wider list would stay silent for a path the tool then refuses anyway.
     pub fn is_read_reachable(&self, path: &Path) -> bool {
+        // #383 c3 — resolver: `canon_for_scope`, because this predicate
+        // decides whether to PROMPT, never whether to permit;
+        // `SandboxedFs::contain_read` does the permitting and does its own
+        // dangling-link resolution. (The reason used to be stated on
+        // the write-grant predicate deleted under
+        // FerroxLabs/wayland-core#384 as an enforcement predicate that
+        // enforced nothing.)
         let canon = canon_for_scope(path);
         canon.starts_with(&self.root) || self.is_session_read_granted(&canon)
     }
 
     /// True when `path` is inside a standing read grant.
     pub fn is_session_read_granted(&self, path: &Path) -> bool {
+        // #383 c3 — resolver: `canon_for_scope`. Advisory mirror, exactly like
+        // [`is_read_reachable`](Self::is_read_reachable).
         let canon = canon_for_scope(path);
         let now = SystemTime::now();
         self.session_path_grants
@@ -1718,6 +2232,11 @@ impl WorkspacePolicy {
         root: impl AsRef<Path>,
         write: bool,
     ) -> Result<PathBuf, PathGrantError> {
+        // #356 c4 -- resolver: `grantable_read_root_shape`, whose own answer is
+        // bare `std::fs::canonicalize`. A GRANT must name a folder that is
+        // there now, so refusing a path that does not exist is the point;
+        // neither guard resolver would do, because both are built to answer
+        // for a path that does not exist yet.
         let dir = self.grantable_read_root_shape(root, write)?;
         let now = SystemTime::now();
         let grants = self.session_path_grants.read();
@@ -1759,6 +2278,9 @@ impl WorkspacePolicy {
             return Err(PathGrantError::FilesystemRoot);
         }
         if let Some(home) = dirs::home_dir() {
+            // #383 c3 — resolver: `canon_for_scope`. `$HOME` always exists, so the
+            // two resolvers cannot disagree about it; the cheap one is chosen
+            // because there is nothing here for the deep one to resolve.
             let home = canon_for_scope(&home);
             // `$HOME` itself, and anything containing it, reach everything the
             // sandbox exists to stand between the agent and.
@@ -1910,6 +2432,9 @@ fn auto_run_overlap(dir: &Path) -> Option<PathBuf> {
     }
     let mut known: Vec<PathBuf> = AUTO_RUN_SYSTEM_DIRS.iter().map(PathBuf::from).collect();
     if let Some(home) = dirs::home_dir() {
+        // #383 c3 — resolver: `canon_for_scope`. `$HOME` always exists, so the
+        // two resolvers cannot disagree about it; the cheap one is chosen
+        // because there is nothing here for the deep one to resolve.
         let home = canon_for_scope(&home);
         known.extend(
             AUTO_RUN_HOME_DIRS
@@ -2078,6 +2603,9 @@ fn credential_store_is_under(dir: &Path) -> bool {
     let Some(home) = dirs::home_dir() else {
         return false;
     };
+    // #383 c3 — resolver: `canon_for_scope`. `$HOME` always exists, so the
+    // two resolvers cannot disagree about it; the cheap one is chosen
+    // because there is nothing here for the deep one to resolve.
     let home = canon_for_scope(&home);
     CREDENTIAL_STORES
         .iter()
@@ -2098,6 +2626,68 @@ fn path_is_in_credential_store(path: &Path) -> bool {
         .iter()
         .map(Path::new)
         .any(|store| path.starts_with(store))
+}
+
+/// The static, lexical sibling of [`WorkspacePolicy::is_vcs_content_store`],
+/// for the one caller that has no policy instance to ask: `grep_policy`
+/// (SR-05).
+///
+/// FerroxLabs/wayland-core#244 c3 asks that the VCS content store be
+/// "unreachable to a shell subprocess". `BashTool`'s subprocess is confined by
+/// the OS sandbox, which consumes [`vcs_content_stores`] as `fs_read_deny` —
+/// WHERE THE BACKEND ENFORCES READ-DENY. Where it does not, the shell is
+/// refused outright, except for the local operator, who keeps an unconfined
+/// one; on the Windows job-object default that is the ordinary interactive
+/// user, and there the store IS readable to `Bash`. That is a decided
+/// position (`.planning/DECISIONS.md`, Q-391), measured and pinned by
+/// `crates/wcore-tools/tests/bash_vcs_store_local_operator_gap.rs`, and
+/// tracked as FerroxLabs/wayland-core#391 — not an oversight, and not
+/// something this predicate changes either way.
+/// `GrepTool` spawns its OWN subprocess (`rg` / `grep` / `findstr`) through
+/// `shell_command_argv`, OUTSIDE that sandbox, so none of that deny list ever
+/// reaches it — and its only other predicate, [`is_secret_path_static`],
+/// matches credential NAMES while a loose object is named after its hash.
+///
+/// MEASURED at integ/f13 a278f8c3b before this existed, with the production
+/// `SandboxedFs::new(SecretDenyFs::new(RealFs, WorkspacePolicy::contained))`
+/// stack: `Grep(pattern, path = ".git")` returned
+/// `.git/lfs/objects/aa/bb/deadbeef:1:WLCANARY-LFSOBJ-244` and
+/// `.git/objects/ab/cd1234:1:WLCANARY-ROOTOBJ-244` in PLAINTEXT, while naming
+/// the store outright was refused. `ctx.vfs.exists()` gates only the TOP-LEVEL
+/// `path` argument and `.git` is not itself a store, so naming the control
+/// directory ONE COMPONENT ABOVE it walked straight in.
+///
+/// The any-depth LEXICAL arm only ([`inside_vcs_store`]) — the same arm
+/// [`WorkspacePolicy::is_vcs_content_store`] tries first. It is HALF of that
+/// predicate and must never be mistaken for all of it.
+///
+/// This doc previously claimed "Grep never sees the second arm's targets: a
+/// gitfile-pointed or `alternates`-borrowed store lives OUTSIDE the workspace
+/// root". That sentence was FALSE and the leak it excused is MEASURED in
+/// `crates/wcore-tools/tests/grep_vcs_named_store_deny.rs`. `git init
+/// --separate-git-dir mygit` and `git clone --reference ../shared` both resolve
+/// arm 2 to a directory INSIDE the root, where nothing is lexically a store:
+///
+/// ```text
+/// ./notes.txt:1:WLCANARY-CONTROL-OK
+/// ./mygit/objects/ab/cd1234:1:WLCANARY-GITFILE-244
+/// ./shared-objects/ab/cd1234:1:WLCANARY-ALTERNATES-244
+/// ```
+///
+/// — returned by `Grep(".")`, the whole-workspace search, in the same
+/// `Contained` posture whose in-process VFS refuses those exact bytes.
+///
+/// So `grep_policy` asks BOTH arms: this one per path, and
+/// [`vcs_content_stores`] resolved for the workspace root and for every
+/// directory the walk traverses. Grep may afford that discovery because it
+/// TRAVERSES, where a point-predicate answering one path at a time cannot —
+/// which makes Grep deliberately STRICTER than
+/// [`WorkspacePolicy::is_vcs_content_store`] on a VENDORED gitfile, whose store
+/// arm 2 (root's `.git` only) never sees. Denying a real object store is not a
+/// wrong refusal, so the strictness is safe in the one direction it goes; the
+/// VFS-side remainder is FerroxLabs/wayland-core#390.
+pub fn is_vcs_content_store_static(path: &Path) -> bool {
+    inside_vcs_store(path)
 }
 
 /// Free-function body of `is_secret_path` (uses no `self` fields). Extracted
@@ -2198,6 +2788,10 @@ pub fn is_secret_path_static(path: &Path) -> bool {
             .iter()
             .any(|b| name.eq_ignore_ascii_case(b))
         {
+            return true;
+        }
+        // A named SSH key (`deploy_rsa`) — the stem varies, the tail does not.
+        if SECRET_NAME_SUFFIXES.iter().any(|s| ends_with_ci(name, s)) {
             return true;
         }
         // service-account*.json, bare key.json, and separator-bounded *-key.json / *_key.json.
@@ -2350,6 +2944,14 @@ thread_local! {
     /// walks and the count would quietly stop meaning anything. Every
     /// `project_committed_secrets` call runs on the thread that asked for it.
     static WALK_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+
+    /// #1182: how many filesystem entries the walks on this thread actually
+    /// VISITED. Thread-local for the same reason as `WALK_CALLS`, and
+    /// attributed to the thread that ASKED for the walk even when the parallel
+    /// arm does the visiting on a pool — the question a caller asks is "did the
+    /// operation I just performed enumerate the tree", and an answer that
+    /// depended on which worker happened to see an entry would not be one.
+    static WALK_ENTRIES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// Number of full workspace secret walks ([`project_committed_secrets`])
@@ -2364,6 +2966,29 @@ thread_local! {
 /// executable evidence for why this walk is deliberately NOT memoised.
 pub fn walk_calls() -> u64 {
     WALK_CALLS.with(|c| c.get())
+}
+
+/// Number of filesystem entries the secret walks requested **on the calling
+/// thread** have visited since the process started.
+///
+/// Read it either side of an operation to assert, by DIRECT OBSERVATION, how
+/// much of the tree that operation enumerated. `walk_calls` answers "was the
+/// walk entered"; this answers "did it enumerate the tree", which is the half a
+/// caller needs when it is asserting that some other operation did NOT walk.
+///
+/// #1182: `contained_construction_does_not_walk_the_workspace` used to
+/// establish that its instrument was alive with a WALL-CLOCK RATIO (the real
+/// tree's walk had to be measurably slower than an empty tree's). Under load
+/// the two timings compress and the control declared itself dead. Counting the
+/// entries removes the timing from the question entirely while keeping the
+/// property that mattered: a walk that became unreachable reports ZERO here and
+/// still fails the test.
+///
+/// Counts the arm that produced the answer. An oversized tree re-walks its
+/// first `SERIAL_WALK_BUDGET` entries in parallel; only the parallel arm's
+/// entries are counted, so the prefix is not double-charged.
+pub fn walk_entries() -> u64 {
+    WALK_ENTRIES.with(|c| c.get())
 }
 
 /// Absolute, canonicalized paths of the workspace's OWN committed secrets
@@ -2450,6 +3075,7 @@ fn project_committed_secrets(
         if !oversized {
             out.sort();
             dirs.append(&mut stamp);
+            WALK_ENTRIES.with(|c| c.set(c.get() + visited as u64));
             return out;
         }
     }
@@ -2466,8 +3092,13 @@ fn project_committed_secrets(
     // by `tests/walk_parallel_identity_test.rs`.
     let found = Mutex::new(Vec::<PathBuf>::new());
     let walked = Mutex::new(Vec::<(PathBuf, SystemTime)>::new());
+    // #1182: entries are counted into a per-CALL atomic and folded into the
+    // calling thread's `WALK_ENTRIES` once the pool has joined, so the count a
+    // caller reads is the one its own operation caused.
+    let visited_parallel = std::sync::atomic::AtomicU64::new(0);
     builder().build_parallel().run(|| {
         Box::new(|result| {
+            visited_parallel.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             // An unreadable directory is skipped here exactly as the serial
             // arm's `Err` skips it.
             if let Ok(entry) = result {
@@ -2487,6 +3118,8 @@ fn project_committed_secrets(
     let mut out = found.into_inner().expect(POISONED);
     out.sort();
     dirs.extend(walked.into_inner().expect(POISONED));
+    WALK_ENTRIES
+        .with(|c| c.set(c.get() + visited_parallel.load(std::sync::atomic::Ordering::Relaxed)));
     out
 }
 
@@ -2539,6 +3172,34 @@ fn dir_stamp(entry: &ignore::DirEntry) -> Option<(PathBuf, SystemTime)> {
 /// it grades the serial arm twice and leaves the parallel arm ungraded.
 #[doc(hidden)]
 pub const SERIAL_WALK_BUDGET: usize = 256;
+
+/// #1145 - is an observed mtime old enough, relative to the instant a scan
+/// started, to be evidence that nothing changed during the scan?
+///
+/// Shared by [`WorkspacePolicy::deny_cache_hit`] and
+/// [`WorkspacePolicy::vcs_store_cache_hit`] so the two memos in this file
+/// cannot answer the freshness question differently.
+///
+/// Take the granularity from the stamp actually in hand rather than assuming
+/// the build host's: a filesystem that resolves only whole seconds reports a
+/// zero nanosecond part for every mtime it stamps. A sub-second stamp that
+/// happens to land exactly on a second boundary is misread here, and falls in
+/// the conservative direction - a rescan that was not strictly needed, never a
+/// hit that was not earned.
+fn stamp_is_settled(observed: SystemTime, stamped_at: SystemTime) -> bool {
+    let granularity = if observed
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |since_epoch| since_epoch.subsec_nanos())
+        == 0
+    {
+        WHOLE_SECOND_MTIME_GRANULARITY
+    } else {
+        SUBSECOND_MTIME_GRANULARITY
+    };
+    stamped_at
+        .duration_since(observed)
+        .is_ok_and(|behind| behind > granularity)
+}
 
 /// The lock is taken only to push a path that has already been canonicalized,
 /// so nothing that can panic runs while it is held and this cannot fire.
@@ -2653,14 +3314,233 @@ fn walk_root_is_covered(covering: &Path, candidate: &Path) -> bool {
 /// add`) and a submodule checkout both have one, and the store it names can sit
 /// OUTSIDE `root` — where `root.join(".git/objects")` does not exist, so the
 /// deny above silently covers nothing. See [`gitfile_content_stores`].
-fn vcs_content_stores(root: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    for (dir, store) in VCS_CONTENT_STORES {
-        push_store(&mut out, root.join(dir).join(store));
+pub(crate) fn vcs_content_stores(root: &Path) -> Vec<PathBuf> {
+    scan_vcs_content_stores(root).stores
+}
+
+/// One scan of the VCS content stores under `root`: the stores, the paths whose
+/// state decided that answer, and what the scan cost.
+///
+/// FerroxLabs/wayland-core#376. `vcs_content_stores` was called once per
+/// ordinary-path VFS operation and rebuilt all of this from the filesystem
+/// every time. Reporting the WITNESSES from the same code that reads them is
+/// what lets the answer be memoised without a second, hand-maintained list of
+/// "things that would invalidate it" — the shape that goes stale silently.
+struct StoreScan {
+    stores: Vec<PathBuf>,
+    witnesses: Vec<(PathBuf, Option<SystemTime>)>,
+    probes: u64,
+    stamped_at: SystemTime,
+}
+
+impl StoreScan {
+    fn new() -> Self {
+        Self {
+            stores: Vec::new(),
+            witnesses: Vec::new(),
+            // Taken BEFORE any probe: anything modified from here on is inside
+            // the scan's own window and must not be trusted by a revalidation.
+            stamped_at: SystemTime::now(),
+            probes: 0,
+        }
     }
-    out.extend(gitfile_content_stores(root));
-    out.extend(alternate_object_dirs(root.join(".git/objects")));
-    out
+
+    /// Stamp `path`, whose state decides part of the answer. Absent is a
+    /// perfectly good stamp: it flips to `Some` the moment the path appears.
+    ///
+    /// Returns whether the path existed.
+    fn witness(&mut self, path: PathBuf) -> bool {
+        if let Some((_, stamp)) = self.witnesses.iter().find(|(seen, _)| *seen == path) {
+            return stamp.is_some();
+        }
+        self.probes += 1;
+        let meta = std::fs::symlink_metadata(&path).ok();
+        let stamp = meta.as_ref().and_then(|meta| meta.modified().ok());
+        let existed = stamp.is_some();
+        let is_link = meta.is_some_and(|meta| meta.file_type().is_symlink());
+        self.witnesses.push((path.clone(), stamp));
+        if is_link {
+            self.witness_link_target(&path);
+        }
+        existed
+    }
+
+    /// Stamp `path` only if it exists, for a path whose APPEARANCE is already
+    /// covered by a witness that is kept.
+    ///
+    /// The four control directories are the case: `<root>/.hg` cannot come into
+    /// being without moving `<root>`'s mtime, and `<root>` is always stamped.
+    /// Dropping the three that a git checkout does not have takes the
+    /// revalidation of an ordinary repository from six stats to three — and a
+    /// revalidation that costs as much as the scan it replaces is not a cache.
+    /// NOT applicable to a path outside the root (a gitfile's gitdir, a
+    /// borrowed alternates store): nothing stamped would move if one appeared.
+    ///
+    /// Returns whether the path is THERE, so the caller can skip everything
+    /// that could only exist underneath it.
+    fn witness_if_present(&mut self, path: PathBuf) -> bool {
+        self.probes += 1;
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            return false;
+        };
+        let Ok(stamp) = meta.modified() else {
+            return false;
+        };
+        if self.witnesses.iter().any(|(seen, _)| *seen == path) {
+            return true;
+        }
+        self.witnesses.push((path.clone(), Some(stamp)));
+        if meta.file_type().is_symlink() {
+            self.witness_link_target(&path);
+        }
+        true
+    }
+
+    /// Every content store the control directories directly under `dir` name.
+    ///
+    /// FerroxLabs/wayland-core#394 c3 / #396 c3 / #398 c3. `grep_policy::
+    /// scope_for` calls this once per directory it traverses -- through
+    /// [`vcs_content_stores`] -- so what it costs on a directory holding NO
+    /// control directory is the per-traversed-directory figure those three
+    /// criteria pin, and every `Grep(".")` pays it at every directory of the
+    /// tree.
+    ///
+    /// Two skips, both resting on the invariant the CALLER establishes by
+    /// stamping `dir` itself: a control directory cannot come into being
+    /// without moving `dir`'s mtime, so an ABSENT one needs no stamp of its
+    /// own, and nothing can exist underneath it either.
+    ///
+    /// * an absent control directory's store leaves are not probed -- six
+    ///   `symlink_metadata` calls on paths that cannot exist;
+    /// * `gitfile_content_stores` and `alternate_object_dirs` both read
+    ///   `<dir>/.git`, so neither can find anything when it is not there.
+    ///
+    /// And the control names are DEDUPLICATED before probing: `VCS_CONTENT_
+    /// STORES` holds six rows over four control directories, `.git` three
+    /// times, and `witness_if_present` counts its probe before it checks for a
+    /// duplicate.
+    ///
+    /// MEASURED, differential `strace -f -c`, ordinary directory, interleaved
+    /// arms: **17.000 -> 5.000** syscalls per call, which takes the pair
+    /// `scope_for` pays per traversed directory from 25.000 to 13.000. The
+    /// answer is unchanged in both directions -- nothing can be found under a
+    /// directory that is not there -- and so is the witness set, because an
+    /// absent control directory was never stamped anyway.
+    fn scan_control_dirs_in(&mut self, dir: &Path) {
+        let mut dot_git = false;
+        let mut done: Vec<&str> = Vec::new();
+        for (control_name, _) in VCS_CONTENT_STORES {
+            if done.contains(control_name) {
+                continue;
+            }
+            done.push(control_name);
+            let control = dir.join(control_name);
+            if !self.witness_if_present(control.clone()) {
+                continue;
+            }
+            dot_git |= *control_name == ".git";
+            for (owner, store) in VCS_CONTENT_STORES {
+                if owner == control_name {
+                    self.push_store(control.join(store));
+                }
+            }
+        }
+        if dot_git {
+            self.gitfile_content_stores(dir);
+            self.alternate_object_dirs(dir.join(".git/objects"));
+        }
+    }
+
+    /// Stamp what a symlinked witness POINTS AT, not only the link itself.
+    ///
+    /// A link's own mtime does NOT move when its target gains a child. So a
+    /// control directory reached through a symlink (`<root>/.git` pointed at
+    /// `<root>/real-git`) could grow an object store with every witness
+    /// unchanged: not `<root>` (the target directory already existed), not
+    /// `<root>/.git` (the link's own mtime), not `objects/info/alternates`
+    /// (still absent). [`WorkspacePolicy::vcs_store_cache_hit`] then returned
+    /// the stale EMPTY list for the life of the process, and arm 1 cannot cover
+    /// the gap either -- the canonical path is `<root>/real-git/objects`, whose
+    /// parent component is not `.git`, so [`is_vcs_store_dir`] says no.
+    /// MEASURED consequence before this: `Grep(path="real-git")` on the
+    /// production contained stack returned `.git/lfs` plaintext, re-opening the
+    /// whole of FerroxLabs/wayland-core#375 through #376's memo. A cache whose
+    /// invalidation cannot observe the mutation is not a cache.
+    ///
+    /// The TARGET's mtime is the one that moves, so the target is what must be
+    /// stamped. A link whose target does not exist YET cannot be canonicalized;
+    /// the path it NAMES is stamped absent instead, and flips to present the
+    /// moment the target appears -- a miss, which rescans.
+    ///
+    /// Costs nothing for an ordinary checkout, where no witness is a link.
+    /// Graded by `vfs_guard_cost::a_store_under_a_symlinked_control_dir_created_after_the_scan_is_denied`.
+    fn witness_link_target(&mut self, link: &Path) {
+        self.probes += 1;
+        if let Ok(target) = std::fs::canonicalize(link) {
+            self.witness(target);
+            return;
+        }
+        self.probes += 1;
+        let Ok(named) = std::fs::read_link(link) else {
+            return;
+        };
+        // `witness` de-duplicates by path, so a symlink CYCLE terminates on the
+        // hop that comes back round rather than recursing forever.
+        self.witness(resolve_against(link.parent().unwrap_or(link), named));
+    }
+
+    /// Canonicalize and record `p` when it exists. A path that does not exist
+    /// is dropped rather than denied: the deny list is handed to the OS
+    /// sandbox, and a deny for a non-existent path is noise the backend still
+    /// has to carry.
+    ///
+    /// The CALLER stamps the directory whose mtime decides whether `p` is
+    /// present, absent or re-pointed — one stamp for all of a control
+    /// directory's store leaves rather than one per leaf, and the caller is the
+    /// only one that knows whether that directory's own appearance is already
+    /// covered.
+    fn push_store(&mut self, p: PathBuf) {
+        self.probes += 1;
+        let Ok(leaf) = std::fs::symlink_metadata(&p) else {
+            // Absent altogether: the CALLER stamps the directory whose mtime
+            // moves when it appears. Costs the one probe `exists` cost.
+            return;
+        };
+        if leaf.file_type().is_symlink() {
+            // The leaf IS a link, so its owner's mtime stops governing here:
+            // the TARGET can gain the store later without moving anything the
+            // owner sees, and a link that dangles today is dropped below and
+            // would never be witnessed at all. `witness` stamps the link AND
+            // what it points at, target-absent included.
+            self.witness(p.clone());
+            self.probes += 1;
+            if !p.exists() {
+                return;
+            }
+        }
+        self.probes += 1;
+        let canonical = std::fs::canonicalize(&p).unwrap_or_else(|_| p.clone());
+        // A store reached through a symlink is only as stable as the link's
+        // TARGET, and moving the target leaves the owning directory untouched.
+        // Stamp the resolved path too, but only when it actually differs —
+        // the ordinary real-directory case pays nothing.
+        if canonical != p {
+            self.witness(canonical.clone());
+        }
+        self.stores.push(canonical);
+    }
+}
+
+fn scan_vcs_content_stores(root: &Path) -> StoreScan {
+    let mut scan = StoreScan::new();
+    // Whether ANY control directory exists at all is decided here: creating,
+    // removing or re-pointing `<root>/.git` moves the root's own mtime.
+    scan.witness(root.to_path_buf());
+    // Whether a control directory gains, loses or re-points a store leaf is
+    // settled by its own mtime; whether it EXISTS at all is settled by the
+    // root's, stamped above. `scan_control_dirs_in` is what acts on that.
+    scan.scan_control_dirs_in(root);
+    scan
 }
 
 /// Workspace-relative content stores denied for reads in a secret-deny posture,
@@ -2708,19 +3588,292 @@ fn is_vcs_store_dir(path: &Path) -> bool {
     })
 }
 
+/// True when `path` IS a VCS content store or lives INSIDE one, or is the
+/// control directory that owns one (`.git`, `.hg`, `.svn`, `.bzr`), at ANY
+/// depth.
+///
+/// FerroxLabs/wayland-core#322 c4: the composer's `@dir` walk needs the same
+/// any-depth treatment the deny walk gives, but it PRUNES rather than denies —
+/// so it must stop at the control directory too, which is the only thing
+/// standing between a tree walk and every object underneath. Both halves read
+/// [`VCS_CONTENT_STORES`], so the walk and the deny list cannot drift apart.
+///
+/// The store half is [`inside_vcs_store`] — the SAME predicate the deny walk
+/// asks through [`WorkspacePolicy::is_vcs_content_store`] — and not the
+/// self-only [`is_vcs_store_dir`]. The two are NOT equivalent and the
+/// difference is reachable: pruning governs only what the walk DESCENDS to,
+/// while a symlink is an entry met at the top of the tree, so one aimed BELOW
+/// a store root (`.git/objects/aa`, neither a `(control, store)` shape nor a
+/// control-directory leaf) escaped the self-only test and every object under
+/// it was inlined. Graded by
+/// `at_dir_prunes_a_path_that_resolves_below_a_store_root`.
+///
+/// Purely lexical, like [`is_vcs_store_dir`]; the caller is responsible for
+/// handing it an already-resolved path, which is what makes a store reached
+/// under another name answer the same as one reached by its own.
+pub fn is_within_vcs_store_or_control_dir(path: &Path) -> bool {
+    if inside_vcs_store(path) {
+        return true;
+    }
+    let Some(leaf) = path.file_name() else {
+        return false;
+    };
+    VCS_CONTENT_STORES
+        .iter()
+        .any(|(dir, _)| leaf == std::ffi::OsStr::new(dir))
+}
+
 /// [`is_vcs_store_dir`] applied to `path` and every ancestor of it: true when
 /// `path` IS a content store or lives inside one.
 fn inside_vcs_store(path: &Path) -> bool {
     path.ancestors().any(is_vcs_store_dir)
 }
 
-/// Canonicalize and record `p` when it exists. A path that does not exist is
-/// dropped rather than denied: the deny list is handed to the OS sandbox, and a
-/// deny for a non-existent path is noise the backend still has to carry.
-fn push_store(out: &mut Vec<PathBuf>, p: PathBuf) {
-    if p.exists() {
-        out.push(std::fs::canonicalize(&p).unwrap_or(p));
+/// True when `name` is one of the [`VCS_CONTENT_STORES`] STORE leaves
+/// (`objects`, `modules`, `lfs`, `store`, `pristine`, `repository`),
+/// irrespective of what its parent is called.
+///
+/// Read by arm 3 ([`WorkspacePolicy::encloses_repository_store`]) to decide
+/// which ancestors are worth a repository probe at all. NOT a denial on its
+/// own: every one of these is also an ordinary project directory name.
+fn is_vcs_store_leaf_name(name: &std::ffi::OsStr) -> bool {
+    VCS_CONTENT_STORES
+        .iter()
+        .any(|(_, store)| name == std::ffi::OsStr::new(store))
+}
+
+/// True when `name` is a VCS CONTROL directory name (`.git`, `.hg`, `.svn`,
+/// `.bzr`), read off the same [`VCS_CONTENT_STORES`] table so the walk and the
+/// deny list cannot drift.
+fn is_vcs_control_dir_name(name: &std::ffi::OsStr) -> bool {
+    VCS_CONTENT_STORES
+        .iter()
+        .any(|(control, _)| name == std::ffi::OsStr::new(control))
+}
+
+/// One arm-4 discovery walk: the stores every NESTED control directory (and
+/// every nested bare repository) under `root` names, and what the walk cost.
+struct NestedStoreScan {
+    stores: Vec<PathBuf>,
+    /// FerroxLabs/wayland-core#406 — the declaration sites this walk READ, with
+    /// the mtime it saw (`None` for absent). See [`NestedStoreCache`].
+    witnesses: Vec<(PathBuf, Option<SystemTime>)>,
+    /// Set true for the declarations of `<root>/.git`, which arm 2 stamps.
+    skip_witnesses: bool,
+    probes: u64,
+    stamped_at: SystemTime,
+}
+
+impl NestedStoreScan {
+    /// Stamp a declaration site — a file whose CONTENT, or a store leaf whose
+    /// TARGET, decided part of this walk's answer.
+    ///
+    /// Absent is a perfectly good stamp and is the one that matters here: it
+    /// flips to `Some` the moment an `alternates` file is written into a
+    /// control directory the walk already found, which is the #406 residual.
+    fn witness(&mut self, path: PathBuf) {
+        if self.skip_witnesses {
+            return;
+        }
+        if self.witnesses.iter().any(|(seen, _)| *seen == path) {
+            return;
+        }
+        self.probes += 1;
+        let stamp = std::fs::symlink_metadata(&path)
+            .and_then(|meta| meta.modified())
+            .ok();
+        self.witnesses.push((path, stamp));
     }
+
+    /// Record a discovered store, canonicalized.
+    ///
+    /// Canonicalizing here rather than at query time is what makes the
+    /// borrow-target NAME irrelevant (FerroxLabs/wayland-core#394): the set is
+    /// tested by prefix against an already-resolved query path, so a store
+    /// reached as `<root>/odb` and one reached as `<root>/vendor/pkg/.git/objects`
+    /// through a symlink are the same entry.
+    fn push_store(&mut self, path: PathBuf) {
+        self.probes += 1;
+        let canonical = std::fs::canonicalize(&path).unwrap_or(path);
+        if !self.stores.contains(&canonical) {
+            self.stores.push(canonical);
+        }
+    }
+
+    /// Every store a git control directory or gitdir at `dir` names, plus the
+    /// stores it BORROWS.
+    fn stores_named_by(&mut self, dir: &Path) {
+        // #406 — ONE stamp for all six leaves, the same economy
+        // `StoreScan::witness_if_present` already applies at the root: a leaf
+        // cannot appear, vanish or be re-pointed without moving the mtime of
+        // the directory that holds it, so stamping `dir` covers every store
+        // this control directory could come to name. Six stats per checkout on
+        // every admitted guard would be a revalidation as expensive as the
+        // discovery it replaces.
+        self.witness(dir.to_path_buf());
+        for (_, leaf) in VCS_CONTENT_STORES {
+            self.push_store(dir.join(leaf));
+        }
+        self.alternates_of(dir.join("objects"));
+    }
+
+    /// `objects/info/alternates` — one borrowed object database per line,
+    /// absolute or relative to `objects_dir`, `#` comments skipped. Same format
+    /// [`StoreScan::alternate_object_dirs`] reads for the root.
+    fn alternates_of(&mut self, objects_dir: PathBuf) {
+        // #406 — stamped whether or not it exists. An absent stamp is what
+        // catches the borrow WRITTEN AFTER this walk into a control directory
+        // the walk had already found.
+        self.witness(objects_dir.join("info/alternates"));
+        self.probes += 1;
+        let Ok(text) = std::fs::read_to_string(objects_dir.join("info/alternates")) else {
+            return;
+        };
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let borrowed = resolve_against(&objects_dir, PathBuf::from(line));
+            self.push_store(borrowed);
+        }
+    }
+}
+
+/// Arm 4 (FerroxLabs/wayland-core#390, #394, #396) — walk `root` ONCE and
+/// resolve every content store that a control directory, a gitfile, a bare
+/// repository or an `alternates` borrow nested under it NAMES.
+///
+/// Three things this walk does that the name-based arms could not:
+///
+/// * a VENDORED checkout's gitfile (`<root>/vendor/pkg/.git` = `gitdir: ../pkg-git`)
+///   is read where it lies, so `<root>/vendor/pkg-git/objects` is denied even
+///   though no component of that path is lexically a `(control, store)` pair
+///   (#390 c1);
+/// * borrow targets and symlinked store leaves are CANONICALIZED into the set,
+///   so a store hidden behind a name like `odb` is covered by the same prefix
+///   test as one called `objects` (#390 c2, #394 c1);
+/// * a BARE repository is recognised by its own shape rather than by a control
+///   directory it does not have (#396 c1).
+///
+/// **Fails closed.** A directory the walk cannot enumerate is recorded as a
+/// store, so its contents are refused rather than silently unscanned; a
+/// `continue` there would let an unreadable directory hide a checkout beneath
+/// it. Reads under such a directory would fail at the OS anyway, so the
+/// wrong-refusal cost is nil.
+///
+/// **Does not descend** into control directories (arm 1 already covers their
+/// interiors lexically, at any depth), into content stores, or through
+/// symlinked directories (a symlink is a jump to somewhere the walk either
+/// reaches on its own or that arms 1-3 answer on the resolved path; following
+/// them is how a walk finds a cycle).
+fn discover_nested_content_stores(root: &Path) -> NestedStoreScan {
+    let mut scan = NestedStoreScan {
+        stores: Vec::new(),
+        witnesses: Vec::new(),
+        skip_witnesses: false,
+        probes: 0,
+        // Taken BEFORE any probe: anything modified from here on is inside the
+        // walk's own window and must not be trusted by a revalidation.
+        stamped_at: SystemTime::now(),
+    };
+    let mut queue = vec![root.to_path_buf()];
+    while let Some(dir) = queue.pop() {
+        // A bare repository (`git clone --bare|--mirror`, a submodule object
+        // cache, a vendored mirror) has HEAD/refs/objects at its own top level
+        // and no control directory anywhere. Its store leaves are recorded and
+        // it is not descended into.
+        scan.probes += 2;
+        if std::fs::symlink_metadata(dir.join("HEAD")).is_ok()
+            && (std::fs::symlink_metadata(dir.join("refs")).is_ok()
+                || std::fs::symlink_metadata(dir.join("config")).is_ok())
+        {
+            scan.stores_named_by(&dir);
+            continue;
+        }
+        scan.probes += 1;
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            // Fail CLOSED: what cannot be enumerated cannot be cleared.
+            scan.push_store(dir);
+            continue;
+        };
+        for entry in entries {
+            let Ok(entry) = entry else {
+                scan.push_store(dir.clone());
+                continue;
+            };
+            let path = entry.path();
+            let name = entry.file_name();
+            scan.probes += 1;
+            let Ok(file_type) = entry.file_type() else {
+                scan.push_store(path);
+                continue;
+            };
+            if is_vcs_control_dir_name(&name) {
+                // #406 — `<root>/.git`'s own declarations are arm 2's job and
+                // are already revalidated on every guard by
+                // `vcs_store_cache_hit`. Stamping them here as well would add a
+                // probe to the ordinary-path guard #398 c2 pins at three, and
+                // buy no denial that arm 2 does not already make.
+                scan.skip_witnesses = dir == root;
+                if file_type.is_dir() {
+                    // A store leaf inside it may be a SYMLINK out of the tree;
+                    // `push_store` canonicalizes, so the target is what lands
+                    // in the set.
+                    scan.stores_named_by(&path);
+                } else {
+                    // A `.git` FILE (gitfile) or a `.git` SYMLINK to a real
+                    // directory: both name a gitdir elsewhere. #242's shape,
+                    // read at every depth rather than at the root only.
+                    // #406 — the gitfile's own CONTENT names the gitdir, and
+                    // a rewrite leaves every directory mtime untouched.
+                    scan.witness(path.clone());
+                    for gitdir in gitfile_targets(&path, &dir, &mut scan.probes) {
+                        scan.witness(gitdir.join("commondir"));
+                        scan.stores_named_by(&gitdir);
+                    }
+                }
+                scan.skip_witnesses = false;
+                continue;
+            }
+            if file_type.is_dir() && !is_vcs_store_dir(&path) {
+                queue.push(path);
+            }
+        }
+    }
+    scan
+}
+
+/// The gitdir(s) a `.git` FILE names: its `gitdir:` line and, for a linked
+/// worktree, the `commondir` that gitdir points at in turn.
+///
+/// Split out of [`StoreScan::gitfile_content_stores`]'s root-only form so the
+/// arm-4 walk can read the same shape at any depth without carrying the
+/// witness bookkeeping the memoised arm-2 scan needs.
+fn gitfile_targets(gitfile: &Path, owner: &Path, probes: &mut u64) -> Vec<PathBuf> {
+    *probes += 1;
+    let Ok(text) = std::fs::read_to_string(gitfile) else {
+        return Vec::new();
+    };
+    let Some(named) = text
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("gitdir:"))
+        .map(|rest| PathBuf::from(rest.trim()))
+        .filter(|p| !p.as_os_str().is_empty())
+    else {
+        return Vec::new();
+    };
+    *probes += 1;
+    let gitdir = resolve_against(owner, named);
+    let mut dirs = vec![gitdir.clone()];
+    *probes += 1;
+    if let Ok(common) = std::fs::read_to_string(gitdir.join("commondir")) {
+        let common = PathBuf::from(common.trim());
+        if !common.as_os_str().is_empty() {
+            dirs.push(resolve_against(&gitdir, common));
+        }
+    }
+    dirs
 }
 
 /// #242 — content stores reached through a `.git` FILE rather than a `.git`
@@ -2740,58 +3893,196 @@ fn push_store(out: &mut Vec<PathBuf>, p: PathBuf) {
 /// Denying a store outside every readable root is harmless — the child cannot
 /// reach it either way — so this deliberately does not scope-check: the case
 /// that matters is precisely the one where the external gitdir IS reachable.
-fn gitfile_content_stores(root: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let dot_git = root.join(".git");
-    if !std::fs::metadata(&dot_git).is_ok_and(|m| m.is_file()) {
-        return out;
-    }
-    let Ok(text) = std::fs::read_to_string(&dot_git) else {
-        return out;
-    };
-    let Some(named) = text
-        .lines()
-        .find_map(|line| line.trim().strip_prefix("gitdir:"))
-        .map(|rest| PathBuf::from(rest.trim()))
-        .filter(|p| !p.as_os_str().is_empty())
-    else {
-        return out;
-    };
-    let gitdir = resolve_against(root, named);
-    let mut dirs = vec![gitdir.clone()];
-    if let Ok(common) = std::fs::read_to_string(gitdir.join("commondir")) {
-        let common = PathBuf::from(common.trim());
-        if !common.as_os_str().is_empty() {
-            dirs.push(resolve_against(&gitdir, common));
+impl StoreScan {
+    fn gitfile_content_stores(&mut self, root: &Path) {
+        let dot_git = root.join(".git");
+        // Already stamped by the control-directory loop when it exists, which
+        // is the only case that reaches past this line. A gitfile's CONTENT
+        // decides everything below and a rewrite leaves the root's mtime
+        // untouched, so that stamp is load-bearing here and not just for the
+        // store leaves.
+        debug_assert!(
+            !dot_git.exists() || self.witnesses.iter().any(|(seen, _)| *seen == dot_git),
+            "an existing `.git` must be stamped before its content is read"
+        );
+        self.probes += 1;
+        if !std::fs::metadata(&dot_git).is_ok_and(|m| m.is_file()) {
+            return;
+        }
+        self.probes += 1;
+        let Ok(text) = std::fs::read_to_string(&dot_git) else {
+            return;
+        };
+        let Some(named) = text
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("gitdir:"))
+            .map(|rest| PathBuf::from(rest.trim()))
+            .filter(|p| !p.as_os_str().is_empty())
+        else {
+            return;
+        };
+        self.probes += 1;
+        let gitdir = resolve_against(root, named);
+        let mut dirs = vec![gitdir.clone()];
+        let commondir = gitdir.join("commondir");
+        self.witness(commondir.clone());
+        self.probes += 1;
+        if let Ok(common) = std::fs::read_to_string(&commondir) {
+            let common = PathBuf::from(common.trim());
+            if !common.as_os_str().is_empty() {
+                self.probes += 1;
+                dirs.push(resolve_against(&gitdir, common));
+            }
+        }
+        for dir in dirs {
+            // Outside the root, so nothing already stamped moves if this
+            // directory appears: it is stamped whether or not it exists.
+            self.witness(dir.clone());
+            for leaf in ["objects", "modules", "lfs"] {
+                self.push_store(dir.join(leaf));
+            }
+            self.alternate_object_dirs(dir.join("objects"));
         }
     }
-    for dir in dirs {
-        for leaf in ["objects", "modules", "lfs"] {
-            push_store(&mut out, dir.join(leaf));
-        }
-        out.extend(alternate_object_dirs(dir.join("objects")));
-    }
-    out
 }
 
 /// Object stores borrowed through `objects/info/alternates` — the third way a
 /// git store lives outside `root` (after a gitfile and a symlink), and the one
 /// `git clone --shared` / `--reference` produces. One path per line, absolute
 /// or relative to `objects_dir`; a `#`-prefixed line is a comment.
-fn alternate_object_dirs(objects_dir: PathBuf) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let Ok(text) = std::fs::read_to_string(objects_dir.join("info/alternates")) else {
-        return out;
-    };
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
+impl StoreScan {
+    fn alternate_object_dirs(&mut self, objects_dir: PathBuf) {
+        // The alternates FILE is the witness, not its parents: its stamp flips
+        // from absent to present the moment it is created at any depth below a
+        // directory that does not exist yet, and its mtime moves when the
+        // borrowed paths inside it change. One stamp, complete.
+        let alternates = objects_dir.join("info/alternates");
+        self.witness(alternates.clone());
+        self.probes += 1;
+        let Ok(text) = std::fs::read_to_string(&alternates) else {
+            return;
+        };
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            self.probes += 1;
+            let borrowed = resolve_against(&objects_dir, PathBuf::from(line));
+            if let Some(owner) = borrowed.parent() {
+                self.witness(owner.to_path_buf());
+            }
+            self.push_store(borrowed);
         }
-        push_store(&mut out, resolve_against(&objects_dir, PathBuf::from(line)));
     }
-    out
 }
+
+// ===========================================================================
+// RESOLVER INVENTORY -- FerroxLabs/wayland-core#402
+//
+// Every function in THIS FILE whose return type MENTIONS `PathBuf` and is not
+// a collection of paths has exactly one `INVENTORY:` row below, classified
+// with the reason. That is a structural test, not a list of spellings: the
+// first version of this gate accepted four literal spellings and was blind to
+// `std::io::Result<PathBuf>` -- the shape `std::fs::canonicalize` returns and
+// one this file already uses -- and to a path carried inside a tuple. Both let
+// a third resolver through in silence, which is the very defect below.
+//
+// It exists because core#356 c4's call-site gate is keyed to two literal
+// resolver names, so a THIRD path resolver arrived ungated: its call sites
+// need not say which resolver they use or why, and both name-keyed gates stay
+// green, because a gate cannot notice a name it was not given. This block is
+// the inverted question -- what does the file DEFINE -- and
+// `tests::resolver_inventory_covers_every_pathbuf_returning_fn` fails when
+// the block and the file disagree in EITHER direction.
+//
+// The classification, so a new row is a decision and not a guess:
+//
+// * `resolver` -- answers "where does a path supplied from OUTSIDE this file
+//   land", for a path the caller may spell any way it likes, and this file
+//   holds more than one answer. The caller therefore has a CHOICE, and
+//   core#356 c4 obliges every call site to state which one it made. The gate
+//   enforces that per row: a row marked `resolver` has its own call sites
+//   checked for a ``resolver: `<name>``` note, so a third resolver is one row
+//   and not a fourth hand-written test.
+// * `helper` -- a private step of one resolver, a join of a path this file
+//   already owns, or a constructor of a fixed location. No choice is offered
+//   at its call sites, so no call-site note is owed -- and the reason it is
+//   owed nothing is on the row rather than in a reviewer's head.
+//
+// INVENTORY: dir_stamp = helper: it resolves nothing. The path it returns is
+//   the one the directory walk already produced -- it neither canonicalizes,
+//   joins, nor re-attaches anything -- and its only job is to read that
+//   directory's mtime with the SAME instrument revalidation uses. No caller is
+//   offered a choice, so no call-site note is owed. It was invisible to the
+//   first gate because its path rides inside `Option<(PathBuf, SystemTime)>`,
+//   and a whitelist of four return-type spellings could not see a tuple.
+//
+// INVENTORY: canon_for_scope = resolver: the WEAK one. Canonicalizes what
+//   exists and re-attaches one missing leaf, so it answers where a path's
+//   SPELLING sits. Correct for advisory mirrors and $HOME lookups, wrong for
+//   a refusal.
+// INVENTORY: canon_existing_ancestor = resolver: the STRONG one. Walks the
+//   dangling tail one symlink hop at a time, so it answers where a write or a
+//   read would LAND. The resolver every `SecretDenyFs` guard predicate must
+//   use (core#383 c3).
+// INVENTORY: resolve = helper: the policy's counted wrapper over
+//   `canon_existing_ancestor` for the two guard predicates. It IS one
+//   resolver choice, already stated at its own body with the core#356 c4
+//   note; a caller of `resolve` has no second answer to pick from.
+// INVENTORY: resolve_against = helper: a private step of the VCS-declaration
+//   scan. It joins a name read out of a gitfile / commondir / alternates
+//   against that file's own directory, which git's own semantics fix; the
+//   caller chooses nothing.
+// INVENTORY: resolve_prefix = helper: the symlink-hop walk inside
+//   `canon_existing_ancestor`, called from nowhere else.
+// INVENTORY: canon_ancestor_only = helper: the walk-UP-and-append-verbatim
+//   shape core#1097 abandoned as a resolver. It follows no symlink, so
+//   `resolve_prefix` can call it without recursing into the hop walk. It must
+//   never be reached from a predicate, which is why it is not a resolver row.
+// INVENTORY: lexical_normalize = helper: applies `.` and `..` textually and
+//   touches no filesystem. It keeps an unresolvable symlink target honest for
+//   `resolve_prefix`; it resolves nothing.
+// INVENTORY: canon = helper: `canonicalize().unwrap_or(p)`, with no
+//   missing-component handling and no link hop. Used only for roots that
+//   already exist at construction time, never for a caller-supplied path.
+// INVENTORY: vcs_store_entry = helper: the per-entry decision of the
+//   secret-deny WALK, not of a caller-supplied path. It is handed an entry the
+//   walk already produced and returns that entry's own canonical path or
+//   nothing; there is no spelling to resolve, because the walk supplied it.
+// INVENTORY: secret_entry = helper: the sibling of `vcs_store_entry`, same
+//   shape and same reason -- shared verbatim by the walk's serial and parallel
+//   arms so the two cannot answer differently.
+// INVENTORY: session_output_root = helper: constructs a FIXED location under
+//   the root (`dunce::simplified(root).join(SESSION_OUTPUT_ROOT)`). A pure
+//   string operation on a path this file already owns.
+// INVENTORY: scratch_dir = helper: constructs a FIXED location under the host
+//   temp directory from the trust level. No caller-supplied path reaches it.
+// INVENTORY: auto_run_overlap = helper: SELECTS one of the auto-run locations
+//   this file already owns and returns it verbatim. Lexical, and deliberately
+//   resolves nothing -- an auto-run directory must be refused whether or not
+//   it currently exists.
+// INVENTORY: revoke_session_read_root = helper: returns the root of a grant
+//   this policy already holds, resolved when the grant was made. A lookup, not
+//   a resolution.
+// INVENTORY: grant_session_read_root = helper: the two-argument form of
+//   `grant_session_read_root_full`; it forwards and resolves nothing itself.
+// INVENTORY: grant_session_read_root_full = helper: takes the path
+//   `grantable_read_root` has already resolved and records it. The resolution
+//   is that function's, and is graded there.
+// INVENTORY: grantable_read_root = helper: the capacity half. It takes the
+//   path `grantable_read_root_shape` has already resolved and returns it
+//   unchanged, so the caller cannot re-resolve it differently -- the same
+//   single-resolution discipline `resolve` gives the guard.
+// INVENTORY: grantable_read_root_shape = resolver: the THIRD answer, and the
+//   one that proves this block is not a two-name gate rewritten. It resolves a
+//   HOST-supplied folder with bare `std::fs::canonicalize`, which REFUSES a
+//   path that does not exist. Correct for a grant -- you cannot open a folder
+//   that is not there, and a grant over a path that may yet be created is a
+//   grant over whatever later takes the name -- and wrong for a guard, which
+//   must judge where a not-yet-created file WOULD land. Its call sites carry
+//   the core#356 c4 note for that reason.
+// ===========================================================================
 
 /// Resolve a VCS-file-supplied path: absolute as written, relative against the
 /// file's own directory, then canonicalized so it compares against the rest of
@@ -2820,34 +4111,6 @@ pub(crate) fn canon_for_scope(path: &Path) -> PathBuf {
             .unwrap_or_else(|_| path.to_path_buf()),
         _ => path.to_path_buf(),
     }
-}
-
-/// Canonicalize as much of `path` as exists and keep the remainder verbatim.
-///
-/// [`canon_for_scope`] resolves only the IMMEDIATE parent and falls back to the
-/// raw path when that parent is missing. For a deny predicate that is a hole on
-/// any host whose config or temp root is itself a symlink (`/var` ->
-/// `/private/var` on macOS): the deny list resolves, the candidate does not, and
-/// the prefix comparison misses. The miss lands on exactly the case
-/// [`WorkspacePolicy::is_skill_source_path`] exists to catch — writing
-/// `<config_dir>/skills/<new-skill>/report.html` creates BOTH missing
-/// components, so "the parent exists" is false precisely when it matters.
-fn canon_deep(path: &Path) -> PathBuf {
-    if let Ok(resolved) = std::fs::canonicalize(path) {
-        return resolved;
-    }
-    let mut trailing: Vec<std::ffi::OsString> = Vec::new();
-    let mut cursor = path;
-    while let (Some(parent), Some(name)) = (cursor.parent(), cursor.file_name()) {
-        trailing.push(name.to_os_string());
-        if let Ok(base) = std::fs::canonicalize(parent) {
-            let mut resolved = base;
-            resolved.extend(trailing.iter().rev());
-            return resolved;
-        }
-        cursor = parent;
-    }
-    path.to_path_buf()
 }
 
 /// True when any ancestor of `path` is a `.wayland-core/skills` or
@@ -2900,6 +4163,24 @@ fn under_project_load_path(path: &Path) -> bool {
 /// A `..` is applied lexically (`pop`) because the prefix accumulated so far is
 /// already canonical, so there is no symlink left for it to traverse wrongly.
 fn canon_existing_ancestor(path: &Path) -> PathBuf {
+    // FerroxLabs/wayland-core#376: an ABSOLUTE path that resolves in full needs
+    // none of the walk below, and that is the overwhelmingly common case on the
+    // per-operation guard path. `canonicalize` resolves every component and
+    // every `..` in one syscall sequence, and it succeeds only when nothing is
+    // missing and no link dangles -- which is precisely the condition under
+    // which the component walk provably returns the same path. The walk exists
+    // for the cases `canonicalize` REFUSES (a missing component, a dangling
+    // link, a `..` after either), so this fast path can never cover one of them.
+    //
+    // Restricted to absolute paths on purpose: for a relative `../x` the walk
+    // pops an EMPTY prefix and yields `x`, while `canonicalize` would resolve it
+    // against the process cwd. Those disagree, and this is not the place to
+    // change which one a caller gets.
+    if path.is_absolute()
+        && let Ok(resolved) = std::fs::canonicalize(path)
+    {
+        return resolved;
+    }
     let mut out = PathBuf::new();
     for component in path.components() {
         match component {

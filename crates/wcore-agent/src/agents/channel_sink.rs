@@ -165,6 +165,31 @@ impl ChannelSink {
     /// is what recovers an UNCLOSED `<think>`: the filter eats to end of
     /// stream rather than leak a runaway tail, and without this flush that
     /// tail would be silently dropped instead of shown.
+    /// #1242 - drain what `filter` is still WITHHOLDING and relay it as one
+    /// last `text_delta` on `msg_id`, before the `stream_end` that closes the
+    /// message.
+    ///
+    /// Same shape and same reason as `ProtocolSink::drain_withheld_text`: the
+    /// relay IS the wire a parent host reads, so a child whose answer ends in
+    /// `<` or in an unclosed `<thinking>` would otherwise be relayed short of
+    /// what the child's own history stored. Ordered before
+    /// [`Self::flush_reasoning`] for the same reason that sink is: one drain
+    /// order for every consumer of the filter, NOT to prevent a double report.
+    /// This sink also flushes after every chunk, so the capture buffer is
+    /// already empty when `finish` truncates it and an unclosed block is
+    /// relayed twice, exactly as `ProtocolSink::drain_withheld_text`
+    /// documents.
+    fn drain_withheld_text(&self, filter: &parking_lot::Mutex<ReasoningFilter>, msg_id: &str) {
+        let recovered = filter.lock().finish();
+        if recovered.is_empty() {
+            return;
+        }
+        self.relay(ProtocolEvent::TextDelta {
+            text: recovered,
+            msg_id: msg_id.to_string(),
+        });
+    }
+
     fn flush_reasoning(&self, filter: &parking_lot::Mutex<ReasoningFilter>, msg_id: &str) {
         let captured = filter.lock().take_captured_delta();
         if !captured.is_empty() {
@@ -179,7 +204,22 @@ impl ChannelSink {
     /// Emit the single authoritative terminal after the child result is known.
     /// There is deliberately no stream fallback: a terminal that can reorder
     /// behind diagnostics is not authoritative evidence.
-    pub fn relay_terminal(&self, terminal_state: WorkflowChildTerminalState, message: &str) {
+    ///
+    /// `category` is the CHILD`s own failure category (#1266 c3). It is a
+    /// required argument rather than a field with a default: this frame is the
+    /// authoritative terminal, and the previous hardcoded
+    /// `FailureCategory::Unknown` here is precisely the drop #1266 reports --
+    /// a child that died on a context limit and one that died on a local
+    /// authority fault reached the parent`s host indistinguishable. It is
+    /// passed THROUGH rather than remapped: a child whose upstream response
+    /// was opaque must still arrive as `unknown`, never be upgraded to a
+    /// plausible-looking `tool_runtime` on the child`s behalf.
+    pub fn relay_terminal(
+        &self,
+        terminal_state: WorkflowChildTerminalState,
+        message: &str,
+        category: wcore_protocol::events::FailureCategory,
+    ) {
         if self.terminal_sent.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -194,6 +234,7 @@ impl ChannelSink {
                     code: "sub_agent_error".to_owned(),
                     message: message.to_owned(),
                     retryable: false,
+                    category,
                 },
             },
         };
@@ -285,9 +326,12 @@ impl OutputSink for ChannelSink {
         _cache_read: u64,
         finish_reason: FinishReason,
     ) {
-        // #1129: an unclosed reasoning block reaches the host instead of
-        // vanishing with the turn.
+        // #1242 then #1129, on BOTH lanes: withheld text first, then the
+        // reasoning capture. The lanes interleave and each has its own state
+        // machine, so each is drained against its own msg_id.
+        self.drain_withheld_text(&self.reasoning, msg_id);
         self.flush_reasoning(&self.reasoning, msg_id);
+        self.drain_withheld_text(&self.chunk_reasoning, &self.chunk_msg_id());
         self.flush_reasoning(&self.chunk_reasoning, &self.chunk_msg_id());
         self.relay(ProtocolEvent::StreamEnd {
             msg_id: msg_id.to_string(),
@@ -297,7 +341,12 @@ impl OutputSink for ChannelSink {
             agent_run_id: None,
         });
     }
-    fn emit_error(&self, msg: &str, retryable: bool) {
+    fn emit_error(
+        &self,
+        msg: &str,
+        retryable: bool,
+        category: wcore_protocol::events::FailureCategory,
+    ) {
         // W5.5 F1: relay ProtocolEvent::Error so the bridge's "error" arm sets
         // SubAgentStatus::Failed (not Done). Previously relayed Info, causing a
         // crashed sub-agent to appear green/Done in the UI strip.
@@ -310,6 +359,33 @@ impl OutputSink for ChannelSink {
                 code: "sub_agent_error".to_string(),
                 message: msg.to_string(),
                 retryable,
+                // wayland#1266 c3 -- the CHILD's own category, relayed, not
+                // the parent's read of it.
+                //
+                // #1237 hardcoded `ToolRuntime` here and defended it as right
+                // "from the parent turn's point of view": the child is
+                // something the parent invoked. That is true and it is also
+                // lossy, and #1266 c3 says which of the two wins. Under the
+                // hardcode a child that died on a context ceiling and a child
+                // that died on a local authority fault were the same frame to
+                // the host -- the classification the CHILD engine had already
+                // made was thrown away at the relay, which is #1266's whole
+                // complaint one boundary over.
+                //
+                // Passed through verbatim rather than remapped, because c3
+                // asks for both halves and a remap can only serve one: a child
+                // that hit a context limit must arrive as `context_limit`, AND
+                // a child that died on an opaque upstream response must still
+                // arrive as `unknown` rather than being upgraded to a
+                // plausible-looking `tool_runtime`. Substituting `ToolRuntime`
+                // for `Unknown` here would be exactly the guess #1237 c4
+                // forbids, made on the child's behalf.
+                //
+                // The parent still knows this was a child: `code` is
+                // `sub_agent_error` and the frame is relayed inside the
+                // parent's `sub_agent_event` envelope. The category answers
+                // "why did it die", not "whose was it".
+                category,
             },
         });
     }
@@ -488,10 +564,15 @@ mod tests {
 
         // Diagnostics remain on the full best-effort stream.
         sink.emit_info("retrying provider");
-        sink.emit_error("transient provider failure", true);
+        sink.emit_error(
+            "transient provider failure",
+            true,
+            wcore_protocol::events::FailureCategory::Unknown,
+        );
         sink.relay_terminal(
             WorkflowChildTerminalState::Succeeded,
             "sub-agent 'chatty' completed (3 turns)",
+            wcore_protocol::events::FailureCategory::Unknown,
         );
 
         let event = terminal_rx
@@ -503,7 +584,11 @@ mod tests {
         assert_eq!(event.relay.inner["msg_id"], "spawn:0:chatty:terminal");
         assert_eq!(event.relay.parent_call_id, "spawn:0:chatty");
 
-        sink.relay_terminal(WorkflowChildTerminalState::Failed, "late contradiction");
+        sink.relay_terminal(
+            WorkflowChildTerminalState::Failed,
+            "late contradiction",
+            wcore_protocol::events::FailureCategory::ToolRuntime,
+        );
         assert!(terminal_rx.try_recv().is_err());
     }
 
@@ -511,7 +596,11 @@ mod tests {
     async fn legacy_constructor_relays_terminal_on_stream() {
         let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
         let sink = ChannelSink::new("spawn:0:legacy".into(), "legacy".into(), tx);
-        sink.relay_terminal(WorkflowChildTerminalState::Succeeded, "completed");
+        sink.relay_terminal(
+            WorkflowChildTerminalState::Succeeded,
+            "completed",
+            wcore_protocol::events::FailureCategory::Unknown,
+        );
 
         let relay = rx
             .recv()
@@ -539,8 +628,16 @@ mod tests {
         sink.emit_text_delta("a", "m");
         sink.emit_text_delta("b", "m");
         // A retry diagnostic remains best-effort and is not a terminal.
-        sink.emit_error("engine crashed", true);
-        sink.relay_terminal(WorkflowChildTerminalState::Failed, "engine crashed");
+        sink.emit_error(
+            "engine crashed",
+            true,
+            wcore_protocol::events::FailureCategory::Unknown,
+        );
+        sink.relay_terminal(
+            WorkflowChildTerminalState::Failed,
+            "engine crashed",
+            wcore_protocol::events::FailureCategory::ToolRuntime,
+        );
 
         let event = terminal_rx
             .recv()

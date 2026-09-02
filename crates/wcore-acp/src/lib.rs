@@ -27,6 +27,7 @@ pub use cursor::{Cursor, CursorError, EventLog, Positioned, ResumeError, ResumeR
 pub use error::AcpError;
 pub use idempotency::{CommandLedger, LedgerOutcome};
 pub use negotiate::{NegotiateError, Negotiated, Version, negotiate};
+pub use protocol::McpToolSelection;
 pub use roles::{AuthzOutcome, Role, RolePolicy, RoledPrincipal, authorize};
 pub use roster::AgentRoster;
 pub use router::ProfileRouter;

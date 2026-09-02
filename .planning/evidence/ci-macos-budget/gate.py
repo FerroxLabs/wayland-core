@@ -20,6 +20,15 @@ import sys
 COND_RE = re.compile(
     r"\$\{\{ fromJSON\(\((?P<cond>.+?)\) && '(?P<full>.+?)' \|\| '(?P<nomac>.+?)'\) \}\}"
 )
+
+# The `ci` job's os matrix nests darwin admission inside a windows-admission
+# expression. Its DARWIN condition is the same clause-group; only the shape
+# around it differs. Matching it here is what keeps this gate covering the
+# matrix that actually schedules the macOS test leg.
+NESTED_RE = re.compile(
+    r"os: \$\{\{ fromJSON\(\(\((?P<cond>.+?)\) && \(.+?\)\) && '(?P<full>.+?)' "
+    r"\|\| \(\(.+?\) && '.+?' \|\| '(?P<nomac>.+?)'\)\) \}\}"
+)
 REPORT_RE = re.compile(r"DARWIN: \$\{\{ \((?P<cond>.+?)\) && 'true' \|\| 'false' \}\}")
 
 
@@ -27,6 +36,9 @@ def extract(text):
     """Return (list_of_condition_strings, [(full,nomac), ...])."""
     conds, literals = [], []
     for m in COND_RE.finditer(text):
+        conds.append(m.group("cond"))
+        literals.append((m.group("full"), m.group("nomac")))
+    for m in NESTED_RE.finditer(text):
         conds.append(m.group("cond"))
         literals.append((m.group("full"), m.group("nomac")))
     for m in REPORT_RE.finditer(text):
@@ -58,6 +70,11 @@ def evaluate(cond, event_name, ref_name, head_msg, commit_msgs):
             if m.group(1).lower() in haystack.lower():
                 return True
             continue
+        m = re.fullmatch(r"startsWith\((\S+), '([^']*)'\)", clause)
+        if m:
+            if (ctx.get(m.group(1)) or "").startswith(m.group(2)):
+                return True
+            continue
         raise AssertionError("gate cannot parse clause: %r" % clause)
     return False
 
@@ -72,6 +89,10 @@ CASES = [
     ("lane push, hostile message", "push", "lane/x", '"; rm -rf /; #',    ['"; rm -rf /; #'],              False),
     ("integration branch push",    "push", "plan/f20-unified-audit-repair", "merge", ["merge"],            True),
     ("main push",                  "push", "main",   "release",           ["release"],                     True),
+    ("integ branch push",          "push", "integ/f13", "merge lane",     ["merge lane"],                  True),
+    ("integ, any suffix",          "push", "integ/x",   "wip",            ["wip"],                         True),
+    ("NEG: integration-notes",     "push", "integration-notes", "x",      ["x"],                           False),
+    ("NEG: integ, no slash",       "push", "integ",     "x",              ["x"],                           False),
     ("pull_request",               "pull_request", "main", None, None,                                     True),
 ]
 
@@ -112,6 +133,31 @@ def gate(text, verbose=True):
             for t in ("x86_64-apple-darwin", "aarch64-apple-darwin"):
                 if t not in full:
                     fails.append("full build matrix lost %s" % t)
+
+    # EVERY SPELLING, not just the three the regexes above know about.
+    #
+    # 2026-08-30: the integration branch was added to the admission condition by
+    # a single-line string replace. It patched all five single-line clause
+    # groups -- both matrices and the reporting step -- and MISSED the `ci` job's
+    # own job-level `if:`, which is a multi-line folded scalar (`>-`) with each
+    # clause on its own line. The macOS BUILD targets duly ran and the `ci`
+    # matrix job skipped anyway, because the job gate still refused the branch.
+    # The change was verified against the matrix expression, i.e. against the
+    # thing edited rather than the thing that decides.
+    #
+    # So: find every `github.ref_name == 'main'` in the file, in any layout, and
+    # require each one to sit in a clause group that also admits `integ/`. This
+    # cannot be satisfied by patching a subset.
+    main_clauses = [m.start() for m in re.finditer(r"github\.ref_name == 'main'", text)]
+    if not main_clauses:
+        fails.append("no `github.ref_name == 'main'` clause found at all -- the admission "
+                     "condition has been restructured and this gate is now blind; fix the gate")
+    orphans = [i for i in main_clauses if "integ/" not in text[i:i + 160]]
+    if orphans:
+        lines = sorted({text.count("\n", 0, i) + 1 for i in orphans})
+        fails.append("%d admission clause group(s) admit `main` but NOT `integ/` -- the "
+                     "integration branch would be rationed like a lane there. Lines: %s"
+                     % (len(orphans), lines))
 
     cond = conds[0]
     for name, ev, ref, hm, cm, exp in CASES:

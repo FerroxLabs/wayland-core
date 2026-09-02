@@ -31,11 +31,65 @@ want_no_grep() { # want_no_grep <label> <file> <fixed-pattern>
 # The gate must exist and be runnable.
 if [ -f "$GATE" ]; then ok "gate script exists"; else bad "gate script exists"; fi
 
+# wayland-core#367 — the failing-SET gate is invoked BY PATH from the shared
+# evidence gate, so deleting the script or the call silently stops every run on
+# this repository from ever comparing failure identities again. Both halves are
+# asserted: the file, and the line that runs it.
+SETGATE="$ROOT/.github/scripts/grade-failing-set.sh"
+if [ -f "$SETGATE" ]; then ok "failing-set gate script exists"; else bad "failing-set gate script exists"; fi
+want_grep "the shared evidence gate runs the failing-set gate" \
+  "$GATE" 'bash "$SETGRADER"'
+want_grep "the failing-set gate fails closed on its own absence" \
+  "$GATE" "Failing-set gate missing"
+if [ -f "$ROOT/.config/known-failing-tests.txt" ]; then
+  ok "the named allowlist file exists"
+else
+  bad "the named allowlist file exists (.config/known-failing-tests.txt)"
+fi
+want_grep "the failing-set self-test runs in lint.yml" \
+  "$ROOT/.github/workflows/lint.yml" "bash .github/scripts/tests/failing-set.test.sh"
+
 # Both report jobs must call the ONE gate. Two copies is how they diverged.
 want_grep "ci.yml report job runs the shared evidence gate" \
   "$CI" "run: bash .github/scripts/assert-test-evidence.sh"
 want_grep "e2e.yml report job runs the shared evidence gate" \
   "$E2E" "run: bash .github/scripts/assert-test-evidence.sh"
+
+# ── ADMISSION: the sweep, over every workflow and every gate script ──────────
+#
+# Calling the gate is not enough; the step that calls it has to actually RUN.
+# ci.yml's caller switched itself off for months while the evidence sat in the
+# artifact it had just downloaded (wayland#1177 c1), and e2e.yml's caller still
+# carried the same shape after ci.yml's was fixed -- which is the whole reason
+# this is a SWEEP and not two more `want_grep`s. gate-admission.py discovers the
+# gates from their own `ADMISSION:` declarations and the call sites by parsing
+# .github/workflows/, so neither a third caller nor a fourth gate can be missed
+# by omission. It proves its own polarity in the same run.
+ADMISSION="$HERE/gate-admission.py"
+if [ ! -f "$ADMISSION" ]; then
+  bad "the admission sweep exists ($ADMISSION)"
+elif ! python3 -c "import yaml" 2>/dev/null && ! pip install --quiet pyyaml 2>/dev/null; then
+  bad "PyYAML is available to read the workflows (install it; do not skip the sweep)"
+else
+  sweep_out=$(python3 "$ADMISSION" 2>&1) || true
+  sweep_seen=0
+  while IFS= read -r line; do
+    case "$line" in
+      "PASS "*) ok "${line#PASS }"; sweep_seen=$((sweep_seen + 1)) ;;
+      "FAIL "*) bad "${line#FAIL }"; sweep_seen=$((sweep_seen + 1)) ;;
+      "INFO "*) printf '       | %s\n' "${line#INFO }" ;;
+      *) printf '       | %s\n' "$line" ;;
+    esac
+  done <<SWEEP
+$sweep_out
+SWEEP
+  # The sweep reporting NOTHING must not read as the sweep passing.
+  if [ "$sweep_seen" -ge 10 ]; then
+    ok "the admission sweep reported its assertions (anti-vacuity)"
+  else
+    bad "the admission sweep reported its assertions (anti-vacuity; got $sweep_seen)"
+  fi
+fi
 
 # `report` is a REQUIRED status context on main. Exactly one job may emit it,
 # and it must be pinned by an explicit name rather than by a job id.
@@ -49,8 +103,14 @@ fi
 
 # The e2e gate must NOT be skipped when the e2e job itself was skipped: "no leg
 # ran at all" is the failure it exists to catch, not a reason to stand down.
-want_grep "e2e gate runs unless the suite was cancelled" \
-  "$E2E" "if: \${{ needs.e2e.result != 'cancelled' }}"
+#
+# THE FORM OF THIS ASSERTION IS THE DEFECT IT NOW GUARDS. Until 2026-08-31 it
+# pinned the literal `if: ${{ needs.e2e.result != 'cancelled' }}` -- so it
+# REQUIRED the shape that wayland#1177 c1 had just been fixed for in ci.yml,
+# and would have reddened the fix. Which exact string a condition is, is not
+# what matters; whether the condition can go inert is. The admission sweep
+# above decides that for every gate call site in the repository, so all that is
+# left here is the one e2e-specific half: `skipped` must not stand it down.
 want_no_grep "e2e gate does not stand down on a skipped suite" \
   "$E2E" "needs.e2e.result != 'skipped'"
 
@@ -132,6 +192,56 @@ if awk '/^\[profile\.ci\]/{p=1;next} /^\[/{p=0} p && /^retries[[:space:]]*=/{pri
   ok "[profile.ci] still retries, so the gate has something to grade"
 else
   bad "[profile.ci] no longer retries — grade-retry-flakes.sh is now dead code, remove it or the retries"
+fi
+
+
+# ── wayland#1216 — the per-leg floor is only a gate while it is WIRED. ──────
+# The mechanism lives in assert-test-evidence.sh and is inert unless ci.yml
+# names a leg, so the name is asserted here rather than only in the script's
+# own self-test.
+want_grep "the shared evidence gate implements a per-leg floor" \
+  "$GATE" "REQUIRED_LEGS"
+want_grep "the shared evidence gate excludes preserved attempts from the count" \
+  "$GATE" '! -name "outer-attempt-*.xml"'
+want_grep "ci.yml names the workspace-suite leg as required" \
+  "$CI" "nextest-junit-linux-containerized ci-linux"
+# The name has to match the artifact the leg actually uploads. A typo here is a
+# leg that is required and can never report, which is a permanently-red gate.
+want_grep "the required leg name matches the uploaded artifact name" \
+  "$CI" "name: nextest-junit-linux-containerized"
+# ...and the report job must still fire when `ci` was skipped but the required
+# leg ran, or the floor is unreachable on exactly those runs.
+#
+# THIS ASSERTION WAS A LITERAL grep FOR `needs.ci-linux.result != 'cancelled'`,
+# i.e. it pinned one IMPLEMENTATION of that requirement. That implementation is
+# now FORBIDDEN: gate-admission.py requires the evidence gate be admitted by
+# `always()` or `!cancelled()` and nothing else, because a hand-written
+# needs-result expression is a gate that can stand ITSELF down -- when both `ci`
+# and `ci-linux` were cancelled or skipped the old expression evaluated false,
+# the step was SKIPPED, and a skipped step is not a failure, so `report` could
+# conclude success having asserted nothing. The two rules contradicted, and the
+# older literal one lost.
+#
+# The REQUIREMENT is unchanged and is now met more broadly: `!cancelled()` fires
+# on every outcome except cancellation, which strictly includes "ci skipped,
+# ci-linux ran". Assert that property instead of the vanished string, so the
+# gate cannot be re-narrowed to any needs-result expression.
+gate_if=$(awk '/^      - name: Assert test evidence exists/ {f=1; next}
+               f && /^        env:/ {exit}
+               f' "$CI" | tr -d '\n' | sed -e 's/^ *if: *//' -e 's/^\${{//' \
+                 -e 's/}}$//' -e 's/[[:space:]]//g')
+case "$gate_if" in
+  'always()'|'!cancelled()')
+    ok "the evidence step fires regardless of which leg ran (supersedes the ci-linux grep)" ;;
+  *)
+    bad "the evidence step fires regardless of which leg ran (admitted by: $gate_if)" ;;
+esac
+# ANTI-VACUITY: the extractor must still be able to find a condition at all, or
+# the case above would pass a rename by matching the empty string.
+if [ -n "$gate_if" ]; then
+  ok "the evidence gate's condition was located (anti-vacuity)"
+else
+  bad "the evidence gate's condition was located (anti-vacuity)"
 fi
 
 echo "---"

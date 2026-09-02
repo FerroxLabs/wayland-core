@@ -389,13 +389,21 @@ impl OutputSink for ChannelSink {
         });
     }
 
-    fn emit_error(&self, msg: &str, retryable: bool) {
+    fn emit_error(
+        &self,
+        msg: &str,
+        retryable: bool,
+        category: wcore_protocol::events::FailureCategory,
+    ) {
         self.send(ProtocolEvent::Error {
             msg_id: None,
             error: ErrorInfo {
                 code: "engine_error".to_string(),
                 message: msg.to_string(),
                 retryable,
+                // wayland#1266 c1: the engine classified this; the TUI bridge
+                // relays that classification rather than re-deciding it.
+                category,
             },
         });
     }
@@ -563,6 +571,13 @@ impl OutputSink for ChannelSink {
         });
     }
 
+    /// wayland#1219: the TUI renders every `ApprovalRequired` it is sent
+    /// (`emit_approval_required` below is unconditional), so a blocking
+    /// approval caller has a real human on the other end here.
+    fn approval_surface_available(&self) -> bool {
+        true
+    }
+
     fn emit_approval_required(
         &self,
         call_id: &str,
@@ -696,6 +711,7 @@ impl Drop for TerminalGuard {
                           Please try again."
                     .to_string(),
                 retryable: true,
+                category: wcore_protocol::events::FailureCategory::ToolRuntime,
             },
         });
         let _ = self.tx.send(ProtocolEvent::StreamEnd {
@@ -824,6 +840,52 @@ fn format_repomap_summary(map: &wcore_repomap::RepoMap) -> String {
     }
     out.push_str("\nFresh scan — the agent indexes the same map on demand.");
     out
+}
+
+/// wayland#1165 — what `/mcp add` was asked to do.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct McpAddRequest {
+    pub name: String,
+    pub target: String,
+    /// The EXPLICIT opt-in: tear a connected server of this name down and
+    /// re-establish it from `target`. Without it a duplicate add of a ready
+    /// server is the wayland#605 no-op and the live connection is untouched.
+    pub replace: bool,
+}
+
+/// wayland#1165 — parse `/mcp add [--replace] <name> <url-or-command>`.
+///
+/// The flag sits BETWEEN the verb and the name on purpose. Everything after
+/// the name is the target VERBATIM — a stdio command line with its own argv —
+/// so a trailing `--replace` has to keep meaning "pass `--replace` to the
+/// child". Putting the flag in front of the name is the one position where it
+/// can never be confused for the server's own argument.
+///
+/// Returns `None` when the line is not a usable `/mcp add`, so the caller shows
+/// its usage line rather than guessing.
+pub(crate) fn parse_mcp_add(line: &str) -> Option<McpAddRequest> {
+    let mut parts = line.split_whitespace();
+    if parts.next()? != "/mcp" {
+        return None;
+    }
+    if parts.next()? != "add" {
+        return None;
+    }
+    let mut replace = false;
+    let mut name = parts.next()?;
+    if name == "--replace" {
+        replace = true;
+        name = parts.next()?;
+    }
+    let target = parts.collect::<Vec<_>>().join(" ");
+    if name.is_empty() || target.is_empty() {
+        return None;
+    }
+    Some(McpAddRequest {
+        name: name.to_string(),
+        target,
+        replace,
+    })
 }
 
 /// D024: classify a `/mcp add` target string into an [`McpServerConfig`].
@@ -1197,6 +1259,7 @@ fn emit_recovery_error(
             code: "recovery_refused".to_string(),
             message: error.to_string(),
             retryable: false,
+            category: error.failure_category(),
         },
     });
     let _ = tx.send(ProtocolEvent::StreamEnd {
@@ -1714,6 +1777,7 @@ impl TuiEngine {
                             code: "engine_error".to_string(),
                             message: e.to_string(),
                             retryable: false,
+                            category: e.failure_category(),
                         },
                     });
                     let _ = tx.send(ProtocolEvent::StreamEnd {
@@ -2532,6 +2596,59 @@ impl TuiEngine {
     /// Arc-shared, so the add is reported as "busy — try again when idle"
     /// rather than silently dropped. This mirrors the json-stream path's own
     /// `registry busy` guard.
+    /// wayland#1165 — `/mcp add --replace <name> <target>`: tear a connected
+    /// server of this name down and re-establish it from the NEW target.
+    ///
+    /// Deliberately built out of the SAME two halves `/mcp restart` is
+    /// (`remove_tui_runtime_mcp` then `connect_and_register_mcp`), and it
+    /// differs from restart in exactly one way: restart reconnects the config
+    /// it just removed, this one discards it and connects the new one. Going
+    /// through the real remove means the lifecycle name is RELEASED and the
+    /// connect reserves a fresh generation — the wayland#605 guard that a ready
+    /// re-add keeps its generation is routed around by an explicit teardown,
+    /// never weakened.
+    ///
+    /// The new target is classified BEFORE anything is torn down, so a typo
+    /// leaves the working server alone.
+    pub fn replace_mcp_server(&self, name: String, target: String) {
+        let config = match mcp_config_from_target(&target) {
+            Ok(c) => scope_tui_runtime_mcp(c, self.active_assistant.as_deref()),
+            Err(e) => {
+                let _ = self.tx.send(ProtocolEvent::Error {
+                    msg_id: None,
+                    error: ErrorInfo {
+                        code: "mcp_add".to_string(),
+                        message: format!("Can't replace MCP server '{name}': {e}"),
+                        retryable: false,
+                        category: wcore_protocol::events::FailureCategory::LocalWayland,
+                    },
+                });
+                return;
+            }
+        };
+        let request_id = self.next_mcp_request_id("replace", &name);
+        let engine = self.engine.clone();
+        let tx = self.tx.clone();
+        let lifecycle = self.mcp_lifecycle.clone();
+        let runtime_mcp = self.runtime_mcp.clone();
+        tokio::spawn(async move {
+            // The removal's own receipt/errors ride the bridge channel. Its
+            // return value is the OLD config, which is exactly what a replace
+            // throws away.
+            let _old = Self::remove_tui_runtime_mcp(
+                engine.clone(),
+                tx.clone(),
+                lifecycle.clone(),
+                runtime_mcp.clone(),
+                request_id,
+                name.clone(),
+            )
+            .await;
+            Self::connect_and_register_mcp(engine, tx, lifecycle, runtime_mcp, true, name, config)
+                .await;
+        });
+    }
+
     pub fn add_mcp_server(&self, name: String, target: String) {
         let config = match mcp_config_from_target(&target) {
             Ok(c) => scope_tui_runtime_mcp(c, self.active_assistant.as_deref()),
@@ -2542,6 +2659,7 @@ impl TuiEngine {
                         code: "mcp_add".to_string(),
                         message: format!("Can't add MCP server '{name}': {e}"),
                         retryable: false,
+                        category: wcore_protocol::events::FailureCategory::LocalWayland,
                     },
                 });
                 return;
@@ -2587,6 +2705,7 @@ impl TuiEngine {
                         code: "mcp_connect".to_string(),
                         message: e,
                         retryable: false,
+                        category: wcore_protocol::events::FailureCategory::ToolRuntime,
                     },
                 });
             }
@@ -2646,6 +2765,7 @@ impl TuiEngine {
                         code: "mcp_connect".to_string(),
                         message: msg,
                         retryable: false,
+                        category: wcore_protocol::events::FailureCategory::ToolRuntime,
                     },
                 });
             };
@@ -2825,6 +2945,7 @@ impl TuiEngine {
                             code: "mcp_config_conflict".to_string(),
                             message: format!("Can't add MCP server '{name}': {reason}"),
                             retryable: false,
+                            category: wcore_protocol::events::FailureCategory::LocalWayland,
                         },
                     });
                     let _ = tx.send(ProtocolEvent::McpFailed {
@@ -2857,6 +2978,7 @@ impl TuiEngine {
                         code: "mcp_capacity".to_string(),
                         message: "MCP lifecycle capacity exceeded for this session".to_string(),
                         retryable: false,
+                        category: wcore_protocol::events::FailureCategory::LocalWayland,
                     },
                 });
                 return;
@@ -2881,6 +3003,7 @@ impl TuiEngine {
                         "Can't add MCP server '{name}': an existing connection has no matching configuration identity"
                     ),
                     retryable: false,
+                    category: wcore_protocol::events::FailureCategory::LocalWayland,
                 },
             });
             return;
@@ -2923,6 +3046,7 @@ impl TuiEngine {
                         code: "mcp_add".to_string(),
                         message: format!("Couldn't connect MCP server '{name}': {reason}"),
                         retryable: false,
+                        category: wcore_protocol::events::FailureCategory::ToolRuntime,
                     },
                 });
                 return;
@@ -2956,6 +3080,7 @@ impl TuiEngine {
                             code: "mcp_add".to_string(),
                             message: format!("Couldn't connect MCP server '{name}': {reason}"),
                             retryable: false,
+                            category: wcore_protocol::events::FailureCategory::ToolRuntime,
                         },
                     });
                     return;
@@ -3008,6 +3133,7 @@ impl TuiEngine {
                         code: "mcp_add".to_string(),
                         message: format!("MCP server '{name}' failed to connect: {reason}"),
                         retryable: false,
+                        category: wcore_protocol::events::FailureCategory::ToolRuntime,
                     },
                 });
                 return;
@@ -3021,6 +3147,8 @@ impl TuiEngine {
         let mut guard = engine.lock().await;
         let builtin_names = guard.tool_names();
         let defer_cold = guard.defer_cold_config();
+        // wayland#1175 — taken before `registry_mut` borrows the engine.
+        let catalog_refresh = guard.mcp_catalog_refresh();
         let (message, tool_names) = match guard.registry_mut() {
             Some(reg) => {
                 wcore_mcp::tool_proxy::register_single_server_tools(
@@ -3032,6 +3160,14 @@ impl TuiEngine {
                     config.allowed_tools.as_deref(),
                     &defer_cold,
                 );
+                // wayland#1175 — a server added with `/mcp add` must not be
+                // opted out of `tools/list_changed`. Its config goes in with
+                // it so the #998 per-tool allowlist survives a refresh.
+                if let Some(refresh) = catalog_refresh.as_ref() {
+                    let mut single = std::collections::HashMap::new();
+                    single.insert(name.clone(), config.clone());
+                    refresh.register_runtime_server(&manager, &single);
+                }
                 let mut tool_names: Vec<String> = reg
                     .to_tool_defs()
                     .into_iter()
@@ -3075,6 +3211,7 @@ impl TuiEngine {
                              once it's idle."
                         ),
                         retryable: true,
+                        category: wcore_protocol::events::FailureCategory::ToolRuntime,
                     },
                 });
                 return;
@@ -3100,6 +3237,12 @@ impl TuiEngine {
             reservation.complete_ready()
         };
         if !published {
+            // Roll the refresh admission back with the registration, so a
+            // withdrawn server cannot be polled and cannot leave a stale
+            // config behind for a later re-add to inherit.
+            if let Some(refresh) = catalog_refresh.as_ref() {
+                refresh.forget_runtime_server(&name);
+            }
             if let Some(registry) = guard.registry_mut() {
                 registry.remove_mcp_server(&name);
                 registry.refresh_tool_search_catalog(&defer_cold);
@@ -3273,6 +3416,14 @@ impl TuiEngine {
         drop(runtimes);
         let mut guard = engine.lock().await;
         let defer_cold = guard.defer_cold_config();
+        // wayland#1213 c4 — taken before `registry_mut` borrows the engine and
+        // used once the transport is closed. `/mcp remove` in the TUI dropped
+        // the registry entry and left the McpCatalogRefresh entry, and its
+        // config, behind: the next `notifications/tools/list_changed` from that
+        // server re-registered the tools the operator had just taken away. The
+        // headless `RemoveMcpServer` path has withdrawn since #1213 c4; this
+        // one, on the documented interactive route, never did.
+        let catalog_refresh = guard.mcp_catalog_refresh();
         let Some(registry) = guard.registry_mut() else {
             runtime_mcp.lock().await.insert(name.clone(), runtime);
             let _ = lifecycle.cancel_stopping(&name);
@@ -3295,6 +3446,22 @@ impl TuiEngine {
                 generation,
                 format!("MCP transport cleanup could not be verified: {error}"),
             );
+            // wayland#1234 -- WITHDRAW HERE TOO, on the arm the tree used to skip.
+            //
+            // The old rationale was "on CleanupUnverified the manager is left in
+            // place and the name stays reserved, so nothing is withdrawn either".
+            // It does not survive the state this arm actually leaves: the tools
+            // were ALREADY taken out of the live registry above and are NOT put
+            // back. CleanupUnverified means `close_server` could not be verified,
+            // i.e. the transport may still be ALIVE -- so the manager stays in
+            // McpCatalogRefresh, the server announces `tools/list_changed`, and the
+            // tools the operator just removed are re-registered. That is #1234's
+            // resurrection shape, on the one arm most likely to have a live
+            // transport. Withdrawing here makes the refresh state agree with the
+            // registry state on BOTH arms.
+            if let Some(refresh) = catalog_refresh.as_ref() {
+                refresh.forget_runtime_server(&name);
+            }
             let _ = tx.send(ProtocolEvent::McpRemovalResult {
                 lifecycle_version: wcore_protocol::commands::MCP_LIFECYCLE_VERSION,
                 request_id,
@@ -3303,6 +3470,12 @@ impl TuiEngine {
                 removed_tools,
             });
             return None;
+        }
+        // Both arms withdraw since wayland#1234: the tools are out of the
+        // registry either way, so leaving the manager in McpCatalogRefresh on
+        // the unverified arm is what let a removed server resurrect them.
+        if let Some(refresh) = catalog_refresh.as_ref() {
+            refresh.forget_runtime_server(&name);
         }
         let _ = lifecycle.complete_stopping_generation(&name, generation);
         let config = runtime.config;
@@ -4372,6 +4545,56 @@ mod tests {
         assert!(out.contains('●'), "short-form active still marked: {out}");
     }
 
+    /// wayland#1165 — the destructive reconfigure is OPT-IN, and the flag sits
+    /// where it cannot be mistaken for the child's own argv.
+    #[test]
+    fn parse_mcp_add_keeps_replace_opt_in_and_out_of_the_target() {
+        let plain =
+            parse_mcp_add("/mcp add docs https://mcp.example.com/sse").expect("a plain add parses");
+        assert_eq!(plain.name, "docs");
+        assert_eq!(plain.target, "https://mcp.example.com/sse");
+        assert!(
+            !plain.replace,
+            "an add that does not ask to replace must never tear a live server down"
+        );
+
+        let replacing = parse_mcp_add("/mcp add --replace docs https://new.example.com/sse")
+            .expect("the opt-in parses");
+        assert_eq!(replacing.name, "docs");
+        assert_eq!(replacing.target, "https://new.example.com/sse");
+        assert!(replacing.replace);
+    }
+
+    /// The trap the flag position exists for: everything after the NAME is the
+    /// stdio command line verbatim, so a child that takes its own `--replace`
+    /// must keep it — and must NOT thereby become a teardown.
+    #[test]
+    fn parse_mcp_add_leaves_a_childs_own_replace_flag_alone() {
+        let req = parse_mcp_add("/mcp add tools ./srv --replace --port 9000")
+            .expect("a stdio add parses");
+        assert_eq!(req.name, "tools");
+        assert_eq!(
+            req.target, "./srv --replace --port 9000",
+            "the child's argv is passed through verbatim"
+        );
+        assert!(
+            !req.replace,
+            "a flag inside the child's argv must never be read as the opt-in"
+        );
+    }
+
+    #[test]
+    fn parse_mcp_add_rejects_the_incomplete_forms() {
+        assert!(parse_mcp_add("/mcp add").is_none());
+        assert!(parse_mcp_add("/mcp add docs").is_none(), "no target");
+        assert!(
+            parse_mcp_add("/mcp add --replace docs").is_none(),
+            "the opt-in still needs a target to reconnect with"
+        );
+        assert!(parse_mcp_add("/mcp remove docs").is_none());
+        assert!(parse_mcp_add("/tools").is_none());
+    }
+
     #[test]
     fn mcp_config_from_target_classifies_url_and_command_d024() {
         use wcore_config::config::TransportType;
@@ -4886,7 +5109,11 @@ mod tests {
         let sink = ChannelSink::new(tx);
         // retryable=true asserts the flag is threaded through, not hardcoded
         // false (audit finding: the TUI bridge ChannelSink used to discard it).
-        sink.emit_error("boom", true);
+        sink.emit_error(
+            "boom",
+            true,
+            wcore_protocol::events::FailureCategory::Unknown,
+        );
         match rx.try_recv().expect("event forwarded") {
             ProtocolEvent::Error { error, .. } => {
                 assert_eq!(error.message, "boom");

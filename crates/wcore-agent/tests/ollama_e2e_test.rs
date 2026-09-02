@@ -114,6 +114,7 @@ async fn ollama_provider_streams_text_delta_and_done() {
         temperature: None,
         omit_max_tokens: false,
         routed_model_hint: None,
+        replay_reasoning_content: false,
     };
 
     let mut rx = provider
@@ -247,6 +248,7 @@ async fn ollama_provider_maps_length_done_reason() {
         temperature: None,
         omit_max_tokens: false,
         routed_model_hint: None,
+        replay_reasoning_content: false,
     };
     let mut rx = provider.stream(&request).await.unwrap();
     while let Some(event) = rx.recv().await {
@@ -296,6 +298,7 @@ async fn ollama_provider_5xx_surfaces_as_api_error() {
         temperature: None,
         omit_max_tokens: false,
         routed_model_hint: None,
+        replay_reasoning_content: false,
     };
     let err = provider.stream(&request).await.unwrap_err();
     match err {
@@ -345,6 +348,7 @@ async fn ollama_live_smoke() {
         temperature: None,
         omit_max_tokens: false,
         routed_model_hint: None,
+        replay_reasoning_content: false,
     };
     let mut rx = provider.stream(&request).await.expect("ollama stream");
     let mut text = String::new();

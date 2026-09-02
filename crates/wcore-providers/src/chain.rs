@@ -273,6 +273,7 @@ mod tests {
             temperature: None,
             omit_max_tokens: false,
             routed_model_hint: None,
+            replay_reasoning_content: false,
         }
     }
 
@@ -566,16 +567,21 @@ mod tests {
 
     // ── #1077 red arm ────────────────────────────────────────────────────────
 
-    /// A real, DNS-free `reqwest` connect failure: bind a loopback port, learn
-    /// its number, drop the listener, then connect to it. Nothing is listening,
-    /// so the kernel answers RST — `ECONNREFUSED`, the shape #1077 is about —
-    /// and no name is ever resolved, so the test stays DNS-hermetic.
+    /// A real, DNS-free `reqwest` connect failure: RESERVE a loopback port that
+    /// is bound but never listened on, then connect to it. The kernel answers
+    /// RST — `ECONNREFUSED`, the shape #1077 is about — and no name is ever
+    /// resolved, so the test stays DNS-hermetic.
+    ///
+    /// This used to bind, DROP the listener, and connect to the freed port.
+    /// That is a race on any machine with other processes: the port can be
+    /// taken between the drop and the connect, and the fixture then measures a
+    /// live server while asserting a refusal. `RefusedPort` holds the socket,
+    /// so the refusal is a property of the fixture rather than of the host's
+    /// current luck.
     async fn real_refused_egress_error() -> wcore_egress::EgressError {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-        let port = listener.local_addr().expect("local_addr").port();
-        drop(listener);
+        let refused = wcore_egress::refused_port::RefusedPort::reserve().expect("bind loopback");
         crate::http_client::build()
-            .get(format!("http://127.0.0.1:{port}/"))
+            .get(refused.url())
             .send()
             .await
             .expect_err("a port with no listener must refuse")

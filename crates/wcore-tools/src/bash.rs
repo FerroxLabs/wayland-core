@@ -183,38 +183,48 @@ fn build_sandbox_pieces_for_session(
     (manifest, SandboxCommand { argv, cwd })
 }
 
-/// PowerShell cannot run under the AppContainer sandbox — it needs .NET / GAC
-/// assemblies that fail to load under the Low-integrity restricted token
-/// (`STATUS_DLL_NOT_FOUND`, 0xC0000135). When the active backend reports
-/// [`SandboxBackend::blocks_powershell`], a `powershell`/`pwsh` shell selection
-/// (via `WAYLAND_BASH_SHELL` / `[tools] windows_shell`) would make EVERY Bash
-/// command hard-fail. The shell is an implementation detail of "run this
-/// command", so downgrade the prefix to `cmd /C`, preserving the user's command,
-/// and warn once. See FerroxLabs/wayland#413.
-fn downgrade_powershell_for_sandbox(argv: &mut Vec<String>, blocks_powershell: bool) {
-    if !blocks_powershell {
+/// `cmd.exe` is the ONLY shell that runs under the AppContainer sandbox.
+/// PowerShell needs .NET / GAC assemblies that fail to load under the
+/// Low-integrity restricted token (`STATUS_DLL_NOT_FOUND`, 0xC0000135), and
+/// git-bash needs `msys-2.0.dll` from `Program Files` plus a DLL-init pass that
+/// the same token refuses (`0xC0000142`) — the sandbox's own resolver says both
+/// in `wcore_sandbox::backends::appcontainer::…::classify_bare_shell`. When the
+/// active backend reports [`SandboxBackend::blocks_powershell`] (which is that
+/// "cmd only" capability), any other shell selection — from
+/// `WAYLAND_BASH_SHELL` / `[tools] windows_shell`, or from the #1164 bash
+/// resolution — would make EVERY Bash command hard-fail. The shell is an
+/// implementation detail of "run this command", so downgrade the prefix to
+/// `cmd /C`, preserving the user's command, and warn once. See
+/// FerroxLabs/wayland#413 and #1164.
+fn downgrade_unsupported_shell_for_sandbox(argv: &mut Vec<String>, cmd_is_the_only_shell: bool) {
+    if !cmd_is_the_only_shell {
         return;
     }
-    let is_powershell = argv.first().is_some_and(|s| {
-        let stem = s.strip_suffix(".exe").unwrap_or(s);
-        stem.eq_ignore_ascii_case("powershell") || stem.eq_ignore_ascii_case("pwsh")
+    let unsupported = argv.first().is_some_and(|s| {
+        let base = s.rsplit(['/', '\\']).next().unwrap_or(s);
+        let stem = base.strip_suffix(".exe").unwrap_or(base);
+        ["powershell", "pwsh", "bash", "sh"]
+            .iter()
+            .any(|shell| stem.eq_ignore_ascii_case(shell))
     });
-    if !is_powershell {
+    if !unsupported {
         return;
     }
-    // The powershell/pwsh prefix is `[shell, "-NoProfile", "-Command", <command>]`;
-    // the user's command is the last element. Replace the whole prefix with the
-    // canonical cmd one — taken from `wcore_config::shell` rather than spelled
-    // out here, because that prefix carries the `/S` the payload quoting on the
-    // spawn path depends on (#943) and a second copy would silently drift.
+    // Every affected prefix puts the user's command LAST — powershell/pwsh is
+    // `[shell, "-NoProfile", "-Command", <command>]` and bash is
+    // `[<path>, "-c", <command>]`. Replace the whole prefix with the canonical
+    // cmd one — taken from `wcore_config::shell` rather than spelled out here,
+    // because that prefix carries the `/S` the payload quoting on the spawn path
+    // depends on (#943) and a second copy would silently drift.
     let command = argv.last().cloned().unwrap_or_default();
     static WARNED: std::sync::Once = std::sync::Once::new();
     WARNED.call_once(|| {
         tracing::warn!(
             target: "wcore_tools",
-            "configured Bash shell is PowerShell, which cannot run under the active \
-             sandbox (AppContainer Low-integrity token); falling back to `cmd /C`. \
-             Set `[tools] windows_shell = cmd` (or WAYLAND_BASH_SHELL=cmd) to silence this."
+            "the selected Bash shell cannot run under the active sandbox \
+             (AppContainer Low-integrity token runs cmd.exe only); falling back to \
+             `cmd /C`. Set `[tools] windows_shell = cmd` (or WAYLAND_BASH_SHELL=cmd) \
+             to silence this."
         );
     });
     *argv = wcore_config::shell::windows_cmd_payload_prefix();
@@ -548,12 +558,19 @@ const BASE_DESCRIPTION: &str = "Executes a shell command and returns its output.
 /// unit-testable from any host.
 fn shell_disclosure(prefix: &[String], os: &str) -> String {
     let invocation = prefix.join(" ");
-    let program = prefix
-        .first()
-        .map(|p| p.trim_end_matches(".exe").to_ascii_lowercase())
-        .unwrap_or_default();
+    // The FINAL path component, because on Windows the interpreter is now
+    // named by its absolute path (`C:\Program Files\Git\bin\bash.exe`) when
+    // #1164 resolved a real bash. Shared with the Windows test fixtures that
+    // must be written in the same dialect this sentence describes, so the two
+    // can never disagree about which interpreter was picked
+    // (FerroxLabs/wayland-core#387).
+    let program = wcore_config::shell::shell_program_stem(prefix);
     let syntax = match program.as_str() {
-        "sh" | "bash" => "POSIX shell syntax applies: `;` separates commands, `$VAR` \
+        "bash" => "This is a real bash. POSIX shell syntax applies in full: `;` \
+             separates commands, `$VAR` expands, and pipes, redirection, globbing, \
+             `[[ ]]`, arrays and heredocs all work."
+            .to_string(),
+        "sh" => "POSIX shell syntax applies: `;` separates commands, `$VAR` \
              expands, and pipes, redirection and globbing work as usual. `sh` may be \
              `dash` rather than `bash`, so avoid bash-only constructs (`[[ ]]`, arrays, \
              `source`, `<<<`) unless you invoke `bash -c` yourself."
@@ -695,7 +712,7 @@ impl Tool for BashTool {
 
         let backend = default_for_platform();
         let (manifest, mut cmd) = build_sandbox_pieces(command, None);
-        downgrade_powershell_for_sandbox(&mut cmd.argv, backend.blocks_powershell());
+        downgrade_unsupported_shell_for_sandbox(&mut cmd.argv, backend.blocks_powershell());
 
         let result = tokio::time::timeout(timeout, backend.execute(&manifest, cmd)).await;
 
@@ -780,7 +797,7 @@ impl Tool for BashTool {
         // own a handle in its background task — wrap the boxed backend.
         let backend: Arc<dyn SandboxBackend> = Arc::from(default_for_platform());
         let (manifest, mut cmd) = build_sandbox_pieces(command, None);
-        downgrade_powershell_for_sandbox(&mut cmd.argv, backend.blocks_powershell());
+        downgrade_unsupported_shell_for_sandbox(&mut cmd.argv, backend.blocks_powershell());
 
         let mut rx = match backend.execute_streaming(&manifest, cmd) {
             Ok(rx) => rx,
@@ -998,7 +1015,7 @@ impl Tool for BashTool {
                 }
             },
         };
-        downgrade_powershell_for_sandbox(&mut cmd.argv, backend.blocks_powershell());
+        downgrade_unsupported_shell_for_sandbox(&mut cmd.argv, backend.blocks_powershell());
         let net = manifest.network.clone();
         // B1: captured before `cmd` is consumed, so a failure can be attributed
         // to a real policy decision instead of surfacing as a bare exit code.
@@ -1160,7 +1177,7 @@ impl Tool for BashTool {
                 }
             },
         };
-        downgrade_powershell_for_sandbox(&mut cmd.argv, backend.blocks_powershell());
+        downgrade_unsupported_shell_for_sandbox(&mut cmd.argv, backend.blocks_powershell());
         let net = manifest.network.clone();
         // B1: see `execute_with_ctx` — same attribution on the streaming path.
         let scope = SandboxScope::new(&manifest, cmd.cwd.as_deref());

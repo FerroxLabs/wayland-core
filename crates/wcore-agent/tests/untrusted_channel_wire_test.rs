@@ -328,26 +328,65 @@ fn wire_system_text(body: &Value) -> String {
         .join("\n")
 }
 
-/// The text of the LAST user message as the provider serialised it. Anthropic
+/// EVERY user turn as the provider serialised it, in wire order. Anthropic
 /// keeps an array of typed blocks; OpenAI flattens to a bare string with the
 /// same `\n` join — see the module docs on why that difference is the reason
 /// the design leans on no in-turn structure at all.
-fn wire_last_user_text(body: &Value) -> String {
-    let messages = body["messages"].as_array().expect("messages array");
-    let last = messages
+///
+/// This used to return only the LAST user turn, on the assumption that the
+/// sender's turn is always the newest one. #559 c6 broke that assumption: on a
+/// wire that can carry two adjacent user turns, the per-turn product blocks now
+/// travel in a CARRIER turn of their own so the sender's turn — the first user
+/// message — stays byte-stable and turn 1's cache entry is readable. Reading
+/// only the last turn would have graded the carrier and missed the sender's
+/// bytes entirely, which is what it did on the OpenAI arm before this changed.
+/// So the whole user surface is graded instead of one turn of it.
+fn wire_user_turns(body: &Value) -> Vec<String> {
+    body["messages"]
+        .as_array()
+        .expect("messages array")
         .iter()
-        .rev()
-        .find(|m| m["role"] == "user")
-        .expect("a user message");
-    match &last["content"] {
-        Value::String(s) => s.clone(),
-        Value::Array(blocks) => blocks
+        .filter(|m| m["role"] == "user")
+        .map(|m| match &m["content"] {
+            Value::String(s) => s.clone(),
+            Value::Array(blocks) => blocks
+                .iter()
+                .filter_map(|b| b.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            other => panic!("unexpected user content shape: {other}"),
+        })
+        .collect()
+}
+
+/// Is every line of a product-only user turn a string the SYSTEM directive
+/// names? A `<plugin-context …>` contribution is a multi-line envelope, so the
+/// walk tracks whether it is inside one; anything else must open with a named
+/// prefix. Returns the offending line, so a failure names it.
+fn unnamed_line_in(turn: &str) -> Option<&str> {
+    let mut inside_envelope = false;
+    for line in turn.lines() {
+        if inside_envelope {
+            if line.contains("</plugin-context>") {
+                inside_envelope = false;
+            }
+            continue;
+        }
+        if line.is_empty() {
+            continue;
+        }
+        match NAMED_RUNTIME_PREFIXES
             .iter()
-            .filter_map(|b| b.get("text").and_then(Value::as_str))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        other => panic!("unexpected user content shape: {other}"),
+            .find(|p| line.starts_with(**p))
+        {
+            Some(prefix) if *prefix == "<plugin-context" => {
+                inside_envelope = !line.contains("</plugin-context>");
+            }
+            Some(_) => {}
+            None => return Some(line),
+        }
     }
+    None
 }
 
 /// THE ROUND-4 ASSERTION. Peel the leading runtime blocks the SYSTEM
@@ -422,7 +461,14 @@ fn assert_boundary_holds_on_the_wire(label: &str, bodies: &[Value]) {
     );
     let body = &bodies[0];
     let system = wire_system_text(body);
-    let user = wire_last_user_text(body);
+    let turns = wire_user_turns(body);
+    assert!(
+        !turns.is_empty(),
+        "{label}: the captured body carries no user turn at all"
+    );
+    // The sender's turn is the FIRST user turn — the liveness assertion below
+    // is what proves it, by nonce, rather than by position alone.
+    let user = turns[0].clone();
 
     // -- instrument liveness ------------------------------------------------
     assert!(
@@ -457,6 +503,36 @@ fn assert_boundary_holds_on_the_wire(label: &str, bodies: &[Value]) {
 
     // -- 2. the turn is exactly what the directive says it is ---------------
     assert_user_turn_is_exactly_the_expected_composition(label, &user);
+
+    // -- 2b. #559 c6: the per-turn product blocks may travel in a CARRIER user
+    // turn of their own, so the sender's turn stays byte-stable and turn 1's
+    // cache entry is readable. That puts product text in a message downstream
+    // of the sender's, which is safe only because it is a SEPARATE wire message
+    // and never the same flat blob — the case the module docs call worse than
+    // adjacency, and the one the placement rule inside a turn still forbids.
+    // Grade it rather than assume it: every extra user turn must be product
+    // text the directive names, and must carry no sender byte at all, so the
+    // carrier cannot become a second route onto the trusted-looking surface.
+    for (n, extra) in turns.iter().enumerate().skip(1) {
+        assert!(
+            !extra.trim().is_empty(),
+            "{label}: user turn {n} is empty — an empty turn is not something the \
+             directive describes"
+        );
+        if let Some(line) = unnamed_line_in(extra) {
+            panic!(
+                "{label}: user turn {n} carries a line the system directive does not \
+                 name: {line:?}"
+            );
+        }
+        for nonce in [HOSTILE_NONCE, ATTACHMENT_NONCE, "WAYLAND_UNTRUSTED_INBOUND"] {
+            assert!(
+                !extra.contains(nonce),
+                "{label}: a sender byte ({nonce}) reached the product's own user turn: \
+                 {extra:?}"
+            );
+        }
+    }
 
     // -- 3. every runtime string present in the turn is named in the directive
     // Grades the directive against the bytes actually on the wire, not against
@@ -747,7 +823,9 @@ async fn the_control_proves_the_directive_assertion_can_fail() {
         "a local (non-channel) engine must not carry the untrusted-channel directive"
     );
     assert!(
-        wire_last_user_text(&bodies[0]).contains("an ordinary local turn"),
+        wire_user_turns(&bodies[0])
+            .iter()
+            .any(|turn| turn.contains("an ordinary local turn")),
         "the control body is not a real outbound prompt"
     );
 }
@@ -830,5 +908,55 @@ fn the_peel_removes_named_runtime_blocks_and_stops_on_anything_else() {
         "the peel swallowed a leading block the directive does not name, so it can no longer \
          detect a reintroduced prologue, header or wrapper — the exact class of regression \
          this file exists to catch"
+    );
+}
+
+/// Grades [`unnamed_line_in`] directly, over inputs this test constructs — the
+/// same reason [`the_peel_removes_named_runtime_blocks_and_stops_on_anything_else`]
+/// exists. The #559 c6 carrier assertion leans on it, and an over-permissive
+/// helper would let unnamed product text ride into the new product-only user
+/// turn while every wire assertion above stayed green.
+#[test]
+fn unnamed_line_in_accepts_only_the_blocks_the_directive_names() {
+    // Accepted: each named prefix on its own.
+    assert_eq!(unnamed_line_in("Skill hint: use the thing"), None);
+    assert_eq!(
+        unnamed_line_in(
+            "<plugin-context source=\"p:h\" trust=\"untrusted\">\nbody line\n</plugin-context>"
+        ),
+        None,
+        "a multi-line plugin-context envelope is ONE named block, not three lines"
+    );
+    // Accepted: both, in either order, which is what two callers can produce.
+    assert_eq!(
+        unnamed_line_in(
+            "Skill hint: a\n<plugin-context source=\"p:h\">\nb\n</plugin-context>\nSkill hint: c"
+        ),
+        None
+    );
+
+    // REFUSED: anything the directive does not name — including text smuggled
+    // after a legitimate block, and after a closed envelope.
+    assert_eq!(
+        unnamed_line_in("Prologue nobody named\nSkill hint: a"),
+        Some("Prologue nobody named")
+    );
+    assert_eq!(
+        unnamed_line_in("Skill hint: a\nCurrent date: 1999-01-01"),
+        Some("Current date: 1999-01-01"),
+        "the date moved to the system prefix in #559 and must not come back in a carrier"
+    );
+    assert_eq!(
+        unnamed_line_in("<plugin-context source=\"p:h\">\nb\n</plugin-context>\ntrailing note"),
+        Some("trailing note"),
+        "the envelope must CLOSE — text after it is not inside it"
+    );
+    // An unterminated envelope must not swallow the rest of the turn silently:
+    // it is still one block, and that is the honest reading, so state it.
+    assert_eq!(
+        unnamed_line_in("<plugin-context source=\"p:h\">\nanything at all"),
+        None,
+        "an unterminated envelope is one block — recorded deliberately, since the \
+         product always closes it and the wire assertion above forbids sender bytes here"
     );
 }

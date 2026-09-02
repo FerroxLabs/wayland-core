@@ -86,12 +86,31 @@ async fn the_engine_spills_where_this_session_can_read_it_back() {
 
     let mut config = test_config();
     config.compact.enabled = false;
-    config.compact.context_window = Some(60_000);
+    config.compact.context_window = Some(25_000);
     config.compact.output_reserve = 10_000;
     config.compact.emergency_buffer = 10_000;
 
     let mut registry = ToolRegistry::new();
-    let huge = "x".repeat(480_000);
+    // wayland-core#378: 60_000, not 480_000. The graded property is that the
+    // shed FIRES and that this session's own jail can read the spilled file
+    // back -- neither depends on the payload being half a megabyte. The
+    // over-ceiling RATIO is what makes the shed fire, and it is preserved
+    // exactly: the old fixture was 480_000 chars (120_000 tok) against a
+    // 60_000 - 10_000 - 10_000 = 40_000 tok effective ceiling, i.e. 3x over;
+    // this one is 60_000 chars (15_000 tok) against 25_000 - 10_000 - 10_000
+    // = 5_000 tok, also 3x over.
+    //
+    // MEASURED on hetzner-dsm, this binary alone, phase-timed: the cost is
+    // ~linear in the payload and sits almost entirely inside `engine.run()`
+    // (fixture construction 0.001-0.002 s, read-back through the jail
+    // 0.000-0.001 s, i.e. under 0.005% of the total between them). At
+    // 480_000 the turn cost 48.5 / 48.6 / 52.7 s run-alone and was killed at
+    // 60 s under host load; at 60_000 it is 5.9 s. The shed is NOT the cost:
+    // with the ceiling raised so the shed never fires, the SAME 480_000
+    // payload still cost 48.0 s, indistinguishable from the shed-on arm.
+    // Shrinking the payload is therefore the only lever that moves the
+    // runtime without changing what is graded.
+    let huge = "x".repeat(60_000);
     registry.register(Box::new(
         MockTool::new("mock_tool", &huge, false).with_max_result_size(600_000),
     ));

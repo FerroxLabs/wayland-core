@@ -142,6 +142,65 @@ FLAKES=$(
   sort
 )
 
+# ── 1b. Failures erased by an OUTER retry (wayland#1177) ───────────────────
+#
+# ci.yml wraps the containerized Linux test run in nick-fields/retry@v3, and
+# each attempt overwrites target/nextest/ci/junit.xml. A test that FAILED on
+# attempt 1 and passed on attempt 2 leaves no <flakyFailure> and no trace in
+# the surviving file, so section 1 above cannot see it BY CONSTRUCTION — the
+# evidence it reads is the evidence that was destroyed.
+# .github/scripts/run-tests-with-attempt-evidence.sh now preserves each failed
+# attempt as outer-attempt-<N>.xml beside a final-status.txt. This is the
+# reader for those files.
+#
+# Only attempts belonging to a step that ULTIMATELY PASSED are graded. A
+# final-status of `failure` means the job is red on its own account and its
+# junit.xml still describes the failure; re-reporting it would turn every
+# ordinary red run into a second, misleading complaint about retries. An
+# ABSENT final-status.txt IS graded — fail-closed: unlabelled preserved
+# evidence is still evidence, and "I cannot tell whether this was retried into
+# green" must not read as "it was not".
+#
+# `<failure>`/`<error>` here, not `<flakyFailure>`: a preserved attempt is a
+# plain failed run, not a nextest-recorded flake. The string `<flakyFailure`
+# does not contain `<failure`, so the two matchers cannot collide.
+OUTER=$(
+  find "$EVIDENCE_DIR" -type f -name "outer-attempt-*.xml" -print0 2>/dev/null |
+  while IFS= read -r -d '' f; do
+    st="$(dirname "$f")/final-status.txt"
+    if [ -f "$st" ] && grep -qx 'failure' "$st"; then continue; fi
+    printf '%s\0' "$f"
+  done |
+  xargs -0 -r awk '
+    function attr(line, key,   s) {
+      if (match(line, "[ \t]" key "=\"[^\"]*\"")) {
+        s = substr(line, RSTART, RLENGTH)
+        return substr(s, length(key) + 4, length(s) - length(key) - 4)
+      }
+      return ""
+    }
+    FNR == 1 { name = ""; cls = ""; failed = 0 }
+    {
+      line = $0
+      if (line ~ /<testcase[ \t>]/) {
+        name = attr(line, "name"); cls = attr(line, "classname"); failed = 0
+        if (line ~ /\/>[ \t]*$/) { name = ""; cls = ""; next }
+      }
+      # Counted on the SAME line as the <testcase> too: nextest writes multi-line
+      # XML, but a compact single-line report must not grade as clean. A rule
+      # that skips the rest of the line is a grader that fails open on
+      # whitespace.
+      if (name != "") failed += gsub(/<failure|<error/, "&", line)
+      if (line ~ /<\/testcase>/) {
+        if (failed > 0 && name != "") printf "%s::%s\t%d\n", cls, name, failed
+        name = ""; cls = ""; failed = 0
+      }
+    }
+  ' |
+  awk -F'\t' '{ n[$1] += $2 } END { for (k in n) printf "%s\t%d\n", k, n[k] }' |
+  sort
+)
+
 # ── 2. Read and VALIDATE the allowlist ─────────────────────────────────────
 #
 # Validated, not merely read. An allowlist that silently tolerates a malformed
@@ -212,7 +271,7 @@ if [ -n "$FLAKES" ]; then
     else
       UNLISTED=$((UNLISTED + 1))
       printf "  RED      %-3s failed attempt(s)  %s\n" "$attempts" "$key"
-      echo "::error title=Retried failure (wayland#1169)::${key} FAILED ${attempts} time(s) and was retried into a pass, so the run conclusion would have said SUCCESS. Reproduce with: cargo nextest run --retries 0 -E 'test(=${key##*::})' - repeated, because an intermittent failure needs n runs and not one. If it is a real defect, fix it or give it a scoped 'retries = 0' override in .config/nextest.toml so the failure reaches the conclusion. If it is genuinely infrastructure noise, add a dated, owned, justified line to ${ALLOWLIST}."
+      echo "::error title=Retried failure (wayland#1169)::${key} FAILED ${attempts} time(s) and was retried into a pass, so the run conclusion would have said SUCCESS. Reproduce with: cargo nextest run --retries 0 -E 'test(${key##*::})' - repeated, because an intermittent failure needs n runs and not one. If it is a real defect, fix it or give it a scoped 'retries = 0' override in .config/nextest.toml so the failure reaches the conclusion. If it is genuinely infrastructure noise, add a dated, owned, justified line to ${ALLOWLIST}."
     fi
   done <<< "$FLAKES"
 else
@@ -220,13 +279,37 @@ else
   echo "tests that needed a retry: none"
 fi
 
+# ── 3b. Grade the erased-by-outer-retry failures (wayland#1177) ────────────
+OUTER_UNLISTED=0
+OUTER_LISTED=0
+OUTER_ATTEMPTS=0
+
+if [ -n "$OUTER" ]; then
+  echo ""
+  echo "tests that failed on an attempt the outer retry discarded:"
+  while IFS=$'\t' read -r key attempts; do
+    if [ -z "$key" ]; then continue; fi
+    OUTER_ATTEMPTS=$((OUTER_ATTEMPTS + attempts))
+    if printf '%s' "$ALLOWED_TEST_IDS" | grep -qxF -- "$key"; then
+      OUTER_LISTED=$((OUTER_LISTED + 1))
+      printf "  ALLOWED  %-3s failed attempt(s)  %s\n" "$attempts" "$key"
+      echo "::warning title=Known-flaky test failed a discarded attempt::${key} failed ${attempts} time(s) on an outer-retry attempt of a step that then passed. It is on ${ALLOWLIST} with an expiry, so it does not fail this run - but it is still a failing test, and the entry is debt with a date on it."
+    else
+      OUTER_UNLISTED=$((OUTER_UNLISTED + 1))
+      printf "  RED      %-3s failed attempt(s)  %s\n" "$attempts" "$key"
+      echo "::error title=Failure erased by an outer retry (wayland#1177)::${key} FAILED on an outer-retry attempt whose JUnit the next attempt overwrites, and the step then passed - so the run conclusion says SUCCESS and nothing else in this run records it. Reproduce with: cargo nextest run --retries 0 -E 'test(${key##*::})' - repeated, because an intermittent failure needs n runs and not one. If it is a real defect, fix it. If it is genuinely infrastructure noise, add a dated, owned, justified line to ${ALLOWLIST}."
+    fi
+  done <<< "$OUTER"
+fi
+
 echo ""
 echo "flaky tests    : $((LISTED + UNLISTED))  (allowlisted: ${LISTED}, unlisted: ${UNLISTED})"
 echo "failed attempts: ${TOTAL_ATTEMPTS}"
+echo "erased failures: $((OUTER_LISTED + OUTER_UNLISTED))  (allowlisted: ${OUTER_LISTED}, unlisted: ${OUTER_UNLISTED})"
 echo "allowlist      : bad entries ${BAD_ENTRIES}, expired ${EXPIRED_ENTRIES}"
 
-if [ "$UNLISTED" -gt 0 ] || [ "$BAD_ENTRIES" -gt 0 ] || [ "$EXPIRED_ENTRIES" -gt 0 ]; then
-  echo "::error title=Retry-flake gate FAILED::${UNLISTED} test(s) were retried into a pass without an allowlist entry, ${BAD_ENTRIES} allowlist entr(ies) are malformed and ${EXPIRED_ENTRIES} have expired. A retried failure is a signal, not silence (wayland#1169)."
+if [ "$UNLISTED" -gt 0 ] || [ "$OUTER_UNLISTED" -gt 0 ] || [ "$BAD_ENTRIES" -gt 0 ] || [ "$EXPIRED_ENTRIES" -gt 0 ]; then
+  echo "::error title=Retry-flake gate FAILED::${UNLISTED} test(s) were retried into a pass without an allowlist entry, ${OUTER_UNLISTED} failed on an attempt an outer retry discarded (wayland#1177), ${BAD_ENTRIES} allowlist entr(ies) are malformed and ${EXPIRED_ENTRIES} have expired. A retried failure is a signal, not silence (wayland#1169)."
   exit 1
 fi
 exit 0

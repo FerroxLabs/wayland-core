@@ -120,6 +120,74 @@ pub struct SessionCreateRequest {
     /// feature-flagged; an unknown id resolves to [`ErrorCode::AgentNotFound`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
+    /// #998 — the host's per-tool MCP switches for this session.
+    ///
+    /// One [`McpToolSelection`] per configured server the host wants narrowed;
+    /// an absent/empty list means no selection was made and every configured
+    /// server contributes exactly what it does today, so the pre-#998 wire is
+    /// byte-identical (compat regression
+    /// `session_create_without_mcp_selection_is_byte_identical`).
+    ///
+    /// Bound at CREATE, never per message: the engine session is built once and
+    /// cached for the session id, so a selection arriving mid-session could not
+    /// re-narrow a registry that is already built — and accepting one per
+    /// message would let a later message WIDEN what an earlier one restricted.
+    /// A client MUST consult [`ServerCapabilities::mcp_tool_selection`] from
+    /// `initialize` before sending this: every request type here carries
+    /// `deny_unknown_fields`, so an old server hard-rejects the key at parse
+    /// time rather than ignoring it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_servers: Vec<McpToolSelection>,
+}
+
+/// #998 — the host's per-tool MCP selection for ONE configured server, over
+/// ACP.
+///
+/// The Desktop MCP Library shows a switch per advertised tool. On the
+/// json-stream path that selection reaches core as
+/// `McpServerConfig::allowed_tools`; the ACP backend had NO MCP surface at all,
+/// so the same switches were inert against it — an operator who switched a
+/// destructive tool off still believed they had disabled it.
+///
+/// SECURITY — this selection is strictly authority-REDUCING, and that is the
+/// whole design. It names a server the SERVER already has configured and can
+/// only narrow what that server contributes; it can never introduce a server,
+/// a command, a URL or a credential. A network-exposed ACP endpoint whose
+/// clients could DECLARE an MCP server would be remote code execution behind an
+/// API key, so the declaration stays server-side and only the switch travels.
+///
+/// Semantics are [`allowed_tools`](Self::allowed_tools)'s, and they match
+/// Desktop's `IMcpServer.allowedTools` verbatim:
+///
+/// - `None` (absent) — no selection was made for this server; it is a no-op.
+/// - `Some(list)` — ONLY the named tools may register. Fail-closed within the
+///   list: a tool the server starts advertising later is not in it, so it does
+///   not acquire authority the operator never granted.
+/// - `Some([])` — "Disable all": the server contributes nothing.
+///
+/// Naming a server the host has NOT configured is not an error and not a
+/// silent failure: an unconfigured server contributes no tools at all, so
+/// every tool the selection would have switched off is already absent. The
+/// selection can never make such a server APPEAR.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct McpToolSelection {
+    /// The configured MCP server this selection applies to, by the name the
+    /// server config uses (`[mcp.servers.<name>]`).
+    pub server: String,
+    /// The tools that may register, by the name the MCP SERVER advertises —
+    /// not the possibly collision-prefixed `mcp__{server}__{tool}` display
+    /// name, which is not stable across a collision appearing or disappearing.
+    ///
+    /// `allowed_tools` is canonical here, matching every other key on this
+    /// wire; Desktop's own model spells it `allowedTools`, accepted as an
+    /// alias so a host may send either.
+    #[serde(
+        default,
+        alias = "allowedTools",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub allowed_tools: Option<Vec<String>>,
 }
 
 /// `session/create` response payload.
@@ -250,6 +318,19 @@ pub struct ServerCapabilities {
     /// the `agents/list` roster, possibly empty).
     #[serde(default)]
     pub agent_selection: bool,
+    /// #998 — `true` when the server understands the per-tool MCP selection
+    /// extension (accepts `SessionCreateRequest::mcp_servers` and applies it to
+    /// the session's engine).
+    ///
+    /// Same R2 rationale as [`Self::agent_selection`]: `SessionCreateRequest`
+    /// is `deny_unknown_fields`, so a new client that sends `mcp_servers` to an
+    /// old server is hard-rejected at parse time. Consult this first.
+    ///
+    /// Advertising it grants nothing. It says only that this build applies the
+    /// selection; a session that sends none is unchanged, and a selection can
+    /// only ever NARROW what the server already had configured.
+    #[serde(default)]
+    pub mcp_tool_selection: bool,
 }
 
 /// `initialize` request payload (empty body — included for symmetry, like
@@ -508,6 +589,7 @@ mod tests {
             tools: Vec::new(),
             system_prompt: None,
             agent: None,
+            mcp_servers: Vec::new(),
         };
         let s = serde_json::to_string(&req).unwrap();
         assert_eq!(s, r#"{"model":"claude-opus-4-8"}"#);
@@ -521,6 +603,84 @@ mod tests {
         assert!(legacy.agent.is_none());
     }
 
+    /// #998 compat regression: a `session/create` that makes NO per-tool MCP
+    /// selection must serialize byte-identically to the pre-#998 wire, and a
+    /// legacy payload must still decode.
+    #[test]
+    fn session_create_without_mcp_selection_is_byte_identical() {
+        let req = SessionCreateRequest {
+            model: Some("claude-opus-4-8".into()),
+            tools: Vec::new(),
+            system_prompt: None,
+            agent: None,
+            mcp_servers: Vec::new(),
+        };
+        let s = serde_json::to_string(&req).unwrap();
+        assert_eq!(s, r#"{"model":"claude-opus-4-8"}"#);
+        assert!(
+            !s.contains("mcp"),
+            "absent selection must not appear on wire"
+        );
+
+        let legacy: SessionCreateRequest =
+            serde_json::from_str(r#"{"model":"claude-opus-4-8"}"#).unwrap();
+        assert!(legacy.mcp_servers.is_empty());
+    }
+
+    /// #998 — the three selection states must stay DISTINGUISHABLE on the ACP
+    /// wire, in both spellings a host may send. The empty array is the trap:
+    /// it means "the operator switched every tool off", and folding it together
+    /// with "absent" enables everything at exactly the moment they asked for
+    /// nothing.
+    #[test]
+    fn mcp_tool_selection_distinguishes_absent_empty_and_named() {
+        fn decode(json: &str) -> Vec<McpToolSelection> {
+            serde_json::from_str::<SessionCreateRequest>(json)
+                .expect("decode")
+                .mcp_servers
+        }
+
+        let absent = decode(r#"{"mcp_servers":[{"server":"fs"}]}"#);
+        assert_eq!(absent[0].allowed_tools, None, "absent means NO selection");
+
+        let none = decode(r#"{"mcp_servers":[{"server":"fs","allowed_tools":[]}]}"#);
+        assert_eq!(
+            none[0].allowed_tools,
+            Some(Vec::new()),
+            "an empty list means DISABLE ALL, never allow-all"
+        );
+
+        let named = decode(r#"{"mcp_servers":[{"server":"fs","allowed_tools":["read"]}]}"#);
+        assert_eq!(
+            named[0].allowed_tools.as_deref(),
+            Some(&["read".to_string()][..])
+        );
+
+        // Desktop's own spelling is accepted and is not lossy.
+        let camel = decode(r#"{"mcp_servers":[{"server":"fs","allowedTools":["read"]}]}"#);
+        assert_eq!(camel, named, "allowedTools must decode identically");
+    }
+
+    /// A client has to be able to tell a build that applies the selection from
+    /// one that would hard-reject the key.
+    #[test]
+    fn capabilities_advertise_mcp_tool_selection_and_stay_forward_compatible() {
+        let caps: ServerCapabilities = serde_json::from_str(
+            r#"{"agent_selection":true,"mcp_tool_selection":true,"something_new":1}"#,
+        )
+        .expect("capability sets are forward-extensible");
+        assert!(caps.mcp_tool_selection);
+
+        // An OLD server omits the key entirely; a new client must read that as
+        // "does not apply the selection", never as a default-on.
+        let old: ServerCapabilities =
+            serde_json::from_str(r#"{"agent_selection":true}"#).expect("decode");
+        assert!(
+            !old.mcp_tool_selection,
+            "an absent capability must never be read as present"
+        );
+    }
+
     #[test]
     fn session_create_with_agent_roundtrips() {
         let req = SessionCreateRequest {
@@ -528,6 +688,7 @@ mod tests {
             tools: Vec::new(),
             system_prompt: None,
             agent: Some("researcher".into()),
+            mcp_servers: Vec::new(),
         };
         let s = serde_json::to_string(&req).unwrap();
         assert!(s.contains(r#""agent":"researcher""#));
@@ -618,6 +779,7 @@ mod tests {
             protocol_version: ACP_PROTOCOL_VERSION.to_string(),
             capabilities: ServerCapabilities {
                 agent_selection: true,
+                mcp_tool_selection: true,
             },
         };
         let s = serde_json::to_string(&resp).unwrap();

@@ -161,7 +161,73 @@ appearing or disappearing.
 
 `allowed_tools` is the canonical spelling; the Wayland desktop model spells the
 same field `allowedTools`, which is accepted as an alias wherever this field is
-read (config file and the `add_mcp_server` command alike).
+read (config file, the `add_mcp_server` command, and the ACP `session/create`
+selection below alike).
+
+### Over ACP
+
+The ACP backend takes the same selection per session, on `session/create`:
+
+```json
+{
+  "model": "claude-opus-4-8",
+  "mcp_servers": [
+    {"server": "warehouse", "allowed_tools": ["inventory_lookup"]}
+  ]
+}
+```
+
+The three states are the ones in the table above, and they are applied to the
+config the session's engine is built from — before its MCP servers are dialled —
+so a denied tool is never registered.
+
+Two rules make this safe on a network-exposed endpoint:
+
+* **It can only narrow.** The selection names a server the operator already
+  declared and INTERSECTS with whatever that declaration allowed. There is no
+  ACP field for a server's command, URL, headers or credentials, so a client
+  cannot introduce a server — only reduce one.
+* **Naming a server that is not configured does nothing.** That is fail-safe,
+  not a silent failure: an unconfigured server contributes no tools, so every
+  tool the switch would have turned off is already absent.
+
+The selection is bound at `session/create` and read from the session record on
+every turn — `message/send` carries no MCP field — so a later message can
+neither introduce a selection nor widen one. Consult
+`capabilities.mcp_tool_selection` from `initialize` before sending the key: ACP
+request types reject unknown fields, so an older server hard-rejects it rather
+than ignoring it.
+
+From the command line:
+
+```bash
+wayland-core acp request create-session --mcp-tools warehouse=inventory_lookup
+wayland-core acp request create-session --mcp-tools warehouse=   # disable all
+```
+
+## Reconfiguring a Connected Server
+
+Re-adding a server that is already connected is a **no-op** by design: the live
+connection, its configuration and its lifecycle generation are left untouched,
+so a retry, a reconnect, or two hosts racing the same add can never tear a
+working server down as a side effect.
+
+To reconfigure one deliberately, opt in:
+
+```
+/mcp add --replace warehouse npx -y warehouse-mcp@next
+```
+
+and on the JSON stream, `{"type": "add_mcp_server", ..., "replace": true}`.
+
+Either spelling tears the existing connection down — the stdio child exits and
+its tools are unregistered — and re-establishes it from the new configuration.
+Only a server introduced at runtime can be replaced; a config-declared name is
+refused, and so is a server that is still connecting, is stopping, or whose
+prior transport cleanup could not be verified. `--replace` sits between the
+verb and the name because everything after the name is the child's own command
+line, where a trailing `--replace` has to keep meaning what the child means
+by it.
 
 ## Smart Tool Curation
 
@@ -371,6 +437,99 @@ not restrict who can then use it within that session.
 > `add_mcp_server` command refuses. The two paths should agree; which way they
 > should agree is an open question — see
 > `.planning/ANSWER-desktop-mcp-scoping-2026-08-08.md`.
+
+## Supply-chain malware gate — `[mcp] malware_gate`
+
+A stdio entry with `command = "npx"`, `"uvx"`, `"pipx"`, `"bunx"`, `"pnpm dlx"`
+(and the other package runners listed in `wcore_mcp::malware_gate`) makes Core
+**fetch a package from a public registry and execute it** with your ambient
+authority, at connect time. Every stdio launch passes through the gate before
+the child process exists, and every launch the gate can **identify as a
+registry fetch** is queried against the [OSV](https://osv.dev) malware feed
+there.
+
+That is narrower than "every stdio launch is checked", and the gap is the part
+worth reading: see [What the gate does not
+cover](#what-the-gate-does-not-cover) below before you rely on it.
+
+Three of the four answers are the same in every configuration:
+
+| Answer | What happens |
+|--------|--------------|
+| No package runner the gate recognises in the command | Nothing is queried and the server launches. This is **not** a finding that nothing is fetched — see the limits below |
+| Queried, no malware advisories | The server launches |
+| Known malware advisories | **Refused** — `MalwareBlocked`, before exec |
+| A package runner whose argv names no readable package | **Refused** — the check could not run, and "the check did not happen" is not a pass. Name it explicitly (`npx --package <pkg>`, `uvx --from <pkg>`, `pipx --spec <pkg>`) |
+
+The fourth case is the one you can configure: **the check could not be
+performed at all** — `api.osv.dev` is unreachable, times out, returns an HTTP
+error or unparseable JSON, or the configured endpoint fails the SSRF safety
+check and is never contacted.
+
+```toml
+[mcp]
+# "permissive" (default) | "strict"
+malware_gate = "permissive"
+```
+
+- **`permissive`** (the default, and the behaviour of every release before this
+  key existed) — the failure is logged at `ERROR`, the only level that reaches
+  you with `RUST_LOG` unset, and the server launches anyway. Refusing every MCP
+  server the moment your machine goes offline is a worse day than an unchecked
+  launch you were told about, so this is what you get by default.
+- **`strict`** — a check that could not be performed is not a pass, and the
+  launch is refused with `MalwareBlocked` before the child exists. Choose this
+  where an unreachable malware feed is more likely to be an attacker holding
+  the feed down than a flaky café network. Note the cost honestly: with
+  `strict`, no network means no `npx`/`uvx` MCP servers at all.
+
+Both failure paths — the backend error and the SSRF short-circuit — follow the
+same mode. There is no way to have one strict and the other permissive.
+
+### What the gate does not cover
+
+An overstated security guarantee is worse than an understated one, because it
+stops the next person looking. This list is the operator-facing half of the
+boundary in `crates/wcore-mcp/src/malware_gate.rs`; a launch in any of these
+shapes reaches exec **unchecked, in both modes**.
+
+- **A runner the gate does not name.** The recognised set is the coverage: the
+  runners listed above, plus their Windows `PATHEXT` spellings (`npx.cmd`,
+  `pnpm.bat`, …) and one or two levels of `sh -c` / `bash -c` / `cmd /C`
+  wrapper. A package runner outside that set is a new entry in
+  `wcore_tools::osv_check::runner_forms`, not something the gate infers.
+- **A shell command that hides its runner.** The wrapper decomposition is a
+  tokeniser, not a shell: variable expansion, command substitution, an alias,
+  `eval`, a sourced file or a wrapper script on disk all defeat it. This is why
+  the table row above says "nothing is *queried*" rather than "nothing is
+  fetched".
+- **A package installed by other means and then executed locally.** An
+  already-installed global binary, a vendored `node_modules`, a `pip install`
+  baked into an image. OSV is queried on the *fetch*, and there is no fetch
+  here for the gate to see.
+- **Anything OSV does not know about**, or does not know about yet.
+- **An advisory that postdates the launch.** The query happens once, at connect
+  time; nothing re-checks a server that is already running.
+
+`strict` does not narrow this list. It governs exactly one thing — a check that
+was attempted and could not be completed — and nothing about a launch the gate
+never recognised as a registry fetch in the first place.
+
+**Cascading.** This key is a security posture, so it does **not** follow the
+usual "project overrides global" rule: the **stricter** of the two layers wins.
+A project `config.toml` can tighten a global `permissive` to `strict`; it can
+never loosen a global `strict` back to `permissive`.
+
+**Checking which mode you are on.** `wayland --doctor` prints it in the MCP
+section, whether or not any server is declared, and `--probe-mcp` launches the
+declared servers under that same posture — the line and the launch read one
+value (wayland-core#354 c7):
+
+```
+MCP servers (declared):
+  [config] filesystem           stdio          npx
+  [mcp] malware_gate = "permissive" — an OSV malware check that cannot be performed LOGS at ERROR and the server still launches (default)
+```
 
 ## Tool Naming
 

@@ -89,7 +89,10 @@ async fn real_host_files_compare_exchange_on_content() {
     assert!(matches!(
         RealFs.compare_exchange_file(&path, &stale).await.unwrap(),
         FileMutationOutcome::Conflict {
-            current: FileObservation::Present(_)
+            current: FileObservation::Present(_),
+            // #1248 c4: refused by the pre-flight classification, before
+            // anything was published, so no save can have been displaced.
+            intercepted_save: None,
         }
     ));
     assert_eq!(

@@ -807,6 +807,12 @@ impl AgentBootstrap {
 
     /// Build the fully-initialized engine.
     pub async fn build(mut self) -> anyhow::Result<BootstrapResult> {
+        // wayland-core#354 — the MCP malware gate's posture is process-wide
+        // and `StdioTransport::spawn` has no config handle, so the operator's
+        // `[mcp] malware_gate` is installed here, at the one seam every agent
+        // session passes through before any MCP server is connected. The
+        // install is one-shot; the first session's posture holds.
+        wcore_mcp::malware_gate::install_mode(self.config.mcp.malware_gate);
         let policy = crate::egress::policy_from_config(&self.config);
         self.session_egress_policy = Some(policy.clone());
         let shared: wcore_egress::SharedPolicy = Arc::new(policy);
@@ -1855,8 +1861,13 @@ impl AgentBootstrap {
                     Some(mgr)
                 }
                 Err(e) => {
-                    self.output
-                        .emit_error(&format!("MCP initialization error: {e}"), false);
+                    // An MCP server that would not initialize is a tool
+                    // backend that failed to come up, not a local refusal.
+                    self.output.emit_error(
+                        &format!("MCP initialization error: {e}"),
+                        false,
+                        wcore_protocol::events::FailureCategory::ToolRuntime,
+                    );
                     None
                 }
             }
@@ -2337,6 +2348,29 @@ impl AgentBootstrap {
                  correctly.",
                 self.config.model,
                 wcore_config::compact::UNVERIFIED_CONTEXT_WINDOW,
+            ));
+        } else if let Some(window) = skills_context_window
+            && !self.config.compact.supports_compaction(window)
+        {
+            // #1179 c2 — the window is KNOWN (the operator set `[compact]
+            // context_window`, or the catalogue has one) and is too small for
+            // compaction to work inside. `should_autocompact_at` refuses it, and
+            // a silent refusal on a window the operator chose is
+            // indistinguishable from compaction being broken. Same surface and
+            // the same reason as the unknown-window notice above: with
+            // `RUST_LOG` unset a `warn!` here reaches nobody (#1130).
+            self.output.emit_info(&format!(
+                "The {window}-token context window in play for model `{}` is too small for \
+                 automatic compaction: core's own system prompt and tool schemas cost \
+                 about {} tokens before you have typed anything, and the autocompact \
+                 trigger at this window would sit at {}. Firing there would summarize a \
+                 conversation that has not started, every turn, and reclaim nothing - so \
+                 automatic compaction is OFF for this session. The emergency context \
+                 limit still applies. Raise the server's context length, or `[compact] \
+                 context_window`, to give compaction room to work.",
+                self.config.model,
+                wcore_config::compact::BASELINE_TURN_TOKENS,
+                self.config.compact.autocompact_threshold_for_window(window),
             ));
         }
         let mut prompt_cache = crate::context::SystemPromptCache::new();
@@ -3005,12 +3039,19 @@ impl AgentBootstrap {
         // F09: attach the consent doorbell only to this session's policy. A
         // later ACP/Desktop session therefore cannot repoint an earlier
         // session's approval bridge.
+        //
+        // wayland#1219: install through the guard, which refuses to wire a
+        // BLOCKING consent prompt onto a sink that cannot render one. The
+        // guard's refusal is the fix for the `--json-stream` five-minute
+        // stall; the `with_hitl_suspend(true)` on that sink
+        // (`wcore_cli::json_stream_sink`) is what keeps the guard from
+        // refusing there.
         if let Some(policy) = self.session_egress_policy.as_ref() {
-            let doorbell = std::sync::Arc::new(crate::egress::BridgeConsentDoorbell::new(
+            crate::egress::install_consent_doorbell(
+                policy,
                 approval_bridge.clone(),
                 self.output.clone(),
-            ));
-            policy.set_doorbell(doorbell);
+            );
         }
 
         if self.config.builtin_tools.script.enabled {
@@ -5826,7 +5867,13 @@ mod path_grant_report_tests {
             _finish_reason: FinishReason,
         ) {
         }
-        fn emit_error(&self, _msg: &str, _retryable: bool) {}
+        fn emit_error(
+            &self,
+            _msg: &str,
+            _retryable: bool,
+            _category: wcore_protocol::events::FailureCategory,
+        ) {
+        }
         fn emit_info(&self, msg: &str) {
             self.infos.lock().push(msg.to_string());
         }

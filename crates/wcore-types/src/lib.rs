@@ -6,6 +6,7 @@ pub mod child_transaction;
 pub mod compact;
 pub mod crucible;
 pub mod execution_policy;
+pub mod failure;
 pub mod file_state;
 pub mod goal;
 // Windows kill-on-close Job Object — the only kernel-backed way to own a
@@ -26,6 +27,7 @@ pub mod reasoning_filter;
 pub mod skill_types;
 pub mod spawner;
 pub mod tool;
+pub mod url_authority;
 pub mod utf8_stream;
 pub mod workspace_trust;
 

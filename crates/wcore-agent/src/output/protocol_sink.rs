@@ -472,6 +472,50 @@ impl ProtocolSink {
     /// what recovers an UNCLOSED `<think>` - the filter deliberately eats to
     /// end of stream rather than leak a runaway tail, and without this flush
     /// that tail would be silently deleted instead of shown.
+    /// #1242 - drain whatever the filter is still WITHHOLDING and put it on
+    /// the wire as one last `text_delta`, before the `stream_end` that closes
+    /// the message.
+    ///
+    /// `process` is a lossy view of the stream: it holds back an undecided
+    /// `<`-prefix and everything after an opening reasoning tag that has not
+    /// closed. The engine's history-side filter has drained that since #1222,
+    /// so a host that did not get the same drain renders a DIFFERENT answer
+    /// from the one stored in the turn.
+    ///
+    /// The wire shape is deliberately the one already in the contract rather
+    /// than a new event: a `text_delta` on the in-flight `msg_id`, emitted
+    /// BEFORE `stream_end`. The message is still open at that point, so a host
+    /// that appends deltas needs no change at all, and a host that ignores it
+    /// renders exactly what it renders today - the same turn, truncated. See
+    /// `docs/json-stream-protocol.md`.
+    ///
+    /// Ordered before [`Self::flush_reasoning`] so every consumer of the
+    /// filter drains it in one order - NOT because the ordering prevents a
+    /// double report on this wire. It cannot. `finish` retracts the unclosed
+    /// block's span from the capture buffer, but [`Self::flush_reasoning`]
+    /// drains that buffer after EVERY chunk, so by `stream_end` it is empty
+    /// and the truncation is a no-op; `finish` says as much itself - the
+    /// already-drained prefix cannot be retracted. An unclosed block does
+    /// therefore reach this wire TWICE, once as the `thinking` events streamed
+    /// while it was still open and once as the raw text recovered here, and
+    /// that is the stated contract in `docs/json-stream-protocol.md` (1.4
+    /// `thinking`), not an accident this ordering repairs.
+    ///
+    /// The retraction is load-bearing where the drain is end-of-stream
+    /// instead - the TUI bridge and `hydrate_history`, which call
+    /// `take_captured` once rather than `take_captured_delta` per chunk - so
+    /// the order is kept here rather than made a per-sink decision.
+    fn drain_withheld_text(&self, msg_id: &str) {
+        let recovered = self.reasoning.lock().finish();
+        if recovered.is_empty() {
+            return;
+        }
+        let _ = self.writer.emit(&ProtocolEvent::TextDelta {
+            text: recovered,
+            msg_id: msg_id.to_string(),
+        });
+    }
+
     fn flush_reasoning(&self, msg_id: &str) {
         let captured = self.reasoning.lock().take_captured_delta();
         if !captured.is_empty() {
@@ -485,7 +529,13 @@ impl ProtocolSink {
 
     /// Emit a turn-scoped error when the caller still owns the protocol
     /// command's correlation id (for example, before the engine starts).
-    pub fn emit_correlated_error(&self, msg_id: &str, msg: &str, retryable: bool) {
+    pub fn emit_correlated_error(
+        &self,
+        msg_id: &str,
+        msg: &str,
+        retryable: bool,
+        category: wcore_protocol::events::FailureCategory,
+    ) {
         let code = auth_error_code(msg).unwrap_or("engine_error");
         let _ = self.writer.emit(&ProtocolEvent::Error {
             msg_id: Some(msg_id.to_string()),
@@ -493,6 +543,14 @@ impl ProtocolSink {
                 code: code.to_string(),
                 message: msg.to_string(),
                 retryable,
+                // wayland#1266 c1. This used to hardcode `Unknown` and point at
+                // `emit_run_failure` for the typed answer -- a method #1266
+                // DELETED, so the pointer went nowhere and every frame from
+                // this seam reached the host as `unknown`. It is the same
+                // `ProtocolEvent::Error` frame `OutputSink::emit_error`
+                // builds, so it takes the category the same way: from the
+                // caller, which is the only place that knows.
+                category,
             },
         });
     }
@@ -921,8 +979,10 @@ impl OutputSink for ProtocolSink {
         cache_read_tokens: u64,
         finish_reason: FinishReason,
     ) {
-        // #1129: an unclosed reasoning block reaches the host instead of
-        // vanishing with the turn.
+        // #1242: text the filter is still withholding, then #1129: an
+        // unclosed reasoning block reaches the host instead of vanishing with
+        // the turn.
+        self.drain_withheld_text(msg_id);
         self.flush_reasoning(msg_id);
         let _ = self.writer.emit(&ProtocolEvent::StreamEnd {
             msg_id: msg_id.to_string(),
@@ -961,8 +1021,9 @@ impl OutputSink for ProtocolSink {
         agent_run_id: Option<&str>,
         usage_delta: Option<&wcore_types::message::TokenUsage>,
     ) {
-        // #1129: same unclosed-block flush as the plain `emit_stream_end`.
-        // Both overrides are live producer paths, so the flush is on both.
+        // #1129 / #1242: same two drains as the plain `emit_stream_end`.
+        // Both overrides are live producer paths, so both are on both.
+        self.drain_withheld_text(msg_id);
         self.flush_reasoning(msg_id);
         let _ = self.writer.emit(&ProtocolEvent::StreamEnd {
             msg_id: msg_id.to_string(),
@@ -1004,7 +1065,12 @@ impl OutputSink for ProtocolSink {
         });
     }
 
-    fn emit_error(&self, msg: &str, retryable: bool) {
+    fn emit_error(
+        &self,
+        msg: &str,
+        retryable: bool,
+        category: wcore_protocol::events::FailureCategory,
+    ) {
         // Distinguish auth failures with a machine-readable code so the host can
         // branch (prompt re-auth, or refresh an OAuth token and re-spawn the
         // turn) instead of string-parsing the message or treating a stale-token
@@ -1018,6 +1084,10 @@ impl OutputSink for ProtocolSink {
                 code: code.to_string(),
                 message: msg.to_string(),
                 retryable,
+                // wayland#1266 c1: the caller names the category now. This
+                // sink no longer decides one, and no longer has a prose-only
+                // sibling to decide it in.
+                category,
             },
         });
         // A startup failure means `ready` is never coming. Release the holding
@@ -1064,6 +1134,15 @@ impl OutputSink for ProtocolSink {
     /// `&dyn OutputSink` without downcasting.
     fn streaming_tools_advertised(&self) -> bool {
         self.streaming_tools_enabled
+    }
+
+    /// wayland#1219: this sink can render an approval EXACTLY when the
+    /// hitl_suspend gate below is open. Same field, one source of truth —
+    /// a blocking caller (the egress consent doorbell) asks this instead of
+    /// assuming, and the answer cannot drift from what
+    /// `emit_approval_required` actually does.
+    fn approval_surface_available(&self) -> bool {
+        self.hitl_suspend_enabled
     }
 
     /// W7 S4: emit `ProtocolEvent::ApprovalRequired` when the sink was
@@ -1694,7 +1773,11 @@ mod tests {
         let sink = ProtocolSink::with_emitter(emitter.clone()).deferring_info_until_ready();
 
         sink.emit_info("why bootstrap was unhappy");
-        sink.emit_error("Engine failed to start during init", false);
+        sink.emit_error(
+            "Engine failed to start during init",
+            false,
+            wcore_protocol::events::FailureCategory::Unknown,
+        );
 
         assert_eq!(emitter.kinds(), vec!["error", "info"]);
         assert_eq!(emitter.info_messages(), vec!["why bootstrap was unhappy"]);
@@ -1888,7 +1971,12 @@ mod tests {
         use crate::test_utils::TestSink;
 
         let transient = TestSink::new();
-        OutputSink::emit_error(&transient, "provider stream failed (HTTP 503)", true);
+        OutputSink::emit_error(
+            &transient,
+            "provider stream failed (HTTP 503)",
+            true,
+            wcore_protocol::events::FailureCategory::Unknown,
+        );
         let snap = transient.handle().snapshot();
         assert_eq!(snap.len(), 1, "exactly one event expected: {snap:?}");
         assert_eq!(
@@ -1899,7 +1987,12 @@ mod tests {
         );
 
         let hard = TestSink::new();
-        OutputSink::emit_error(&hard, "API 400 invalid_request_error", false);
+        OutputSink::emit_error(
+            &hard,
+            "API 400 invalid_request_error",
+            false,
+            wcore_protocol::events::FailureCategory::Unknown,
+        );
         let snap = hard.handle().snapshot();
         assert_eq!(
             snap[0]["error"]["retryable"],

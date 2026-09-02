@@ -395,9 +395,12 @@ fn gh635_large_window_model_does_not_compact_at_the_200k_default() {
 /// serve, so autocompact never fired and the context grew until the server
 /// truncated it.
 ///
-/// The threshold is the `MIN_AUTOCOMPACT_WINDOW_FRACTION` floor rather than
-/// `window - output_reserve - autocompact_buffer`, because 32,768 - 33,000
-/// saturates to zero and zero means ALWAYS FIRE on this path.
+/// #1179 — the threshold is `window - SCALED output_reserve - SCALED
+/// autocompact_buffer`. It used to be 22,937 (#1150's 0.70-of-window
+/// replacement for a subtraction that saturated to zero), and that number sat
+/// ABOVE this window's own pre-flight ceiling of 9,768: the #255 guard shed and
+/// aborted 13,169 tokens before compaction could ever fire. Scaling both from
+/// one factor puts the trigger back below the ceiling — 14,747 < 20,208.
 ///
 /// HOW THIS FAILS IF THE DEFECT RETURNS: put `DEFAULT_CONTEXT_WINDOW` back in
 /// the final arm of `CompactConfig::effective_context_window`
@@ -407,20 +410,25 @@ fn gh635_unknown_model_uses_the_conservative_fallback_threshold() {
     // Deliberately NOT `default_config()`: this is the fallback under test.
     let config = CompactConfig::default();
     let threshold = autocompact_threshold(&config, UNKNOWN_PROVIDER, UNKNOWN_MODEL);
-    assert_eq!(threshold, 22_937);
+    assert_eq!(threshold, 14_747);
+    assert!(
+        threshold < config.input_ceiling_for_window(32_768),
+        "the trigger must sit below the pre-flight ceiling, or the guard fires \
+         first and compaction can never run"
+    );
     assert!(
         threshold > 0,
         "a zero threshold is ALWAYS FIRE, not `no threshold` (compact/auto.rs \
          tests `tokens >= threshold`, compact/micro.rs treats zero as ungated)"
     );
     assert!(should_autocompact(
-        22_937,
+        14_747,
         &config,
         UNKNOWN_PROVIDER,
         UNKNOWN_MODEL
     ));
     assert!(!should_autocompact(
-        22_936,
+        14_746,
         &config,
         UNKNOWN_PROVIDER,
         UNKNOWN_MODEL
@@ -748,10 +756,11 @@ fn summary_content_manual_no_continuation() {
 /// to `true` on a zero threshold. The notice's own remedy would have produced an
 /// LLM summarization at the top of every single turn.
 ///
-/// HOW THIS FAILS IF THE DEFECT RETURNS: drop the
-/// `MIN_AUTOCOMPACT_WINDOW_FRACTION` floor from `autocompact_threshold`
-/// (crates/wcore-agent/src/compact/auto.rs). `threshold` becomes 0 and the
-/// zero-token assertion below fails first.
+/// HOW THIS FAILS IF THE DEFECT RETURNS: make
+/// `CompactConfig::scaled_reserves` the identity
+/// (crates/wcore-config/src/compact.rs). `threshold` becomes 0 — 32,768 minus
+/// 33,000 of absolute reserves — and the zero-token assertion below fails
+/// first, because zero is ALWAYS FIRE on this path.
 #[test]
 fn an_operator_set_small_window_still_has_a_reachable_threshold() {
     use wcore_agent::compact::emergency::emergency_limit;
@@ -762,20 +771,20 @@ fn an_operator_set_small_window_still_has_a_reachable_threshold() {
     };
     let threshold = autocompact_threshold(&config, UNKNOWN_PROVIDER, UNKNOWN_MODEL);
 
-    assert_eq!(threshold, 22_937, "0.70 x 32_768");
+    assert_eq!(threshold, 14_747, "32_768 - scaled 20_000 - scaled 13_000");
     assert!(
         !should_autocompact(0, &config, UNKNOWN_PROVIDER, UNKNOWN_MODEL),
         "an empty context must never trigger a summarization; a zero threshold makes \
          `tokens >= threshold` true on turn one"
     );
     assert!(!should_autocompact(
-        22_936,
+        14_746,
         &config,
         UNKNOWN_PROVIDER,
         UNKNOWN_MODEL
     ));
     assert!(should_autocompact(
-        22_937,
+        14_747,
         &config,
         UNKNOWN_PROVIDER,
         UNKNOWN_MODEL
@@ -783,17 +792,22 @@ fn an_operator_set_small_window_still_has_a_reachable_threshold() {
     // Ordering invariant: autocompact must get its chance before the emergency
     // hard stop refuses the request outright.
     assert!(
-        threshold < emergency_limit(&config, UNKNOWN_PROVIDER, UNKNOWN_MODEL),
+        threshold
+            < emergency_limit(
+                &config,
+                config.effective_context_window(UNKNOWN_PROVIDER, UNKNOWN_MODEL)
+            ),
         "autocompact ({threshold}) must fire below the emergency limit"
     );
 }
 
-/// The floor must be INERT for every window the product can actually know
+/// The scaling must be INERT for every window the product can actually know
 /// about — it exists to keep small windows arithmetically sane, not to retune
-/// any model. The smallest context window in the `limits` catalogue is 128,000.
+/// any model. The smallest context window in the `limits` catalogue is 128,000,
+/// and the #1179 crossover is 60,000.
 ///
-/// Without this arm, raising `MIN_AUTOCOMPACT_WINDOW_FRACTION` far enough to
-/// start compacting real models early would go unnoticed.
+/// Without this arm, lowering `MAX_RESERVE_FRACTION` far enough to start
+/// compacting real models early would go unnoticed.
 #[test]
 fn the_small_window_floor_does_not_retune_any_catalogued_model() {
     let config = CompactConfig::default();

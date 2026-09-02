@@ -27,7 +27,7 @@ use serde::Deserialize;
 use crate::contract::{
     Availability, BackendCapabilities, BackendKind, CleanupObservation, ExecutionBackend,
     ExecutionTask, Health, HibernationObservation, OrphanScan, ProbeBasis, ResourceBudget,
-    SecretChannel,
+    SecretChannel, UnscopedOrphanScan,
 };
 use crate::error::{ExecError, Result};
 use crate::policy::{EffectivePolicy, declared_secret_exposure};
@@ -925,6 +925,35 @@ impl ExecutionBackend for CloudBackend {
                 enumerated: false,
             }),
         }
+    }
+
+    /// UNSUPPORTED, and it says so rather than answering zero.
+    ///
+    /// A machine DOES carry a product-wide marker — the nonce metadata KEY —
+    /// so unlike the two process-table backends this one is closable. It is
+    /// not closed here because the vendor listing this backend uses is a
+    /// value-equality query on that key, and turning it into a key-presence
+    /// query means listing every machine in the app and filtering client-side.
+    /// That code cannot be exercised on any host in this project's CI without
+    /// live vendor credentials, and an unexercised scanner that reports zero
+    /// is worse than one that reports that it did not look.
+    async fn scan_all_orphans(&self) -> Result<UnscopedOrphanScan> {
+        Ok(UnscopedOrphanScan {
+            backend_id: BACKEND_ID.into(),
+            kind: BackendKind::Cloud,
+            method: format!(
+                "the vendor listing is queried as metadata.{NONCE_METADATA_KEY}=<nonce>; \
+                 no key-presence listing is issued"
+            ),
+            found: Vec::new(),
+            enumerated: false,
+            unsupported_reason: Some(format!(
+                "an unscoped scan would list every machine in the app and filter on the \
+                 presence of metadata.{NONCE_METADATA_KEY} client-side; that path is \
+                 unexercised without live vendor credentials and is not shipped. This is \
+                 NOT a report of zero orphans."
+            )),
+        })
     }
 }
 

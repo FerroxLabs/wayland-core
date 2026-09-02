@@ -62,6 +62,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate, matchers};
 
 #[path = "support/mod.rs"]
 mod support;
+use support::owned_tree::OwnedTree;
 
 /// Marker prefixed onto the delegated goal, so a provider request whose FIRST
 /// user message carries it is known to be the CHILD's.
@@ -267,7 +268,11 @@ fn init_workspace(home: &Path) -> std::path::PathBuf {
 const PROMPT_READ_BUDGET: Duration = Duration::from_secs(150);
 
 struct AcpServer {
-    child: std::process::Child,
+    /// Owns the whole `acp serve` process tree for the server's lifetime and
+    /// kills + reaps it on `Drop`, on EVERY exit path including a panicking
+    /// assertion (FerroxLabs/wayland#1156). Underscored like `_vault` below:
+    /// nothing reads it, it is held for the drop.
+    _child: OwnedTree<std::process::Child>,
     addr: String,
     key: String,
     _vault: support::vault::VaultGuard,
@@ -327,13 +332,6 @@ impl AcpServer {
     }
 }
 
-impl Drop for AcpServer {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
 fn json_body(response: &str) -> serde_json::Value {
     let body = response
         .split_once("\r\n\r\n")
@@ -360,9 +358,9 @@ fn spawn_acp(home: &Path, cwd: &Path) -> AcpServer {
     .stderr(Stdio::piped());
     support::pty::harden_child_env(&mut cmd, home);
     let vault = support::vault::configure_process(&mut cmd);
-    let mut child = cmd.spawn().expect("spawn acp serve");
+    let mut child = OwnedTree::new(cmd.spawn().expect("spawn acp serve"));
 
-    let stderr = child.stderr.take().expect("acp serve stderr");
+    let stderr = child.child_mut().stderr.take().expect("acp serve stderr");
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         for line in BufReader::new(stderr).lines().map_while(Result::ok) {
@@ -382,7 +380,7 @@ fn spawn_acp(home: &Path, cwd: &Path) -> AcpServer {
         .recv_timeout(Duration::from_secs(60))
         .expect("acp serve reported its bound address");
     AcpServer {
-        child,
+        _child: child,
         addr,
         key,
         _vault: vault,
@@ -571,9 +569,9 @@ fn server_pointed_at(addr: String) -> AcpServer {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     let vault = support::vault::configure_process(&mut cmd);
-    let child = cmd.spawn().expect("spawn the short-lived stand-in child");
+    let child = OwnedTree::new(cmd.spawn().expect("spawn the short-lived stand-in child"));
     AcpServer {
-        child,
+        _child: child,
         addr,
         key: "read-guard-test-key".to_owned(),
         _vault: vault,

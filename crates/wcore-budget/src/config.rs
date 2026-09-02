@@ -33,6 +33,8 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::spend::SpendMode;
+
 #[derive(Debug, Clone, Error, PartialEq)]
 pub enum BudgetConfigError {
     #[error("max_cost_usd must be finite and non-negative, got {0}")]
@@ -218,6 +220,10 @@ impl BudgetPreset {
                 max_tokens_out: Some(3 * 64_000),
                 max_cost_usd: Some(4.00),
                 max_daily_cost_usd: None,
+                // A size preset bounds HOW MUCH, never WHAT ON. Stamping a
+                // spend mode here would make picking an envelope silently
+                // forbid whole classes of model.
+                mode: None,
             },
             Self::Small => BudgetConfig {
                 preset: Some(self),
@@ -229,6 +235,10 @@ impl BudgetPreset {
                 max_tokens_out: Some(10 * 64_000),
                 max_cost_usd: Some(16.00),
                 max_daily_cost_usd: None,
+                // A size preset bounds HOW MUCH, never WHAT ON. Stamping a
+                // spend mode here would make picking an envelope silently
+                // forbid whole classes of model.
+                mode: None,
             },
             Self::Normal => BudgetConfig {
                 preset: Some(self),
@@ -244,6 +254,10 @@ impl BudgetPreset {
                 max_tokens_out: Some(156 * 64_000),
                 max_cost_usd: Some(450.00),
                 max_daily_cost_usd: None,
+                // A size preset bounds HOW MUCH, never WHAT ON. Stamping a
+                // spend mode here would make picking an envelope silently
+                // forbid whole classes of model.
+                mode: None,
             },
             Self::NoHostedSpend => BudgetConfig {
                 preset: Some(self),
@@ -291,9 +305,29 @@ pub struct BudgetConfig {
     /// Opt-in: `None` (and the Smart default) leaves the ceiling absent, which
     /// is the historical behaviour.
     pub max_daily_cost_usd: Option<f64>,
+    /// FerroxLabs/wayland#174 items 3-4 — WHAT this session may spend on,
+    /// as opposed to how much.
+    ///
+    /// `no-paid` admits only models with no price; `local-only` admits only
+    /// local inference. Both are enforced at provider dispatch by
+    /// [`crate::spend::SpendPolicy`], not merely reported: a mode that only
+    /// warned would be the shipped default with extra steps.
+    ///
+    /// `None` and `Some(SpendMode::Unrestricted)` are the same thing and are
+    /// the historical behaviour. It is deliberately NOT filled in by
+    /// [`BudgetConfig::smart_default`] — a spend MODE is an operator decision,
+    /// and defaulting one would either be inert or silently forbid work.
+    #[serde(default)]
+    pub mode: Option<SpendMode>,
 }
 
 impl BudgetConfig {
+    /// The effective spend mode: the configured one, or unrestricted.
+    #[must_use]
+    pub fn spend_mode(&self) -> SpendMode {
+        self.mode.unwrap_or_default()
+    }
+
     pub fn validate(&self) -> Result<(), BudgetConfigError> {
         if let Some(usd) = self.max_cost_usd
             && (!usd.is_finite() || usd < 0.0)
@@ -329,6 +363,8 @@ impl BudgetConfig {
             // silently bound long-running multi-session work that has always
             // been unbounded on this axis.
             max_daily_cost_usd: None,
+            // Deliberately absent: see the field doc.
+            mode: None,
         }
     }
 
@@ -349,6 +385,7 @@ impl BudgetConfig {
             max_tokens_out: self.max_tokens_out.or(defaults.max_tokens_out),
             max_cost_usd: self.max_cost_usd.or(defaults.max_cost_usd),
             max_daily_cost_usd: self.max_daily_cost_usd.or(defaults.max_daily_cost_usd),
+            mode: self.mode.or(defaults.mode),
         }
     }
 
@@ -435,6 +472,9 @@ impl BudgetConfig {
                 base.max_daily_cost_usd,
                 self.max_daily_cost_usd,
             )?,
+            // Not a numeric cap, so there is nothing to tighten-or-refuse: no
+            // preset sets one, and the operator's explicit mode passes through.
+            mode: self.mode.or(base.mode),
         })
     }
 

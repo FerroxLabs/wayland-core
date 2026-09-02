@@ -15,11 +15,14 @@
 //!   a vendored or nested checkout — `<root>/vendor/x/.git/objects`, a submodule
 //!   working copy, a bundled example repo — was denied by NEITHER layer.
 //!
-//! **Red arm for the VFS half:** delete `|| self.policy.is_vcs_content_store(path)`
-//! from `SecretDenyFs::guard` in `crates/wcore-tools/src/vfs.rs`. Every
-//! `#[test]` in this file except `nested_store_reaches_the_os_deny_list` must go
-//! red. That call site is the whole of the in-process wiring; the predicate
-//! answering correctly on its own denies nothing.
+//! **Red arm for the VFS half:** delete the
+//! `self.is_vcs_content_store_resolved(&canon)` disjunct from
+//! `WorkspacePolicy::denies_read_content` in
+//! `crates/wcore-tools/src/workspace_policy.rs` — the single predicate
+//! `SecretDenyFs::guard` asks since core#375. Every `#[test]` in this file
+//! except `nested_store_reaches_the_os_deny_list` must go red. That disjunct is
+//! the whole of the in-process wiring; the predicate answering correctly on its
+//! own denies nothing.
 //!
 //! **Red arm for the walk half:** delete the `vcs_store_entry` call from either
 //! arm of `project_committed_secrets` in `workspace_policy.rs`.

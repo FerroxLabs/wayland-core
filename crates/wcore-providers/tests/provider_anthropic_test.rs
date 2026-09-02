@@ -39,6 +39,7 @@ fn minimal_request() -> LlmRequest {
         temperature: None,
         omit_max_tokens: false,
         routed_model_hint: None,
+        replay_reasoning_content: false,
     }
 }
 
@@ -915,5 +916,150 @@ async fn test_anthropic_no_failover_without_fallback_configured() {
     match provider.stream(&minimal_request()).await {
         Err(ProviderError::Api { status, .. }) => assert_eq!(status, 401),
         other => panic!("expected Api(401) with no failover, got: {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FerroxLabs/wayland#1217 — the base_url × /v1 cross product
+// ---------------------------------------------------------------------------
+
+/// #1217 c1/c4. `try_stream` built the Messages URL with a bare
+/// `format!("{base_url}/v1/messages")`, so a base spelled with a trailing
+/// slash produced `//v1/messages` and one spelled with the `/v1` Anthropic
+/// prints in its own docs produced `/v1/v1/messages`. Both 404 live.
+///
+/// This is the CROSS PRODUCT, not one example: {no trailing slash, trailing
+/// slash} × {bare root, `/v1`}. The observable is the path the mock server
+/// actually receives — the mock answers ONLY `/v1/messages`, so a doubled or
+/// double-slashed path is a 404 and `stream()` fails. Nothing here inspects a
+/// helper's return value, so the assertion cannot pass while the request goes
+/// somewhere else.
+#[tokio::test]
+async fn anthropic_base_url_spellings_all_post_exactly_one_v1_messages() {
+    for suffix in ["", "/", "/v1", "/v1/"] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(text_sse_body("ok"), "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+
+        let base = format!("{}{suffix}", server.uri());
+        let provider = AnthropicProvider::new(
+            "test-api-key",
+            &base,
+            ProviderCompat::anthropic_defaults(),
+            DebugConfig::default(),
+        )
+        .with_cache(false);
+
+        let rx = provider
+            .stream(&minimal_request())
+            .await
+            .unwrap_or_else(|e| panic!("base_url {base:?} must reach /v1/messages, got {e:?}"));
+        let events = collect_events(rx).await;
+        assert!(
+            events.iter().any(|e| matches!(e, LlmEvent::Done { .. })),
+            "base_url {base:?} produced no Done event: {events:?}"
+        );
+
+        // And the received path is literally `/v1/messages`, once — the
+        // request log is the record of where the bytes went.
+        let received = server.received_requests().await.expect("request log");
+        assert_eq!(received.len(), 1, "base_url {base:?}: {received:?}");
+        assert_eq!(
+            received[0].url.path(),
+            "/v1/messages",
+            "base_url {base:?} dialed the wrong path"
+        );
+    }
+}
+
+/// The wrong-collapse control for the same joiner: a base that carries a REAL
+/// path prefix (the MiniMax / Anthropic-compat proxy shape,
+/// `https://api.minimax.io/anthropic`) must keep it. A fix that simply forced
+/// the path to `/v1/messages`, or that stripped the base's path, would pass
+/// the test above and fail this one.
+#[tokio::test]
+async fn anthropic_base_url_path_prefix_is_preserved_not_collapsed() {
+    for (suffix, expected) in [
+        ("/anthropic", "/anthropic/v1/messages"),
+        ("/anthropic/", "/anthropic/v1/messages"),
+        ("/anthropic/v1", "/anthropic/v1/messages"),
+        // A segment that merely CONTAINS `v1` is not a `/v1` to collapse.
+        ("/apiv1", "/apiv1/v1/messages"),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(expected))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(text_sse_body("ok"), "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+
+        let base = format!("{}{suffix}", server.uri());
+        let provider = AnthropicProvider::new(
+            "test-api-key",
+            &base,
+            ProviderCompat::anthropic_defaults(),
+            DebugConfig::default(),
+        )
+        .with_cache(false);
+
+        let rx = provider
+            .stream(&minimal_request())
+            .await
+            .unwrap_or_else(|e| panic!("base_url {base:?} must reach {expected}, got {e:?}"));
+        let _ = collect_events(rx).await;
+        let received = server.received_requests().await.expect("request log");
+        assert_eq!(
+            received[0].url.path(),
+            expected,
+            "base_url {base:?} dialed the wrong path"
+        );
+    }
+}
+
+/// #1217 c3 for the `/v1/models` half. `list_models` falls back to the static
+/// alias catalog on ANY failure, so a 404 there is silent — which is exactly
+/// why the doubled path survived. The observable is the received path.
+#[tokio::test]
+async fn anthropic_list_models_spellings_all_get_exactly_one_v1_models() {
+    for suffix in ["", "/", "/v1", "/v1/"] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"data":[{"id":"claude-x","display_name":"Claude X"}]}"#),
+            )
+            .mount(&server)
+            .await;
+
+        let base = format!("{}{suffix}", server.uri());
+        let provider = AnthropicProvider::new(
+            "test-api-key",
+            &base,
+            ProviderCompat::anthropic_defaults(),
+            DebugConfig::default(),
+        )
+        .with_cache(false);
+
+        let _ = provider.list_models().await;
+        let received = server.received_requests().await.expect("request log");
+        assert_eq!(
+            received.len(),
+            1,
+            "base_url {base:?} sent {} requests",
+            received.len()
+        );
+        assert_eq!(
+            received[0].url.path(),
+            "/v1/models",
+            "base_url {base:?} dialed the wrong path"
+        );
     }
 }

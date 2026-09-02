@@ -395,6 +395,26 @@ impl SandboxRegistry {
     pub fn owns_descendants_hard(&self) -> bool {
         self.backend.owns_descendants_hard()
     }
+    /// See [`backends::SandboxBackend::unavailable_reason`] (#369 c2).
+    pub fn unavailable_reason(&self) -> Option<String> {
+        self.backend.unavailable_reason()
+    }
+    /// See [`backends::SandboxBackend::known_limitations`] (#368, #369).
+    pub fn known_limitations(&self) -> Vec<&'static str> {
+        self.backend.known_limitations()
+    }
+    /// See [`backends::SandboxBackend::availability_probe_is_startup_safe`].
+    ///
+    /// Exposed so a DECORATOR over a registry can forward the real backend's
+    /// answer instead of inheriting the trait default `true`. The default is
+    /// the non-conservative direction here: `AppContainerBackend` overrides it
+    /// to `false` because its probe is a 15s wall-clock-guarded real spawn, and
+    /// a decorator that answers `true` for it would put that spawn back on the
+    /// `--json-stream` readiness path — the #125 hang class. Its one caller is
+    /// `SessionSandboxBackend` in `wcore-agent` (FerroxLabs/wayland-core#400).
+    pub fn availability_probe_is_startup_safe(&self) -> bool {
+        self.backend.availability_probe_is_startup_safe()
+    }
     pub fn binds_cwd_authority(&self) -> bool {
         self.backend.binds_cwd_authority()
     }

@@ -626,7 +626,63 @@ async fn interleave(during: bool) -> (usize, usize, std::time::Duration) {
 // guard verdict — writing it would destroy whatever arrived, so it is refused
 // like any other stale write.
 // ===========================================================================
+/// # The Windows truth, measured
+///
+/// This arm is NOT gated to Unix and never was — it runs on the Windows CI leg
+/// like everywhere else, and `.config/nextest.toml` already pins this whole
+/// binary to `retries = 0` under `profile.ci`, so CI is not absorbing anything.
+/// Until 2026-08-29 nobody had watched it run on a Windows host. Measured on a
+/// Windows 11 build 26200 workstation at this tree,
+/// `cargo nextest run -p wcore-tools --retries 0` twelve times:
+///
+/// * **6 of 12** executions green, 0 lost.
+/// * **5 of 12** RED on real loss — 2 of 18, 1 of 5, 2 of 10, 1 of 13 and
+///   1 of 17 interleavings lost. Aggregated over the eleven executions that
+///   measured anything: **7 saves lost out of 169 that landed inside the
+///   window (4.1%)**.
+/// * **1 of 12** never got to measure: the FIXTURE's own saver failed at
+///   [`save`] — `std::fs::rename` returned
+///   `Os { code: 5, kind: PermissionDenied, message: "Access is denied." }`.
+///   That is not noise, it is the other half of the Windows truth: while the
+///   guard holds the destination open, an editor's atomic save over that name
+///   is REFUSED by the OS rather than silently lost.
+///
+/// LOAD MATTERS, AND THE NUMBERS ARE NOT LOAD-FREE — said here rather than
+/// discovered later. The six slow executions (40–97 s wall, cold tree) carried
+/// four of the five loss failures; the six fast ones (15–18 s, warm) carried
+/// one. So the rate above is an upper bound for a warm host and a lower bound
+/// for a loaded one — but loss is NOT purely a load artefact: the 1-of-17 came
+/// from a 17.0 s warm execution, and one of the rename refusals from a 14.9 s
+/// one. This is the same cold-tree sensitivity the workspace-size latency work
+/// recorded, and it is why a clean small temp dir would have hidden all of it.
+///
+/// So the guarantee this arm asserts does not hold on Windows, and the arm is
+/// deliberately left ungated so it keeps saying so. The residual is tracked as
+/// `#342` c3; the cause is that `atomic_io::publish_displacing` has no
+/// exchange primitive on Win32 — `ReplaceFileW` is a two-step rename with an
+/// instant at which the destination name does not resolve, and EVERY failure
+/// of it degrades silently to the old re-check-then-rename fallback.
+/// # GATED ON WINDOWS (#370 c1), and this is the honest half of a declaration
+///
+/// This arm asserts the UNIX guarantee. On Windows that guarantee is not what
+/// the product gives, and `wcore_config::atomic_io` now says so in its own
+/// words rather than leaving this test to discover it once a quarter: every
+/// `ReplaceFileW` failure degrades to check-then-rename, and the measured
+/// cost of that degrade at `retries = 0` on Windows 11 build 26200 is the
+/// rate recorded above.
+///
+/// So on Windows this arm is `ignore`d WITH THAT RATE IN THE REASON, and the
+/// weaker guarantee Windows is declared to give — *a save is never lost
+/// SILENTLY* — is graded by its own arm,
+/// `wcore_config::atomic_io::tests::a_refused_replacefilew_is_counted_and_not_silent`,
+/// which reproduces the sharing violation and asserts the degrade is counted.
+/// Ignoring without that second arm would be deleting the measurement; the
+/// pair is the point.
 #[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "#370 [Edit path arm]: the unix guarantee this asserts does not hold on Windows. Measured at retries=0 on Windows 11 build 26200: 7 of 169 interleaved saves lost on the Edit path (4.1%), 1 of 144 on the VFS path (0.7%), and 4 of 24 executions instead refused the editor rename outright with ERROR_ACCESS_DENIED. RE-MEASURED 2026-08-30 on the same host AFTER wayland#1202 changed Swap semantics on this exact path, N=20 per arm at retries=0 with this ignore FORCED via --run-ignored all, so the gate below rests on the tree it ships with: the Edit arm was red in 6 of 20 and lost 3 of 302 interleaved saves (1.0%); the VFS arm was red in 8 of 20 and lost 1 of 219 (0.5%); the remaining 11 reds printed no window at all because the fixture's own rename was refused with ERROR_ACCESS_DENIED, which is #370's SECOND Windows failure and not an absence of one. 14 of 40 executions red. So the FIRST branch of #370 c1 -- these arms passing at retries=0 over N>=20 -- is REFUTED against this tree, and gating is the honest branch and not the convenient one. The weaker guarantee Windows IS declared to give is graded by wcore_config::atomic_io::tests::a_refused_replacefilew_is_counted_and_not_silent."
+)]
 async fn a_save_during_an_edit_is_not_lost() {
     let (lost, interleaved, window) = edit_interleave(Saver::Rename, None).await;
     println!("[edit/rename] window {window:?}; {lost} lost, {interleaved} interleavings caught");
@@ -640,27 +696,54 @@ async fn a_save_during_an_edit_is_not_lost() {
     );
 }
 
-/// The residual, measured rather than asserted away. An editor that truncates
-/// and writes **in place** can begin its write before the last-moment check
-/// and finish it after: those bytes go to an inode the rename then unlinks,
-/// and no amount of re-reading closes that — it needs a lock the editor would
-/// have to take too. Measured across 24 spread interleavings: 12 of 12 lost
-/// with no check at all; 2 of 24 with the check before `atomic_write`, whose
-/// tempfile fsync sat inside the window; 0 of 24 over five runs with the check
-/// moved into the rename slot. Asserted as "materially better than no check"
-/// rather than as zero, because what remains is a scheduling artefact.
+/// The in-place-save arm, which the atomic exchange closed outright.
+///
+/// # Why this used to tolerate a quarter of the saves
+///
+/// It was written against a re-check-then-rename publish, where an editor that
+/// truncates and writes **in place** could begin its write before the check
+/// and finish it after: those bytes went to an inode the rename then unlinked,
+/// and no amount of re-reading closed it. Measured then, across 24 spread
+/// interleavings: 12 of 12 lost with no check at all; 2 of 24 with the check
+/// before `atomic_write`; 0 of 24 over five runs with the check moved into the
+/// rename slot. It was asserted as `lost * 4 < interleaved` — "materially
+/// better than no check" — because what remained looked like a scheduling
+/// artefact that a re-read could never remove.
+///
+/// # Why it is zero now, structurally and not just empirically
+///
+/// `atomic_write_checked` publishes with `RENAME_EXCHANGE`, so the bytes the
+/// verdict reads ARE the bytes the destination held at the instant of
+/// publication. An in-place save opens the destination `O_TRUNC`, so from the
+/// moment its `open` returns the inode is empty or partial — there is no
+/// instant at which it still holds the pre-image the verdict demands. Every
+/// interleaved save therefore fails `pre_image_matches`, the publish is
+/// retracted by a second exchange, and the saved bytes stay where the editor
+/// put them.
+///
+/// # Re-graded against the exchange
+///
+/// 12 runs × 24 attempts on hetzner (Linux 6.x, ext4): 230 of 288 saves landed
+/// inside the window and **0 were lost** — every run. The old tolerance was
+/// never re-graded after the exchange landed (FerroxLabs/wayland#1155); a test
+/// that permits a quarter of saves to vanish is not a test, so it asserts zero.
+///
+/// Not vacuous: forcing `exchange` to report `Swap::Unsupported` (the Windows
+/// and unsupported-filesystem path) puts the publish back on
+/// re-check-then-rename and this arm loses saves again — see the mutation
+/// recorded in the #1155 lane.
 #[tokio::test]
-async fn an_in_place_save_can_still_lose_to_the_final_rename() {
+async fn an_in_place_save_is_not_lost_to_the_final_rename() {
     let (lost, interleaved, window) = edit_interleave(Saver::InPlace, None).await;
     println!("[edit/in-place] window {window:?}; {lost} lost, {interleaved} interleavings caught");
     assert!(
         interleaved > 0,
         "no save ever landed inside the window, so this arm measured nothing"
     );
-    assert!(
-        lost * 4 < interleaved,
-        "an in-place save is being lost as often as it was with no check at all: \
-         {lost} of {interleaved}"
+    assert_eq!(
+        lost, 0,
+        "an in-place save that arrived while the write was being checked was \
+         overwritten: {lost} of {interleaved} interleavings lost"
     );
 }
 
@@ -1020,7 +1103,42 @@ unsafe extern "C" {
 // the filesystem path alone would close the race nobody runs and leave the
 // one everybody runs open.
 // ===========================================================================
+/// # The Windows truth, measured
+///
+/// Same measurement as [`a_save_during_an_edit_is_not_lost`], same host, same
+/// twelve `--retries 0` executions on 2026-08-29:
+///
+/// * **7 of 12** green, 0 lost.
+/// * **1 of 12** RED on real loss — 1 of 22 interleavings. Aggregated over the
+///   eight executions that measured anything: **1 save lost out of 144 that
+///   landed inside the window (0.7%)**.
+/// * **3 of 12** never measured — the fixture's saver hit the same
+///   `Os { code: 5, kind: PermissionDenied }` rename refusal.
+/// * **1 of 12** timed out.
+///
+/// The vfs path loses less often than the filesystem path but is not exempt:
+/// it publishes through the same `atomic_io` primitive. Tracked as `#342` c3.
+/// # GATED ON WINDOWS (#370 c1), and this is the honest half of a declaration
+///
+/// This arm asserts the UNIX guarantee. On Windows that guarantee is not what
+/// the product gives, and `wcore_config::atomic_io` now says so in its own
+/// words rather than leaving this test to discover it once a quarter: every
+/// `ReplaceFileW` failure degrades to check-then-rename, and the measured
+/// cost of that degrade at `retries = 0` on Windows 11 build 26200 is the
+/// rate recorded above.
+///
+/// So on Windows this arm is `ignore`d WITH THAT RATE IN THE REASON, and the
+/// weaker guarantee Windows is declared to give — *a save is never lost
+/// SILENTLY* — is graded by its own arm,
+/// `wcore_config::atomic_io::tests::a_refused_replacefilew_is_counted_and_not_silent`,
+/// which reproduces the sharing violation and asserts the degrade is counted.
+/// Ignoring without that second arm would be deleting the measurement; the
+/// pair is the point.
 #[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "#370 [VFS path arm]: the unix guarantee this asserts does not hold on Windows. Measured at retries=0 on Windows 11 build 26200: 7 of 169 interleaved saves lost on the Edit path (4.1%), 1 of 144 on the VFS path (0.7%), and 4 of 24 executions instead refused the editor rename outright with ERROR_ACCESS_DENIED. RE-MEASURED 2026-08-30 on the same host AFTER wayland#1202 changed Swap semantics on this exact path, N=20 per arm at retries=0 with this ignore FORCED via --run-ignored all, so the gate below rests on the tree it ships with: the Edit arm was red in 6 of 20 and lost 3 of 302 interleaved saves (1.0%); the VFS arm was red in 8 of 20 and lost 1 of 219 (0.5%); the remaining 11 reds printed no window at all because the fixture's own rename was refused with ERROR_ACCESS_DENIED, which is #370's SECOND Windows failure and not an absence of one. 14 of 40 executions red. So the FIRST branch of #370 c1 -- these arms passing at retries=0 over N>=20 -- is REFUTED against this tree, and gating is the honest branch and not the convenient one. The weaker guarantee Windows IS declared to give is graded by wcore_config::atomic_io::tests::a_refused_replacefilew_is_counted_and_not_silent."
+)]
 async fn a_save_during_an_edit_is_not_lost_on_the_vfs_path() {
     let ctx = ToolContext::test_default();
     let (lost, interleaved, window) = edit_interleave(Saver::Rename, Some(&ctx)).await;

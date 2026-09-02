@@ -47,6 +47,10 @@ use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
+#[path = "support/mod.rs"]
+mod support;
+use support::owned_tree::OwnedTree;
+
 /// The credentials-store slot `acp.rs` writes the server key into.
 const KEY_SLOT: &str = "acp.acp-server-key";
 
@@ -139,7 +143,11 @@ fn http_get(port: u16, path: &str, api_key: Option<&str>) -> (u16, String) {
 }
 
 /// Spawn `acp serve` with a hermetic isolated home and NO injected server key.
-fn spawn_serve(port: u16, home: &Path) -> Child {
+///
+/// Returns an owning guard, not a bare `Child`: an assertion failure anywhere
+/// below used to skip the trailing `kill()` and leave the server running with
+/// `PPID 1`, still holding its port (FerroxLabs/wayland#1156).
+fn spawn_serve(port: u16, home: &Path) -> OwnedTree<Child> {
     let bind = format!("127.0.0.1:{port}");
     let mut cmd = Command::new(binary());
     cmd.args(["acp", "serve", "--bind", &bind])
@@ -154,14 +162,14 @@ fn spawn_serve(port: u16, home: &Path) -> Child {
     for k in STRIPPED_PROVIDER_ENV {
         cmd.env_remove(k);
     }
-    cmd.spawn().expect("spawn acp serve")
+    OwnedTree::new(cmd.spawn().expect("spawn acp serve"))
 }
 
 /// Drain the child's stderr on a thread and collect every line until the
 /// server announces its bind address (or the budget expires). Returning the
 /// whole transcript keeps the assertions readable when a boot fails.
-fn collect_startup_lines(child: &mut Child, budget: Duration) -> Vec<String> {
-    let stderr = child.stderr.take().expect("stderr piped");
+fn collect_startup_lines(child: &mut OwnedTree<Child>, budget: Duration) -> Vec<String> {
+    let stderr = child.child_mut().stderr.take().expect("stderr piped");
     let (tx, rx) = mpsc::channel::<String>();
     std::thread::spawn(move || {
         let reader = BufReader::new(stderr);
@@ -287,9 +295,6 @@ fn headless_serve_boots_reports_its_key_store_and_exposes_only_health() {
         status, 200,
         "the persisted key must authenticate against the running server"
     );
-
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 /// POSITIVE CONTROL for the terminal guard, on the real binary.
@@ -343,10 +348,11 @@ fn an_interactive_first_run_still_prints_the_key() {
     for k in STRIPPED_PROVIDER_ENV {
         cmd.env_remove(k);
     }
-    let mut child = pty
-        .slave
-        .spawn_command(cmd)
-        .expect("spawn acp serve on a PTY");
+    let _child = OwnedTree::new(
+        pty.slave
+            .spawn_command(cmd)
+            .expect("spawn acp serve on a PTY"),
+    );
 
     let mut reader = pty.master.try_clone_reader().expect("clone PTY reader");
     let (tx, rx) = mpsc::channel::<Vec<u8>>();
@@ -393,7 +399,4 @@ fn an_interactive_first_run_still_prints_the_key() {
         !out.contains("stderr is NOT a terminal"),
         "the suppressed-key notice must not appear on a real terminal:\n{out}"
     );
-
-    let _ = child.kill();
-    let _ = child.wait();
 }

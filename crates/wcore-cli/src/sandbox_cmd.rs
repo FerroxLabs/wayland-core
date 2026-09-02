@@ -140,6 +140,43 @@ pub struct SandboxStatus {
     pub owns_descendants_hard: bool,
     pub binds_cwd_authority: bool,
     pub binds_workspace_authority: bool,
+    /// Why `available` is `false`, when the backend knows (#369 c2). An
+    /// operator must not have to provoke an `execute()` to find out.
+    pub unavailable_reason: Option<String>,
+    /// What the selected backend is KNOWN not to do (#368, #369).
+    pub known_limitations: Vec<String>,
+    /// Whether this backend REFUSES PowerShell (#400). Read by four sites in
+    /// `wcore_tools::bash` that rewrite the operator's argv when it is `true`,
+    /// and until #400 it reached no operator surface at all.
+    pub blocks_powershell: bool,
+    /// The CONSEQUENCE of [`Self::blocks_powershell`], in words, or `None`
+    /// when the backend runs every shell (#400 c3).
+    ///
+    /// The boolean alone is the failure #368 c6 identified in the capability
+    /// booleans: accurate, and unreadable as a posture. What the operator SEES
+    /// is a `powershell` command running under `cmd`, so the surface has to
+    /// name the rewrite or it cannot let them attribute what they observe.
+    /// Carried as its own field rather than as prose in the human arm because
+    /// `--json` is the arm a host integration reads, and a consequence only
+    /// the terminal carries is a consequence the desktop app cannot surface.
+    pub shell_downgrade_notice: Option<String>,
+}
+
+/// The consequence sentence for a backend that answers
+/// [`wcore_sandbox::backends::SandboxBackend::blocks_powershell`] `true`.
+///
+/// Derived from the rewrite itself
+/// (`wcore_tools::bash::downgrade_unsupported_shell_for_sandbox`), not from the
+/// method name: that function rewrites `powershell`, `pwsh`, `bash` AND `sh`
+/// prefixes to `cmd /C`, so a notice naming only PowerShell would leave an
+/// operator whose `bash -c` was rewritten with nothing to attribute it to.
+fn shell_downgrade_notice(backend: &str) -> String {
+    format!(
+        "backend `{backend}` cannot run PowerShell: `powershell` / `pwsh` fail \
+         to load .NET/GAC assemblies under its restricted token. A command that \
+         selects one is NOT refused - it is DOWNGRADED to `cmd /C` and run under \
+         that shell instead. `bash` / `sh` selections are downgraded the same way."
+    )
 }
 
 impl SandboxStatus {
@@ -155,6 +192,16 @@ impl SandboxStatus {
             owns_descendants_hard: registry.owns_descendants_hard(),
             binds_cwd_authority: registry.binds_cwd_authority(),
             binds_workspace_authority: registry.binds_workspace_authority(),
+            unavailable_reason: registry.unavailable_reason(),
+            known_limitations: registry
+                .known_limitations()
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            blocks_powershell: registry.blocks_powershell(),
+            shell_downgrade_notice: registry
+                .blocks_powershell()
+                .then(|| shell_downgrade_notice(registry.backend_name())),
         }
     }
 
@@ -168,7 +215,788 @@ impl SandboxStatus {
             "owns_descendants_hard": self.owns_descendants_hard,
             "binds_cwd_authority": self.binds_cwd_authority,
             "binds_workspace_authority": self.binds_workspace_authority,
+            "unavailable_reason": self.unavailable_reason,
+            "known_limitations": self.known_limitations,
+            "blocks_powershell": self.blocks_powershell,
+            "shell_downgrade_notice": self.shell_downgrade_notice,
         })
+    }
+}
+
+/// `sandbox status` is the operator's ONLY read of the containment posture,
+/// and until `#368`/`#369` it could not carry a fact nobody had thought to
+/// turn into a boolean. These grade the two fields that changed that.
+#[cfg(test)]
+mod disclosure_tests {
+    use super::{SandboxRegistry, SandboxStatus};
+    use std::sync::Arc;
+
+    fn bare() -> SandboxStatus {
+        SandboxStatus {
+            backend: "test".to_owned(),
+            available: true,
+            bypasses_containment: false,
+            confines_filesystem: false,
+            enforces_read_deny: false,
+            owns_descendants_hard: false,
+            binds_cwd_authority: false,
+            binds_workspace_authority: false,
+            unavailable_reason: None,
+            known_limitations: Vec::new(),
+            blocks_powershell: false,
+            shell_downgrade_notice: None,
+        }
+    }
+
+    /// Both fields must reach `--json`. A host integration or a script reads
+    /// that and nothing else, and a disclosure only the human-readable arm
+    /// carries is a disclosure the desktop app cannot surface.
+    #[test]
+    fn the_json_arm_carries_the_disclosure_a_script_reads() {
+        let mut status = bare();
+        status.available = false;
+        status.unavailable_reason = Some("the probe said so".to_owned());
+        status.known_limitations = vec!["it does not do the thing".to_owned()];
+        let json = status.to_json();
+        assert_eq!(json["unavailable_reason"], "the probe said so");
+        assert_eq!(json["known_limitations"][0], "it does not do the thing");
+    }
+
+    /// TOTAL over the struct's fields, not over the ones somebody remembered
+    /// to serialise.
+    ///
+    /// # The N+1 this exists to make impossible
+    ///
+    /// `#368` c6's fix made the disclosure TOTAL over the backends that
+    /// declare a limitation. One level up, the same hole is still open: the
+    /// operator's read is `SandboxStatus`, and a field can reach the struct
+    /// and never reach `--json`, which is the arm a host integration and every
+    /// script read. Nothing graded that, and `#400` c1 is about to add exactly
+    /// such a field (`blocks_powershell`).
+    ///
+    /// The question is inverted rather than enumerated: not "did somebody
+    /// remember to serialise this field?", which is undecidable over the
+    /// fields nobody has added yet, but "is the JSON key set EQUAL to the
+    /// struct's field set?", which is decidable and total. A field added and
+    /// not serialised reddens here; so does a key serialised under a name no
+    /// field has.
+    ///
+    /// The human arm is NOT made total here and that is a stated gap, not an
+    /// oversight: it renders labels (`binds cwd authority`), not field names,
+    /// so field-name equality cannot decide it. Making it total needs one
+    /// label table driving both arms, which is a bigger change than an RC
+    /// wants; the two disclosure fields it turns on are graded above.
+    #[test]
+    fn every_status_field_reaches_the_json_arm() {
+        let src = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/sandbox_cmd.rs"),
+        )
+        .expect("this file is readable from its own test");
+        let open_brace = src
+            .find("pub struct SandboxStatus {")
+            .expect("the struct this test is about must be findable")
+            + "pub struct SandboxStatus {".len();
+        let body = &src[open_brace..];
+        let body = &body[..body.find("\n}\n").expect("the struct must close")];
+        let mut fields: Vec<String> = body
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("pub "))
+            .filter_map(|l| l.split(':').next())
+            .map(|s| s.trim().to_owned())
+            .collect();
+
+        // POSITIVE CONTROL on the scanner. A find that silently drifted would
+        // leave an empty field list, and an empty set compares equal to an
+        // empty set -- the vacuity this whole file exists to close.
+        assert!(
+            fields.len() >= 8,
+            "the scanner found only {} fields on SandboxStatus; it is not \
+             reading the struct: {body:?}",
+            fields.len()
+        );
+
+        let json = bare().to_json();
+        let mut keys: Vec<String> = json
+            .as_object()
+            .expect("the status must serialise as an object")
+            .keys()
+            .cloned()
+            .collect();
+        fields.sort();
+        keys.sort();
+        assert_eq!(
+            fields, keys,
+            "every field of `SandboxStatus` must reach the `--json` arm and \
+             nothing else may: a host integration reads that and nothing \
+             else, so a field the struct carries and the JSON drops is a \
+             disclosure the desktop app cannot surface. Add the key in \
+             `to_json`, and an arm in this module if an operator has to be \
+             able to act on it."
+        );
+    }
+
+    /// A backend with nothing to disclose must emit JSON `null` and an EMPTY
+    /// list, never an empty string or a reassuring placeholder. A consumer
+    /// that sees `""` cannot tell "no cause recorded" from "cause is blank",
+    /// and #369's whole harm was a cause that existed and could not be read.
+    #[test]
+    fn nothing_recorded_serialises_as_null_and_empty_not_as_reassurance() {
+        let json = bare().to_json();
+        assert!(json["unavailable_reason"].is_null());
+        assert_eq!(json["known_limitations"].as_array().map(Vec::len), Some(0));
+    }
+
+    /// The human arm must print every declared limitation, not merely hold
+    /// them in the struct. Graded with a sentinel so it is the RENDER under
+    /// test and not any particular backend's wording.
+    #[test]
+    fn the_human_arm_prints_every_declared_limitation() {
+        let mut status = bare();
+        status.known_limitations = vec![
+            "SENTINEL-ONE does not do the first thing".to_owned(),
+            "SENTINEL-TWO does not do the second thing".to_owned(),
+        ];
+        let human = super::render_status_human(&status);
+        assert!(
+            human.contains("KNOWN LIMITATIONS"),
+            "the block must be headed, or the lines read as prose: {human}"
+        );
+        for text in &status.known_limitations {
+            assert!(
+                human.contains(text.as_str()),
+                "the human arm dropped {text:?}; an operator at a terminal \
+                 reads this and nothing else: {human}"
+            );
+        }
+    }
+
+    /// A backend with nothing declared must not print an empty heading — an
+    /// empty `KNOWN LIMITATIONS:` block reads as a clean bill of health.
+    #[test]
+    fn the_human_arm_says_nothing_when_nothing_is_declared() {
+        assert!(!super::render_status_human(&bare()).contains("KNOWN LIMITATIONS"));
+    }
+
+    /// Answers `is_available()` without probing, and delegates everything this
+    /// criterion is about to the real backend underneath.
+    ///
+    /// `SandboxStatus::project` reads `is_available()`, and AppContainer's is a
+    /// guarded REAL SPAWN with a 15 s wall-clock guard. If the disclosure grade
+    /// depended on it, the one arm that catches a deleted disclosure would be
+    /// slow, side-effecting, and skipped on exactly the hosts where the
+    /// disclosure matters most. NOTHING ELSE is substituted: `name()` and
+    /// `known_limitations()` come from the real backend, so deleting a real
+    /// backend's declaration still reddens.
+    struct AvailabilityStub(Arc<dyn wcore_sandbox::backends::SandboxBackend>);
+
+    #[async_trait::async_trait]
+    impl wcore_sandbox::backends::SandboxBackend for AvailabilityStub {
+        fn name(&self) -> &'static str {
+            self.0.name()
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+        // EVERY disclosure method is delegated, and that is load-bearing
+        // rather than tidy: a decorator that forgets one falls back to the
+        // trait default — an empty list, or no reason — and reports a backend
+        // with nothing wrong with it. That is a live shape in this workspace
+        // (`SessionSandboxBackend`, FerroxLabs/wayland-core#400), and here it
+        // would silently make the assertions below vacuous.
+        fn known_limitations(&self) -> Vec<&'static str> {
+            self.0.known_limitations()
+        }
+        fn unavailable_reason(&self) -> Option<String> {
+            self.0.unavailable_reason()
+        }
+        fn blocks_powershell(&self) -> bool {
+            self.0.blocks_powershell()
+        }
+        async fn execute(
+            &self,
+            _manifest: &wcore_sandbox::SandboxManifest,
+            _cmd: wcore_sandbox::SandboxCommand,
+        ) -> wcore_sandbox::Result<wcore_sandbox::SandboxOutput> {
+            unreachable!("the disclosure grade never executes a command")
+        }
+    }
+
+    /// THE assertion `#368` c6 is actually about: what a backend declares must
+    /// survive the whole path an operator reads it through — backend →
+    /// `SandboxRegistry` → `SandboxStatus` → BOTH arms of `sandbox status`.
+    ///
+    /// Grading the constants instead of this path is what let
+    /// `AppContainerBackend::known_limitations` be replaced with `Vec::new()`
+    /// while `sandbox status --json` on real Windows returned
+    /// `"known_limitations":[]` and every test stayed green.
+    fn assert_disclosure_reaches_the_operator(
+        backend: Arc<dyn wcore_sandbox::backends::SandboxBackend>,
+        declares: &[&str],
+    ) {
+        let name = backend.name();
+        assert!(
+            !declares.is_empty(),
+            "row `{name}` is registered and declares no method, so this loop \
+             grades nothing for it"
+        );
+
+        // Read the backend BEFORE it is wrapped, so what the operator ends up
+        // seeing is compared against what the backend actually said rather
+        // than against the wrapper's echo of it.
+        let declared: Vec<String> = backend
+            .known_limitations()
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let reason = backend.unavailable_reason();
+        let backend_blocks_powershell = backend.blocks_powershell();
+
+        let registry = SandboxRegistry::new(Arc::new(AvailabilityStub(backend)));
+        let status = SandboxStatus::project(&registry);
+        let json = status.to_json();
+        let human = super::render_status_human(&status);
+
+        for method in declares {
+            match *method {
+                "known_limitations" => {
+                    assert!(
+                        !declared.is_empty(),
+                        "backend `{name}` is registered as declaring a known \
+                         limitation and declared none; an empty list is what an \
+                         operator reads as a clean bill of health"
+                    );
+                    for text in &declared {
+                        assert!(
+                            json["known_limitations"]
+                                .as_array()
+                                .is_some_and(|entries| entries.iter().any(|v| v == text)),
+                            "backend `{name}` declares {text:?} and the --json \
+                             arm a host integration reads does not carry it: {json}"
+                        );
+                        assert!(
+                            human.contains(text.as_str()),
+                            "backend `{name}` declares {text:?} and the human \
+                             arm an operator reads does not print it: {human}"
+                        );
+                    }
+                }
+                "unavailable_reason" => {
+                    // Equality in BOTH directions, so this holds whether or
+                    // not a cause happens to be recorded on the host running
+                    // the test: a backend that says nothing must not have a
+                    // reason invented for it, and one that says something must
+                    // not have it dropped. `Some` is exercised non-vacuously
+                    // on every target by
+                    // `an_unavailable_reason_reaches_both_operator_arms_through_the_registry`.
+                    assert_eq!(
+                        status.unavailable_reason, reason,
+                        "backend `{name}` says its unavailability is {reason:?} \
+                         and the status an operator reads says {:?}; #369's harm \
+                         was twelve days of a cause that existed and could not \
+                         be read",
+                        status.unavailable_reason
+                    );
+                    if let Some(why) = &reason {
+                        assert_eq!(
+                            json["unavailable_reason"], *why,
+                            "backend `{name}` knows why it is unavailable and \
+                             the --json arm does not carry it: {json}"
+                        );
+                        assert!(
+                            human.contains(why.as_str()),
+                            "backend `{name}` knows why it is unavailable and \
+                             the human arm does not print it: {human}"
+                        );
+                    }
+                }
+                "blocks_powershell" => {
+                    // The backend is REGISTERED as overriding this method, and
+                    // the only reason to override it is to answer `true`: a
+                    // row that answers `false` is registered for a disclosure
+                    // it does not make, and every assertion below would then
+                    // hold vacuously.
+                    assert!(
+                        backend_blocks_powershell,
+                        "backend `{name}` is registered as declaring \
+                         `blocks_powershell` and answers false, so the \
+                         disclosure it is registered for does not exist and \
+                         nothing below grades anything"
+                    );
+                    assert!(
+                        status.blocks_powershell,
+                        "backend `{name}` refuses PowerShell and the status an \
+                         operator reads says it does not; four sites in \
+                         `wcore_tools::bash` rewrite the operator's argv on \
+                         this fact"
+                    );
+                    assert_eq!(
+                        json["blocks_powershell"], true,
+                        "the --json arm a host integration reads does not \
+                         carry backend `{name}`'s PowerShell refusal: {json}"
+                    );
+                    let notice = status.shell_downgrade_notice.clone().expect(
+                        "a backend that refuses PowerShell must carry the \
+                         CONSEQUENCE, not only the boolean (#400 c3)",
+                    );
+                    assert_eq!(
+                        json["shell_downgrade_notice"], notice,
+                        "the consequence must reach --json too, or the desktop \
+                         app cannot surface it: {json}"
+                    );
+                    for word in ["DOWNGRADED", "cmd /C", "powershell"] {
+                        assert!(
+                            notice.contains(word),
+                            "the notice must name the consequence an operator \
+                             SEES, not only the fact; {word:?} missing from \
+                             {notice:?}"
+                        );
+                    }
+                    for line in super::textwrap_notice(&notice) {
+                        assert!(
+                            human.contains(line.as_str()),
+                            "an operator at a terminal reads the human arm and \
+                             nothing else, and it dropped {line:?}: {human}"
+                        );
+                    }
+                }
+                other => panic!(
+                    "row `{name}` declares `{other}`, which is in \
+                     `DISCLOSURE_METHODS` and has no arm here. Add one — this \
+                     panic IS the guard: a disclosure method nothing projects \
+                     is exactly how `known_limitations` was deletable with \
+                     every test green."
+                ),
+            }
+        }
+    }
+
+    /// A backend's `unavailable_reason` must survive the whole path an
+    /// operator reads it through — backend → `SandboxRegistry` →
+    /// `SandboxStatus` → BOTH arms — and this grades the PATH with a sentinel
+    /// rather than any one backend's wording.
+    ///
+    /// # The N+1 this exists to make impossible, measured not imagined
+    ///
+    /// `#368` c6's fix made that path total for `known_limitations` and left
+    /// its sibling exactly as it was. Every assertion on `unavailable_reason`
+    /// built a `SandboxStatus` BY HAND, so nothing traversed the registry:
+    /// replacing `SandboxRegistry::unavailable_reason`'s delegate with `None`
+    /// compiles (`CHECK_EXIT=0`) and leaves the entire `wcore-sandbox` +
+    /// `wcore-cli` suite green (3927 tests, `RED1_TESTS_EXIT=0`), while the
+    /// identical mutation on the `known_limitations` delegate reddens
+    /// `every_declaring_backends_disclosure_reaches_both_operator_arms`
+    /// (`CTL_TESTS_EXIT=100`). Same file, adjacent functions, opposite
+    /// outcomes — a coverage hole, not a broken instrument.
+    ///
+    /// The backend below is unavailable AND says why, which is the state
+    /// `#369` measured lasting twelve days on a developer machine.
+    #[test]
+    fn an_unavailable_reason_reaches_both_operator_arms_through_the_registry() {
+        const SENTINEL: &str = "SENTINEL-CAUSE: the probe failed and the backend recorded why";
+
+        struct Wedged;
+
+        #[async_trait::async_trait]
+        impl wcore_sandbox::backends::SandboxBackend for Wedged {
+            fn name(&self) -> &'static str {
+                "sentinel_wedged"
+            }
+            fn is_available(&self) -> bool {
+                false
+            }
+            fn unavailable_reason(&self) -> Option<String> {
+                Some(SENTINEL.to_owned())
+            }
+            async fn execute(
+                &self,
+                _manifest: &wcore_sandbox::SandboxManifest,
+                _cmd: wcore_sandbox::SandboxCommand,
+            ) -> wcore_sandbox::Result<wcore_sandbox::SandboxOutput> {
+                unreachable!("an unavailable backend is never executed by a status read")
+            }
+        }
+
+        let registry = SandboxRegistry::new(Arc::new(Wedged));
+        let status = SandboxStatus::project(&registry);
+        assert_eq!(
+            status.unavailable_reason.as_deref(),
+            Some(SENTINEL),
+            "the registry dropped the backend's recorded cause before the \
+             status was even built"
+        );
+
+        let json = status.to_json();
+        assert_eq!(
+            json["unavailable_reason"], SENTINEL,
+            "a host integration and every script read this arm and nothing \
+             else: {json}"
+        );
+
+        let human = super::render_status_human(&status);
+        assert!(
+            human.contains(SENTINEL),
+            "an operator at a terminal reads this arm and nothing else: {human}"
+        );
+        assert!(
+            human.contains("UNAVAILABLE"),
+            "the cause must be headed as an unavailability, or it reads as \
+             prose beside a row of booleans: {human}"
+        );
+    }
+
+    /// `#368` c6 AS WRITTEN: the CONCURRENT-IDENTITY defect specifically must
+    /// be stated where an operator reads the containment posture.
+    ///
+    /// # Why this is not covered by the test above it
+    ///
+    /// `every_declaring_backends_disclosure_reaches_both_operator_arms` grades
+    /// whatever a backend HAPPENS to declare — it reads
+    /// `backend.known_limitations()` and projects each row it finds. That is
+    /// the right shape for the totality question and it is a strictly weaker
+    /// property than this criterion, which names ONE defect.
+    ///
+    /// MEASURED on real Windows 10.0.26200.9168, on this tree, rather than
+    /// argued: deleting `APPCONTAINER_CONCURRENT_IDENTITY_LIMITATION` from
+    /// `AppContainerBackend::known_limitations` — the row `#368` c6 is about,
+    /// leaving `#369`'s row behind so the list is still non-empty — compiles
+    /// (`CHECK_EXIT=0`) and leaves all 9 disclosure tests GREEN. The operator
+    /// then reads a `sandbox status` whose KNOWN LIMITATIONS block no longer
+    /// mentions the concurrent-identity race at all, which is exactly the
+    /// state `#368` c6 forbids. So the criterion gets an arm that names its
+    /// own row; the `Vec::new()` arm the table machinery closes is a different
+    /// mutation and both are needed.
+    ///
+    /// Windows-only because `AppContainerBackend` is the compile stub
+    /// elsewhere and the posture this criterion is about is the real backend's.
+    #[cfg(windows)]
+    #[test]
+    fn the_concurrent_identity_defect_is_stated_where_the_operator_reads_the_posture() {
+        use wcore_sandbox::backends::appcontainer::{
+            APPCONTAINER_CONCURRENT_IDENTITY_LIMITATION, AppContainerBackend,
+        };
+
+        // The tracker has to travel WITH the claim: `#368` c6 asks the product
+        // to state the defect, and a statement an operator cannot chase back
+        // to an open issue is a statement they cannot act on.
+        assert!(
+            APPCONTAINER_CONCURRENT_IDENTITY_LIMITATION.contains("FerroxLabs/wayland-core#368"),
+            "the disclosure must name its tracker: {APPCONTAINER_CONCURRENT_IDENTITY_LIMITATION}"
+        );
+
+        let backend: Arc<dyn wcore_sandbox::backends::SandboxBackend> =
+            Arc::new(AppContainerBackend::new());
+        assert!(
+            backend
+                .known_limitations()
+                .contains(&APPCONTAINER_CONCURRENT_IDENTITY_LIMITATION),
+            "the real Windows AppContainer backend does not declare the \
+             concurrent-identity defect at all, so no operator surface can \
+             carry it; it declared {:?}",
+            backend.known_limitations()
+        );
+
+        // Through the SAME path an operator reads, not by hand: backend ->
+        // SandboxRegistry -> SandboxStatus -> both arms. A hand-built status is
+        // how `unavailable_reason` stayed unread through a whole release.
+        let registry = SandboxRegistry::new(Arc::new(AvailabilityStub(backend)));
+        let status = SandboxStatus::project(&registry);
+        let json = status.to_json();
+        let human = super::render_status_human(&status);
+
+        assert!(
+            json["known_limitations"]
+                .as_array()
+                .is_some_and(|entries| entries
+                    .iter()
+                    .any(|v| v == APPCONTAINER_CONCURRENT_IDENTITY_LIMITATION)),
+            "the --json arm a host integration reads does not carry the \
+             concurrent-identity defect: {json}"
+        );
+        assert!(
+            human.contains(APPCONTAINER_CONCURRENT_IDENTITY_LIMITATION),
+            "the human arm an operator reads does not print the \
+             concurrent-identity defect: {human}"
+        );
+    }
+
+    /// A backend's PowerShell refusal must survive the whole path an operator
+    /// reads it through — backend → `SandboxRegistry` → `SandboxStatus` →
+    /// BOTH arms — and this grades the PATH with a sentinel, on EVERY target.
+    ///
+    /// # Why a sentinel and not `AppContainerBackend`
+    ///
+    /// The only backend in this workspace that answers `true` is
+    /// `AppContainerBackend`, which is `cfg(windows)`. Graded only through
+    /// `every_declaring_backends_disclosure_reaches_both_operator_arms` this
+    /// property would be unmeasured on the Linux and macOS legs — and #400 was
+    /// filed precisely because a fact that no test on the developer's own
+    /// platform can reach is a fact that gets deleted with everything green.
+    /// This arm runs everywhere; the table arm adds the real backend on
+    /// Windows. Neither replaces the other.
+    ///
+    /// # The red arm, measured
+    ///
+    /// Replacing `SandboxRegistry::blocks_powershell`'s delegate body with
+    /// `false` — the exact mutation that broke `known_limitations` and
+    /// `unavailable_reason` invisibly before #368 c6 and #400 — compiles, and
+    /// reddens THIS test.
+    #[test]
+    fn a_powershell_refusal_reaches_both_operator_arms_through_the_registry() {
+        struct CmdOnly;
+
+        #[async_trait::async_trait]
+        impl wcore_sandbox::backends::SandboxBackend for CmdOnly {
+            fn name(&self) -> &'static str {
+                "sentinel_cmd_only"
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+            fn blocks_powershell(&self) -> bool {
+                true
+            }
+            async fn execute(
+                &self,
+                _manifest: &wcore_sandbox::SandboxManifest,
+                _cmd: wcore_sandbox::SandboxCommand,
+            ) -> wcore_sandbox::Result<wcore_sandbox::SandboxOutput> {
+                unreachable!("a status read never executes a command")
+            }
+        }
+
+        let registry = SandboxRegistry::new(Arc::new(CmdOnly));
+        let status = SandboxStatus::project(&registry);
+        assert!(
+            status.blocks_powershell,
+            "the registry dropped the backend's PowerShell refusal before the \
+             status was even built"
+        );
+
+        let json = status.to_json();
+        assert_eq!(
+            json["blocks_powershell"], true,
+            "a host integration reads this arm and nothing else: {json}"
+        );
+
+        // c3: the CONSEQUENCE, not only the fact. `blocks powershell true` is
+        // accurate and unreadable as a posture; what the operator SEES is a
+        // powershell command running under cmd.
+        let notice = status
+            .shell_downgrade_notice
+            .clone()
+            .expect("a refusing backend must carry the consequence in words");
+        assert_eq!(
+            json["shell_downgrade_notice"], notice,
+            "the consequence must reach --json, or the desktop app cannot \
+             surface it: {json}"
+        );
+        for word in ["DOWNGRADED", "cmd /C", "powershell", "pwsh", "bash"] {
+            assert!(
+                notice.contains(word),
+                "the notice must let an operator attribute what they OBSERVE; \
+                 {word:?} missing from {notice:?}"
+            );
+        }
+
+        let human = super::render_status_human(&status);
+        assert!(
+            human.contains("POWERSHELL IS REFUSED"),
+            "the consequence must be HEADED, or it reads as prose beside a row \
+             of booleans: {human}"
+        );
+        for line in super::textwrap_notice(&notice) {
+            assert!(
+                human.contains(line.as_str()),
+                "an operator at a terminal reads this arm and nothing else, \
+                 and it dropped {line:?}: {human}"
+            );
+        }
+    }
+
+    /// #400 c3 ON ITS OWN, separated from c1 so it cannot be met by
+    /// inattention: the disclosure must name the CONSEQUENCE, not only the
+    /// fact.
+    ///
+    /// A row reading `blocks powershell true` is accurate and is the exact
+    /// failure `#368` c6 named in the capability booleans — unreadable as a
+    /// posture. What the operator SEES is a `powershell` command that ran
+    /// under `cmd`, and four sites in `wcore_tools::bash` are what did it. The
+    /// `tracing::warn!` on that rewrite path is not a second chance: with
+    /// `RUST_LOG` unset only `ERROR` reaches stderr, so it reaches nobody.
+    ///
+    /// The wording is not pinned; the PROPERTIES are, so an honest rewrite does
+    /// not redden and a disclosure that drops the rewrite does.
+    #[test]
+    fn the_disclosure_names_the_downgrade_and_not_only_the_refusal() {
+        let notice = super::shell_downgrade_notice("sentinel_backend");
+
+        assert!(
+            notice.contains("sentinel_backend"),
+            "the notice must name the backend it is about: {notice:?}"
+        );
+        // The rewrite, in the operator's terms.
+        assert!(
+            notice.contains("DOWNGRADED") && notice.contains("cmd /C"),
+            "the notice must say the command is downgraded and to WHAT, or an \
+             operator cannot attribute the shell they see: {notice:?}"
+        );
+        // NOT refused. An operator told only "PowerShell is blocked" would
+        // reasonably expect their command to fail; it does not, it runs
+        // somewhere else, which is the harder thing to attribute.
+        assert!(
+            notice.contains("NOT refused"),
+            "the notice must distinguish `downgraded` from `refused`: {notice:?}"
+        );
+        // TOTAL over what the rewrite actually does. The production helper
+        // `downgrade_unsupported_shell_for_sandbox` rewrites `powershell`,
+        // `pwsh`, `bash` AND `sh` prefixes; a notice naming only PowerShell
+        // leaves the operator whose `bash -c` was rewritten with nothing.
+        for shell in ["powershell", "pwsh", "bash", "sh"] {
+            assert!(
+                notice.contains(shell),
+                "`{shell}` is rewritten by \
+                 `wcore_tools::bash::downgrade_unsupported_shell_for_sandbox` and \
+                 the disclosure does not mention it: {notice:?}"
+            );
+        }
+
+        // And it must reach the arm each audience reads.
+        let mut status = bare();
+        status.blocks_powershell = true;
+        status.shell_downgrade_notice = Some(notice.clone());
+        assert_eq!(status.to_json()["shell_downgrade_notice"], notice);
+        let human = super::render_status_human(&status);
+        for line in super::textwrap_notice(&notice) {
+            assert!(human.contains(line.as_str()), "human arm dropped {line:?}");
+        }
+    }
+
+    /// NEGATIVE CONTROL, and it is the arm that blocks the cheap fix. A
+    /// disclosure that is printed unconditionally discloses nothing: it would
+    /// pass every assertion above while telling an operator on Linux — where
+    /// every shell runs — that their `powershell` command is being rewritten.
+    #[test]
+    fn a_backend_that_runs_every_shell_claims_no_refusal() {
+        struct EveryShell;
+
+        #[async_trait::async_trait]
+        impl wcore_sandbox::backends::SandboxBackend for EveryShell {
+            fn name(&self) -> &'static str {
+                "sentinel_every_shell"
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+            async fn execute(
+                &self,
+                _manifest: &wcore_sandbox::SandboxManifest,
+                _cmd: wcore_sandbox::SandboxCommand,
+            ) -> wcore_sandbox::Result<wcore_sandbox::SandboxOutput> {
+                unreachable!("a status read never executes a command")
+            }
+        }
+
+        let registry = SandboxRegistry::new(Arc::new(EveryShell));
+        let status = SandboxStatus::project(&registry);
+        assert!(!status.blocks_powershell);
+        assert!(
+            status.shell_downgrade_notice.is_none(),
+            "a backend that runs every shell must not carry a downgrade notice"
+        );
+        let json = status.to_json();
+        assert_eq!(json["blocks_powershell"], false);
+        assert!(
+            json["shell_downgrade_notice"].is_null(),
+            "nothing recorded must serialise as null, never as an empty string \
+             a consumer cannot tell from a blank cause: {json}"
+        );
+        let human = super::render_status_human(&status);
+        assert!(
+            !human.contains("POWERSHELL IS REFUSED"),
+            "an unconditional disclosure discloses nothing: {human}"
+        );
+        assert!(
+            !human.contains("DOWNGRADED"),
+            "an unconditional disclosure discloses nothing: {human}"
+        );
+    }
+
+    /// TOTAL over the declaring backends, not over the ones somebody
+    /// remembered. The table is scanned against this crate's source by
+    /// `wcore-sandbox/tests/declared_limitations_are_registered.rs`, so a
+    /// backend that declares a limitation cannot reach here unlisted, and an
+    /// unrecognised row panics rather than being skipped.
+    #[test]
+    fn every_declaring_backends_disclosure_reaches_both_operator_arms() {
+        use wcore_sandbox::backends::BACKENDS_THAT_DISCLOSE;
+        use wcore_sandbox::backends::windows_job_object::WindowsJobObjectBackend;
+
+        assert!(
+            !BACKENDS_THAT_DISCLOSE.is_empty(),
+            "positive control: an empty table would make this loop vacuous"
+        );
+        let mut graded = 0usize;
+        let mut unconstructible = 0usize;
+        for row in BACKENDS_THAT_DISCLOSE {
+            // A row whose type does not exist on this target is ASSERTED
+            // absent, never skipped: a skip is how a row stops being graded
+            // with nothing going red. `constructible_here` is derived from the
+            // row's own `declared_on`, so it cannot disagree with the arms
+            // below without one of them panicking.
+            if !row.declared_on.constructible_here() {
+                unconstructible += 1;
+                continue;
+            }
+            match row.name {
+                "windows_job_object" => {
+                    assert_disclosure_reaches_the_operator(
+                        Arc::new(WindowsJobObjectBackend::new()),
+                        row.declares,
+                    );
+                    graded += 1;
+                }
+                // On Windows `AppContainerBackend` IS the real backend; off
+                // Windows the same path resolves to the compile stub, and the
+                // two are separate rows because they disclose different
+                // things.
+                #[cfg(windows)]
+                "appcontainer" => {
+                    assert_disclosure_reaches_the_operator(
+                        Arc::new(wcore_sandbox::backends::appcontainer::AppContainerBackend::new()),
+                        row.declares,
+                    );
+                    graded += 1;
+                }
+                #[cfg(not(windows))]
+                "appcontainer_stub" => {
+                    assert_disclosure_reaches_the_operator(
+                        Arc::new(wcore_sandbox::backends::appcontainer::AppContainerBackend::new()),
+                        row.declares,
+                    );
+                    graded += 1;
+                }
+                other => panic!(
+                    "backend `{other}` is constructible on this target, \
+                     discloses {:?}, and nothing here projects it to the \
+                     operator. Add an arm — this panic IS the guard: #368 c6 \
+                     was graded `met` while exactly one backend's declaration \
+                     was unread, and deleting it left every test green.",
+                    row.declares
+                ),
+            }
+        }
+        assert_eq!(
+            graded + unconstructible,
+            BACKENDS_THAT_DISCLOSE.len(),
+            "every row is either graded here or asserted unconstructible on \
+             this target; {graded} graded and {unconstructible} unconstructible \
+             does not account for all of them"
+        );
+        assert!(
+            graded >= 1,
+            "no row was constructible on this target, so this test proves \
+             nothing here"
+        );
     }
 }
 
@@ -247,40 +1075,151 @@ fn run_status(json: bool) -> anyhow::Result<()> {
         println!("{}", status.to_json());
         return Ok(());
     }
-    println!("backend                   {}", status.backend);
-    println!("available                 {}", status.available);
-    println!("bypasses containment      {}", status.bypasses_containment);
-    println!("confines filesystem       {}", status.confines_filesystem);
-    println!("enforces read deny        {}", status.enforces_read_deny);
-    println!("owns descendants hard     {}", status.owns_descendants_hard);
-    println!("binds cwd authority       {}", status.binds_cwd_authority);
-    println!(
+    print!("{}", render_status_human(&status));
+    Ok(())
+}
+
+/// The human arm of `sandbox status`, rendered to a `String` rather than
+/// straight to stdout.
+///
+/// # Why this is a function and not a run of `println!`
+///
+/// It was a run of `println!`, and that made the operator's ACTUAL read
+/// ungradeable: every test on this surface asserted the `SandboxStatus`
+/// struct or its JSON, so a disclosure could reach the struct and never reach
+/// the screen and nothing would notice. `#368` c6 asks for the opposite
+/// property — that the product STATES a defect *where an operator reads the
+/// containment posture* — and this is that place. Returning the text is what
+/// lets `disclosure_tests` grade the read instead of the constant behind it.
+/// Break a one-sentence notice onto terminal-width lines. Kept deliberately
+/// dumb: it never re-orders or drops a word, so the assertion that the human
+/// arm carries the notice's WORDS cannot be satisfied by a paraphrase.
+fn textwrap_notice(notice: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in notice.split_whitespace() {
+        if !current.is_empty() && current.len() + 1 + word.len() > 68 {
+            lines.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(word);
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
+fn render_status_human(status: &SandboxStatus) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = writeln!(out, "backend                   {}", status.backend);
+    let _ = writeln!(out, "available                 {}", status.available);
+    let _ = writeln!(
+        out,
+        "bypasses containment      {}",
+        status.bypasses_containment
+    );
+    let _ = writeln!(
+        out,
+        "confines filesystem       {}",
+        status.confines_filesystem
+    );
+    let _ = writeln!(
+        out,
+        "enforces read deny        {}",
+        status.enforces_read_deny
+    );
+    let _ = writeln!(
+        out,
+        "owns descendants hard     {}",
+        status.owns_descendants_hard
+    );
+    let _ = writeln!(
+        out,
+        "binds cwd authority       {}",
+        status.binds_cwd_authority
+    );
+    let _ = writeln!(
+        out,
         "binds workspace authority {}",
         status.binds_workspace_authority
     );
+    let _ = writeln!(
+        out,
+        "blocks powershell         {}",
+        status.blocks_powershell
+    );
+    if let Some(why) = &status.unavailable_reason {
+        let _ = writeln!(out);
+        let _ = writeln!(out, "UNAVAILABLE, and the backend knows why:");
+        let _ = writeln!(out, "      {why}");
+    }
+    if !status.known_limitations.is_empty() {
+        let _ = writeln!(out);
+        let _ = writeln!(
+            out,
+            "KNOWN LIMITATIONS of backend `{}` — measured, open, and NOT fixed:",
+            status.backend
+        );
+        for l in &status.known_limitations {
+            let _ = writeln!(out, "      - {l}");
+        }
+    }
+    if let Some(notice) = &status.shell_downgrade_notice {
+        let _ = writeln!(out);
+        let _ = writeln!(out, "POWERSHELL IS REFUSED by this backend:");
+        for line in textwrap_notice(notice) {
+            let _ = writeln!(out, "      {line}");
+        }
+    }
     // A row of booleans is not readable as a security posture. Say the
     // consequence of the one that decides whether a command can leave the
     // workspace, naming the mechanism so an operator can act on it.
     if status.available && !status.bypasses_containment && !status.confines_filesystem {
-        println!();
-        println!(
+        let _ = writeln!(out);
+        let _ = writeln!(
+            out,
             "NOTE: backend `{}` does NOT confine the filesystem.",
             status.backend
         );
-        println!("      A command run through this sandbox — including the agent's Bash tool —");
-        println!("      can read and write anywhere this user account can.");
-        println!("      `bypasses containment false` means a real backend was selected, NOT");
-        println!("      that a write cannot escape the workspace.");
+        let _ = writeln!(
+            out,
+            "      A command run through this sandbox — including the agent's Bash tool —"
+        );
+        let _ = writeln!(
+            out,
+            "      can read and write anywhere this user account can."
+        );
+        let _ = writeln!(
+            out,
+            "      `bypasses containment false` means a real backend was selected, NOT"
+        );
+        let _ = writeln!(out, "      that a write cannot escape the workspace.");
         if cfg!(windows) {
-            println!("      In force:     kill-on-close Job Object process-tree ownership;");
-            println!("                    child environment scrubbed to the manifest.");
-            println!("      NOT in force: OS filesystem confinement, OS network denial,");
-            println!("                    OS secret read-deny.");
-            println!("      `WAYLAND_SANDBOX=appcontainer` selects the STRICT backend that");
-            println!("      enforces them.");
+            let _ = writeln!(
+                out,
+                "      In force:     kill-on-close Job Object process-tree ownership;"
+            );
+            let _ = writeln!(
+                out,
+                "                    child environment scrubbed to the manifest."
+            );
+            let _ = writeln!(
+                out,
+                "      NOT in force: OS filesystem confinement, OS network denial,"
+            );
+            let _ = writeln!(out, "                    OS secret read-deny.");
+            let _ = writeln!(
+                out,
+                "      `WAYLAND_SANDBOX=appcontainer` selects the STRICT backend that"
+            );
+            let _ = writeln!(out, "      enforces them.");
         }
     }
-    Ok(())
+    out
 }
 
 async fn run_exec(

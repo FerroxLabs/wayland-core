@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# ADMISSION: unconditional -- every workflow step that runs this script must
+# be admitted by a status-check function (`always()` / `!cancelled()`). An
+# absence of Windows signal is most worth saying when something else in the
+# job has also gone wrong, and a plain condition is skipped exactly then.
+#
 # A SKIPPED WINDOWS LEG IS NOT WINDOWS COVERAGE (gh#1146).
 #
 # `report` is a REQUIRED status context on main and it aggregates the whole

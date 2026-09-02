@@ -8,11 +8,14 @@
 //! hydrated tools landed mid-array instead of appending, so every cached byte
 //! after the first entry was discarded and re-billed.
 //!
-//! This test drives the engine's own per-turn tool pipeline
-//! (`AgentEngine::apply_tool_deferral`, engine.rs) through the same public
-//! `wcore_tools::registry` helpers it calls, then serializes the result with
-//! the real Anthropic wire encoder. The assertion is on the SERIALIZED bytes,
-//! not on an internal `Vec` order.
+//! These tests RE-COMPOSE the engine's per-turn tool pipeline
+//! (`AgentEngine::apply_tool_deferral`, engine.rs, private) from the same
+//! public `wcore_tools::registry` helpers it calls, then serialize the result
+//! with the real Anthropic wire encoder. The assertion is on the SERIALIZED
+//! bytes, not on an internal `Vec` order — but be clear about what a
+//! re-composition can and cannot show: it grades the HELPERS. The engine's
+//! own wiring is graded from inside the crate, by the hydration/deferral
+//! tests in engine.rs, which call `apply_tool_deferral` itself.
 
 use wcore_types::tool::ToolDef;
 
@@ -150,3 +153,15 @@ fn a_second_hydration_appends_after_the_first() {
         names(&turn3)
     );
 }
+
+// ---------------------------------------------------------------------------
+// FerroxLabs/wayland#1209 — the same guarantee with the catalog fold OFF —
+// is guarded from INSIDE the crate, in engine.rs:
+// stub_mode_hydration_leaves_the_engine_tools_prefix_byte_identical and
+// both_catalog_modes_agree_on_the_engine_hot_prefix. It has to be: the
+// property is a property of AgentEngine::apply_tool_deferral (private), and
+// a guard written out here can only RE-COMPOSE that pipeline from the same
+// public wcore_tools::registry helpers — which grades the helpers, not the
+// engine, and stays green when a step is dropped from the production call
+// site. An earlier version of this file did exactly that.
+// ---------------------------------------------------------------------------

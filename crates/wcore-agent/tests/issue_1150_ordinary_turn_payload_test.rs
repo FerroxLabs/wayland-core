@@ -1,0 +1,438 @@
+//! wayland#1150 c5 — what an ORDINARY chat turn actually injects.
+//!
+//! The reporter's Expected Behavior, verbatim: "Tool schemas and skills should
+//! be injected only when relevant or explicitly activated, rather than on every
+//! ordinary chat turn." Two halves, and until this file only the tool half had
+//! any machinery and NEITHER half had an instrument that measured what a real
+//! boot sends.
+//!
+//! Everything here is driven through the REAL `AgentBootstrap::build()` with an
+//! injected recording provider, so the `LlmRequest` measured is the one the
+//! engine hands a provider: the real built-in registry, the real cold-deferral
+//! and catalog-fold passes, the real skill discovery, the real system prompt.
+//! Re-composing those helpers by hand would grade a pipeline the product does
+//! not run — how three vacuous guards shipped on this issue already.
+//!
+//! Sibling `issue_1150_implicit_prefix_cache_test.rs` cannot stand in for this:
+//! its fixture sets `Config::system_prompt` directly, so `build_system_prompt`
+//! — the ONLY place the skills listing is assembled — is never called on that
+//! path, and its segment-0 assertion is blind to skills by construction.
+
+use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
+use serde_json::json;
+use tempfile::tempdir;
+use wcore_agent::bootstrap::AgentBootstrap;
+use wcore_agent::output::OutputSink;
+use wcore_agent::output::null_sink::NullSink;
+use wcore_config::compat::ProviderCompat;
+use wcore_config::config::{Config, ProviderType};
+use wcore_providers::{LlmProvider, ProviderError};
+use wcore_types::llm::{LlmEvent, LlmRequest};
+use wcore_types::message::{FinishReason, StopReason, TokenUsage};
+
+// ---------------------------------------------------------------------------
+// Harness
+// ---------------------------------------------------------------------------
+
+/// Replays one script per dispatch, in order, and keeps every request.
+struct RecordingProvider {
+    scripts: Mutex<Vec<Vec<LlmEvent>>>,
+    requests: Arc<Mutex<Vec<LlmRequest>>>,
+}
+
+#[async_trait]
+impl LlmProvider for RecordingProvider {
+    async fn stream(
+        &self,
+        request: &LlmRequest,
+    ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+        self.requests.lock().unwrap().push(request.clone());
+        let mut scripts = self.scripts.lock().unwrap();
+        let events = if scripts.len() > 1 {
+            scripts.remove(0)
+        } else {
+            scripts[0].clone()
+        };
+        drop(scripts);
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        tokio::spawn(async move {
+            for event in events {
+                let _ = tx.send(event).await;
+            }
+        });
+        Ok(rx)
+    }
+}
+
+fn plain_answer() -> Vec<LlmEvent> {
+    vec![
+        LlmEvent::TextDelta("4".to_string()),
+        LlmEvent::Done {
+            stop_reason: StopReason::EndTurn,
+            finish_reason: FinishReason::Stop,
+            usage: TokenUsage::default(),
+        },
+    ]
+}
+
+fn tool_round(id: &str, name: &str, input: serde_json::Value) -> Vec<LlmEvent> {
+    vec![
+        LlmEvent::ToolUse {
+            id: id.to_string(),
+            name: name.to_string(),
+            input,
+            extra: None,
+        },
+        LlmEvent::Done {
+            stop_reason: StopReason::ToolUse,
+            finish_reason: FinishReason::from_stop_reason(StopReason::ToolUse),
+            usage: TokenUsage::default(),
+        },
+    ]
+}
+
+/// The reporter's route: an unlisted local model over an OpenAI-compatible
+/// endpoint, with no `[compact] context_window` — so the session assumes
+/// `UNVERIFIED_CONTEXT_WINDOW` (32,768) and the skills budget is 1% of it.
+fn config() -> Config {
+    let mut cfg = Config {
+        provider_label: "openai".into(),
+        provider: ProviderType::OpenAI,
+        api_key: "sk-test".into(),
+        base_url: "http://localhost:0".into(),
+        model: "issue-1150-local-32k-unlisted".into(),
+        max_tokens: 1024,
+        max_turns: Some(6),
+        compat: ProviderCompat::openai_defaults(),
+        ..Default::default()
+    };
+    cfg.tools.auto_approve = true;
+    cfg.session.enabled = false;
+    cfg
+}
+
+/// Plant `n` project skills of a realistic shape, none of which has anything
+/// to do with the questions asked below.
+fn plant_skills(root: &std::path::Path, n: usize) {
+    let skills = root.join(".wayland-core").join("skills");
+    for i in 0..n {
+        let dir = skills.join(format!("m-skill-{i:03}"));
+        std::fs::create_dir_all(&dir).expect("skill dir");
+        let desc = format!("skill {i:03} ")
+            + &"does a distinct thing worth describing at some length so the listing is realistic "
+                .repeat(3);
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: m-skill-{i:03}\ndescription: {desc}\n---\n\nbody\n"),
+        )
+        .expect("write SKILL.md");
+    }
+}
+
+/// Drive `prompts` user turns on ONE engine and return every `LlmRequest` the
+/// provider was handed.
+/// Point user-level skill discovery at an empty directory.
+///
+/// The assertions below are about the skills THIS test plants. On a machine
+/// with skills actually installed (85 of them on the host this was fixed on)
+/// the host's own skills are discovered too, sort ahead of anything planted in
+/// a tempdir, and — now that FerroxLabs/wayland#1280 c1 gives the listing a
+/// real ceiling — crowd the fixtures out of it. That made this file's result a
+/// function of whose machine it ran on. Every test in this binary is
+/// `#[serial]` because this is process-global state.
+fn isolate_user_skill_dirs() {
+    static ISOLATED: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    let dir = ISOLATED.get_or_init(|| tempdir().expect("isolated home"));
+    // SAFETY: every test in this binary is #[serial], and these three are set
+    // once to a path that outlives the process's use of them.
+    unsafe {
+        std::env::set_var("HOME", dir.path());
+        std::env::set_var("XDG_CONFIG_HOME", dir.path().join("config"));
+        std::env::set_var("WAYLAND_HOME", dir.path().join("wayland-home"));
+    }
+}
+
+async fn session(
+    skill_count: usize,
+    cfg: Config,
+    scripts: Vec<Vec<LlmEvent>>,
+    prompts: &[&str],
+) -> Vec<LlmRequest> {
+    isolate_user_skill_dirs();
+    let tmp = tempdir().expect("tempdir");
+    let root = std::fs::canonicalize(tmp.path()).expect("canonicalize");
+    plant_skills(&root, skill_count);
+
+    let requests: Arc<Mutex<Vec<LlmRequest>>> = Arc::new(Mutex::new(Vec::new()));
+    let provider = Arc::new(RecordingProvider {
+        scripts: Mutex::new(scripts),
+        requests: requests.clone(),
+    });
+    let sink: Arc<dyn OutputSink> = Arc::new(NullSink);
+    let mut result = AgentBootstrap::new(cfg, root.to_str().expect("utf-8").to_string(), sink)
+        .without_channels(true)
+        .extra_skill_dirs(vec![root.clone()])
+        .provider(provider)
+        .build()
+        .await
+        .expect("bootstrap");
+
+    for (i, p) in prompts.iter().enumerate() {
+        result.engine.run(p, &format!("m{i}")).await.expect("turn");
+    }
+    drop(result);
+    let reqs = requests.lock().unwrap().clone();
+    assert!(!reqs.is_empty(), "the engine dispatched nothing");
+    reqs
+}
+
+async fn ordinary_turn(skill_count: usize, cfg: Config) -> LlmRequest {
+    session(skill_count, cfg, vec![plain_answer()], &["What is 2 + 2?"])
+        .await
+        .remove(0)
+}
+
+/// Bytes a def costs when its FULL schema is serialized.
+fn schema_bytes(t: &wcore_types::tool::ToolDef) -> usize {
+    t.name.len()
+        + t.description.len()
+        + serde_json::to_string(&t.input_schema)
+            .map(|s| s.len())
+            .unwrap_or(0)
+}
+
+fn total_schema_bytes(req: &LlmRequest) -> usize {
+    req.tools.iter().map(schema_bytes).sum()
+}
+
+/// The `<system-reminder>` skills block, if the turn carried one.
+fn skills_block(system: &str) -> Option<&str> {
+    let mark = "The following skills are available for use with the Skill tool:";
+    let start = system.find(mark)?;
+    let head = system[..start].rfind("<system-reminder>")?;
+    let end = system[start..].find("</system-reminder>")? + start + "</system-reminder>".len();
+    Some(&system[head..end])
+}
+
+// ---------------------------------------------------------------------------
+// The TOOL half of c5
+// ---------------------------------------------------------------------------
+
+/// Measured on a real boot, with the pre-machinery arm as the CONTROL in the
+/// same test so an empty result cannot read as absence.
+///
+/// Numbers at the time of writing (hetzner, clean HOME): deferral OFF ships 48
+/// tools and 52,110 bytes of schema on EVERY turn; deferral ON ships 8 and
+/// 8,902, with the other 40 folded out of `tools[]` entirely and named in a
+/// 566-byte catalog line inside ToolSearch's description.
+#[tokio::test]
+#[serial_test::serial]
+async fn most_tool_schemas_are_not_shipped_on_an_ordinary_turn() {
+    let on = ordinary_turn(10, config()).await;
+
+    let mut off_cfg = config();
+    off_cfg.builtin_tools.defer_cold.enabled = false;
+    off_cfg.builtin_tools.defer_cold.catalog = false;
+    let off = ordinary_turn(10, off_cfg).await;
+
+    // CONTROL: the arm the machinery is measured against must actually carry
+    // the whole registry, or the comparison below grades nothing.
+    assert!(
+        off.tools.len() >= 40,
+        "the deferral-OFF control shipped only {} tools, so it is not the \
+         whole-registry arm this test compares against",
+        off.tools.len()
+    );
+
+    let hot: Vec<&str> = on
+        .tools
+        .iter()
+        .filter(|t| !t.deferred)
+        .map(|t| t.name.as_str())
+        .collect();
+
+    assert_eq!(
+        on.tools.len(),
+        hot.len(),
+        "a deferred STUB entry reached the wire; the catalog fold is supposed to \
+         remove every deferred def from tools[] outright. Shipped: {:?}",
+        on.tools.iter().map(|t| &t.name).collect::<Vec<_>>()
+    );
+
+    assert!(
+        on.tools.len() * 3 <= off.tools.len(),
+        "an ordinary turn still ships {} of the registry's {} tools; the whole \
+         point of deferral is that most of them are not there",
+        on.tools.len(),
+        off.tools.len()
+    );
+
+    let on_bytes = total_schema_bytes(&on);
+    let off_bytes = total_schema_bytes(&off);
+    assert!(
+        on_bytes * 3 <= off_bytes,
+        "tool schemas on an ordinary turn cost {on_bytes} bytes against the \
+         deferral-off control's {off_bytes} — less than the 3x the machinery is \
+         supposed to buy"
+    );
+
+    // Everything folded out must still be NAMED, or the model cannot ask for it.
+    let catalog = on
+        .tools
+        .iter()
+        .find(|t| t.name == "ToolSearch")
+        .map(|t| t.description.clone())
+        .expect("ToolSearch is the hydration path and is never deferred");
+    let missing: Vec<&str> = off
+        .tools
+        .iter()
+        .map(|t| t.name.as_str())
+        .filter(|n| !hot.contains(n) && !catalog.contains(*n))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "these tools were folded out of tools[] AND left out of the catalog, so \
+         the model can neither call them nor discover them: {missing:?}"
+    );
+}
+
+/// WRONG-REFUSAL CONTROL. Withholding a schema the model then cannot call is
+/// worse than a large prompt, so the conditional half is measured on a session
+/// where the model DOES need a folded-out tool: it asks ToolSearch for it, and
+/// the next dispatch must carry that tool's real schema.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_folded_out_tool_becomes_callable_on_explicit_activation() {
+    const WANTED: &str = "WebFetch";
+
+    let reqs = session(
+        10,
+        config(),
+        vec![
+            tool_round("c1", "ToolSearch", json!({ "query": WANTED })),
+            plain_answer(),
+        ],
+        &["Fetch a page for me."],
+    )
+    .await;
+
+    assert!(
+        reqs.len() >= 2,
+        "the session did not reach a second dispatch, so nothing about \
+         post-activation availability was measured"
+    );
+
+    // PRECONDITION: it really was absent before the model asked for it,
+    // otherwise the assertion below passes for the wrong reason.
+    assert!(
+        !reqs[0].tools.iter().any(|t| t.name == WANTED),
+        "{WANTED} was already on the wire before any ToolSearch call, so this \
+         test cannot show activation did anything"
+    );
+
+    let admitted = reqs[1]
+        .tools
+        .iter()
+        .find(|t| t.name == WANTED)
+        .unwrap_or_else(|| {
+            panic!(
+                "the model explicitly asked ToolSearch for {WANTED} and the very \
+                 next dispatch still does not carry it — a tool it cannot call. \
+                 Shipped: {:?}",
+                reqs[1].tools.iter().map(|t| &t.name).collect::<Vec<_>>()
+            )
+        });
+    assert!(
+        !admitted.deferred,
+        "{WANTED} was admitted as a DEFERRED stub, so the provider still has no \
+         schema to validate a call against"
+    );
+    assert!(
+        !admitted.input_schema.is_null(),
+        "{WANTED} was admitted without an input schema"
+    );
+
+    // And activation is PER TOOL, not a blanket un-deferral: something the
+    // model never asked for must not ride in on the back of the one it did.
+    let after = reqs[1].tools.len();
+    let before = reqs[0].tools.len();
+    assert_eq!(
+        after,
+        before + 1,
+        "one explicit activation changed the tools[] array by {} entries; \
+         hydration is supposed to admit exactly the tool that was asked for",
+        after as i64 - before as i64
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The SKILLS half of c5
+// ---------------------------------------------------------------------------
+
+/// The gap, pinned so it is falsifiable rather than asserted in a ledger note.
+///
+/// c5 asks for skills "injected only when relevant or explicitly activated".
+/// There is no relevance gate and no activation gate on that path: a turn whose
+/// text has nothing to do with any planted skill still gets a listing naming
+/// every one of them.
+///
+/// This test deliberately does NOT compare the listings of two turns. An
+/// earlier cut did, as a change-detector for a future per-turn gate, and a red
+/// arm proved it could not fail: `context::build_system_prompt` has exactly ONE
+/// call site, `bootstrap.rs:2377`, so the system prompt — skills listing
+/// included — is assembled once at boot and the same String is handed to every
+/// dispatch for the life of the session. Comparing two turns compared a stored
+/// value with itself. That structural fact is the single most important input
+/// to how c5's skills half gets built: a gate that varies per turn cannot live
+/// where the listing is assembled today, and moving the assembly onto the
+/// per-turn path also moves it out of the cached prefix — segment 0 of an
+/// OpenAI-shaped body, ahead of the tool schemas and the whole conversation —
+/// which on the reporter's own implicit-cache endpoint re-bills every request
+/// in full. That is a structural change, not a bounded one.
+///
+/// This test does NOT assert the listing's size. It used to say it could not,
+/// because the budget was not a ceiling: `format_skills_within_budget`
+/// subtracted the bundled entries from it and never capped them, and its
+/// minimal mode still emitted every non-bundled NAME — 100 bundled + 10 project
+/// skills rendered 22,399 chars against a 1,310-char budget, 17.1x. That was
+/// FerroxLabs/wayland#1280 c1 and it is now FIXED; the ceiling and its
+/// wrong-refusal control are graded by
+/// `issue_1280_skills_ceiling_test.rs`. Size is that file's subject, and
+/// duplicating the assertion here would give two places to update and one of
+/// them would rot. What is left for THIS test is the other half: the listing is
+/// still UNCONDITIONAL.
+///
+/// When a gate is built, the first assertion below is the one that must go red.
+#[tokio::test]
+#[serial_test::serial]
+async fn the_skills_listing_is_unconditional_on_an_ordinary_turn() {
+    let reqs = session(
+        10,
+        config(),
+        vec![plain_answer()],
+        &["What is 2 + 2?", "Name a colour."],
+    )
+    .await;
+
+    let first = skills_block(&reqs[0].system).expect("a skills listing was rendered");
+
+    let named = (0..10)
+        .filter(|i| first.contains(&format!("m-skill-{i:03}")))
+        .count();
+    assert_eq!(
+        named, 10,
+        "every planted skill is listed on a turn about arithmetic; none of them \
+         is relevant to it and none was activated. This is c5's open half"
+    );
+
+    // NON-VACUITY: the listing must actually be carrying something, or the
+    // equality above is the equality of two empty strings.
+    assert!(
+        first.len() > 200,
+        "the skills listing is only {} bytes; this test would pass on a session \
+         with no skills at all, which measures nothing",
+        first.len()
+    );
+}

@@ -108,13 +108,39 @@ fn write_ledger(
 ) {
     std::fs::create_dir_all(dir).unwrap();
     let ledger = serde_json::json!({
-        "schema": 1,
+        // The schema this build WRITES, not a literal. Pinned at `1`, every
+        // fixture here quietly became a legacy file the moment #1163 c4 bumped
+        // the version, so the whole suite would have been grading the
+        // migration path while claiming to grade the current one.
+        "schema": wcore_agent::cache_ledger::LEDGER_SCHEMA,
         "session_id": session,
         "started_at": "2026-07-29T10:00:00.000Z",
         "updated_at": format!("2026-07-29T10:{:02}:00.000Z", turns.len().max(1)),
         "session_complete": true,
         "turns": turns,
         "compactions": compactions,
+    });
+    std::fs::write(
+        dir.join(format!("{session}.json")),
+        serde_json::to_vec_pretty(&ledger).unwrap(),
+    )
+    .unwrap();
+}
+
+/// A ledger in the shape v0.13.9 wrote: schema 1, and the counterfactual a
+/// bare `0.0` because the model had no catalog rate. v1 had no way to say
+/// "unknown", so `0.0` WAS how it said it — which is the whole of #1163 and,
+/// once the field became `Option<f64>`, of wayland#1205.
+fn write_v1_ledger(dir: &Path, session: &str, turns: Vec<serde_json::Value>) {
+    std::fs::create_dir_all(dir).unwrap();
+    let ledger = serde_json::json!({
+        "schema": 1,
+        "session_id": session,
+        "started_at": "2026-07-29T10:00:00.000Z",
+        "updated_at": "2026-07-29T10:04:00.000Z",
+        "session_complete": true,
+        "turns": turns,
+        "compactions": [],
     });
     std::fs::write(
         dir.join(format!("{session}.json")),
@@ -815,6 +841,31 @@ fn an_unknown_session_id_still_fails_and_says_where_to_look() {
         err.contains("cache list"),
         "the error must point at the verb that lists the real keys:\n{err}"
     );
+
+    // #1162 / defect D22 -- the MESSAGE is this ticket's deliverable, so its
+    // shape is graded, not just its keywords. The message shipped with runs of
+    // ten and twenty-two literal spaces mid-sentence: a `\`-newline
+    // continuation was collapsed onto one source line and the source
+    // indentation stayed inside the string. `contains("cache list")` above is
+    // satisfied by the mangled text, which is why it went out unnoticed.
+    //
+    // Pinned two ways. First the exact sentence, spelled with single spaces --
+    // this is the clause that carried the ten-space run.
+    assert!(
+        err.contains("keyed by the engine's internal conversation id"),
+        "the explanation of what the key really is must read as one sentence, \
+            not as words separated by collapsed source indentation:\n{err}"
+    );
+    // Then the general shape, so the next collapse anywhere in this message is
+    // caught even if the wording changes. Leading indentation of a wrapped
+    // terminal line is not this defect, hence `trim_start`.
+    for line in err.lines() {
+        assert!(
+            !line.trim_start().contains("   "),
+            "the failure message carries a run of collapsed source indentation \
+                mid-sentence; join the words with a single space:\n{err}"
+        );
+    }
 }
 
 // ── #1163: an unpriceable counterfactual must render as unknown ─────────────
@@ -878,6 +929,226 @@ fn an_unpriced_counterfactual_renders_unknown_instead_of_a_negative_saving() {
     );
 }
 
+/// wayland#1205 — reading back a ledger an OLDER build wrote must not
+/// reproduce #1163 on the fixed build.
+///
+/// `uncached_equivalent_usd` changed from `f64` to `Option<f64>` in place, and
+/// `#[serde(default)]` cannot tell a v1 `0.0` (which meant "nothing could
+/// price this") from a v2 `Some(0.0)` (a genuine priced zero). Only the schema
+/// version can, which is why it was bumped. Measured through the BINARY, on
+/// all three verbs, because the operator in #1163 filed it off a `cache report`
+/// over a ledger directory they already had — a library-level assertion would
+/// not have been that surface.
+#[test]
+fn a_v0_13_9_ledger_does_not_render_a_negative_saving_or_certify_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_v1_ledger(
+        tmp.path(),
+        "legacy-sess",
+        vec![turn_json(
+            1,
+            6_620,
+            7_232,
+            0,
+            0.061389,
+            0.0,
+            "provider_reported",
+            None,
+            14_752,
+        )],
+    );
+
+    let report = stdout(&run(tmp.path(), &["report"]));
+    assert_eq!(
+        field(&report, "cost", "uncached_equivalent_usd"),
+        "unknown",
+        "a v1 zero meant `nothing could price this`; rendering it as a priced \
+         zero is #1163 coming back on the fixed build:\n{report}"
+    );
+    assert_eq!(field(&report, "cost", "saving_usd"), "unknown");
+    assert_ne!(
+        field(&report, "cost", "saving_truth"),
+        "priced",
+        "grading the fabricated saving `priced` is a confidence the pre-fix \
+         build never even claimed:\n{report}"
+    );
+    assert!(
+        !report.contains("saving_usd=-"),
+        "the ticket`s own report line is `saving_usd=-0.061389`; it must not \
+         come back:\n{report}"
+    );
+
+    // The store total sums the same field, so one legacy session poisons
+    // `cache list` for the whole directory if the migration is skipped.
+    let list = stdout(&run(tmp.path(), &["list"]));
+    assert_eq!(
+        field(&list, "total", "uncached_equivalent_usd"),
+        "unknown",
+        "one legacy session must not put a fabricated zero into the store \
+         total:\n{list}"
+    );
+
+    // c3's SECOND conjunct, in the criterion's own words: "cache verify does
+    // not return trustworthy=true for it". Graded on the printed field and on
+    // the exit code, because a certification surface that says `false` and
+    // exits 0 has not refused anything.
+    let verified = run(tmp.path(), &["verify"]);
+    let v = stdout(&verified);
+    assert_ne!(
+        field(&v, "verify", "saving_truth"),
+        "priced",
+        "verify is the certification surface; certifying a saving computed \
+         against a baseline nobody wrote is the worst place to say it:\n{v}"
+    );
+    assert_eq!(
+        field(&v, "verify", "trustworthy"),
+        "false",
+        "wayland#1205 c3: a ledger whose counterfactual meaning this build had \
+         to GUESS is not certifiable, however good its billed figure is:\n{v}"
+    );
+    assert_eq!(
+        code(&verified),
+        9,
+        "trustworthy=false must be an exit-code refusal, not a printed word \
+         beside exit 0:\n{v}"
+    );
+    // The spend itself is still reported as the fact it is — the refusal is
+    // about the file's provenance, not about the provider's number.
+    assert_eq!(field(&v, "verify", "cost_truth"), "priced");
+    assert_eq!(
+        field(&v, "verify", "laundered_counterfactual_round_trips"),
+        "1",
+        "the reason for the refusal must be on the line, or an operator cannot \
+         tell it from an unpriced-model refusal:\n{v}"
+    );
+}
+
+/// Known-negative for the assertion above, and the guard the `verify` comment
+/// has always claimed: an ordinary CURRENT-schema session whose counterfactual
+/// simply has no catalog rate — an unlisted model — must still verify.
+///
+/// Without this, "trustworthy=false for a legacy 0.0" is indistinguishable
+/// from "trustworthy=false for every session on an unlisted model", which
+/// would fail CI for a large share of real runs and is exactly the regression
+/// wayland#1163's fix was written to avoid. The two cases differ only in
+/// whether the file's field MEANINGS predate this build.
+#[test]
+fn a_current_schema_session_with_an_unpriced_counterfactual_still_verifies() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut turn = turn_json(
+        1,
+        6_620,
+        7_232,
+        0,
+        0.061389,
+        0.0,
+        "provider_reported",
+        None,
+        14_752,
+    );
+    // v2's way of saying "nothing could price this": the field is ABSENT.
+    // That is the distinction v1 could not draw, and the whole of #1205.
+    turn.as_object_mut()
+        .unwrap()
+        .remove("uncached_equivalent_usd");
+    write_ledger(tmp.path(), "modern-sess", vec![turn], vec![]);
+
+    let verified = run(tmp.path(), &["verify"]);
+    let v = stdout(&verified);
+    assert_eq!(
+        field(&v, "verify", "saving_truth"),
+        "unpriced",
+        "premise: this session's counterfactual must really be unknown, or the \
+         control is not probing the case it claims to:\n{v}"
+    );
+    assert_eq!(
+        field(&v, "verify", "laundered_counterfactual_round_trips"),
+        "0",
+        "premise: nothing was migrated here — this is a current-schema file:\n{v}"
+    );
+    assert_eq!(
+        field(&v, "verify", "trustworthy"),
+        "true",
+        "an unlisted model is not a corrupt ledger; refusing it would make the \
+         #1205 fix a worse regression than the bug:\n{v}"
+    );
+    assert_eq!(code(&verified), 0, "and it must exit 0:\n{v}");
+}
+
+/// wayland#1205 c3 — a v1 ledger is refused even when its counterfactual was
+/// a real, NON-zero figure.
+///
+/// lane/f13-misc asserted the opposite here, on the premise that a non-zero v1
+/// counterfactual is unambiguous. v0.13.9's own source refutes it: its
+/// `resolve_turn_cost` "reports `priced = true` for BOTH an exact catalog row
+/// and the `ProviderCompat` family fallback", and the counterfactual call
+/// recorded no `cost_source`, so the number on disk may be a conservative
+/// family CEILING — the one thing the v2 writer refuses to emit, because
+/// "subtracting a real billed figure from a ceiling is not a measurement".
+///
+/// The narrowness that actually matters is still guarded, one test up:
+/// `a_current_schema_session_with_an_unpriced_counterfactual_still_verifies`
+/// keeps a CURRENT-schema session on an unlisted model verifying, which is the
+/// over-correction that would fail CI for a large share of real runs.
+#[test]
+fn a_legacy_ledger_with_a_nonzero_counterfactual_is_refused_too() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_v1_ledger(
+        tmp.path(),
+        "legacy-priced",
+        vec![turn_json(
+            1,
+            6_620,
+            7_232,
+            0,
+            0.061389,
+            // v1 wrote a real number here, so the migration has nothing to
+            // demote: `Some(0.09)` means the same thing in v1 and v2.
+            0.09,
+            "provider_reported",
+            None,
+            14_752,
+        )],
+    );
+
+    let verified = run(tmp.path(), &["verify"]);
+    let v = stdout(&verified);
+    assert_eq!(
+        field(&v, "verify", "legacy_schema"),
+        "1",
+        "premise: this is a v1 file, which is the whole basis of the \
+         refusal:\n{v}"
+    );
+    assert_eq!(
+        field(&v, "verify", "laundered_counterfactual_round_trips"),
+        "1",
+        "the non-zero figure is demoted too — v1 could not say whether it was \
+         a catalog price or a family ceiling:\n{v}"
+    );
+    assert_eq!(
+        field(&v, "verify", "saving_truth"),
+        "unpriced",
+        "and so the saving is unknown rather than confidently wrong:\n{v}"
+    );
+    assert_eq!(
+        field(&v, "verify", "trustworthy"),
+        "false",
+        "a file whose counterfactual provenance this build had to guess at is \
+         not certifiable:\n{v}"
+    );
+    assert_eq!(
+        field(&v, "verify", "cost_truth"),
+        "priced",
+        "the BILLED figure never changed meaning and is still reported as the \
+         fact it is:\n{v}"
+    );
+    assert_eq!(
+        code(&verified),
+        9,
+        "a legacy-schema refusal is distinct from an unpriced-cost one:\n{v}"
+    );
+}
+
 /// Known-negative for the test above: a REAL negative saving — a session that
 /// writes cache and never reads it back — must still print as a negative
 /// number. Rendering every saving as `unknown` would satisfy the assertions
@@ -902,4 +1173,122 @@ fn a_genuinely_negative_saving_is_still_reported_as_a_negative_number() {
          that must stay reportable: {saving}\n{report}"
     );
     assert_eq!(field(&report, "cost", "saving_truth"), "priced");
+}
+
+// ── #1205: a ledger written by v0.13.9 ──────────────────────────────────────
+
+/// The exact on-disk shape v0.13.9 wrote — schema 1, `uncached_equivalent_usd`
+/// a bare `f64`, `cost_source: provider_reported` — reproducing the ledger the
+/// #1205 measurement used. Hand-written, and deliberately NOT routed through
+/// `write_ledger`: `write_ledger` now stamps the CURRENT schema, and a fixture
+/// that moves with the code cannot represent a file an older build left behind.
+fn write_legacy_v1_ledger(dir: &Path, session: &str) {
+    std::fs::create_dir_all(dir).unwrap();
+    let ledger = serde_json::json!({
+        "schema": 1,
+        "session_id": session,
+        "started_at": "2026-07-29T10:00:00.000Z",
+        "updated_at": "2026-07-29T10:05:00.000Z",
+        "session_complete": true,
+        "turns": [{
+            "turn": 0,
+            "round_trip": 1,
+            "ts": "2026-07-29T10:00:01.000Z",
+            "provider": "flux-router",
+            "model": "flux-reasoning",
+            "retention": "ephemeral5m",
+            "uncached_input_tokens": 1_200,
+            "cache_read_tokens": 58_000,
+            "cache_write_tokens": 0,
+            "output_tokens": 400,
+            "cost_usd": 0.061389,
+            "cost_source": "provider_reported",
+            "uncached_equivalent_usd": 0.0,
+            "watermark_tokens": 59_200,
+            "conservative_watermark_tokens": 60_000,
+            "autocompact_threshold_tokens": 150_000,
+            "emergency_limit_tokens": 197_000
+        }],
+        "compactions": []
+    });
+    std::fs::write(
+        dir.join(format!("{session}.json")),
+        serde_json::to_vec_pretty(&ledger).unwrap(),
+    )
+    .unwrap();
+}
+
+/// #1205 c2 — measured on the build that "fixed" #1163, this exact ledger
+/// printed `F23_CACHE=cost usd=0.061389 uncached_equivalent_usd=0.000000
+/// saving_usd=-0.061389 saving_ratio=unknown cost_truth=priced
+/// saving_truth=priced counterfactual_unpriced_round_trips=0` with no
+/// `saving_warning` line: #1163 reproduced verbatim, and now certified.
+#[test]
+fn a_v0_13_9_ledger_no_longer_reports_a_negative_saving_as_priced() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_legacy_v1_ledger(tmp.path(), "legacy");
+
+    let out = stdout(&run(tmp.path(), &["report"]));
+    assert_eq!(
+        field(&out, "cost", "uncached_equivalent_usd"),
+        "unknown",
+        "the v1 zero was never a price:\n{out}"
+    );
+    assert_eq!(field(&out, "cost", "saving_usd"), "unknown");
+    assert_eq!(field(&out, "cost", "saving_truth"), "unpriced");
+    assert_eq!(
+        field(&out, "cost", "counterfactual_unpriced_round_trips"),
+        "1"
+    );
+    // The billed figure is untouched: provider-reported spend is still spend.
+    assert_eq!(field(&out, "cost", "usd"), "0.061389");
+    assert_eq!(field(&out, "cost", "cost_truth"), "priced");
+    assert!(
+        out.contains("F23_CACHE=saving_warning"),
+        "the operator must be told the saving is unknown:\n{out}"
+    );
+}
+
+/// #1205 c3, both halves: the store total must not sum a legacy `0.0` into the
+/// counterfactual, and `verify` must not certify the session it came from.
+#[test]
+fn a_legacy_ledger_is_not_summed_into_the_store_total_and_does_not_pass_verify() {
+    let tmp = tempfile::tempdir().unwrap();
+    // A perfectly good current-schema session sits beside it, so the assertion
+    // is about the legacy row and not about an empty store.
+    healthy(tmp.path(), "current");
+    write_legacy_v1_ledger(tmp.path(), "legacy");
+
+    let list = stdout(&run(tmp.path(), &["list"]));
+    assert_eq!(field(&list, "total", "sessions"), "2");
+    assert_eq!(
+        field(&list, "total", "uncached_equivalent_usd"),
+        "unknown",
+        "one legacy row makes the store counterfactual unknown, not a floor:\n{list}"
+    );
+
+    let v = run(tmp.path(), &["verify", "--session", "legacy"]);
+    let vo = stdout(&v);
+    assert_eq!(
+        field(&vo, "verify", "trustworthy"),
+        "false",
+        "a migrated ledger is reported, never certified:\n{vo}"
+    );
+    assert_eq!(field(&vo, "verify", "legacy_schema"), "1");
+    // 9, not 7. lane/f13-misc had already shipped a DEDICATED
+    // `EXIT_LEGACY_SCHEMA`, and the distinction is worth keeping: exit 7 says
+    // the billed figure is not spend, exit 9 says the billed figure is fine
+    // but the file's field meanings predate this build.
+    assert_eq!(code(&v), 9, "stdout was:\n{vo}");
+
+    // Control: the same command over the CURRENT-schema session still passes,
+    // so `verify` has not simply been broken for everything.
+    let ok = run(tmp.path(), &["verify", "--session", "current"]);
+    assert_eq!(
+        field(&stdout(&ok), "verify", "legacy_schema"),
+        "none",
+        "stdout was:\n{}",
+        stdout(&ok)
+    );
+    assert_eq!(code(&ok), 0, "stdout was:\n{}", stdout(&ok));
 }

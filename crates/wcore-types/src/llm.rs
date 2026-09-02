@@ -217,6 +217,22 @@ pub struct LlmRequest {
     /// `Default` is `None`, so all existing `..Default::default()` construction
     /// sites are unaffected.
     pub routed_model_hint: Option<String>,
+    /// #434 — force historical `reasoning_content` replay for THIS request,
+    /// whatever the model string and the routed-model hint say.
+    ///
+    /// [`Self::routed_model_hint`] can only ever describe an EARLIER turn: a
+    /// router answers on the way back, so on the turn a tier alias FIRST
+    /// resolves to a strict reasoner the engine is still shaping the request
+    /// against a name that matches no model contract. When that request is
+    /// refused for missing `reasoning_content`, the engine learns the contract
+    /// from the refusal itself and re-issues the SAME turn with this flag set.
+    ///
+    /// It is set ONLY by that recovery (and kept for the rest of the
+    /// conversation once learned) — never inferred from a model string, so it
+    /// can never turn replay on for a non-strict model that would 400 on an
+    /// unsigned thinking block. `Default` is `false`, so every existing
+    /// construction site is unaffected.
+    pub replay_reasoning_content: bool,
 }
 
 #[derive(Debug, Clone)]

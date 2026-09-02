@@ -4,8 +4,16 @@
 //! `.wayland-core/skills/` and `.wayland-core/commands/` layout, then exercises the full
 //! pipeline: discovery -> loading -> system prompt injection -> SkillTool execution.
 //!
-//! Tests use `load_all_skills` with `add_dirs` or a temp cwd to avoid depending
-//! on any pre-existing files in the repo or user home directory.
+//! Tests use `load_all_skills` with `add_dirs` or a temp cwd, and point
+//! `HOME`/`XDG_CONFIG_HOME`/`WAYLAND_HOME` at an empty directory, to avoid
+//! depending on any pre-existing files in the repo or user home directory.
+//! The temp cwd alone was NOT enough: `load_all_skills` reads the user-level
+//! skills directory too, so on a machine with skills installed (85 of them on
+//! the host where this was caught) `e7_system_prompt_injection` was asserting
+//! over the host's skills as well as its own — and once
+//! FerroxLabs/wayland#1280 c1 gave the listing a real ceiling, the host's
+//! skills crowded the fixtures out of it and the test's result became a
+//! function of whose machine it ran on.
 
 use std::fs;
 use std::path::PathBuf;
@@ -98,8 +106,23 @@ fn make_tool(skills: Vec<SkillMetadata>, cwd: &str) -> SkillTool {
 // E1: Project-level skill discovery
 // ---------------------------------------------------------------------------
 
+/// Point user-level skill discovery at an empty directory. See the module doc.
+fn isolate_user_skill_dirs() {
+    static ISOLATED: std::sync::OnceLock<TempDir> = std::sync::OnceLock::new();
+    let dir = ISOLATED.get_or_init(|| TempDir::new().expect("isolated home"));
+    // SAFETY: every test in this binary is #[serial], and these three are set
+    // once to a path that outlives the process's use of them.
+    unsafe {
+        std::env::set_var("HOME", dir.path());
+        std::env::set_var("XDG_CONFIG_HOME", dir.path().join("config"));
+        std::env::set_var("WAYLAND_HOME", dir.path().join("wayland-home"));
+    }
+}
+
 #[tokio::test]
+#[serial_test::serial]
 async fn e1_project_skill_discovered() {
+    isolate_user_skill_dirs();
     let (_guard, root) = make_project();
     let skills = load_all_skills(&root, &[], false, None).await;
 
@@ -114,7 +137,9 @@ async fn e1_project_skill_discovered() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[serial_test::serial]
 async fn e2_legacy_commands_discovered() {
+    isolate_user_skill_dirs();
     let (_guard, root) = make_project();
     let skills = load_all_skills(&root, &[], false, None).await;
 
@@ -128,7 +153,9 @@ async fn e2_legacy_commands_discovered() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[serial_test::serial]
 async fn e3_nested_namespace() {
+    isolate_user_skill_dirs();
     let (_guard, root) = make_project();
     let skills = load_all_skills(&root, &[], false, None).await;
 
@@ -142,7 +169,9 @@ async fn e3_nested_namespace() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[serial_test::serial]
 async fn e4_variable_substitution() {
+    isolate_user_skill_dirs();
     let (_guard, root) = make_project();
     let cwd = root.to_string_lossy().to_string();
     let skills = load_all_skills(&root, &[], false, None).await;
@@ -165,8 +194,10 @@ async fn e4_variable_substitution() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[serial_test::serial]
 #[cfg(not(windows))] // Shell expansion uses Unix commands; skip on Windows
 async fn e5_shell_expansion() {
+    isolate_user_skill_dirs();
     let (_guard, root) = make_project();
     let cwd = root.to_string_lossy().to_string();
     let skills = load_all_skills(&root, &[], false, None).await;
@@ -203,7 +234,9 @@ async fn e5_shell_expansion() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[serial_test::serial]
 async fn e6_conditional_activation() {
+    isolate_user_skill_dirs();
     let (_guard, root) = make_project();
     let skills = load_all_skills(&root, &[], false, None).await;
 
@@ -228,7 +261,9 @@ async fn e6_conditional_activation() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[serial_test::serial]
 async fn e7_system_prompt_injection() {
+    isolate_user_skill_dirs();
     let (_guard, root) = make_project();
     let cwd = root.to_string_lossy().to_string();
     let skills = load_all_skills(&root, &[], false, None).await;
@@ -294,7 +329,9 @@ async fn e7_system_prompt_injection() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[serial_test::serial]
 async fn e8_full_execution() {
+    isolate_user_skill_dirs();
     let (_guard, root) = make_project();
     let cwd = root.to_string_lossy().to_string();
     let skills = load_all_skills(&root, &[], false, None).await;
@@ -324,7 +361,9 @@ async fn e8_full_execution() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[serial_test::serial]
 async fn e9_deduplication() {
+    isolate_user_skill_dirs();
     let (_guard, root) = make_project();
     let skills = load_all_skills(&root, &[], false, None).await;
 
@@ -343,7 +382,9 @@ async fn e9_deduplication() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[serial_test::serial]
 async fn e10_skill_not_found() {
+    isolate_user_skill_dirs();
     let (_guard, root) = make_project();
     let cwd = root.to_string_lossy().to_string();
     let skills = load_all_skills(&root, &[], false, None).await;
@@ -364,7 +405,9 @@ async fn e10_skill_not_found() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[serial_test::serial]
 async fn e11_legacy_command_execution() {
+    isolate_user_skill_dirs();
     let (_guard, root) = make_project();
     let cwd = root.to_string_lossy().to_string();
     let skills = load_all_skills(&root, &[], false, None).await;

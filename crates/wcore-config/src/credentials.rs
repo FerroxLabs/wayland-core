@@ -3,17 +3,42 @@
 //! Closes SECURITY MAJOR #16 (API keys + AWS secret + GCP secret persisted
 //! in plaintext config with default OS permissions).
 //!
-//! Two backends ship:
+//! ## The default is FAIL-CLOSED. There is no plaintext fallback.
 //!
-//! * `PlaintextCredentialsStore` — backs onto the existing
-//!   `~/.config/wayland-core/config.toml` path; every save enforces
-//!   `0o600` perms on Unix and tries a deny-all ACL on Windows. The
-//!   fallback half of the default `Auto` backend (and the explicit
-//!   `backend = "plaintext"` opt-out).
-//! * `KeyringCredentialsStore` — uses the OS credential store via the
-//!   `keyring` crate (macOS Keychain, Windows Credential Manager, Linux
-//!   Secret Service). Behind the `keyring` cargo feature (on by default
-//!   in this workspace) and selected via `backend = "keyring"`.
+//! Shipped as of v0.12.26 and stated here because the sentence this replaced
+//! said the opposite. `build_ladder` mounts the OS keyring and the encrypted
+//! vault and NOTHING ELSE; when neither is mounted, `put` REFUSES. It never
+//! falls through to a cleartext write. FerroxLabs/wayland-core#397: the stale
+//! claim sat on the type, where a reader looks first, while the truth sat
+//! ~2,650 lines further down, and it produced a false "Core falls back to
+//! plaintext credentials" reading three separate times in one afternoon.
+//!
+//! The plaintext store still exists, in two bounded roles, and saying so is
+//! the point — deleting the false sentence without stating the true one only
+//! invites the next reader to guess:
+//!
+//! * **Read-and-delete-only legacy.** The ladder's bottom rung is READ so that
+//!   credentials written before a secure tier existed stay resolvable, and a
+//!   value found there is promoted UP on the next read. Nothing new is ever
+//!   written to it by the ladder.
+//! * **An explicit, warned opt-out.** `backend = "plaintext"` selects it
+//!   outright and prints a warning on stderr. Material that must never be
+//!   cleartext (OAuth token sets) bypasses that opt-out by opening the ladder
+//!   through [`open_secure_ladder_store`].
+//!
+//! Three stores ship:
+//!
+//! * `KeyringCredentialsStore` — the OS credential store via the `keyring`
+//!   crate (macOS Keychain, Windows Credential Manager, Linux Secret
+//!   Service). Behind the `keyring` cargo feature (on by default in this
+//!   workspace); the ladder's top rung, and selectable via
+//!   `backend = "keyring"`.
+//! * `EncryptedFileCredentialsStore` — an Argon2id + XChaCha20-Poly1305 vault.
+//!   The ladder's second rung, mounted when unlock material is present, and
+//!   the top rung for an isolated profile (`WAYLAND_HOME`), which must not
+//!   touch the process-global keyring service.
+//! * `PlaintextCredentialsStore` — TOML on disk, `0o600` on Unix and a
+//!   deny-all ACL attempt on Windows. Its two roles are the ones above.
 //!
 //! The trait is intentionally minimal so callers can also swap in a
 //! test-only in-memory store. Lookups go through `Config::resolve_*`
@@ -37,14 +62,28 @@ use thiserror::Error;
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CredentialsBackend {
-    /// Default: prefer the OS keyring, transparently falling back to the
-    /// plaintext `0o600` file when no keyring is available (headless Linux,
-    /// CI). Reads consult the keyring first, then plaintext, so credentials
-    /// written by either backend — including pre-existing plaintext keys —
-    /// stay resolvable; new writes prefer the keyring. Closes the
-    /// "secrets cleartext by default" finding (deep-sweep F16) without
-    /// breaking headless or stranding existing keys. Set `backend =
-    /// "plaintext"` to opt back in to the legacy always-plaintext store.
+    /// Default: the FAIL-CLOSED ladder built by [`build_ladder`].
+    ///
+    /// ladder: keyring -> encrypted_vault -> refuse
+    ///
+    /// The line above is machine-read by
+    /// `the_documented_ladder_matches_the_rungs_build_ladder_mounts`; it is the
+    /// claim, and the test is what stops it drifting from the code again.
+    ///
+    /// Writes descend the mounted rungs and then STOP. When neither the OS
+    /// keyring nor the encrypted vault is available — headless Linux, CI, a
+    /// locked vault — `put` returns an error. **It does not fall back to the
+    /// plaintext file.** This doc comment claimed such a fallback until
+    /// FerroxLabs/wayland-core#397; the fallback was removed in v0.12.26 and
+    /// the sentence was not, and three independent readings then reported a
+    /// plaintext-by-default weakness that had been fixed nine releases earlier.
+    ///
+    /// Reads descend one rung FURTHER, into the legacy plaintext file, so keys
+    /// written before a secure tier existed stay resolvable; a value found
+    /// there is promoted up on the next read and purged from below. That is a
+    /// read path only — see the module header for the plaintext store's two
+    /// remaining roles. Set `backend = "plaintext"` for the explicit, warned
+    /// opt-out.
     #[default]
     Auto,
     /// Plaintext TOML on disk with `0o600` perms enforced.
@@ -3466,6 +3505,167 @@ pub fn warn_if_world_readable(path: &Path) {
 mod tests {
     use super::*;
     use tempfile::{TempDir, tempdir};
+
+    // =======================================================================
+    // FerroxLabs/wayland-core#397 — the documented ladder and the built ladder
+    // =======================================================================
+
+    /// The rung list in `CredentialsBackend::Auto`'s doc comment is the rung
+    /// list `build_ladder` mounts.
+    ///
+    /// #397 c2. The failure mode this guards is not a typo, it is DISTANCE:
+    /// the claim lives on the type at the top of the file and the code lives
+    /// ~2,650 lines down, and distance does not shrink on its own. A prose
+    /// rule ("keep these in sync") does not do this — the same file already
+    /// carried one and the comment still went stale for nine releases.
+    ///
+    /// The instrument reads the `ladder:` line as the DECLARATION and derives
+    /// the ACTUAL rungs from the store types `build_ladder`'s body constructs,
+    /// so adding a rung, removing one, or reordering them fails here.
+    #[test]
+    fn the_documented_ladder_matches_the_rungs_build_ladder_mounts() {
+        const SOURCE: &str = include_str!("credentials.rs");
+
+        // 1. The declaration.
+        let declared: Vec<String> = SOURCE
+            .lines()
+            .find_map(|line| {
+                line.trim_start()
+                    .strip_prefix("/// ladder: ")
+                    .map(|rest| rest.split(" -> ").map(|r| r.trim().to_string()).collect())
+            })
+            .expect(
+                "the `Auto` doc comment must declare its ladder as a \
+                 `/// ladder: a -> b -> refuse` line — that line IS the claim",
+            );
+
+        // 2. What `build_ladder` actually mounts, in body order.
+        let body_start = SOURCE
+            .find("fn build_ladder(")
+            .expect("known-positive control: `build_ladder` must be in this file");
+        // The first column-zero closing brace after the signature: every
+        // block inside the function is indented, so this is its end.
+        let body_end = SOURCE[body_start..]
+            .find("\n}\n")
+            .map_or(SOURCE.len(), |at| body_start + at);
+        let body = &SOURCE[body_start..body_end];
+
+        // Every credentials store this crate defines, so a rung added from a
+        // NEW store type cannot slip through by not being on a short list.
+        let mut stores: Vec<&str> = SOURCE
+            .lines()
+            .filter_map(|line| {
+                let trimmed = line.trim_start();
+                let rest = trimmed
+                    .strip_prefix("pub struct ")
+                    .or_else(|| trimmed.strip_prefix("struct "))?;
+                let name = rest.split(['<', ' ', '{', '(']).next()?;
+                name.ends_with("CredentialsStore").then_some(name)
+            })
+            .collect();
+        stores.sort_unstable();
+        stores.dedup();
+        assert!(
+            stores.len() >= 4,
+            "known-positive control: the scan found only {stores:?} — it is \
+             not seeing this file's credential stores"
+        );
+
+        fn rung_name(store: &str) -> &str {
+            match store {
+                "KeyringCredentialsStore" => "keyring",
+                "EncryptedFileCredentialsStore" => "encrypted_vault",
+                "PlaintextCredentialsStore" => "plaintext",
+                other => other,
+            }
+        }
+        let mut mounted: Vec<String> = Vec::new();
+        for (offset, _) in body.match_indices("CredentialsStore::new(") {
+            let head = &body[..offset];
+            let Some(store) = stores
+                .iter()
+                .find(|store| head.ends_with(&store[..store.len() - "CredentialsStore".len()]))
+            else {
+                continue;
+            };
+            // The ladder type itself is the container, not a rung.
+            if *store == "LadderCredentialsStore" {
+                continue;
+            }
+            let name = rung_name(store).to_string();
+            if !mounted.contains(&name) {
+                mounted.push(name);
+            }
+        }
+        assert!(
+            !mounted.is_empty(),
+            "known-positive control: `build_ladder` constructs no store at all \
+             — the body slice is wrong, not the code"
+        );
+
+        // 3. Compare. The declaration's terminal word is the behaviour on an
+        //    empty ladder and is checked by the sibling test below, so it is
+        //    dropped before the rung comparison.
+        let (terminal, declared_rungs) = declared
+            .split_last()
+            .expect("the declaration must name at least a terminal");
+        assert_eq!(
+            terminal, "refuse",
+            "#397: the ladder's terminal behaviour is REFUSE. A declaration \
+             ending any other way is claiming a fallback the code does not have"
+        );
+        assert_eq!(
+            declared_rungs.to_vec(),
+            mounted,
+            "the `ladder:` line in `CredentialsBackend::Auto`'s doc comment and \
+             the rungs `build_ladder` mounts disagree (FerroxLabs/wayland-core#397)"
+        );
+        assert!(
+            !declared_rungs.iter().any(|rung| rung == "plaintext"),
+            "the documented ladder names `plaintext` as a WRITE rung — that is \
+             exactly the claim #397 was filed to remove"
+        );
+    }
+
+    /// The terminal word is a behaviour, so it is measured as one: a ladder
+    /// with no secure rung REFUSES the write and leaves no cleartext behind.
+    ///
+    /// #397 c2's other arm. Reading `Err(no_secure_backend_for_write(key))` in
+    /// the source proves the branch is written; running it proves the branch
+    /// is reached and that nothing else wrote the value on the way past.
+    #[test]
+    fn a_ladder_with_no_secure_rung_refuses_the_write_and_writes_no_cleartext() {
+        let dir = tempdir().unwrap();
+        let plaintext_path = dir.path().join("credentials.toml");
+        let ladder = LadderCredentialsStore::new(None, None, plaintext_path.clone());
+
+        let refused = ladder.put("anthropic.api_key", "sk-ant-MUST-NOT-BE-WRITTEN");
+        assert!(
+            refused.is_err(),
+            "a ladder with no keyring and no vault must REFUSE the write, not \
+             fall through to cleartext"
+        );
+        assert!(
+            !plaintext_path.exists(),
+            "the refused write left a plaintext credentials file behind"
+        );
+
+        // WRONG-REFUSAL CONTROL: the legacy READ rung still works, or this
+        // would be passing because the ladder refuses everything, and every
+        // pre-existing key would be stranded.
+        std::fs::write(
+            &plaintext_path,
+            "[secrets]\n\"legacy.key\" = \"sk-legacy\"\n",
+        )
+        .unwrap();
+        let ladder = LadderCredentialsStore::new(None, None, plaintext_path.clone());
+        assert_eq!(
+            ladder.get("legacy.key").unwrap().as_deref(),
+            Some("sk-legacy"),
+            "reads must still descend to the legacy plaintext file — that is \
+             the role the module header states it keeps"
+        );
+    }
 
     /// The startup availability probe must agree with the opener and must
     /// change nothing while answering.

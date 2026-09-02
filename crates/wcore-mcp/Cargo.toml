@@ -45,3 +45,6 @@ serial_test.workspace = true
 # Slice 3 — forge_grant.rs mocks the producer's /.well-known/mcp + /grant
 # endpoints to verify the liveness probe + grant status mapping.
 wiremock.workspace = true
+# wayland-core#354 — the permissive arm of the malware gate is only honest if
+# the fail-open is AUDIBLE, so its test captures the emitted tracing level.
+tracing-subscriber.workspace = true

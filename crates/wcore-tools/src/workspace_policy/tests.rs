@@ -9,73 +9,84 @@ use std::path::Path;
 /// inside the bootstrap future that blocks the TUI's first paint, so on a large
 /// tree it cost seconds of dead startup time.
 ///
-/// Stated against baselines taken over an EMPTY tree rather than as a bare
-/// `walk > construct * 10` ratio, because construction carries a per-platform
-/// CONSTANT — canonicalization plus a handful of well-known-path probes — that
-/// the old form silently assumed was zero. MEASURED on Windows, where that
-/// constant is the same order as the walk itself at this tree size:
+/// #1182: stated in ENTRIES VISITED, by direct observation through
+/// [`super::walk_entries`], not in wall-clock time.
+///
+/// The two properties this test needs are "the walk really enumerates the tree"
+/// (otherwise "construction did not walk" passes for free against a walk that
+/// is unreachable) and "construction does not". Both used to be stated as
+/// timings, and both were therefore decided by whatever else the host was
+/// doing. The liveness half was the worse of the two because it could declare
+/// ITSELF dead — recorded verbatim on the 0.13.10 integration branch under
+/// concurrent load on a 96-core box:
 ///
 /// ```text
-///   dirs   construct     walk
-///    300    12.4 ms    11.6 ms
-///   3000    10.4 ms   112.7 ms
-///  12000    25.7 ms  1011.9 ms
+/// instrument is dead: the walk must be reachable and tree-driven;
+///   walk=20.476985ms  walk_empty=8.247227ms  construct_empty=772.466µs
 /// ```
 ///
-/// Construction is FLAT while the walk is linear, so the property holds — but
-/// the ratio at 3000 sat on the 10x line and flapped (a failing CI run
-/// measured 6.5x). Comparing construction against construction removes the
-/// constant instead of pretending it is absent, and an eager walk still cannot
-/// pass: it would add a whole walk to the big-tree construction.
+/// The walk in that run visited the whole 3000-directory tree. Nothing was
+/// wrong with it; the EMPTY-tree baseline had stalled, the ratio compressed,
+/// and the control reported a healthy instrument as a dead one. A ratio of two
+/// wall clocks cannot tell "the walk did not happen" from "the machine is
+/// busy", and only the first of those is a defect.
+///
+/// The counter tells them apart, and it keeps the property that made the
+/// control worth having: a walk that becomes unreachable visits ZERO entries
+/// and this test still fails. It also states the SECOND half directly, which
+/// removes the last timing — an eager walk at construction is now a count, not
+/// a duration comparison against a per-platform constant that earlier revisions
+/// of this test had to model (on Windows, construction's fixed path probes cost
+/// the same order as the walk itself at this tree size).
 #[test]
 fn contained_construction_does_not_walk_the_workspace() {
-    // Baselines over an empty tree. Taken FIRST so they absorb the cold cost
-    // of the fixed path probes, which would otherwise land on the measurement
-    // below and flatter it.
-    let empty = tempfile::tempdir().unwrap();
-    let t = std::time::Instant::now();
-    let baseline = WorkspacePolicy::contained(empty.path());
-    let construct_empty = t.elapsed();
-    let t = std::time::Instant::now();
-    let _ = baseline.secret_deny_paths_dynamic();
-    let walk_empty = t.elapsed();
-
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    // Enough directories that a walk is unmistakably more expensive than not
-    // walking, but small enough to stay quick in CI.
+    // Enough directories that a walk is unmistakably an enumeration of THIS
+    // tree rather than of a handful of fixed probe paths, but small enough to
+    // stay quick in CI. Above `SERIAL_WALK_BUDGET`, so the parallel arm is the
+    // one graded — the arm whose entries are counted on a worker pool and
+    // folded back onto this thread.
     for i in 0..3000 {
         let sub = root.join(format!("d{i}"));
         std::fs::create_dir_all(&sub).unwrap();
         std::fs::write(sub.join("a.rs"), b"fn main() {}").unwrap();
     }
+    // A real committed secret, so the walk has a positive result to report and
+    // "visited the tree" cannot mean "enumerated it and understood nothing".
+    std::fs::write(root.join(".env"), b"TOKEN=hunter2\n").unwrap();
 
-    let t0 = std::time::Instant::now();
+    let before_construct = super::walk_entries();
     let p = WorkspacePolicy::contained(root);
-    let construct = t0.elapsed();
+    let during_construct = super::walk_entries() - before_construct;
 
-    // Known-positive control in the same test: the walk this construction must
-    // NOT be doing is still reachable, still happens, and its cost really is
-    // driven by the tree. Without this the assertion below could pass on a
-    // machine where BOTH are instant — i.e. where the instrument is dead.
-    let t1 = std::time::Instant::now();
+    let before_walk = super::walk_entries();
     let dynamic = p.secret_deny_paths_dynamic();
-    let walk = t1.elapsed();
-    let _ = dynamic;
+    let during_walk = super::walk_entries() - before_walk;
 
+    // KNOWN-POSITIVE CONTROL, stated first: the walk this construction must NOT
+    // be doing is reachable and really did enumerate this tree. Without it the
+    // assertion below passes for free against a walk that never runs.
     assert!(
-        walk > walk_empty * 10 && walk > construct_empty,
-        "instrument is dead: the walk must be reachable and tree-driven; \
-         walk={walk:?} walk_empty={walk_empty:?} construct_empty={construct_empty:?}"
+        during_walk >= 3000,
+        "instrument is dead: the walk must be reachable and must enumerate the \
+         workspace; it visited {during_walk} entries over a 3000-directory tree"
+    );
+    // The second half of the same control: enumerating is not classifying. A
+    // walk that visited every entry and stopped recognising secrets would leave
+    // the deny list empty and every claim built on it vacuous.
+    assert!(
+        dynamic.iter().any(|path| path.ends_with(".env")),
+        "instrument is dead: the walk must still find the planted .env; got {dynamic:?}"
     );
 
-    // An eager walk would put a whole `walk` inside `construct`. Half of one is
-    // far below that and far above the noise on the constant.
-    assert!(
-        construct < construct_empty + walk / 2,
-        "construction must not walk the workspace: construct={construct:?} \
-         construct_empty={construct_empty:?} walk={walk:?} \
-         (an eager walk adds a whole walk to construction)"
+    // The property. An eager walk at construction would put the whole
+    // enumeration above inside `contained()`.
+    assert_eq!(
+        during_construct, 0,
+        "construction must not walk the workspace: it visited {during_construct} \
+         entries before anything asked for the deny list (the walk itself visits \
+         {during_walk})"
     );
 }
 
@@ -1322,22 +1333,23 @@ fn secret_fixture_tree() -> (tempfile::TempDir, std::path::PathBuf) {
 /// A1 — #922 R1: the deny walk is not run for a backend that discards the list.
 ///
 /// Modelled on `contained_construction_does_not_walk_the_workspace` above,
-/// including its known-positive control: the `true` arm must be materially
-/// more expensive on the big tree than on an empty one, so a host where both
-/// arms are instant FAILS the instrument instead of passing the assertion
-/// vacuously.
+/// including its known-positive control — and, since #1182, stated the same
+/// way that one is: in ENTRIES VISITED, through [`super::walk_entries`].
+///
+/// It carried the identical wall-clock ratio and the identical defect, and it
+/// was caught the same way, on the same box, in a full-suite run under load:
+///
+/// ```text
+/// instrument is dead: the enforcing arm must be tree-driven;
+///   enforcing_big=25.529233ms enforcing_empty=2.964103ms
+/// ```
+///
+/// The enforcing arm in that run walked the whole 3000-directory tree. Only the
+/// EMPTY-tree baseline had moved. Counting entries removes the baseline, the
+/// ratio and the per-platform constant from the question at once, and states
+/// the claim itself — "R1 does not walk" — as the number it always was.
 #[test]
 fn r1_skips_the_walk_for_a_non_enforcing_backend() {
-    let empty = tempfile::tempdir().unwrap();
-    let baseline = WorkspacePolicy::contained(empty.path());
-    // Taken first so the cold cost of the fixed path probes lands here.
-    let t = std::time::Instant::now();
-    let _ = baseline.secret_deny_paths_for_backend(true);
-    let enforcing_empty = t.elapsed();
-    let t = std::time::Instant::now();
-    let _ = baseline.secret_deny_paths_for_backend(false);
-    let skipped_empty = t.elapsed();
-
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     for i in 0..3000 {
@@ -1354,29 +1366,30 @@ fn r1_skips_the_walk_for_a_non_enforcing_backend() {
     std::fs::write(root.join(".env"), b"TOKEN=1").unwrap();
     let p = WorkspacePolicy::contained(root);
 
-    let t = std::time::Instant::now();
+    let before = super::walk_entries();
     let enforcing = p.secret_deny_paths_for_backend(true);
-    let enforcing_big = t.elapsed();
-    let t = std::time::Instant::now();
-    let skipped = p.secret_deny_paths_for_backend(false);
-    let skipped_big = t.elapsed();
+    let enforcing_entries = super::walk_entries() - before;
+    // A FRESH policy for the skipped arm: the enforcing call above memoises its
+    // result, so re-asking the same policy would report zero entries because
+    // the answer was cached, not because R1 declined to walk.
+    let q = WorkspacePolicy::contained(root);
+    let before = super::walk_entries();
+    let skipped = q.secret_deny_paths_for_backend(false);
+    let skipped_entries = super::walk_entries() - before;
 
     // KNOWN-POSITIVE CONTROL: the walk this test claims to be skipping is
-    // reachable, does happen, and its cost really is driven by the tree.
+    // reachable and really does enumerate this tree.
     assert!(
-        enforcing_big > enforcing_empty * 10,
-        "instrument is dead: the enforcing arm must be tree-driven; \
-         enforcing_big={enforcing_big:?} enforcing_empty={enforcing_empty:?}"
+        enforcing_entries >= 3000,
+        "instrument is dead: the enforcing arm must enumerate the workspace; it \
+         visited {enforcing_entries} entries over a 3000-directory tree"
     );
 
-    // THE CLAIM: the skipped arm is flat — the big tree costs no more than the
-    // empty one. Stated against the empty-tree baseline plus half a walk, the
-    // same shape the construction pin uses, so the platform constant is
-    // subtracted rather than assumed to be zero.
-    assert!(
-        skipped_big < skipped_empty + enforcing_big / 2,
-        "R1 must not walk on a non-enforcing backend: skipped_big={skipped_big:?} \
-         skipped_empty={skipped_empty:?} enforcing_big={enforcing_big:?}"
+    // THE CLAIM, as the number it always was.
+    assert_eq!(
+        skipped_entries, 0,
+        "R1 must not walk on a non-enforcing backend: it visited \
+         {skipped_entries} entries (the enforcing arm visits {enforcing_entries})"
     );
 
     // And the skipped arm produces nothing at all, while the enforcing arm does.
@@ -2192,4 +2205,1160 @@ fn an_unscannably_large_root_is_refused_not_waved_through() {
     );
     // WRONG-REFUSAL CONTROL: the same tree, under a budget that covers it.
     scan_write_root_bounded(dir.path(), 5).expect("a root inside the budget is scanned and passes");
+}
+
+// ── core#323: ONE denylist, ONE owner ───────────────────────────────────────
+
+/// Every credential file name the `@`-attach guard denies that THIS predicate
+/// — the one `Read`, `Grep`, `SecretDenyFs` and the Bash deny walk consult —
+/// did not.
+///
+/// core#323's first cut made `wcore-cli`'s `@`-attach guard consult BOTH
+/// lists. That closed the `@` half and left the dangerous half open: a user
+/// typing `@.pgpass` was refused, while the MODEL could read the same file
+/// through `Read` / `Grep` / `Bash cat`, because those consult this predicate
+/// alone. Two lists that must agree drift again; the entries below are the
+/// drift that was still live after the union landed.
+///
+/// Asserted under a directory prefix because every caller of this predicate
+/// passes an absolute path.
+const AT_ATTACH_ONLY_SECRETS: &[&str] = &[
+    ".envrc",
+    ".pgpass",
+    "secrets.json",
+    "secrets.yaml",
+    "secrets.yml",
+    "credentials",
+    "credentials.json",
+    "release.keystore",
+    "signing.jks",
+    "deploy_rsa",
+    "deploy_ed25519",
+];
+
+#[test]
+fn the_shared_denylist_carries_every_name_the_at_attach_guard_denies() {
+    let base = Path::new("/w").join("project");
+    let escaped: Vec<&str> = AT_ATTACH_ONLY_SECRETS
+        .iter()
+        .copied()
+        .filter(|n| !is_secret_path_static(&base.join(n)))
+        .collect();
+    assert!(
+        escaped.is_empty(),
+        "the file tools would hand these credential files to the model: {escaped:?}"
+    );
+}
+
+/// Without this control the table above is satisfied by a predicate that
+/// denies everything. `credentials/README.md` pins that the bare `credentials`
+/// rule matches a FILE NAME and not a directory on the way to one;
+/// `turnkey.json` / `monkey.json` pin the existing `*-key.json` boundary.
+#[test]
+fn the_shared_denylist_still_admits_ordinary_files() {
+    let base = Path::new("/w").join("project");
+    let refused: Vec<&str> = [
+        "src/main.rs",
+        "README.md",
+        "Cargo.toml",
+        "environment.rs",
+        "docs/monkey.json",
+        "notes/turnkey.json",
+        "credentials/README.md",
+        "secretsmanager.rs",
+        "keystore.rs",
+        "config",
+    ]
+    .iter()
+    .copied()
+    .filter(|n| is_secret_path_static(&base.join(n)))
+    .collect();
+    assert!(
+        refused.is_empty(),
+        "ordinary files must stay readable, but these were denied: {refused:?}"
+    );
+}
+
+// ── FerroxLabs/wayland-core#356: the skill-source refusal, graded against the
+// two escapes #1097 rewrote `canon_existing_ancestor` for ──────────────────
+//
+// `is_skill_source_path` used `canon_deep` — the walk-UP-and-append-verbatim
+// shape `25b19d2d` argued is unsound and #1097 abandoned — while its neighbour
+// seventy lines away used the walk-DOWN form. Neither escape was graded on the
+// weaker one, so "does the refusal hold against the holes we already know
+// about?" had no answer either way. These two tests are that answer. Measured
+// on hetzner-dsm before the switch, resolving `<ws>/brief.html` where that name
+// is a DANGLING symlink into `<ws>/.wayland-core/skills/linked-skill/`:
+//
+//   canon_existing_ancestor -> .../.wayland-core/skills/linked-skill/brief.html
+//   canon_deep              -> .../ws/brief.html          <-- refusal missed
+//
+// The `..` case held on both; the symlink case did not, which is why the call
+// site moved rather than gaining a citation.
+
+/// ESCAPE 1 — a `..` that follows a component which does not exist yet.
+///
+/// The ordinary state of a write into a load path, not an edge case: a skill's
+/// first output creates its own directory on the way, so part of the path is
+/// always missing. Held on `canon_deep` too, for a reason that is not
+/// resolution — an unresolvable `..` stayed in the string, and a `..` kept
+/// verbatim still satisfies a PREFIX match. That is fail-safe for a deny and
+/// fail-open for the allow predicate next door, which is precisely why the two
+/// resolvers must not be chosen by whichever is nearer.
+#[test]
+fn a_parent_dir_after_a_missing_component_still_reaches_the_skill_load_path() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let load = root.join(".wayland-core").join("skills");
+    std::fs::create_dir_all(&load).unwrap();
+    let policy = WorkspacePolicy::trusted_local(&root);
+
+    let missing = load.join("not-yet");
+    assert!(
+        !missing.exists(),
+        "the point of this case is that this component is absent"
+    );
+    assert!(
+        policy.is_skill_source_path(&missing.join("..").join("report.html")),
+        "a `..` after a missing component walked back into the load path and the \
+            refusal did not see it"
+    );
+
+    // Known-positive control: the identical shape landing somewhere ordinary is
+    // NOT refused, so this is not passing because every `..` is refused.
+    assert!(
+        !policy.is_skill_source_path(&root.join("nope").join("..").join("report.html")),
+        "an ordinary workspace write with a `..` in it must stay writable"
+    );
+}
+
+/// ESCAPE 2 — the dangling-symlink hop. THE case `canon_deep` missed.
+///
+/// `std::fs::canonicalize` fails on a link whose target does not exist yet, so
+/// a resolver that canonicalizes the longest EXISTING ancestor and appends the
+/// rest verbatim judges where the LINK sits instead of where the path leads.
+/// `is_repo_control_path`'s own doc comment claims a benign-named symlink
+/// "resolves before the prefix match so it cannot be used to smuggle a write
+/// through" — true only of the walk-DOWN resolver, which is the other half of
+/// why the switch covers both call sites.
+///
+/// The controls are carried IN this test so a change that refused every symlink
+/// (which would also satisfy the probe) fails here instead of looking green.
+#[test]
+#[cfg(unix)]
+fn a_dangling_symlink_into_the_skill_load_path_is_refused() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let skill = root
+        .join(".wayland-core")
+        .join("skills")
+        .join("linked-skill");
+    std::fs::create_dir_all(&skill).unwrap();
+    let policy = WorkspacePolicy::trusted_local(&root);
+
+    // CONTROL: the same link shape with an EXISTING target was already refused
+    // before this change, so a green on the probe cannot come from this arm.
+    let live_target = skill.join("live.html");
+    std::fs::write(&live_target, b"x").unwrap();
+    let live_link = root.join("live-link.html");
+    std::os::unix::fs::symlink(&live_target, &live_link).unwrap();
+    assert!(
+        policy.is_skill_source_path(&live_link),
+        "CONTROL: a symlink with an existing target in the load path must be refused"
+    );
+
+    // THE DEFECT: the target does not exist yet, so the link dangles.
+    let dangling = root.join("brief.html");
+    std::os::unix::fs::symlink(skill.join("brief.html"), &dangling).unwrap();
+    assert!(
+        policy.is_skill_source_path(&dangling),
+        "a DANGLING symlink into a skill load path was not recognised — the \
+            refusal judged where the LINK sits, not where the path leads"
+    );
+
+    // CONTROL: a dangling link landing somewhere ordinary stays writable. The
+    // fix RESOLVES links; it does not blanket-refuse unresolvable ones.
+    let ordinary_link = root.join("ordinary-link.txt");
+    std::os::unix::fs::symlink(root.join("not-yet.txt"), &ordinary_link).unwrap();
+    assert!(
+        !policy.is_skill_source_path(&ordinary_link),
+        "CONTROL: a dangling link landing outside every load path must stay writable"
+    );
+
+    // A symlink CYCLE must terminate rather than spin.
+    let a = root.join("cycle_a");
+    let b = root.join("cycle_b");
+    std::os::unix::fs::symlink(&b, &a).unwrap();
+    std::os::unix::fs::symlink(&a, &b).unwrap();
+    let _ = policy.is_skill_source_path(&a);
+}
+
+/// The SECOND call site the #356 switch covers.
+///
+/// `is_repo_control_path` used the same walk-up resolver and carries the same
+/// claim in its doc comment. Without this, that half of the change would be
+/// asserted and not graded: every existing repo-control test passes either way.
+#[test]
+#[cfg(unix)]
+fn a_dangling_symlink_into_the_repo_control_surface_is_refused() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let hooks = root.join(".git").join("hooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    let policy = WorkspacePolicy::trusted_local(&root);
+
+    // CONTROL: named directly, it was always refused.
+    assert!(
+        policy.is_repo_control_path(&hooks.join("pre-commit")),
+        "CONTROL: the hook path named directly must be refused"
+    );
+
+    // THE DEFECT: reached through a link whose target does not exist yet.
+    let link = root.join("notes.md");
+    std::os::unix::fs::symlink(hooks.join("pre-commit"), &link).unwrap();
+    assert!(
+        policy.is_repo_control_path(&link),
+        "a DANGLING symlink into `.git/hooks` was not recognised as a repo-control \
+         write — the doc comment above this predicate claims otherwise"
+    );
+
+    // CONTROL: an ordinary dangling link in the workspace stays writable.
+    let ordinary = root.join("draft.md");
+    std::os::unix::fs::symlink(root.join("not-yet.md"), &ordinary).unwrap();
+    assert!(
+        !policy.is_repo_control_path(&ordinary),
+        "CONTROL: a dangling link landing outside the control surface must stay writable"
+    );
+}
+
+/// FerroxLabs/wayland-core#383 — the #356 dangling-symlink escape, still live
+/// on the THIRD predicate in this file.
+///
+/// `is_project_secret` kept `canon_for_scope` when #356 moved
+/// `is_skill_source_path` and `is_repo_control_path` onto
+/// `canon_existing_ancestor`, so the identical shape passed straight through a
+/// security refusal. `std::fs::canonicalize` fails on a link whose target does
+/// not exist yet; `canon_for_scope` then falls back to canonicalizing the
+/// PARENT and re-attaching the leaf, which judges where the LINK sits rather
+/// than where the write would land.
+///
+/// The direction that matters is the WRITE. A secret that does not exist has
+/// nothing to leak, so the read direction was never open — but a `Full`-posture
+/// channel / remote session installs `SecretDenyFs` with NO `SandboxedFs`
+/// wrapper to pre-canonicalize, so a `Write` of `<root>/notes.txt` that lands
+/// as `<root>/.env` through a dangling link reached the disk.
+///
+/// All three arms the ticket measured are asserted here, plus two controls, so
+/// a change that simply refused every symlink cannot pass this test.
+#[test]
+#[cfg(unix)]
+fn a_dangling_symlink_to_a_not_yet_existing_project_secret_is_refused() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let policy = WorkspacePolicy::contained(&root);
+
+    // ARM 1 (CONTROL, green before the fix): the direct name.
+    let direct = root.join(".env");
+    assert!(
+        policy.is_project_secret(&direct),
+        "CONTROL: a project secret named directly must be refused"
+    );
+
+    // ARM 2 (CONTROL, green before the fix): a link whose target EXISTS
+    // canonicalizes, so it was already caught.
+    std::fs::write(&direct, b"TOKEN=live\n").unwrap();
+    let live_link = root.join("live-notes.txt");
+    std::os::unix::fs::symlink(&direct, &live_link).unwrap();
+    assert!(
+        policy.is_project_secret(&live_link),
+        "CONTROL: a benign-named link to an EXISTING project secret must be refused"
+    );
+
+    // ARM 3 (THE DEFECT): the same link with the target not yet created. This
+    // is the write a Full-posture session performs when it creates the secret.
+    std::fs::remove_file(&direct).unwrap();
+    assert!(
+        !direct.exists(),
+        "the point of this arm is that .env is absent"
+    );
+    let dangling = root.join("notes.txt");
+    std::os::unix::fs::symlink(&direct, &dangling).unwrap();
+    assert!(
+        policy.is_project_secret(&dangling),
+        "a DANGLING symlink to a not-yet-existing project secret was not refused \
+         — the predicate judged where the LINK sits, not where the write lands"
+    );
+
+    // CONTROL: a dangling link landing on an ORDINARY name stays writable. The
+    // fix resolves links; it does not blanket-refuse unresolvable ones.
+    let ordinary = root.join("ordinary-link.txt");
+    std::os::unix::fs::symlink(root.join("not-yet.txt"), &ordinary).unwrap();
+    assert!(
+        !policy.is_project_secret(&ordinary),
+        "CONTROL: a dangling link to an ordinary path must stay writable"
+    );
+
+    // CONTROL: the #667 scope carve-out survives. A host secret OUTSIDE the
+    // workspace root is deliberately NOT a project secret, dangling or not.
+    let outside = tempfile::tempdir().expect("outside");
+    let outside_root = std::fs::canonicalize(outside.path()).unwrap();
+    let escape = root.join("escape.txt");
+    std::os::unix::fs::symlink(outside_root.join(".env"), &escape).unwrap();
+    assert!(
+        !policy.is_project_secret(&escape),
+        "CONTROL: a secret outside the workspace root stays outside this predicate"
+    );
+}
+
+/// #383 c3 — the SECOND predicate `SecretDenyFs::guard` asks must resolve the
+/// same way, or the guard answers two different questions about where one path
+/// lands.
+///
+/// Without this the resolver switch would be graded on `is_project_secret`
+/// alone and `is_vcs_content_store` would keep the weaker one: a `Write` that
+/// lands inside `.git/objects` through a dangling link would be refused by
+/// neither predicate, which is #244's own gap re-opened through #356's shape.
+#[test]
+#[cfg(unix)]
+fn a_dangling_symlink_into_a_vcs_content_store_is_refused() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    std::fs::create_dir_all(root.join(".git").join("objects").join("ab")).unwrap();
+    let policy = WorkspacePolicy::contained(&root);
+
+    // CONTROL: named directly, always refused.
+    let direct = root.join(".git").join("objects").join("ab").join("cdef");
+    assert!(
+        policy.is_vcs_content_store(&direct),
+        "CONTROL: an object path named directly must be refused"
+    );
+
+    // THE DEFECT: the object does not exist yet and is reached through a link.
+    let dangling = root.join("obj.bin");
+    std::os::unix::fs::symlink(&direct, &dangling).unwrap();
+    assert!(
+        policy.is_vcs_content_store(&dangling),
+        "a DANGLING symlink into `.git/objects` was not recognised as a content \
+         store — the predicate judged where the LINK sits"
+    );
+
+    // CONTROL: `.git/HEAD` and `.git/refs` stay readable, so this is not
+    // passing because everything under `.git` became a store.
+    assert!(
+        !policy.is_vcs_content_store(&root.join(".git").join("HEAD")),
+        "CONTROL: `.git/HEAD` must stay readable (the `git rev-parse` carve-out)"
+    );
+}
+
+/// A line that opens a function body — the boundary
+/// [`every_weak_resolver_site_states_which_resolver_and_why`] stops its
+/// look-back at.
+fn is_fn_signature(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with("//") {
+        return false;
+    }
+    trimmed.starts_with("fn ")
+        || trimmed.starts_with("async fn ")
+        || (trimmed.starts_with("pub") && trimmed.contains(" fn "))
+}
+
+/// FerroxLabs/wayland-core#383 c3 — every REMAINING `canon_for_scope` call site
+/// in this file states which resolver it uses and why.
+///
+/// #356 moved two predicates onto `canon_existing_ancestor` and its ledger note
+/// asserted the file then held one resolver. It did not: `is_project_secret`
+/// and `is_vcs_content_store` — both halves of a security refusal — kept the
+/// weaker one, seventy lines away, with nothing at either site to say a choice
+/// had been made. #383 moved those two as well. The sites that remain are
+/// advisory mirrors and `$HOME` lookups where the weak resolver is correct, and
+/// this test is what stops the NEXT author reintroducing the trap by picking
+/// whichever resolver is nearer.
+///
+/// A prose rule in a doc comment does not do this. "A comment is not a guard":
+/// the same class was documented once already and the next call site repeated
+/// it anyway.
+/// FerroxLabs/wayland-core#356 c4 — the SAME obligation on the OTHER resolver.
+///
+/// c4 reads: "If both resolvers remain, the reason each call site picked one is
+/// stated AT the call site." Both do remain, so the obligation is symmetric,
+/// and grading only the weak one graded half a sentence: a reader standing at a
+/// `canon_existing_ancestor` call could no more see that a choice had been made
+/// than a reader standing at a `canon_for_scope` one. Driven by the same
+/// enclosing-function instrument, from a table, so a THIRD resolver is one row.
+fn resolver_sites_without_a_reason(
+    source: &str,
+    needle: &str,
+    marker: &str,
+) -> (usize, Vec<String>) {
+    let lines: Vec<&str> = source.lines().collect();
+    let mut sites = 0usize;
+    let mut unlabelled: Vec<String> = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//") || !line.contains(needle) {
+            continue;
+        }
+        if line.contains(&format!("fn {needle}")) {
+            continue;
+        }
+        sites += 1;
+        let start = lines[..index]
+            .iter()
+            .rposition(|above| is_fn_signature(above))
+            .map_or(0, |at| at + 1);
+        if !lines[start..index]
+            .iter()
+            .any(|above| above.contains(marker))
+        {
+            unlabelled.push(format!("line {}: {}", index + 1, trimmed));
+        }
+    }
+    (sites, unlabelled)
+}
+
+#[test]
+fn every_strong_resolver_site_states_which_resolver_and_why() {
+    const SOURCE: &str = include_str!("../workspace_policy.rs");
+
+    let (sites, unlabelled) = resolver_sites_without_a_reason(
+        SOURCE,
+        "canon_existing_ancestor(",
+        "resolver: `canon_existing_ancestor`",
+    );
+    // Known-positive control, and the anti-vacuity one: an instrument that
+    // found no sites would pass on a file with none.
+    assert!(
+        sites >= 5,
+        "the scan found only {sites} `canon_existing_ancestor` call sites — the instrument is looking at the wrong thing"
+    );
+    assert!(
+        unlabelled.is_empty(),
+        "core#356 c4: these `canon_existing_ancestor` call sites do not say          which resolver they use or why. Both resolvers remain in this file,          so the obligation is symmetric with the `canon_for_scope` one:\n{}",
+        unlabelled.join("\n")
+    );
+}
+
+#[test]
+fn every_weak_resolver_site_states_which_resolver_and_why() {
+    const SOURCE: &str = include_str!("../workspace_policy.rs");
+    const MARKER: &str = "resolver: `canon_for_scope`";
+
+    let lines: Vec<&str> = SOURCE.lines().collect();
+    let mut sites = 0usize;
+    let mut unlabelled: Vec<String> = Vec::new();
+
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        // Comments (including the doc comment on the function itself) name the
+        // resolver without calling it.
+        if trimmed.starts_with("//") {
+            continue;
+        }
+        if !line.contains("canon_for_scope(") {
+            continue;
+        }
+        // Its own definition.
+        if line.contains("fn canon_for_scope(") {
+            continue;
+        }
+        sites += 1;
+        // Scoped to the ENCLOSING function, not a fixed line count. A fixed
+        // window was the first shape of this test and it was VACUOUS: deleting
+        // the note from `is_session_read_granted` still passed, because twelve
+        // lines up sat the note belonging to `is_read_reachable` next door.
+        // The instrument has to stop where the function does.
+        let start = lines[..index]
+            .iter()
+            .rposition(|above| is_fn_signature(above))
+            .map_or(0, |at| at + 1);
+        if !lines[start..index]
+            .iter()
+            .any(|above| above.contains(MARKER))
+        {
+            unlabelled.push(format!("line {}: {}", index + 1, trimmed));
+        }
+    }
+
+    // Known-positive control. An `include_str!` that pulled the wrong file, or
+    // a rename of the resolver, would find nothing and this test would pass by
+    // scanning air.
+    assert!(
+        sites >= 5,
+        "the scan found only {sites} `canon_for_scope` call sites — the \
+         instrument is looking at the wrong thing"
+    );
+    assert!(
+        SOURCE.contains("fn canon_for_scope("),
+        "known-positive control: the resolver's own definition must be in the \
+         file being scanned"
+    );
+    assert!(
+        unlabelled.is_empty(),
+        "these `canon_for_scope` call sites do not say which resolver they use \
+         or why — add a `{MARKER}` note, or move them onto \
+         `canon_existing_ancestor`:\n{}",
+        unlabelled.join("\n")
+    );
+
+    // The two predicates #383 moved must NOT have come back.
+    for guard in [
+        "is_project_secret_resolved(&canon_for_scope",
+        "is_vcs_content_store_resolved(&canon_for_scope",
+    ] {
+        assert!(
+            !SOURCE.contains(guard),
+            "a `SecretDenyFs` guard predicate is back on the weak resolver: {guard}"
+        );
+    }
+}
+
+/// One function this file DEFINES whose return type is a SINGLE path.
+struct SinglePathFn {
+    name: String,
+    line: usize,
+    ret: String,
+}
+
+/// Every `-> PathBuf` / `-> Option<PathBuf>` / `-> Result<PathBuf, _>`
+/// function `source` defines, plus the total number of function signatures
+/// walked (the parser's own anti-vacuity number).
+///
+/// Signatures are joined up to the body brace rather than read one line at a
+/// time, because `cargo fmt` breaks a four-argument signature across five
+/// lines and a line-at-a-time reader would truncate it at the first comma and
+/// see no return type at all.
+fn single_path_returning_fns(source: &str) -> (Vec<SinglePathFn>, usize) {
+    let lines: Vec<&str> = source.lines().collect();
+    let mut found: Vec<SinglePathFn> = Vec::new();
+    let mut signatures = 0usize;
+
+    for (index, line) in lines.iter().enumerate() {
+        if !is_fn_signature(line) {
+            continue;
+        }
+        signatures += 1;
+
+        let mut head = String::new();
+        for candidate in lines[index..].iter().take(12) {
+            head.push(' ');
+            head.push_str(candidate.trim());
+            if candidate.contains('{') || candidate.trim_end().ends_with(';') {
+                break;
+            }
+        }
+        let head = &head[..head.find('{').unwrap_or(head.len())];
+
+        let Some(after_fn) = head.split_once("fn ") else {
+            continue;
+        };
+        let name: String = after_fn
+            .1
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        if name.is_empty() {
+            continue;
+        }
+        // The RETURN arrow is the last one before the body: an argument of
+        // type `impl Fn(&Path) -> bool` puts an arrow inside the parameter
+        // list, and reading the FIRST arrow would classify
+        // `vcs_store_entry` by its callback instead of by its result.
+        let Some(arrow) = head.rfind("->") else {
+            continue;
+        };
+        let ret = head[arrow + 2..].trim().trim_end_matches(',').trim();
+        // Return-type SPELLINGS are not a closed alphabet. This was a list of
+        // four, and `std::io::Result<PathBuf>` -- the shape `std::fs::canonicalize`
+        // itself returns, already used in workspace_policy.rs -- was not on it, so
+        // a third resolver spelled the ordinary way passed the gate in silence
+        // (core#402 c1, refuted on its first grading). A gate keyed to a finite
+        // list of type spellings is the same defect as the gate keyed to a finite
+        // list of NAMES that this issue exists to close, one level along.
+        //
+        // Structural instead: any return type that mentions `PathBuf` as a whole
+        // token returns a path, unless it is plainly a COLLECTION of paths, which
+        // is a different thing from a resolver. Guessing wrong on the collection
+        // list fails CLOSED -- the function joins the inventory and has to be
+        // documented -- and that is the only direction this gate may err in.
+        let mentions_path = ret
+            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .any(|tok| tok == "PathBuf");
+        let is_collection = [
+            "Vec<",
+            "VecDeque<",
+            "HashSet<",
+            "BTreeSet<",
+            "HashMap<",
+            "BTreeMap<",
+            "&[",
+            "Box<[",
+        ]
+        .iter()
+        .any(|p| ret.contains(p));
+        let single_path = mentions_path && !is_collection;
+        if !single_path {
+            continue;
+        }
+        found.push(SinglePathFn {
+            name,
+            line: index + 1,
+            ret: ret.to_string(),
+        });
+    }
+
+    (found, signatures)
+}
+
+/// A parsed `// INVENTORY:` row.
+struct InventoryRow {
+    name: String,
+    class: String,
+    reason: String,
+    line: usize,
+}
+
+fn resolver_inventory(source: &str) -> Vec<InventoryRow> {
+    let lines: Vec<&str> = source.lines().collect();
+    let mut rows: Vec<InventoryRow> = Vec::new();
+
+    for (index, line) in lines.iter().enumerate() {
+        let Some(rest) = line.trim_start().strip_prefix("// INVENTORY: ") else {
+            continue;
+        };
+        let Some((name, tail)) = rest.split_once(" = ") else {
+            continue;
+        };
+        let Some((class, first)) = tail.split_once(": ") else {
+            continue;
+        };
+        // A reason wraps. Read the continuation lines too, or the gate would
+        // grade the width of the comment column instead of the reason.
+        let mut reason = first.trim().to_string();
+        for below in lines[index + 1..].iter() {
+            let trimmed = below.trim_start();
+            let Some(more) = trimmed.strip_prefix("// ") else {
+                break;
+            };
+            if more.starts_with("INVENTORY:") || more.starts_with("====") {
+                break;
+            }
+            reason.push(' ');
+            reason.push_str(more.trim());
+        }
+        rows.push(InventoryRow {
+            name: name.trim().to_string(),
+            class: class.trim().to_string(),
+            reason,
+            line: index + 1,
+        });
+    }
+
+    rows
+}
+
+/// FerroxLabs/wayland-core#402 c1 — a path-resolving function added to
+/// `workspace_policy.rs` that is not one of the resolvers already named FAILS
+/// A GATE instead of arriving silently.
+///
+/// core#356 c4's two gates ask, of a name they were GIVEN, whether its call
+/// sites explain themselves. That is the right question and it is blind in the
+/// one direction that matters: a third resolver is a name nobody gave them, so
+/// its sites need say nothing and both gates stay green. #402 is that
+/// blindness, and it is the same shape as core#377 c2 — a gate over one
+/// SPELLING replaced by a gate over a closed alphabet.
+///
+/// The closed alphabet here is structural rather than lexical: **what this file
+/// defines**. Every function whose return type is a single path is enumerated
+/// from the source and matched against the `RESOLVER INVENTORY` block, in BOTH
+/// directions — a function with no row fails, and a row with no function fails.
+/// A `resolver` row then carries core#356 c4's call-site obligation
+/// automatically, so a third resolver is one row and not a fourth hand-written
+/// test.
+///
+/// Its own red arm, run rather than modelled (see the ledger for #402 c1): add
+/// `fn canon_third(path: &Path) -> PathBuf`, call it from a predicate, and this
+/// test names `canon_third` while the two site gates pass.
+#[test]
+fn resolver_inventory_covers_every_pathbuf_returning_fn() {
+    const SOURCE: &str = include_str!("../workspace_policy.rs");
+
+    let (defined, signatures) = single_path_returning_fns(SOURCE);
+    let rows = resolver_inventory(SOURCE);
+
+    // ---- anti-vacuity controls, all of which fail CLOSED -------------------
+    // A parser that silently stopped reading, or an `include_str!` pointed at
+    // the wrong file, finds nothing — and nothing compared against nothing is
+    // the vacuous pass this whole test exists to prevent.
+    assert!(
+        SOURCE.contains("fn canon_existing_ancestor(") && SOURCE.contains("fn canon_for_scope("),
+        "known-positive control: `include_str!` did not pull workspace_policy.rs"
+    );
+    assert!(
+        signatures >= 100,
+        "the signature walker saw only {signatures} functions in \
+         workspace_policy.rs — it is not reading the file"
+    );
+    assert!(
+        defined.len() >= 12,
+        "the scan found only {} single-path-returning functions — the return \
+         type parser is looking at the wrong thing: {defined:?}",
+        defined.len(),
+        defined = defined
+            .iter()
+            .map(|f| format!("{} -> {}", f.name, f.ret))
+            .collect::<Vec<_>>()
+    );
+    for control in ["canon_existing_ancestor", "canon_for_scope", "canon"] {
+        assert!(
+            defined.iter().any(|f| f.name == control),
+            "known-positive control: `{control}` returns a single path and the \
+             scan did not find it"
+        );
+    }
+    assert!(
+        !rows.is_empty(),
+        "the RESOLVER INVENTORY block of workspace_policy.rs is missing or \
+         its rows no longer parse — the gate would compare the file against \
+         nothing (FerroxLabs/wayland-core#402 c1)"
+    );
+
+    // ---- every row is a DECISION, not a placeholder -------------------------
+    for row in &rows {
+        assert!(
+            row.class == "resolver" || row.class == "helper",
+            "line {}: `{}` is classified `{}` — the inventory admits exactly \
+             `resolver` or `helper`",
+            row.line,
+            row.name,
+            row.class
+        );
+        assert!(
+            row.reason.len() >= 20,
+            "line {}: `{}` carries no reason. #402 c3 asks for the reason \
+             WHERE THE GATE READS IT, so a later reader can tell a decision \
+             from a default",
+            row.line,
+            row.name
+        );
+    }
+    let mut names: Vec<&str> = rows.iter().map(|row| row.name.as_str()).collect();
+    names.sort_unstable();
+    let before = names.len();
+    names.dedup();
+    assert_eq!(
+        before,
+        names.len(),
+        "the RESOLVER INVENTORY block classifies a function twice; two rows \
+         can disagree and the gate would read whichever it saw first"
+    );
+
+    // ---- the gate itself, in BOTH directions --------------------------------
+    let missing: Vec<String> = defined
+        .iter()
+        .filter(|f| !rows.iter().any(|row| row.name == f.name))
+        .map(|f| format!("{} (line {}) -> {}", f.name, f.line, f.ret))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "these `-> PathBuf` functions are not in the RESOLVER INVENTORY block \
+         of workspace_policy.rs — classify each as `resolver` or `helper` with \
+         its reason, and if it is a resolver give its call sites the #356 c4 \
+         note (FerroxLabs/wayland-core#402 c1):\n{}",
+        missing.join("\n")
+    );
+    let stale: Vec<String> = rows
+        .iter()
+        .filter(|row| !defined.iter().any(|f| f.name == row.name))
+        .map(|row| format!("{} (inventory line {})", row.name, row.line))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "these RESOLVER INVENTORY rows name a function workspace_policy.rs no \
+         longer defines with a single-path return type. An inventory that \
+         outlives its code is how #402's ledger grade outlived its own \
+         evidence:\n{}",
+        stale.join("\n")
+    );
+
+    // ---- a `resolver` row CARRIES core#356 c4, from the table ----------------
+    let resolvers: Vec<&InventoryRow> = rows.iter().filter(|row| row.class == "resolver").collect();
+    assert!(
+        resolvers.len() >= 2,
+        "the inventory names {} resolvers. Both `canon_for_scope` and \
+         `canon_existing_ancestor` are still in this file and both are still \
+         reachable, so a table with fewer rows than that has been weakened \
+         rather than corrected",
+        resolvers.len()
+    );
+    for row in resolvers {
+        let (sites, unlabelled) = resolver_sites_without_a_reason(
+            SOURCE,
+            &format!("{}(", row.name),
+            &format!("resolver: `{}`", row.name),
+        );
+        assert!(
+            sites >= 1,
+            "`{}` is classified `resolver` but has no call site in this file — \
+             either it is dead, or the needle no longer matches and this row's \
+             obligation is being graded against air",
+            row.name
+        );
+        assert!(
+            unlabelled.is_empty(),
+            "core#356 c4, reached through the #402 inventory rather than \
+             through a literal name: these `{}` call sites do not say which \
+             resolver they use or why:\n{}",
+            row.name,
+            unlabelled.join("\n")
+        );
+    }
+}
+
+/// FerroxLabs/wayland-core#394 c3 / #396 c3 / #398 c3 — the INSTRUMENT for the
+/// per-traversed-directory cost `grep_policy::scope_for` pays.
+///
+/// Not an assertion: a syscall count cannot be asserted inside the process
+/// making the syscalls. This runs `scope_for` over a workspace of
+/// `WL_PROBE_DIRS` ordinary directories so the caller can `strace -f -c` it at
+/// two or more sizes; the DIFFERENCE divided by the difference in directories
+/// cancels every one-off, the harness's own startup included.
+///
+/// Its own known-positive control is the `1 passed` line: a probe that fails to
+/// build its fixture, or that `scope_for` refuses outright, makes no syscalls
+/// and would report a flattering zero.
+///
+/// ```text
+/// for n in 100 1100 2100; do
+///   WL_PROBE_DIRS=$n strace -f -c -o /tmp/p.$n \
+///     cargo test -p wcore-tools --lib -- --exact --nocapture \
+///     workspace_policy::tests::probe_vcs_content_stores_per_traversed_directory
+/// done
+/// ```
+#[test]
+fn probe_vcs_content_stores_per_traversed_directory() {
+    let Ok(count) = std::env::var("WL_PROBE_DIRS") else {
+        // Not the probe run: keep the test cheap and still meaningful as a
+        // smoke test of the traversal it measures.
+        return;
+    };
+    let count: usize = count.parse().expect("WL_PROBE_DIRS must be a number");
+    let dir = tempfile::tempdir().expect("workspace");
+    let root = std::fs::canonicalize(dir.path()).expect("canonical root");
+    std::fs::create_dir_all(root.join(".git/objects/ab")).unwrap();
+    std::fs::write(root.join(".git/objects/ab/cdef"), b"x").unwrap();
+    for i in 0..count {
+        let leaf = root.join(format!("pkg{i}"));
+        std::fs::create_dir_all(&leaf).unwrap();
+        std::fs::write(leaf.join("main.rs"), b"fn main() {}\n").unwrap();
+    }
+    let policy = Arc::new(WorkspacePolicy::contained(&root));
+    // Warm the policy's one-off state OUTSIDE the measured traversal, so the
+    // figure is the steady-state per-directory cost this criterion is about
+    // and not a cold one-off divided by the fixture size.
+    assert!(!policy.denies_read_content(&root.join("pkg0/main.rs")));
+    // `WL_PROBE_REPS` repetitions of the traversal. Differencing two REP counts
+    // at the SAME directory count cancels the arm-4 one-off walk, which is
+    // itself O(directories) and would otherwise be indistinguishable from a
+    // per-traversal per-directory cost in a single-invocation measurement.
+    let reps: usize = std::env::var("WL_PROBE_REPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1);
+    let mut scope = crate::grep_policy::scope_for(&root, &root, Some(Arc::clone(&policy)));
+    for _ in 1..reps {
+        scope = crate::grep_policy::scope_for(&root, &root, Some(Arc::clone(&policy)));
+    }
+    // Known-positive control: the traversal must have SEEN the store, or a
+    // zero-syscall answer would look like an efficiency win.
+    assert!(
+        !scope.admits(&root.join("pkg0/main.rs"))
+            || scope.is_store(&root.join(".git/objects/ab/cdef")),
+        "probe control: `scope_for` must still classify the root store, or the \
+         syscall figure below is measuring a traversal that did nothing"
+    );
+}
+
+/// FerroxLabs/wayland-core#394 c3 / #396 c3 / #398 c3 — the instrument that
+/// produced the **5 syscalls/directory** those three criteria are pinned to,
+/// ported verbatim in SHAPE so the bar can be measured rather than argued
+/// about.
+///
+/// The pin has been unmeetable for two lanes, and the reason is that the probe
+/// it names was REDEFINED under the same name. At `875bf32cb`, where 5.000 was
+/// read, `probe_vcs_content_stores_per_traversed_directory` looped
+/// `vcs_content_stores(&ordinary_dir)` `WL_PROBE_DIRS` times — its own doc
+/// comment says so: *"`grep_policy::scope_for` calls it in. `WL_PROBE_DIRS`
+/// sets the loop count"*. It never called `scope_for`, which did not yet exist
+/// on that tree under that name. So 5.000 is the cost of the PREDICATE
+/// `scope_for` pays once per directory it traverses.
+///
+/// The probe carrying that name today measures something else: a whole
+/// `scope_for` traversal of `WL_PROBE_DIRS` real directories, divided by the
+/// directory count — `opendir`/`getdents`/`statx` of the walk itself included.
+/// That is why it reads ~35 and why 35 was being compared with 5. Two
+/// questions, one name.
+///
+/// This is the first question, asked of today's code. `scope_for`'s
+/// `filter_entry` calls `policy.denies_read_content(entry.path())` once per
+/// traversed directory, so that call IS what `vcs_content_stores(&dir)` was:
+///
+/// ```text
+/// for n in 100 1100; do
+///   WL_PROBE_DIRS=$n strace -f -c -o /tmp/q.$n \
+///     cargo test -p wcore-tools --lib -- --exact --nocapture \
+///     workspace_policy::tests::probe_grep_scope_predicate_per_traversed_directory
+/// done
+/// ```
+///
+/// and `(syscalls(1100) - syscalls(100)) / 1000` is the per-directory figure,
+/// with every one-off — process startup, the fixture, the arm-2 scan and arm
+/// 4's single walk — cancelled by the subtraction.
+///
+/// Two known-positive controls in the same run, because a probe that answers
+/// nothing makes no syscalls and reports a flattering zero: the root store must
+/// still be REFUSED, and the ordinary directory must still be ADMITTED. The
+/// second is also the wrong-refusal control — a predicate that had started
+/// refusing everything would be cheap and useless.
+#[test]
+fn probe_grep_scope_predicate_per_traversed_directory() {
+    let n: usize = std::env::var("WL_PROBE_DIRS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(100);
+
+    let tmp = tempfile::tempdir().expect("workspace");
+    let root = std::fs::canonicalize(tmp.path()).expect("canonical root");
+    std::fs::create_dir_all(root.join(".git/objects/ab")).unwrap();
+    std::fs::write(root.join(".git/objects/ab/cdef"), b"x").unwrap();
+    let dir = root.join("src/deep/deeper");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let policy = WorkspacePolicy::contained(&root);
+
+    // CONTROL, known-positive: the store must still be refused. This also warms
+    // every one-off the subtraction would otherwise have to cancel.
+    assert!(
+        policy.denies_read_content(&root.join(".git/objects/ab/cdef")),
+        "probe control: the root store must still be refused, or the figure \
+         below prices a predicate that answers nothing"
+    );
+    // CONTROL, wrong-refusal: the ordinary directory `scope_for` traverses must
+    // still be admitted.
+    assert!(
+        !policy.denies_read_content(&dir),
+        "probe control: an ordinary traversed directory must stay admitted"
+    );
+
+    let mut sink = 0usize;
+    for _ in 0..n {
+        sink += usize::from(policy.denies_read_content(&dir));
+        sink += vcs_content_stores(&dir).len();
+    }
+    assert_eq!(
+        sink, 0,
+        "probe control: the loop must have asked the real predicates n times"
+    );
+}
+
+/// DECOMPOSITION arm (lane f13-s3-vcs-gate): the SECOND of the two calls
+/// `grep_policy::scope_for` makes per traversed directory, alone. Subtracting
+/// this from `probe_grep_scope_predicate_per_traversed_directory` isolates the
+/// first (`denies_read_content`), which is the half that moved.
+#[test]
+fn probe_vcs_content_stores_alone_per_traversed_directory() {
+    let n: usize = std::env::var("WL_PROBE_DIRS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(100);
+    let tmp = tempfile::tempdir().expect("workspace");
+    let root = std::fs::canonicalize(tmp.path()).expect("canonical root");
+    std::fs::create_dir_all(root.join(".git/objects/ab")).unwrap();
+    std::fs::write(root.join(".git/objects/ab/cdef"), b"x").unwrap();
+    let dir = root.join("src/deep/deeper");
+    std::fs::create_dir_all(&dir).unwrap();
+    assert!(
+        !vcs_content_stores(&root).is_empty(),
+        "probe control: the scan must find <root>/.git/objects"
+    );
+    assert!(
+        vcs_content_stores(&dir).is_empty(),
+        "probe control: an ordinary directory names no store"
+    );
+    let mut sink = 0usize;
+    for _ in 0..n {
+        sink += vcs_content_stores(&dir).len();
+    }
+    assert_eq!(sink, 0, "probe control: the loop must have run n times");
+}
+
+// ===========================================================================
+// FerroxLabs/wayland-core#384 c3 — no documented-but-uncalled enforcement
+// predicate remains in workspace_policy.rs.
+// ===========================================================================
+
+/// Doc-comment phrases that constitute an ENFORCEMENT CLAIM: the sentence a
+/// reader would take as "this is the check that does the refusing".
+///
+/// `is_session_write_granted` said "the predicate `SandboxedFs`'s mutating
+/// operations ask" and had no production call site at all. The class is not
+/// "an unused function" — dead code is a lint's job — it is a function whose
+/// DOCUMENTATION points a future author at a check that nothing runs.
+/// A SHAPE, not a list of the sites that exist today. This file's own
+/// convention for "this is the one place the question is answered" is a
+/// capitalised definite article — `THE read-content refusal`, `THE exec-time
+/// shell gate predicate`, `THE ONE ANSWER` — and the obligation forms are
+/// `must not`, `must be REFUSED`, `must stay denied`. Enumerating the current
+/// predicates instead would grade the instances rather than the class, which
+/// is how the previous three sweeps of this kind were refuted.
+const ENFORCEMENT_CLAIMS: &[&str] = &[
+    "THE ",
+    "the predicate ",
+    "must not ",
+    "must be REFUSED",
+    "must stay denied",
+];
+
+/// Every `pub fn` in `source` whose doc block makes an enforcement claim and
+/// whose name appears NOWHERE in `callers`.
+///
+/// Pure, so the known-positive controls below can drive it with a synthetic
+/// source instead of hoping the real tree happens to contain an example.
+fn documented_but_uncalled(source: &str, callers: &str) -> Vec<String> {
+    let mut doc = String::new();
+    let mut orphans = Vec::new();
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("///") {
+            doc.push_str(rest);
+            doc.push('\n');
+            continue;
+        }
+        if trimmed.starts_with("//") || trimmed.starts_with("#[") {
+            continue;
+        }
+        let is_fn = trimmed.starts_with("pub fn ") || trimmed.starts_with("pub async fn ");
+        if is_fn && ENFORCEMENT_CLAIMS.iter().any(|claim| doc.contains(claim)) {
+            let name = trimmed
+                .trim_start_matches("pub ")
+                .trim_start_matches("async ")
+                .trim_start_matches("fn ")
+                .split('(')
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            if !name.is_empty() && !callers.contains(&format!("{name}(")) {
+                orphans.push(name);
+            }
+        }
+        if !trimmed.is_empty() {
+            doc.clear();
+        }
+    }
+    orphans
+}
+
+/// Every production `.rs` under `crates/*/src`, concatenated — the corpus a
+/// call site must appear in.
+///
+/// `tests.rs` and anything under a `tests/` directory are excluded on purpose:
+/// a predicate whose only callers are its own tests is exactly the shape this
+/// gate exists to catch, and counting them would make it pass vacuously.
+/// LIMITATION, stated rather than hidden: an inline `#[cfg(test)]` module in
+/// some OTHER crate's `src` file would count as a caller. No such caller exists
+/// today, and the alternative is parsing Rust in a test.
+fn production_call_sites() -> String {
+    let crates_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates/wcore-tools has a parent")
+        .to_path_buf();
+    let mut corpus = String::new();
+    let mut stack = vec![crates_dir];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if path
+                    .file_name()
+                    .is_some_and(|n| n == "tests" || n == "target")
+                {
+                    continue;
+                }
+                stack.push(path);
+                continue;
+            }
+            if path.extension().is_some_and(|e| e == "rs")
+                && !path.ends_with("workspace_policy.rs")
+                && path.file_name().is_none_or(|n| n != "tests.rs")
+                && let Ok(body) = std::fs::read_to_string(&path)
+            {
+                corpus.push_str(&body);
+            }
+        }
+    }
+    corpus
+}
+
+#[test]
+fn no_documented_enforcement_predicate_is_uncalled() {
+    const SOURCE: &str = include_str!("../workspace_policy.rs");
+
+    // ---- KNOWN-POSITIVE CONTROLS, in the same test ---------------------
+    // A gate whose detector matches nothing passes on any tree at all. These
+    // two drive the SAME function that grades the real file.
+    const FAKE: &str = "\
+/// The write sibling, and the predicate `SandboxedFs`'s mutating operations
+/// ask.
+pub fn is_totally_dead(&self, path: &Path) -> bool { true }
+
+/// The predicate the guard asks on every read.
+pub fn is_actually_called(&self, path: &Path) -> bool { true }
+
+/// An ordinary helper nobody claims enforces anything.
+pub fn unclaimed_and_uncalled(&self) -> bool { true }
+";
+    assert_eq!(
+        documented_but_uncalled(FAKE, "self.is_actually_called(&canon)"),
+        vec!["is_totally_dead".to_string()],
+        "control: the detector must flag a documented-but-uncalled predicate, \
+         must NOT flag one that has a call site, and must NOT flag a function \
+         that makes no enforcement claim"
+    );
+
+    // THE anti-vacuity control. If the claim vocabulary matched nothing in the
+    // REAL file, every assertion below would pass on any tree whatsoever — the
+    // permanently-green twin of a permanently-red gate.
+    let claimants = documented_but_uncalled(SOURCE, "");
+    assert!(
+        claimants.len() >= 8,
+        "control: the claim vocabulary matched only {claimants:?} enforcement \
+         predicates in workspace_policy.rs. This gate grades what it matches; \
+         if the file's wording moved, move ENFORCEMENT_CLAIMS with it"
+    );
+
+    let callers = production_call_sites();
+    assert!(
+        callers.len() > 500_000,
+        "control: the call-site corpus is {} bytes — the walk found almost \
+         nothing and every predicate would look uncalled",
+        callers.len()
+    );
+    assert!(
+        callers.contains("denies_read_content("),
+        "control: the corpus must contain a call site we KNOW exists, or an \
+         empty read would make this gate pass vacuously"
+    );
+
+    // ---- the real grade ------------------------------------------------
+    let orphans = documented_but_uncalled(SOURCE, &callers);
+    assert!(
+        orphans.is_empty(),
+        "core#384 c3: these predicates document themselves as enforcement \
+         points and nothing in production calls them. Either wire each one in \
+         or delete it with its doc comment, the way #384 did for \
+         is_session_write_granted: {orphans:?}"
+    );
 }

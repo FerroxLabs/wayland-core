@@ -49,10 +49,74 @@ pub enum PathValidationError {
     SystemPath(PathBuf),
     #[error("path is a UNC / network path (SMB NTLM-leak risk): {0:?}")]
     UncPath(PathBuf),
-    #[error("path uses a Windows device / verbatim namespace (\\\\.\\ or \\\\?\\): {0:?}")]
+    #[error(
+        "path uses a Windows device namespace (\\\\.\\) or a non-disk \\\\?\\ verbatim root: {0:?}"
+    )]
     DeviceOrVerbatimPath(PathBuf),
     #[error("path is not a regular file: {0:?}")]
     NonRegularFile(PathBuf),
+    #[error("path names the Windows NUL device: {0:?}")]
+    WindowsNullDevice(PathBuf),
+    #[error("path could not be inspected ({1:?}): {0:?}")]
+    Unstattable(PathBuf, std::io::ErrorKind),
+}
+
+/// #238 -- is this final path component the Windows `NUL` device?
+///
+/// **Deliberately just `NUL`.** The filed fix was the textbook one: refuse any
+/// component whose extension-stripped name is a reserved DOS device
+/// (`NUL`/`CON`/`AUX`/`PRN`/`COM1`-`COM9`/`LPT1`-`LPT9`). That fix was written,
+/// unit-tested green, and then REFUTED by measurement -- the tests were green
+/// because they encoded the same wrong assumption the guard did.
+///
+/// Measured 2026-08-18 on Windows 11 build 10.0.26200.0 / NTFS, fresh
+/// directory, .NET write + read-back + on-disk byte count + `cmd type`:
+///
+/// | name | write | read back | bytes on disk | verdict |
+/// |---|---|---|---|---|
+/// | `NUL` | throws | fail | 0 | device |
+/// | `CON` `AUX` `PRN` `COM1` `LPT1` | ok | ok | 1 | **ordinary file** |
+/// | `NUL.txt` `AUX.log` | ok | ok | 1 | **ordinary file** |
+/// | `ordinary.txt` (control) | ok | ok | 1 | ordinary file |
+///
+/// Both controls were present: `ordinary.txt` proves the probe reads normal
+/// behaviour and `NUL` proves it can still detect device behaviour, so the
+/// middle rows are real. The broad blocklist would therefore REFUSE
+/// `aux.txt`, `NUL.txt`, `COM1` and `con.json` -- addressable files holding
+/// real user data on this build. Refusing real data to close a LOW-severity
+/// read of an empty device stream is a worse trade than the gap.
+///
+/// `NUL` alone is free: no ordinary file can bear that name on Windows, so
+/// refusing it cannot refuse anything real. Trailing dots and spaces are
+/// stripped because Win32 strips them before resolving the name; the extension
+/// is NOT stripped, because the measurement says `NUL.txt` is a file.
+///
+/// On an older kernel (Server 2019/2022, build 20348) the other names are
+/// likely still devices -- the same build split as the DELETE-mask work. That
+/// residual is knowingly left open: it reads an empty stream, while the fix
+/// for it destroys data on current Windows. Do not re-file the broad guard
+/// without a measurement table for the build you are targeting.
+///
+/// Pure and string-only, so it is unit-testable on every platform; the
+/// ENFORCEMENT is Windows-gated, because `NUL` is an ordinary, legal file name
+/// on Unix and refusing it there would be the same data-refusing mistake.
+pub fn is_windows_null_device_name(component: &str) -> bool {
+    component
+        .trim_end_matches(['.', ' '])
+        .eq_ignore_ascii_case("nul")
+}
+
+/// The #238 decision with the platform as a PARAMETER.
+///
+/// There is no local Windows gate in this project, so a `#[cfg(windows)]`
+/// enforcement arm would be graded by nothing until CI. Threading the platform
+/// through means both arms -- refuse on Windows, allow on Unix -- are exercised
+/// on every host, the way the UNC guard is tested by its string form.
+fn is_windows_null_device_path(path: &Path, on_windows: bool) -> bool {
+    on_windows
+        && path
+            .file_name()
+            .is_some_and(|name| is_windows_null_device_name(&name.to_string_lossy()))
 }
 
 /// Validate an LLM-supplied path before any filesystem touch.
@@ -79,17 +143,27 @@ pub fn validate_user_path(path: &Path) -> Result<PathBuf, PathValidationError> {
         return Err(PathValidationError::UncPath(raw));
     }
 
-    // #644 (CI(Array) fix): reject the Windows device (`\\.\`) and verbatim
-    // (`\\?\...`) namespaces. On Windows a verbatim-disk path (`\\?\C:\...`) is
-    // absolute, so it would sail past the `is_absolute` guard below and be
-    // ACCEPTED — bypassing Win32 path normalization and confinement — while a
-    // device path (`\\.\PhysicalDrive0`) is a raw handle with the same
-    // unbounded-read / non-regular hazard #644 targets. Neither is a legitimate
-    // input to the legacy file tools. Reject both explicitly and portably (they
-    // are NOT UNC — `\\?\UNC\...` is already consumed as UncPath above), so the
-    // guard is enforced and unit-tested on every platform.
-    if looks_like_device_or_verbatim(path, &path_str) {
+    // #644 (CI(Array) fix): reject the Windows device namespace (`\\.\...`,
+    // e.g. `\\.\PhysicalDrive0`) — a raw handle with the same unbounded-read /
+    // non-regular hazard #644 targets — and any NON-DISK verbatim root
+    // (`\\?\GLOBALROOT\Device\...`, `\\?\Volume{...}\...`), which reach the
+    // same devices by the other spelling. Neither is a legitimate input to the
+    // legacy file tools, and neither is UNC (`\\?\UNC\...` is already consumed
+    // as UncPath above), so both are rejected explicitly and portably here.
+    //
+    // core#409 c2: the verbatim DISK form (`\\?\C:\...`) is deliberately NOT
+    // rejected — see `looks_like_device_or_nondisk_verbatim`.
+    if looks_like_device_or_nondisk_verbatim(path, &path_str) {
         return Err(PathValidationError::DeviceOrVerbatimPath(raw));
+    }
+
+    // #238: `C:\\Users\\me\\NUL` has an ordinary Disk prefix, is absolute, and
+    // is neither UNC nor a device/verbatim namespace, so every guard above
+    // passes it straight through to `CreateFileW`, which resolves it to the
+    // null device. Windows-only: see `is_windows_null_device_name` for why
+    // this is `NUL` and nothing else, and why Unix must not enforce it.
+    if is_windows_null_device_path(path, cfg!(windows)) {
+        return Err(PathValidationError::WindowsNullDevice(raw));
     }
 
     if !path.is_absolute() {
@@ -147,11 +221,22 @@ pub fn validate_user_path(path: &Path) -> Result<PathBuf, PathValidationError> {
     // forever (DoS). `fs::metadata` follows symlinks, so a symlink to such a
     // target is caught too. Only enforced when the path already exists, so a
     // not-yet-created Write/Edit target (and ordinary directories) still pass.
-    if let Ok(meta) = fs::metadata(&normalized) {
-        let ft = meta.file_type();
-        if !ft.is_file() && !ft.is_dir() {
-            return Err(PathValidationError::NonRegularFile(normalized));
+    //
+    // #238: this used to be `if let Ok(meta)`, so ANY stat failure silently
+    // SKIPPED the check and the path returned `Ok`. A guard that disappears
+    // exactly when the OS refuses to describe the target is the wrong way
+    // round. `NotFound` is the one benign failure -- it is the normal
+    // Write/Edit "leaf does not exist yet" case -- so it alone still passes;
+    // every other kind now fails closed and says which kind it was.
+    match fs::metadata(&normalized) {
+        Ok(meta) => {
+            let ft = meta.file_type();
+            if !ft.is_file() && !ft.is_dir() {
+                return Err(PathValidationError::NonRegularFile(normalized));
+            }
         }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(PathValidationError::Unstattable(normalized, err.kind())),
     }
 
     Ok(normalized)
@@ -171,8 +256,10 @@ pub fn validate_user_path(path: &Path) -> Result<PathBuf, PathValidationError> {
 /// search root:
 ///
 ///   1. No null bytes.
-///   2. No UNC / device / verbatim namespace (#644's NetNTLM-leak reasoning
-///      applies unchanged when the path is handed to `rg` instead of `fs`).
+///   2. No UNC, device or non-disk verbatim namespace (#644's NetNTLM-leak
+///      reasoning applies unchanged when the path is handed to `rg` instead of
+///      `fs`). A verbatim DISK root IS accepted — see
+///      `looks_like_device_or_nondisk_verbatim` and core#409 c2.
 ///   3. Resolve relative input against `base` (the sandbox jail root when the
 ///      caller has one, else the process cwd) and lex-normalize, so
 ///      `../../../etc/shadow` is graded as the absolute path it denotes rather
@@ -200,7 +287,7 @@ pub fn validate_search_root(
     if looks_like_unc(path, &path_str) {
         return Err(PathValidationError::UncPath(raw));
     }
-    if looks_like_device_or_verbatim(path, &path_str) {
+    if looks_like_device_or_nondisk_verbatim(path, &path_str) {
         return Err(PathValidationError::DeviceOrVerbatimPath(raw));
     }
 
@@ -264,26 +351,46 @@ fn looks_like_unc(path: &Path, s: &str) -> bool {
     wcore_config::network_path::has_unc_prefix(path)
 }
 
-/// #644: does `path`/`s` name a Windows device (`\\.\`) or verbatim (`\\?\`)
-/// namespace path (other than `\\?\UNC\...`, which `looks_like_unc` already
-/// classifies as UNC)?
+/// #644 / core#409 c2: does `path`/`s` name a Windows path the file tools must
+/// refuse on its NAMESPACE alone — the device namespace (`\\.\PhysicalDrive0`,
+/// a raw device handle) or a NON-DISK verbatim root
+/// (`\\?\GLOBALROOT\Device\...`, `\\?\Volume{...}\...`), which reach the same
+/// devices by the other spelling? Callers invoke this AFTER `looks_like_unc`,
+/// so `\\?\UNC\...` is already classified as UNC.
 ///
-/// These share the `\\` lead-in with UNC but are not remote SMB targets:
-///   * `\\?\C:\...` (verbatim disk) disables Win32 path normalization and is
-///     `is_absolute() == true` on Windows, so without this guard it would be
-///     ACCEPTED by the legacy file tools.
-///   * `\\.\PhysicalDrive0` (device namespace) is a raw device handle.
+/// **`\\?\C:\...` — the verbatim DISK form — is deliberately NOT refused.**
+/// It names an ordinary local file, and it is the form `std::fs::canonicalize`
+/// RETURNS on Windows, so it is the spelling this product's own canonical paths
+/// carry: `WorkspacePolicy::root()` is `canonicalize`d at construction, and
+/// every absolute path built by joining onto it is verbatim. Refusing it
+/// refused the product's own output. MEASURED on Windows three times before the
+/// guard itself was narrowed, each time worked around at a CALLER:
 ///
-/// Callers invoke this AFTER `looks_like_unc`, so verbatim-UNC is already
-/// handled; the `\\?\unc\` guard below is belt-and-suspenders for the standalone
-/// function. Mirrors `looks_like_unc`'s dual strategy: authoritative parsed
-/// prefix on Windows, portable normalized-string match everywhere.
-fn looks_like_device_or_verbatim(path: &Path, s: &str) -> bool {
-    // Consolidated alongside `looks_like_unc` — see the note there. Keeping
-    // the two in one module is what makes "`\\?\UNC\...` is UNC, never
-    // device/verbatim" checkable in one place instead of four.
+///   * `Refused to read \\?\F:\...\.wayland-out\results\toolu_01.txt` on
+///     Windows 11 26200 — `workspace_policy::session_output_root`, worked
+///     around there with `dunce::simplified`;
+///   * all three tests in `wcore-agent/tests/full_posture_secret_jail_test.rs`
+///     on the hosted Windows runner, worked around there with `simplified_root`;
+///   * `Refused to search \\?\C:\...\Temp\.tmpcEhD2n` — the CONTROL arm of
+///     `grep_vcs_content_store_deny`, i.e. an ORDINARY search of the session's
+///     own workspace. That is FerroxLabs/wayland-core#409 c2, and it is a
+///     user-facing wrong refusal, not a test artefact.
+///
+/// Admitting it opens nothing, because nothing downstream keys on the prefix:
+/// the Windows credential deny-list matches with `contains`, so a prefix cannot
+/// evade it; `..` is refused outright (`validate_user_path`) or lex-normalized
+/// away (`validate_search_root`) before any open; and every containment compare
+/// in `workspace_policy` canonicalizes BOTH sides, which on Windows means both
+/// are verbatim. The `\\?\` normalization-bypass hazard #644 named is real for
+/// the DEVICE spellings, which this still refuses.
+///
+/// Mirrors `looks_like_unc`'s dual strategy via the consolidated predicates in
+/// `wcore_config::network_path`: authoritative parsed prefix on Windows,
+/// portable normalized-string match everywhere, same answer on every platform.
+fn looks_like_device_or_nondisk_verbatim(path: &Path, s: &str) -> bool {
     let _ = s;
     wcore_config::network_path::has_device_or_verbatim_prefix(path)
+        && !wcore_config::network_path::has_verbatim_disk_prefix(path)
 }
 
 /// If `path` is a symlink, follow it (up to 8 hops) to an absolute,
@@ -617,6 +724,178 @@ pub(crate) fn lex_normalize(path: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
+    // --- #238: the Windows NUL device ------------------------------------
+    //
+    // Every path literal below uses FORWARD slashes on purpose. `Path` treats
+    // `\` as an ordinary character on Unix, so a backslash literal would give
+    // `file_name() == "C:\\Users\\me\\NUL"` here and the test would pass for
+    // the wrong reason. `/` is a separator on BOTH platforms.
+
+    /// The name predicate. `NUL` and its trailing-dot/space forms only --
+    /// every other reserved DOS name is an ordinary file on the build this
+    /// was measured on, and refusing them would refuse real user data.
+    #[test]
+    fn only_nul_is_treated_as_a_windows_device_name() {
+        for yes in ["NUL", "nul", "Nul", "NUL.", "NUL ", "nul. . ."] {
+            assert!(
+                is_windows_null_device_name(yes),
+                "{yes:?} must be recognised as the NUL device"
+            );
+        }
+        // MEASURED ordinary files on Windows 11 26200 -- see the predicate's
+        // doc comment. Refusing any of these is the refuted fix.
+        for no in [
+            "CON", "AUX", "PRN", "COM1", "LPT1", "con", "aux.txt", "NUL.txt", "nul.log",
+            "con.json", "NULL", "nulls", "annul", "", "n u l",
+        ] {
+            assert!(
+                !is_windows_null_device_name(no),
+                "{no:?} is an ordinary file name and must NOT be refused"
+            );
+        }
+    }
+
+    /// The enforcement decision, with the platform threaded in so BOTH arms
+    /// run on every host. There is no local Windows gate; a `#[cfg(windows)]`
+    /// test would be graded by nothing until CI.
+    #[test]
+    fn the_null_device_guard_fires_on_windows_and_only_on_windows() {
+        let device = Path::new("C:/Users/me/NUL");
+        assert!(
+            is_windows_null_device_path(device, true),
+            "on Windows this reaches CreateFileW and resolves to the null device"
+        );
+        // NEGATIVE CONTROL: `NUL` is a legal, ordinary file name on Unix.
+        // Enforcing there would be the same data-refusing mistake as the
+        // blocklist, in the other direction.
+        assert!(
+            !is_windows_null_device_path(Path::new("/home/me/NUL"), false),
+            "Unix must not refuse an ordinary file named NUL"
+        );
+        // Only the FINAL component names a device: `C:\NUL\x` is not one.
+        assert!(!is_windows_null_device_path(
+            Path::new("C:/NUL/notes.txt"),
+            true
+        ));
+        // NEGATIVE CONTROL: the measured-ordinary names, through the real
+        // path decision rather than the string predicate.
+        for ordinary in ["C:/p/CON", "C:/p/COM1", "C:/p/NUL.txt", "C:/p/aux.log"] {
+            assert!(
+                !is_windows_null_device_path(Path::new(ordinary), true),
+                "{ordinary} holds real user data on Windows 11 26200"
+            );
+        }
+    }
+
+    /// End-to-end on this host: a file literally named `NUL` must still be
+    /// readable on Unix. This is the guard-does-not-leak control, and it runs
+    /// in plain CI on Linux and macOS.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_unix_file_named_nul_is_still_accepted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let nul = dir.path().join("NUL");
+        std::fs::write(&nul, b"real user data").expect("write");
+        let validated = validate_user_path(&nul).expect("NUL is an ordinary Unix file name");
+        assert_eq!(validated.file_name().unwrap(), "NUL");
+    }
+
+    /// End-to-end on Windows. Unverified locally -- there is no Windows host
+    /// in this loop -- so it is graded by CI's windows job alone.
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_nul_path_is_refused_end_to_end() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let device = dir.path().join("NUL");
+        assert!(matches!(
+            validate_user_path(&device),
+            Err(PathValidationError::WindowsNullDevice(_))
+        ));
+        // NEGATIVE CONTROL: the measured-ordinary reserved names still work.
+        for ordinary in ["CON", "COM1", "NUL.txt", "aux.log"] {
+            let target = dir.path().join(ordinary);
+            std::fs::write(&target, b"real user data").expect("write");
+            validate_user_path(&target)
+                .unwrap_or_else(|e| panic!("{ordinary} must stay readable: {e}"));
+        }
+    }
+
+    /// A path whose `fs::metadata` fails for a NON-absence reason, in this
+    /// platform's own spelling. Returned rather than inlined so the premise
+    /// assertion below is identical on both.
+    ///
+    /// UNIX -- the original #238 red arm: a component that is a FILE rather
+    /// than a directory makes `metadata` fail with `ENOTDIR`.
+    ///
+    /// WINDOWS (FerroxLabs/wayland-core#374): that same provocation maps to
+    /// `ERROR_PATH_NOT_FOUND` (3), which Rust reports as `NotFound` -- the one
+    /// kind the guard deliberately lets through -- so the premise could not be
+    /// established and the test HARD-FAILED the nightly soak, 3 of 3 tries.
+    /// A component longer than `NAME_MAX` is used instead. MEASURED on Windows
+    /// 11 build 26200 rather than assumed, because two of the three
+    /// provocations #374 suggested do not work here:
+    ///
+    /// ```text
+    /// file-as-a-component      ERR kind=NotFound        raw=Some(3)
+    /// component of 300 chars   ERR kind=InvalidFilename raw=Some(123)
+    /// illegal character `<`    ERR kind=InvalidFilename raw=Some(123)
+    /// 392-char path, MAX_PATH  ERR kind=NotFound        raw=Some(3)
+    /// ```
+    ///
+    /// So the over-long *path* #374 proposed is `NotFound` on this build and
+    /// would not have established the premise either; the over-long
+    /// *component* does. It is preferred over the illegal-character spelling
+    /// because every character in it is a legal filename character, so no
+    /// earlier guard in `validate_user_path` can plausibly claim it first.
+    fn a_non_absence_stat_failure(dir: &Path) -> PathBuf {
+        #[cfg(not(windows))]
+        {
+            let file = dir.join("not-a-dir.txt");
+            std::fs::write(&file, b"x").expect("write");
+            file.join("child.txt")
+        }
+        #[cfg(windows)]
+        {
+            dir.join("L".repeat(300))
+        }
+    }
+
+    /// #238 RED ARM. The `NonRegularFile` guard was written `if let
+    /// Ok(meta)`, so any stat failure SKIPPED it and the path returned `Ok`,
+    /// and the path sailed through.
+    #[test]
+    fn a_path_whose_metadata_fails_for_a_reason_other_than_absence_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let through_a_file = a_non_absence_stat_failure(dir.path());
+
+        let err = std::fs::metadata(&through_a_file).unwrap_err();
+        assert_ne!(
+            err.kind(),
+            std::io::ErrorKind::NotFound,
+            "premise: this must be a NON-absence stat failure, got {err:?}"
+        );
+
+        let refusal = validate_user_path(&through_a_file)
+            .expect_err("a target the OS refuses to describe must not be waved through");
+        assert!(
+            matches!(refusal, PathValidationError::Unstattable(_, _)),
+            "expected Unstattable, got {refusal:?}"
+        );
+    }
+
+    /// NEGATIVE CONTROL -- must pass in BOTH arms. A Write/Edit target whose
+    /// leaf does not exist yet is the normal case and must stay allowed.
+    #[test]
+    fn a_not_yet_created_write_target_is_still_allowed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("new-file.txt");
+        assert_eq!(
+            std::fs::metadata(&target).unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
+        validate_user_path(&target).expect("a nonexistent leaf under a real dir must be allowed");
+    }
+
     #[test]
     fn relative_path_rejected() {
         let err = validate_user_path(Path::new("relative/file.txt")).unwrap_err();
@@ -689,20 +968,91 @@ mod tests {
     #[test]
     fn verbatim_disk_and_device_paths_are_not_unc() {
         // These share the `\\` lead-in but are NOT remote SMB targets, so the
-        // UNC guard must not claim them. They ARE rejected (device / verbatim
-        // namespace), just not as UncPath — on Windows `\\?\C:\...` is absolute
-        // and would otherwise be ACCEPTED, so the reject is load-bearing there.
+        // UNC guard must not claim either of them, whatever else happens to
+        // them afterwards.
         for p in [r"\\?\C:\Users\me\notes.txt", r"\\.\PhysicalDrive0"] {
-            let err = validate_user_path(Path::new(p)).unwrap_err();
+            if let Err(err) = validate_user_path(Path::new(p)) {
+                assert!(
+                    !matches!(err, PathValidationError::UncPath(_)),
+                    "{p:?} must not be classified as UNC, got {err:?}"
+                );
+            }
+        }
+        // The DEVICE half is still refused on its namespace, on every platform.
+        let err = validate_user_path(Path::new(r"\\.\PhysicalDrive0")).unwrap_err();
+        assert!(
+            matches!(err, PathValidationError::DeviceOrVerbatimPath(_)),
+            "the device namespace must stay refused, got {err:?}"
+        );
+    }
+
+    /// core#409 c2 — the namespace guard, pinned in BOTH directions.
+    ///
+    /// Graded on the classifier rather than through `validate_user_path`,
+    /// because a `\\?\...` string is not `is_absolute()` on Unix: the admit arm
+    /// would come back `NotAbsolute` there and prove nothing about the guard
+    /// under test. The classifier is pure and answers the same on every
+    /// platform, so both arms are exercised on every host.
+    #[test]
+    fn the_namespace_guard_refuses_devices_and_admits_verbatim_disks() {
+        // REFUSE — raw devices, by either spelling.
+        for refused in [
+            r"\\.\PhysicalDrive0",
+            r"\\.\pipe\wayland",
+            r"\\?\GLOBALROOT\Device\HarddiskVolume1\secret",
+            r"\\?\Volume{00000000-0000-0000-0000-000000000000}\x",
+        ] {
+            let path = Path::new(refused);
             assert!(
-                !matches!(err, PathValidationError::UncPath(_)),
-                "{p:?} must not be classified as UNC, got {err:?}"
-            );
-            assert!(
-                matches!(err, PathValidationError::DeviceOrVerbatimPath(_)),
-                "{p:?} must be rejected as device/verbatim, got {err:?}"
+                looks_like_device_or_nondisk_verbatim(path, &path.to_string_lossy()),
+                "{refused:?} reaches a raw device and must stay refused"
             );
         }
+
+        // ADMIT — ordinary local files. `\\?\C:\...` is what
+        // `std::fs::canonicalize` returns on Windows and what
+        // `WorkspacePolicy::root()` stores, so refusing it refuses the
+        // product's own canonical paths (core#409 c2).
+        for admitted in [
+            r"\\?\C:\Users\me\notes.txt",
+            r"\\?\F:\ws\.wayland-out\results\toolu_01.txt",
+            r"\\?\c:\Windows\ServiceProfiles\NetworkService\AppData\Local\Temp\.tmp",
+        ] {
+            let path = Path::new(admitted);
+            assert!(
+                !looks_like_device_or_nondisk_verbatim(path, &path.to_string_lossy()),
+                "{admitted:?} is an ordinary local file"
+            );
+        }
+    }
+
+    /// core#409 c2, through the production entry point: the search root a
+    /// session actually carries must be a legal search root.
+    ///
+    /// On Windows `std::fs::canonicalize` returns `\\?\C:\...`, which is what
+    /// `WorkspacePolicy::root()` holds and therefore what Grep is handed; the
+    /// guard refused it, and the failure surfaced as the CONTROL arm of
+    /// `grep_vcs_content_store_deny` — an ordinary search of the workspace —
+    /// dying with `path uses a Windows device / verbatim namespace`. On Unix
+    /// `canonicalize` returns the plain form, so this arm is a control there
+    /// and the regression itself is graded on the Windows host.
+    #[test]
+    fn a_canonicalized_workspace_root_is_a_valid_search_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(dir.path()).unwrap();
+        let resolved = validate_search_root(&root, None).unwrap_or_else(|e| {
+            panic!("canonicalize's own output was refused as a search root: {e}")
+        });
+        assert_eq!(resolved, lex_normalize(&root));
+
+        // Both directions in one test: the device namespace is still refused
+        // by the SAME entry point, so this cannot pass by the guard having
+        // been deleted.
+        let err = validate_search_root(Path::new(r"\\.\PhysicalDrive0"), None).unwrap_err();
+        assert!(
+            matches!(err, PathValidationError::DeviceOrVerbatimPath(_)),
+            "the device namespace must stay refused as a search root, got {err:?}"
+        );
     }
 
     // `\\?\UNC\server\share` stays classified as UNC — the device/verbatim

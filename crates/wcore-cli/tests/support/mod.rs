@@ -3,6 +3,8 @@
 //! Included from integration test files via `#[path = "support/mod.rs"] mod support;`.
 
 pub mod mock_llm;
+pub mod owned_tree;
+pub mod process_tree_fixture;
 pub mod pty;
 pub mod vault;
 

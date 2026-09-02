@@ -16,7 +16,9 @@ use crate::executor::prepare_inline_content;
 use crate::hooks::{parse_skill_hooks, to_hook_defs};
 use crate::loader::load_skills_from_dir;
 use crate::permissions::{SkillPermission, SkillPermissionChecker};
-use crate::prompt::format_skills_within_budget;
+use unicode_width::UnicodeWidthStr;
+
+use crate::prompt::{SKILL_OVERFLOW_HINT, format_skills_within_budget, get_char_budget};
 use crate::refs::SkillRef;
 use crate::types::{EffortLevel, ExecutionContext, LoadedFrom, SkillMetadata, SkillSource};
 
@@ -416,13 +418,32 @@ fn tc_e2e_7_bundled_skills_budget_protection() {
     let mut all_skills = vec![bundled];
     all_skills.extend(regular_skills);
 
-    // Use a very small context window (100 tokens = 400 chars budget) to force truncation
+    // 100 tokens is a 4-char budget. AC-10 used to read "the bundled skill
+    // survives whatever the budget is", and FerroxLabs/wayland#1280 c1 is
+    // exactly the finding that that unconditional survival is the defect: the
+    // bundled block was SUBTRACTED from the budget and never capped, so a
+    // session with many bundled skills rendered a listing many times the window
+    // share it claims. What is asserted now is the ceiling plus its escape
+    // hatch, which is the contract that replaced it.
+    let budget = get_char_budget(Some(100));
     let result = format_skills_within_budget(&all_skills, Some(100));
 
-    // AC-10 assertions
+    let width = UnicodeWidthStr::width(result.as_str());
     assert!(
-        result.contains("bundled-skill"),
-        "bundled skill should appear in listing even with tight budget, got: {result}"
+        width
+            <= budget.max(UnicodeWidthStr::width(
+                format!("- (+{} {SKILL_OVERFLOW_HINT})", all_skills.len()).as_str()
+            )),
+        "the listing is {width} columns against a {budget}-column budget; a \
+         4-char budget cannot fit an entry, so the only thing that may be \
+         emitted is the single overflow line: {result}"
+    );
+
+    // WRONG-REFUSAL CONTROL: nothing may be dropped silently. Whatever did not
+    // fit is counted and the way to reach it is named.
+    assert!(
+        result.contains(SKILL_OVERFLOW_HINT),
+        "skills were trimmed with no route back to them: {result}"
     );
 
     // At least some regular skills should be omitted (names only or truncated)
@@ -488,13 +509,26 @@ fn tc_e2e_9_prompt_budget_truncation() {
     let mut skills = vec![bundled];
     skills.extend(regular_skills);
 
-    // Use 50 tokens → 200 chars budget — far below what 30 regular skills need
+    // 50 tokens is a 2-char budget. AC-12's "bundled must be preserved" was
+    // the FerroxLabs/wayland#1280 c1 defect stated as a requirement — the
+    // bundled block was exempt from the budget rather than charged against it.
+    // The replacement contract: the listing never exceeds the budget by more
+    // than one fixed overflow line, and that line is what keeps every trimmed
+    // skill reachable.
+    let budget = get_char_budget(Some(50));
     let output = format_skills_within_budget(&skills, Some(50));
 
-    // AC-12 assertions
+    let width = UnicodeWidthStr::width(output.as_str());
     assert!(
-        output.contains("my-bundled"),
-        "bundled skill must be preserved"
+        width
+            <= budget.max(UnicodeWidthStr::width(
+                format!("- (+{} {SKILL_OVERFLOW_HINT})", skills.len()).as_str()
+            )),
+        "the listing is {width} columns against a {budget}-column budget: {output}"
+    );
+    assert!(
+        output.contains(SKILL_OVERFLOW_HINT),
+        "31 skills were trimmed to fit 2 columns with no route back to them: {output}"
     );
 
     let full_reg_count = (0..n)
@@ -504,11 +538,6 @@ fn tc_e2e_9_prompt_budget_truncation() {
         full_reg_count < n,
         "some regular skills should be truncated, full_count={full_reg_count}"
     );
-
-    // Verify total output length stays within a reasonable margin of budget
-    // Budget = 50 tokens * 4 chars/token * 1% = 2 chars — that's extremely tight.
-    // With bundled protection, at minimum bundled entry is present.
-    // We just verify bundled is there and not all regular skills are full-expanded.
 }
 
 // ---------------------------------------------------------------------------
@@ -1147,8 +1176,12 @@ fn wb_8b_single_skill_within_budget() {
 }
 
 #[test]
-fn wb_8c_all_bundled_no_non_bundled() {
-    // When only bundled skills exist, they're all returned even under budget pressure
+fn wb_8c_all_bundled_is_still_bounded() {
+    // This case USED to assert that an all-bundled set is returned whole
+    // however small the budget — the `rest_indices.is_empty()` early return,
+    // which FerroxLabs/wayland#1280 c1 names as one of the three terms that
+    // grew without bound in the skill count. An all-bundled set is now clamped
+    // like any other, and what it drops it names.
     let mut b1 = make_ref("bundled-a");
     b1.source = SkillSource::Bundled;
     b1.description = "Bundled A".to_string();
@@ -1156,7 +1189,19 @@ fn wb_8c_all_bundled_no_non_bundled() {
     b2.source = SkillSource::Bundled;
     b2.description = "Bundled B".to_string();
 
-    let result = format_skills_within_budget(&[b1, b2], Some(1)); // tiny budget
-    assert!(result.contains("bundled-a"), "bundled A should be present");
-    assert!(result.contains("bundled-b"), "bundled B should be present");
+    // A budget that fits both, to show the clamp is not an unconditional trim.
+    let roomy = format_skills_within_budget(&[b1.clone(), b2.clone()], Some(10_000));
+    assert!(roomy.contains("bundled-a") && roomy.contains("bundled-b"));
+    assert!(!roomy.contains(SKILL_OVERFLOW_HINT));
+
+    let result = format_skills_within_budget(&[b1, b2], Some(1)); // 0-char budget
+    assert!(
+        UnicodeWidthStr::width(result.as_str())
+            <= UnicodeWidthStr::width(format!("- (+2 {SKILL_OVERFLOW_HINT})").as_str()),
+        "an all-bundled listing overran a zero budget: {result}"
+    );
+    assert!(
+        result.contains(SKILL_OVERFLOW_HINT),
+        "bundled skills were trimmed with no route back to them: {result}"
+    );
 }

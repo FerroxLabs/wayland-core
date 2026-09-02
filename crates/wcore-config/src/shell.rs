@@ -20,6 +20,7 @@
 
 mod executable_readiness;
 mod mcp_stdio_launch_context;
+mod windows_bash;
 
 use std::process::Output;
 use std::sync::OnceLock;
@@ -33,6 +34,10 @@ pub use executable_readiness::{
 pub use mcp_stdio_launch_context::{
     FORWARDED_ENVIRONMENT_VARIABLES, LaunchValueSource, MANDATORY_WINDOWS_CHILD_VARIABLES,
     McpStdioLaunchContext, McpStdioLaunchContextError,
+};
+pub use windows_bash::{
+    BashCandidate, BashRefusal, WindowsBashEnv, WindowsBashSelection, resolve_windows_bash,
+    select_windows_bash, windows_bash_candidates, windows_bash_path_refusal,
 };
 
 /// Process-global Bash-tool shell override, sourced from `[tools] windows_shell`
@@ -74,15 +79,19 @@ pub fn shell_info() -> ShellInfo {
 /// Windows PowerShell override.
 ///
 /// Returns the program + flag(s) that precede the command string in the
-/// BashTool argv: `["sh", "-c"]` on Unix and `["cmd", "/S", "/C"]` on Windows
-/// by default (see [`windows_cmd_payload_prefix`] for why `/S`). On Windows
+/// BashTool argv: `["sh", "-c"]` on Unix. On Windows it is `[<bash>, "-c"]`
+/// when this host has a real bash at one of the KNOWN install locations
+/// ([`resolve_windows_bash`] — never a bare `PATH` lookup, and never
+/// `System32\bash.exe`, which is the WSL launcher), and `["cmd", "/S", "/C"]`
+/// when it does not (see [`windows_cmd_payload_prefix`] for why `/S`). On Windows
 /// ONLY, the interpreter can be switched to `powershell` →
 /// `["powershell", "-NoProfile", "-Command"]` (Windows PowerShell 5.1, always
 /// present) or `pwsh` → the same with `pwsh` (PowerShell 7+, if installed). Any
-/// other value falls back to `cmd /S /C`.
+/// other value falls back to `cmd /S /C`; `bash` (or a path naming one) keeps
+/// the resolved-bash default.
 ///
 /// The choice resolves with precedence **`WAYLAND_BASH_SHELL` env (runtime
-/// override) > `[tools] windows_shell` config > default `cmd`**. The config key
+/// override) > `[tools] windows_shell` config > the resolved default**. The config key
 /// is the path the desktop app writes; the env var is the runtime escape hatch.
 ///
 /// Scope is deliberately the BashTool only — the hook, MCP-stdio, and skill
@@ -96,12 +105,43 @@ pub fn bash_shell_argv_prefix() -> Vec<String> {
         .ok()
         .filter(|s| !s.trim().is_empty())
         .or_else(|| BASH_SHELL_CONFIG.get().cloned().flatten());
-    bash_shell_prefix_for(cfg!(windows), choice.as_deref())
+    // Only probe the filesystem when a bash could actually be selected — an
+    // operator who asked for cmd or PowerShell must not pay for the walk.
+    let bash = if cfg!(windows) && windows_shell_prefers_bash(choice.as_deref()) {
+        resolve_windows_bash(choice.as_deref()).selected
+    } else {
+        None
+    };
+    bash_shell_prefix_for(cfg!(windows), choice.as_deref(), bash.as_deref())
+}
+
+/// Whether this `WAYLAND_BASH_SHELL` / `[tools] windows_shell` value leaves the
+/// Windows interpreter open to a real bash.
+///
+/// True when the setting is unset (the default, which is now "a real bash if
+/// this host has one") or names bash explicitly. An operator who named `cmd`,
+/// `powershell`, `pwsh` — or anything else — has already chosen, and discovery
+/// must not override them. Kept in step with [`bash_shell_prefix_for`]'s arms
+/// by `prefers_bash_agrees_with_the_prefix_arms`.
+fn windows_shell_prefers_bash(win_shell: Option<&str>) -> bool {
+    matches!(
+        win_shell.map(normalize_win_shell).as_deref(),
+        None | Some("bash") | Some("sh")
+    )
 }
 
 /// Pure core of [`bash_shell_argv_prefix`], split out so every branch —
-/// including the Windows/PowerShell ones — is unit-testable on any host.
-fn bash_shell_prefix_for(is_windows: bool, win_shell: Option<&str>) -> Vec<String> {
+/// including the Windows/PowerShell/bash ones — is unit-testable on any host.
+///
+/// `bash` is the already-resolved absolute path to a real bash on this host, or
+/// `None` when none was found (see [`windows_bash`]). Resolution is injected
+/// rather than performed here so this stays pure: the Windows bash arm is
+/// graded from Linux.
+fn bash_shell_prefix_for(
+    is_windows: bool,
+    win_shell: Option<&str>,
+    bash: Option<&str>,
+) -> Vec<String> {
     if !is_windows {
         return vec!["sh".to_string(), "-c".to_string()];
     }
@@ -116,6 +156,13 @@ fn bash_shell_prefix_for(is_windows: bool, win_shell: Option<&str>) -> Vec<Strin
             "-NoProfile".to_string(),
             "-Command".to_string(),
         ],
+        // Unset, or an explicit bash: use a real bash when this host has one
+        // (FerroxLabs/wayland#1164), and cmd when it does not. Any other
+        // explicit value is the operator's choice and still means cmd.
+        None | Some("bash") | Some("sh") => match bash {
+            Some(path) => vec![path.to_string(), "-c".to_string()],
+            None => windows_cmd_payload_prefix(),
+        },
         _ => windows_cmd_payload_prefix(),
     }
 }
@@ -146,6 +193,41 @@ fn bash_shell_prefix_for(is_windows: bool, win_shell: Option<&str>) -> Vec<Strin
 /// delivery no longer depends on what the operator happened to type.
 pub fn windows_cmd_payload_prefix() -> Vec<String> {
     vec!["cmd".to_string(), "/S".to_string(), "/C".to_string()]
+}
+
+/// The interpreter a shell prefix actually names, as a lowercased program
+/// stem: `sh`, `bash`, `cmd`, `powershell`, `pwsh`, or whatever else was
+/// selected.
+///
+/// The FINAL path component, because since FerroxLabs/wayland#1164 the Windows
+/// interpreter is named by its absolute path (`C:\Program Files\Git\bin\
+/// bash.exe`) whenever a real bash was resolved. Splitting is done here rather
+/// than with `std::path`, which on Unix does not treat `\` as a separator, so
+/// the Windows spellings are classified identically from any host. A trailing
+/// `.exe` is stripped so `BASH.EXE` and `bash` are the same answer.
+///
+/// This lives here, in the crate that BUILDS the prefix, because two callers
+/// need the same answer: `wcore_tools::bash::shell_disclosure`, which tells the
+/// model which dialect it is driving, and the Windows test fixtures that have
+/// to be written in that dialect (FerroxLabs/wayland-core#387). A fixture that
+/// hard-codes `cmd` syntax under `cfg(windows)` is wrong on any host with Git
+/// for Windows installed.
+pub fn shell_program_stem(prefix: &[String]) -> String {
+    prefix
+        .first()
+        .map(|p| p.to_ascii_lowercase())
+        .map(|p| {
+            let base = p.rsplit(['/', '\\']).next().unwrap_or(&p).to_string();
+            base.strip_suffix(".exe").unwrap_or(&base).to_string()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether the interpreter this prefix names is a POSIX shell, i.e. one where
+/// `;` separates commands, `$VAR` expands and `echo` terminates a line with a
+/// bare `\n`. False for `cmd` and for PowerShell.
+pub fn shell_prefix_is_posix(prefix: &[String]) -> bool {
+    matches!(shell_program_stem(prefix).as_str(), "sh" | "bash")
 }
 
 /// Normalize a `WAYLAND_BASH_SHELL` / `[tools] windows_shell` value to its
@@ -494,6 +576,84 @@ fn wrap_cmd_payload(payload: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::{shell_prefix_is_posix, shell_program_stem};
+
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The stem is the FINAL component with `.exe` stripped, and the Windows
+    /// spellings are classified identically from a Unix host -- which is the
+    /// point, since this is what the Windows fixtures branch on
+    /// (FerroxLabs/wayland-core#387) and they are authored on Linux.
+    #[test]
+    fn the_stem_is_the_final_component_on_either_separator_and_any_case() {
+        assert_eq!(shell_program_stem(&argv(&["sh", "-c"])), "sh");
+        assert_eq!(shell_program_stem(&argv(&["cmd", "/S", "/C"])), "cmd");
+        assert_eq!(
+            shell_program_stem(&argv(&["C:\\Program Files\\Git\\bin\\bash.exe", "-c"])),
+            "bash"
+        );
+        assert_eq!(
+            shell_program_stem(&argv(&["C:/Program Files/Git/bin/BASH.EXE", "-c"])),
+            "bash"
+        );
+        assert_eq!(
+            shell_program_stem(&argv(&["powershell", "-NoProfile", "-Command"])),
+            "powershell"
+        );
+        // An empty prefix must not panic; it simply names nothing.
+        assert_eq!(shell_program_stem(&[]), "");
+    }
+
+    /// A fixture that asks "may I write `$VAR` and `;`?" must get `true` for a
+    /// resolved Windows bash and `false` for `cmd` -- the whole reason #387
+    /// exists is that the platform no longer answers that question.
+    #[test]
+    fn only_a_posix_shell_is_reported_as_posix() {
+        assert!(shell_prefix_is_posix(&argv(&["sh", "-c"])));
+        assert!(shell_prefix_is_posix(&argv(&[
+            "C:\\Program Files\\Git\\bin\\bash.exe",
+            "-c"
+        ])));
+        assert!(!shell_prefix_is_posix(&argv(&["cmd", "/S", "/C"])));
+        assert!(!shell_prefix_is_posix(&argv(&[
+            "powershell",
+            "-NoProfile",
+            "-Command"
+        ])));
+        assert!(!shell_prefix_is_posix(&argv(&[
+            "pwsh",
+            "-NoProfile",
+            "-Command"
+        ])));
+        assert!(!shell_prefix_is_posix(&[]));
+    }
+
+    /// The helper must agree with the prefix the product actually builds, in
+    /// both Windows arms -- otherwise a fixture could be written in the wrong
+    /// dialect while every test above still passes.
+    #[test]
+    fn the_helper_agrees_with_every_arm_the_prefix_builder_produces() {
+        const GIT_BASH: &str = "C:\\Program Files\\Git\\bin\\bash.exe";
+        assert!(shell_prefix_is_posix(&super::bash_shell_prefix_for(
+            true,
+            None,
+            Some(GIT_BASH)
+        )));
+        assert!(!shell_prefix_is_posix(&super::bash_shell_prefix_for(
+            true, None, None
+        )));
+        assert!(!shell_prefix_is_posix(&super::bash_shell_prefix_for(
+            true,
+            Some("powershell"),
+            Some(GIT_BASH)
+        )));
+        assert!(shell_prefix_is_posix(&super::bash_shell_prefix_for(
+            false, None, None
+        )));
+    }
+
     use super::*;
 
     /// The `cmd /C` payload rule fires on exactly the argv shape that carries a
@@ -613,7 +773,7 @@ mod tests {
     /// layer can see.
     #[test]
     fn a_wrapped_payload_beginning_with_a_program_name_is_not_left_quoted() {
-        let prefix = bash_shell_prefix_for(true, None);
+        let prefix = bash_shell_prefix_for(true, None, None);
         assert!(
             !cmd_preserves_the_outer_pair(&prefix, "cmd /c echo NESTED", true),
             "cmd.exe keeps the wrapper's quotes for this payload, so the child \
@@ -718,7 +878,7 @@ mod tests {
     #[test]
     fn the_two_measured_clean_shapes_are_unchanged() {
         let before: Vec<String> = vec!["cmd".into(), "/C".into()];
-        let after = bash_shell_prefix_for(true, None);
+        let after = bash_shell_prefix_for(true, None, None);
         for (payload, names_an_executable_file, why) in [
             (
                 "echo NOQUOTE",
@@ -771,7 +931,7 @@ mod tests {
     fn the_payload_is_still_located_with_the_extra_switch_in_front() {
         assert_eq!(cmd_payload_index("cmd", &["/S", "/C", "echo hi"]), Some(2));
         assert_eq!(cmd_payload_index("cmd", &["/s", "/c", "echo hi"]), Some(2));
-        let prefix = bash_shell_prefix_for(true, None);
+        let prefix = bash_shell_prefix_for(true, None, None);
         let flag = prefix
             .iter()
             .position(|a| a.eq_ignore_ascii_case("/c"))
@@ -797,19 +957,28 @@ mod tests {
     #[test]
     fn bash_prefix_unix_is_sh_dash_c_regardless_of_env() {
         // The PowerShell override is Windows-only; on Unix it is ignored.
-        assert_eq!(bash_shell_prefix_for(false, None), vec!["sh", "-c"]);
+        assert_eq!(bash_shell_prefix_for(false, None, None), vec!["sh", "-c"]);
         assert_eq!(
-            bash_shell_prefix_for(false, Some("powershell")),
+            bash_shell_prefix_for(false, Some("powershell"), None),
             vec!["sh", "-c"]
         );
     }
 
     #[test]
-    fn bash_prefix_windows_defaults_to_cmd() {
-        assert_eq!(bash_shell_prefix_for(true, None), vec!["cmd", "/S", "/C"]);
+    fn bash_prefix_windows_defaults_to_cmd_when_no_bash_was_resolved() {
+        assert_eq!(
+            bash_shell_prefix_for(true, None, None),
+            vec!["cmd", "/S", "/C"]
+        );
         // An unrecognized value falls back to cmd, never an empty/invalid argv.
         assert_eq!(
-            bash_shell_prefix_for(true, Some("bash")),
+            bash_shell_prefix_for(true, Some("zsh"), None),
+            vec!["cmd", "/S", "/C"]
+        );
+        // `bash` asked for is still cmd when this host has no acceptable bash
+        // (#1164 c4). The arm that DOES find one lives in `windows_bash_tests`.
+        assert_eq!(
+            bash_shell_prefix_for(true, Some("bash"), None),
             vec!["cmd", "/S", "/C"]
         );
     }
@@ -817,16 +986,16 @@ mod tests {
     #[test]
     fn bash_prefix_windows_powershell_override() {
         assert_eq!(
-            bash_shell_prefix_for(true, Some("powershell")),
+            bash_shell_prefix_for(true, Some("powershell"), None),
             vec!["powershell", "-NoProfile", "-Command"]
         );
         // Case-insensitive and whitespace-tolerant.
         assert_eq!(
-            bash_shell_prefix_for(true, Some("  PowerShell ")),
+            bash_shell_prefix_for(true, Some("  PowerShell "), None),
             vec!["powershell", "-NoProfile", "-Command"]
         );
         assert_eq!(
-            bash_shell_prefix_for(true, Some("pwsh")),
+            bash_shell_prefix_for(true, Some("pwsh"), None),
             vec!["pwsh", "-NoProfile", "-Command"]
         );
     }
@@ -845,7 +1014,7 @@ mod tests {
             "/usr/bin/pwsh",
         ] {
             assert_eq!(
-                bash_shell_prefix_for(true, Some(v)),
+                bash_shell_prefix_for(true, Some(v), None),
                 pwsh,
                 "{v} should select pwsh"
             );
@@ -856,7 +1025,7 @@ mod tests {
             r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
         ] {
             assert_eq!(
-                bash_shell_prefix_for(true, Some(v)),
+                bash_shell_prefix_for(true, Some(v), None),
                 powershell,
                 "{v} should select powershell"
             );
@@ -864,7 +1033,15 @@ mod tests {
         // A path to an unrelated shell still falls back to cmd (only pwsh/powershell
         // are sandbox-supported selectors).
         assert_eq!(
-            bash_shell_prefix_for(true, Some(r"C:\Program Files\Git\bin\bash.exe")),
+            bash_shell_prefix_for(true, Some(r"C:\Program Files\zsh\zsh.exe"), None),
+            vec!["cmd", "/S", "/C"]
+        );
+        // A bash path is NO LONGER one of them: #1164 resolves a real bash and
+        // runs it. It still falls back to cmd when this host has none, which is
+        // the `None` third argument here; the selected-bash arm is covered in
+        // `windows_bash_tests.rs`.
+        assert_eq!(
+            bash_shell_prefix_for(true, Some(r"C:\Program Files\Git\bin\bash.exe"), None),
             vec!["cmd", "/S", "/C"]
         );
     }
@@ -883,7 +1060,7 @@ mod tests {
     #[test]
     fn bash_prefix_default_branches_match_shell_info() {
         let info = shell_info();
-        let prefix = bash_shell_prefix_for(cfg!(windows), None);
+        let prefix = bash_shell_prefix_for(cfg!(windows), None, None);
         assert_eq!(prefix.first().map(String::as_str), Some(info.program));
         assert_eq!(prefix.last().map(String::as_str), Some(info.flag));
         let extra: Vec<&str> = prefix[1..prefix.len() - 1]

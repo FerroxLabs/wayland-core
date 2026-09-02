@@ -417,3 +417,72 @@ fn the_corpus_drift_step_is_a_gate_and_carries_nothing_that_could_silence_it() {
         );
     }
 }
+
+/// The LANE gate carries the corpus check too, and it is not advisory.
+///
+/// The CI step asserted above is the last line of defence, not the first, and
+/// on 2026-08-30 it was the ONLY one. A lane edited `wcore-cli/src/main.rs` —
+/// a `SOURCE_INPUTS` file, hashed by path and read from disk at test time —
+/// tested `-p wcore-mcp -p wcore-cli`, ran `scripts/preflight.sh`, got 0 from
+/// both, and reported the tree green. `-p wcore-protocol` was 100.
+///
+/// The lane's gate could not have caught it: nothing in `preflight.sh` looked
+/// at the corpus, and `contract::preflight`'s hint is advisory by construction
+/// — it returns a message, never an error — so a lane can quote `PREFLIGHT=0`
+/// as coverage it is not. The remedy is in `preflight.sh` now, as a FAILING
+/// gate, and it asks the deciding question directly (is the corpus current
+/// with the tree?) rather than the proxy the hint asks (did the diff touch a
+/// listed path?), so no diff base and no path spelling can defeat it.
+///
+/// A shell script cannot fail to contain a line, so this is what makes its
+/// removal loud instead of silent.
+#[test]
+fn the_lane_preflight_gates_on_corpus_currency_rather_than_hinting_at_it() {
+    let preflight = read("scripts/preflight.sh");
+
+    // Control on the read: this is the pre-flight, not some other script.
+    assert!(
+        preflight.contains("PRE-FLIGHT PASSED"),
+        "control failed: scripts/preflight.sh does not look like the lane \
+         pre-flight, so every assertion below is about the wrong file"
+    );
+
+    let hits = executable_hits(&preflight, "wcore-contract -- check", "#");
+    assert_eq!(
+        hits.len(),
+        1,
+        "scripts/preflight.sh must run `wcore-contract -- check` exactly once, \
+         on a line that is not a comment. Without it a lane that edits a \
+         SOURCE_INPUTS file passes its own gate and hands the red to whoever \
+         integrates (measured: lane/f13-w2-mcp-transports, 2026-08-30)"
+    );
+
+    // ADVISORY IS NOT A GATE. `wcore-contract -- preflight` prints a hint and
+    // exits 0 by design; accepting it here would restore exactly the hole this
+    // test closes.
+    assert!(
+        executable_hits(&preflight, "wcore-contract -- preflight", "#").is_empty(),
+        "the pre-flight hint exits 0 whatever it finds. It is a hint, not the \
+         gate — `wcore-contract -- check` is the gate"
+    );
+
+    // And the result must reach the exit code. A gate whose failure is printed
+    // and then dropped is the advisory hint wearing a gate's name.
+    let line = preflight.lines().nth(hits[0]).expect("hit line exists");
+    let assigned = line
+        .split_once('=')
+        .map(|(name, _)| name.trim())
+        .filter(|name| !name.contains(' '))
+        .expect("the corpus gate is bound to a shell variable this test can follow");
+    assert!(
+        preflight.contains(&format!("if out=\"$(${assigned} 2>&1)\"")),
+        "the corpus gate is defined as `{assigned}` but is never run into the \
+         `fail` accumulator, so a red would print and the script would still \
+         exit 0"
+    );
+    assert!(
+        preflight.contains("  fail=1"),
+        "control failed: the pre-flight no longer accumulates failures the way \
+         this test assumes it does"
+    );
+}

@@ -65,7 +65,13 @@ impl OutputSink for ChildCapture {
         _finish_reason: FinishReason,
     ) {
     }
-    fn emit_error(&self, _msg: &str, _retryable: bool) {}
+    fn emit_error(
+        &self,
+        _msg: &str,
+        _retryable: bool,
+        _category: wcore_protocol::events::FailureCategory,
+    ) {
+    }
     fn emit_info(&self, _msg: &str) {}
     fn emit_correlated_sub_agent_event(
         &self,

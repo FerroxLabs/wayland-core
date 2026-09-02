@@ -120,8 +120,44 @@ pub const CONTRACT_MAJOR: u64 = 1;
 // never in. The event is purely additive and nothing existing changes shape, so
 // `major` holds at 1 — but the minor has to move, because an added type is
 // undiscoverable to a host pinned below the version that introduced it.
-pub const CONTRACT_MINOR: u64 = 22;
-pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/22";
+//
+// 22 -> 23: ONE minor move carrying TWO additions, named here together. The
+// pair collided on this exact constant during integration — `integ/f13` had
+// already spent 22 -> 23 on wayland-core#314 c5, `lane/f13-w3-host-protocol`
+// had independently spent it on wayland#1237 — so they ride a single bump
+// (wayland#1266 c4). A host moving 1.22 -> 1.23 gains BOTH capabilities below;
+// neither half is the whole of what 23 added.
+//
+// 22 -> 23 (a): wayland-core#314 c5 adds one event, `grant_refused`. Exactly the
+// same shape as 21 -> 22 and for exactly the same reason, one surface over: a
+// refused `grant_path` / `grant_workspace_capability` announced itself only as
+// an `info` frame of English prose, so the only way a host could branch on a
+// refusal was to match our wording, and the only way it could tell "refused"
+// from "not yet" was the absence of a frame. The event names the SURFACE that
+// refused and the REASON (`local_opt_in_required` vs `policy_rejected` — two
+// different remedies for the user), and carries the host's own `grant_id` as
+// the correlation key, `null` for the capability command which has none.
+// Purely additive: nothing existing changes shape, so `major` holds at 1, and
+// the minor has to move because an added type is undiscoverable to a host
+// pinned below it.
+//
+// 22 -> 23 (b): wayland#1237 (decomposed from wayland#388 c7) adds one optional
+// field, `category`, to `error`'s `ErrorInfo`. A typed failure category the
+// host can branch on: `context_limit`, `tool_runtime`, `local_wayland`, or
+// `unknown` where core cannot decide. `major` holds at 1 — the field is
+// `serde(default)` and `error` already published `additionalProperties: true`,
+// so a host that has never heard of it validates and renders exactly as
+// before, and a payload written without it still decodes as `unknown`. The
+// wire-shape gate refuses the regeneration under a standing 1.22
+// (`altered=["events/error.json"]`), which is that gate deciding the version
+// question it exists to force. The minor has to move because a host CANNOT
+// feature-detect this by looking: an engine that never classified anything and
+// an engine that classified this failure as unclassifiable both send
+// `unknown`, and before the field they both sent nothing at all. #388's
+// complaint is that a host has to pattern-match English to find out why a long
+// run died; a host pinned below this version still has to.
+pub const CONTRACT_MINOR: u64 = 23;
+pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/23";
 pub const CONTRACT_ROOT: &str = "contracts/desktop/v1";
 
 const DEFERRED: &str = r#"# Deferred Desktop contract adversarial cases
@@ -1503,7 +1539,9 @@ fn enforce_approval_gate_contract(
         .ok_or_else(|| std::io::Error::other("EVENT_SPECS must declare approval_required"))?;
     if declared.correlation != "call_id" {
         return Err(std::io::Error::other(format!(
-            "approval_required declares correlation={:?}, but `resume_token` is the bridge              secret and is EMPTY on an ordinary tool gate. The public handle is `call_id`              (`correlation_id` always equals it), and an ordinary gate is answered with              tool_approve/tool_deny keyed by call_id.",
+            "approval_required declares correlation={:?}, but `resume_token` is the bridge \
+                secret and is EMPTY on an ordinary tool gate. The public handle is `call_id` (`correlation_id` always equals it), and an ordinary gate is answered with \
+                tool_approve/tool_deny keyed by call_id.",
             declared.correlation
         ))
         .into());
@@ -1526,7 +1564,9 @@ fn enforce_approval_gate_contract(
             && correlation_id != call_id
         {
             return Err(std::io::Error::other(format!(
-                "{path}: correlation_id {correlation_id:?} != call_id {call_id:?}.                  `ProtocolEvent::ApprovalRequired::correlation_id` always equals `call_id`."
+                "{path}: correlation_id {correlation_id:?} != call_id {call_id:?}. \
+                 `ProtocolEvent::ApprovalRequired::correlation_id` always equals \
+                 `call_id`."
             ))
             .into());
         }
@@ -1544,7 +1584,10 @@ fn enforce_approval_gate_contract(
         .unwrap_or_default();
     if !token.is_empty() {
         return Err(std::io::Error::other(format!(
-            "events/approval_required.json publishes resume_token={token:?}, but the canonical              row is an ordinary tool gate and an ordinary gate has NO bridge entry, so its              resume_token is the empty string. A host that echoes a token it read here answers              with approval_resume, which resolves nothing, and the tool hangs until its TTL."
+            "events/approval_required.json publishes resume_token={token:?}, but the canonical \
+                row is an ordinary tool gate and an ordinary gate has NO bridge entry, so its \
+                resume_token is the empty string. A host that echoes a token it read here answers \
+                with approval_resume, which resolves nothing, and the tool hangs until its TTL."
         ))
         .into());
     }

@@ -513,8 +513,19 @@ Write-Phase "PHASE G — cargo nextest on representative crates"
 # that matches NOTHING, but says nothing about a run whose count silently
 # collapses from hundreds to a handful because a crate stopped compiling its
 # test targets under a cfg. Hence the executed-count floor below.
+#
+# `--no-fail-fast` (added 2026-08-29, FerroxLabs/wayland-core#350). Without it
+# nextest CANCELS the run at the first failure, so PHASE G reported only the
+# EARLIEST defect and everything ordered after it was invisible. Measured, not
+# argued: run 33258858506 stopped at `3060/4123` on the core#374 hard failure;
+# with that one defect fixed and nothing else changed, run 33266413002 reached
+# `3883/4126` and surfaced three timeouts in `bash_unsaved_guard_bound_live`
+# that had been hidden behind it for the whole cycle. A soak whose report is a
+# lower bound cannot be used to decide that Windows is green, which is exactly
+# what #350 c5 asks it to decide. The same reasoning is already recorded in
+# ci.yml for the containerized Linux leg.
 $NextestLog = Join-Path $ResultsDir "G-nextest.log"
-cargo nextest run --no-tests=fail `
+cargo nextest run --no-tests=fail --no-fail-fast `
     -p wcore-cron `
     -p wcore-config `
     -p wcore-providers `

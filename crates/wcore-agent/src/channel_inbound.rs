@@ -84,19 +84,25 @@ const MAX_SESSION_WORKERS: usize = 1000;
 /// per-key engine pool — so a later message simply respawns a fresh worker.
 const WORKER_IDLE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 
-/// Pick the outbound reply target for a turn's reply.
+/// Pick the outbound QUOTE target for a turn's reply.
 ///
-/// Prefers `reply_to_message_id` — the specific message the inbound quoted,
-/// which reply-quoting platforms (Telegram, Discord, WhatsApp, Matrix, …) need
-/// to thread in-context — and falls back to `thread_id` (the thread root that
-/// Slack's `thread_ts` requires). For Slack the two coincide whenever
-/// `reply_to_message_id` is set, so this is a strict no-op there; for the other
-/// connectors it carries the quoted id that was previously dropped. Returns
-/// `None` when the inbound is neither a reply nor in a thread.
-fn outbound_reply_target(msg: &IncomingMessage) -> Option<String> {
-    msg.reply_to_message_id
-        .clone()
-        .or_else(|| msg.thread_id.clone())
+/// This is `reply_to_message_id` and nothing else: the specific message the
+/// inbound quoted, which reply-quoting platforms (Telegram, Discord, WhatsApp,
+/// Matrix, …) render as an in-context quote. Returns `None` when the inbound
+/// was not itself a reply.
+///
+/// It deliberately does NOT fall back to `thread_id`. That fallback conflated
+/// two different things (issue #253): on Telegram it sent a forum-topic id as
+/// `reply_to_message_id`, quoting the topic-creation message instead of
+/// selecting the topic, and on Discord it would put a thread CHANNEL id into a
+/// message reference. The thread DESTINATION now rides
+/// [`OutgoingMessage::thread_id`] instead, and Slack — the one connector that
+/// legitimately needs the thread root on the outbound — reads it from there.
+/// For Slack this is a strict no-op: its parser sets `reply_to_message_id` to
+/// the `thread_ts` whenever it sets it at all, so the value reaching the wire
+/// is unchanged.
+fn outbound_quote_target(msg: &IncomingMessage) -> Option<String> {
+    msg.reply_to_message_id.clone()
 }
 
 /// Seam between the inbound subscriber and the agent engine.
@@ -630,7 +636,8 @@ async fn run_turn(
                     let notice = OutgoingMessage {
                         conversation_id: msg.conversation_id.clone(),
                         text: RATE_LIMIT_NOTICE.to_string(),
-                        reply_to: outbound_reply_target(msg),
+                        thread_id: msg.thread_id.clone(),
+                        reply_to: outbound_quote_target(msg),
                         attachments: Vec::new(),
                     };
                     let guard = manager.read().await;
@@ -645,10 +652,14 @@ async fn run_turn(
                 return;
             }
 
+            // A reply inherits BOTH the originating thread (destination) and
+            // the quoted message (reply metadata) — never one standing in for
+            // the other. Issue #253.
             let outgoing = OutgoingMessage {
                 conversation_id: msg.conversation_id.clone(),
                 text: reply,
-                reply_to: outbound_reply_target(msg),
+                thread_id: msg.thread_id.clone(),
+                reply_to: outbound_quote_target(msg),
                 attachments: Vec::new(),
             };
             let guard = manager.read().await;
@@ -888,29 +899,71 @@ mod tests {
     }
 
     #[test]
-    fn outbound_reply_target_prefers_reply_id_over_thread() {
+    fn outbound_quote_target_prefers_reply_id_over_thread() {
         let mut m = dm("1");
         m.reply_to_message_id = Some("wamid.QUOTE".into());
         m.thread_id = Some("thread-root".into());
         // A reply must quote the specific message, not the thread root.
-        assert_eq!(outbound_reply_target(&m), Some("wamid.QUOTE".to_string()));
+        assert_eq!(outbound_quote_target(&m), Some("wamid.QUOTE".to_string()));
     }
 
+    /// Issue #253 — the quote target must NOT fall back to the thread id.
+    ///
+    /// This test previously asserted the opposite. The fallback is what put a
+    /// Telegram forum-topic id into `reply_to_message_id`; the thread now
+    /// travels as `OutgoingMessage.thread_id`, and Slack — the connector the
+    /// fallback existed for — reads its `thread_ts` from that field instead.
     #[test]
-    fn outbound_reply_target_falls_back_to_thread() {
+    fn outbound_quote_target_does_not_fall_back_to_thread() {
         let mut m = dm("2");
         m.thread_id = Some("1700000001.000100".into());
-        // No quoted id (Slack thread root / in-thread message): use thread_id.
         assert_eq!(
-            outbound_reply_target(&m),
-            Some("1700000001.000100".to_string())
+            outbound_quote_target(&m),
+            None,
+            "a thread id is a destination, never a quoted message"
         );
     }
 
+    /// The reply an inbound turn sends must carry the thread as a DESTINATION
+    /// and the quoted message separately — the pairing the helper alone cannot
+    /// show.
     #[test]
-    fn outbound_reply_target_none_when_neither() {
+    fn a_reply_inherits_the_thread_as_a_destination_and_the_quote_separately() {
+        let mut m = dm("4");
+        m.thread_id = Some("123".into());
+        m.reply_to_message_id = Some("987".into());
+        let outgoing = OutgoingMessage {
+            conversation_id: m.conversation_id.clone(),
+            text: "reply".to_string(),
+            thread_id: m.thread_id.clone(),
+            reply_to: outbound_quote_target(&m),
+            attachments: Vec::new(),
+        };
+        assert_eq!(outgoing.thread_id.as_deref(), Some("123"));
+        assert_eq!(outgoing.reply_to.as_deref(), Some("987"));
+    }
+
+    /// NEGATIVE CONTROL — passes in BOTH arms. An unthreaded, unquoted inbound
+    /// still produces a reply with neither field set, so the pairing above
+    /// cannot be satisfied by unconditionally stamping both.
+    #[test]
+    fn an_unthreaded_reply_carries_neither_destination_nor_quote() {
+        let m = dm("5");
+        let outgoing = OutgoingMessage {
+            conversation_id: m.conversation_id.clone(),
+            text: "reply".to_string(),
+            thread_id: m.thread_id.clone(),
+            reply_to: outbound_quote_target(&m),
+            attachments: Vec::new(),
+        };
+        assert_eq!(outgoing.thread_id, None);
+        assert_eq!(outgoing.reply_to, None);
+    }
+
+    #[test]
+    fn outbound_quote_target_none_when_neither() {
         // A fresh, unthreaded message replies without a target.
-        assert_eq!(outbound_reply_target(&dm("3")), None);
+        assert_eq!(outbound_quote_target(&dm("3")), None);
     }
 
     /// Register a `CapturingChannel` with the queued inbound, build a

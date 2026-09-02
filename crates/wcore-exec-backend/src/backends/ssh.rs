@@ -44,7 +44,7 @@ use async_trait::async_trait;
 use crate::contract::{
     Availability, BackendCapabilities, BackendKind, CleanupObservation, ExecutionBackend,
     ExecutionTask, Health, HibernationObservation, OrphanScan, ProbeBasis, ResourceBudget,
-    SecretChannel, validate_identifier,
+    SecretChannel, UnscopedOrphanScan, validate_identifier,
 };
 use crate::error::{ExecError, Result};
 use crate::policy::{EffectivePolicy, declared_secret_exposure};
@@ -454,6 +454,26 @@ impl ExecutionBackend for SshBackend {
                 enumerated: false,
             }),
         }
+    }
+
+    /// UNSUPPORTED, and it says so rather than answering zero. The far-end
+    /// scan is `ps -eo pid,args` filtered on the task nonce; a remote process
+    /// carries no product-wide marker, so there is nothing to filter on for
+    /// "any wayland run". Same shape as the local backend, same reason, and
+    /// the same refusal to report a zero it has not measured.
+    async fn scan_all_orphans(&self) -> Result<UnscopedOrphanScan> {
+        Ok(UnscopedOrphanScan {
+            backend_id: BACKEND_ID.into(),
+            kind: BackendKind::Ssh,
+            method: "no unscoped enumeration exists for the remote process table".into(),
+            found: Vec::new(),
+            enumerated: false,
+            unsupported_reason: Some(
+                "a far-end process carries no product-wide marker in its argv, only its \
+                 own task nonce. This is NOT a report of zero orphans."
+                    .into(),
+            ),
+        })
     }
 }
 

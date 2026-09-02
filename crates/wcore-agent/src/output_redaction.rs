@@ -78,9 +78,29 @@ pub(crate) fn redact_tool_output(content: &str) -> String {
     // FIRECRAWL_API_KEY (`fc-[A-Za-z0-9]{20,}`) matches from there through the
     // final group and on into any alphanumeric output that follows, and 25
     // characters of a live approval token reach the wire ahead of the
-    // replacement. Token-first is unconditionally safer: it reads unmodified
-    // input, so it can only find MORE tokens, and the PII pass still sees
-    // everything the token scrub did not remove.
+    // replacement.
+    //
+    // Token-first is the right order because it is safer in the direction that
+    // is REACHABLE, not because it dominates. It reads unmodified input, so it
+    // always sees a whole token, and the PII pass still sees everything the
+    // token scrub left behind.
+    //
+    // It is NOT strictly safer, and the inverse is measured, not theoretical.
+    // The token scrub substitutes `[REDACTED]`, and `[` and `]` fall outside
+    // the character class of several PII patterns, so a substitution landing
+    // INSIDE a PII match splits it and strands the tail. Verbatim, against
+    // this compiled product, for `"Bearer " + 25*'A' + token + 30*'Z'`:
+    //     PII-first   -> `[REDACTED:BEARER_TOKEN]`
+    //     token-first -> `[REDACTED:BEARER_TOKEN][REDACTED]ZZZZ...` (30 chars survive)
+    // Same shape for `sk-ant-...` under ANTHROPIC_API_KEY.
+    //
+    // That case needs a real secret to literally embed a live, process-minted
+    // `apr-<uuid>`, which the model cannot know (GHSA-8r7g), so it is
+    // unreachable in practice while the token-straddle case above is a
+    // measured 1-in-256. Do not read this ordering as a general rule that
+    // token-first cannot strand a secret: it can, and if the token
+    // placeholder ever changes, re-measure both directions before assuming
+    // this still holds.
     PIIScrubber
         .scrub(&redact_active_tokens(content))
         .into_owned()

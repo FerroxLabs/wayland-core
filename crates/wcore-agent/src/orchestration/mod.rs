@@ -5289,7 +5289,8 @@ mod tests {
             events
                 .iter()
                 .any(|e| matches!(e, ProtocolEvent::CallAnnounced { .. })),
-            "control failed: no call was auto-approved, so the announce path was              never exercised and this test proves nothing"
+            "control failed: no call was auto-approved, so the announce path was \
+                never exercised and this test proves nothing"
         );
 
         for expected in call_ids {
@@ -5678,14 +5679,38 @@ mod tests {
     /// The echoed payload is laid out so the token straddles the head cut: with
     /// `max_result_size = 200` the head keeps the first 100 chars, and the
     /// token starts at offset 80.
+    ///
+    /// #361: the token is PINNED, not minted, and the pinned value is the
+    /// adversarial one. See the comment on the `token` binding below.
     #[tokio::test]
     async fn active_approval_token_split_by_truncation_leaves_no_fragment() {
         use wcore_protocol::commands::ApprovalScope;
 
-        let (bridge, token, _rx) = pending_bridge_token().await;
+        // #361. `ApprovalBridge` mints `apr-<uuid v4>`, and 1 uuid in 256 has a
+        // fourth group ending in `fc`, which puts a FIRECRAWL_API_KEY prefix
+        // (`fc-[A-Za-z0-9]{20,}`) INSIDE the token. Under the pre-0.13.11
+        // PII-first ordering in `redact_tool_output` that greedy match ate the
+        // token's tail and the whole alphanumeric filler behind it, the payload
+        // collapsed from 490 chars to 133, `truncate_result` no-opped at its
+        // 200-char cap, and the truncation CONTROL below went red. That is the
+        // shared-process lib-suite failure in core#361; a minted token made it
+        // look load-dependent because it is redrawn on every run.
+        //
+        // The ordering is fixed, but a fixture that reaches the truncation
+        // boundary for only 255 uuids in 256 is not a boundary test. This IS
+        // that 1-in-256 uuid, so the adversarial input runs on EVERY execution
+        // and the boundary is reached deterministically, independent of
+        // scheduling. Publishing it through `ActiveTokenRedactor` directly is
+        // the same registration the bridge performs via `refresh_redactor`;
+        // the bridge's own publication stays covered by the two sibling tests
+        // that call `pending_bridge_token`. Do NOT swap this for a random
+        // token: that restores the 1-in-256 flake and de-fangs the fixture.
+        let token = String::from("apr-00000000-0000-4000-80fc-000000000000");
+        let redactor = crate::output::protocol_sink::ActiveTokenRedactor::new();
+        redactor.set(vec![token.clone()]);
         assert!(
-            bridge.redactor().snapshot().contains(&token),
-            "control failed: the bridge never published the token as active"
+            redactor.snapshot().contains(&token),
+            "control failed: the token was never published as active"
         );
 
         let mut registry = ToolRegistry::new();
@@ -5705,8 +5730,9 @@ mod tests {
         // CONTROL: the layout must actually straddle the head boundary, or the
         // test degenerates into the whole-token case above.
         assert!(
-            payload.len() > 200 && token.len() > 20,
-            "fixture must truncate"
+            payload.len() > 200 && token.len() > 20 && token.contains("fc-"),
+            "fixture must truncate, and must keep the adversarial uuid that \
+             puts a FIRECRAWL_API_KEY prefix inside the token"
         );
         let calls = vec![ContentBlock::ToolUse {
             id: "call-584-trunc".into(),

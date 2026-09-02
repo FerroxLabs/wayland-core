@@ -55,6 +55,26 @@ on:
         type: string
         required: false
         default: ""
+      # core#325 c2 asks for A RUN in which one job is green and another red,
+      # shown NOT to close the tracker. No such run had ever executed: every
+      # scheduled tick is on main, and a dispatch of the real thing writes to a
+      # real tracker issue, which is why nobody fired one.
+      #
+      # This input removes that reason. It skips the two heavy jobs, fails
+      # `keyring-blob-size` on purpose so the tracker sees a genuinely RED
+      # sibling, and replaces both issue-writing steps with a step that PRINTS
+      # the payload and ASSERTS the decision was `report`. Everything c2 is
+      # about still runs for real: the `${{ needs.<job>.result }}` expansion,
+      # the multi-line JOB_RESULTS env, $GITHUB_OUTPUT -> steps.decide.outputs,
+      # and `always()` admitting the tracker while a sibling is red.
+      #
+      # Unreachable from the cron: `github.event.inputs.*` is empty for a
+      # `schedule` event, so every guard below reads '' != 'true'.
+      tracker_rehearsal:
+        description: "Rehearse the soak-tracker decision against a RED sibling. Writes to no issue."
+        type: boolean
+        required: false
+        default: false
 
 # Least-privilege default. The scheduled soak's issue-opening step needs
 # issues: write, so that job re-grants it at job scope; the candidate F20 jobs
@@ -109,12 +129,16 @@ jobs:
   windows-soak:
     name: Windows soak (windows-2025)
     # Skipped in candidate mode — only the exact F20 native jobs run then.
-    if: github.event.inputs.f20_candidate != 'true'
+    # Skipped in a tracker rehearsal too: the rehearsal grades the tracker's
+    # arithmetic, not the soak, and a skipped job is a non-success the decision
+    # script already handles (`cancelled | skipped` -> NONSUCCESS).
+    if: >-
+      ${{ github.event.inputs.f20_candidate != 'true'
+      && github.event.inputs.tracker_rehearsal != 'true' }}
     runs-on: windows-2025
     timeout-minutes: 60
     permissions:
       contents: read
-      issues: write
 
     steps:
       # Which Windows executor served this job (gh#1146). Fails closed: a job
@@ -200,123 +224,6 @@ jobs:
           # H-mutants.log, and nothing in the run said so.
           if-no-files-found: error
 
-      # Close the failure issue when the soak goes GREEN.
-      #
-      # This step exists because the failure body above has always promised
-      # "the next nightly cron tick will close this issue" and nothing in the
-      # workflow could do it. core#256 accumulated 19 bot failure comments,
-      # went silent when the soak recovered, and would have stayed open
-      # forever. A tracker that can only ever gain rows is not a tracker.
-      #
-      # Deliberately narrow: it closes ONLY an issue this workflow opened,
-      # identified by BOTH its labels and its title prefix, and it always
-      # leaves a comment naming the green run so the close is auditable.
-      # It never touches a human-filed issue.
-      - name: Close the failure issue on a green soak
-        if: success()
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const today  = new Date().toISOString().slice(0, 10);
-            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-
-            const { data: issues } = await github.rest.issues.listForRepo({
-              owner:  context.repo.owner,
-              repo:   context.repo.repo,
-              state:  'open',
-              labels: ['windows-soak', 'test-debt'],
-            });
-            const existing = issues.find(i => i.title.startsWith('[nightly-windows-soak] FAIL'));
-            if (!existing) {
-              core.info('no open soak failure issue - nothing to close');
-              return;
-            }
-
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo:  context.repo.repo,
-              issue_number: existing.number,
-              body: [
-                `## Windows soak GREEN - ${today}`,
-                ``,
-                `**Run**: ${runUrl}`,
-                ``,
-                `Closing automatically. One green tick is what this issue was`,
-                `opened against, so one green tick retires it. If the soak is`,
-                `flaky rather than fixed, the next red tick reopens a new issue`,
-                `and that recurrence is the signal worth reading.`,
-                ``,
-                `_Auto-closed by .github/workflows/nightly-windows-soak.yml_`,
-              ].join('\n'),
-            });
-
-            await github.rest.issues.update({
-              owner: context.repo.owner,
-              repo:  context.repo.repo,
-              issue_number: existing.number,
-              state: 'closed',
-              state_reason: 'completed',
-            });
-            core.info(`closed #${existing.number} on a green soak`);
-
-      # Open (or update) a GitHub issue when the soak fails. Mirrors
-      # mutants-nightly.yml so a failure shows up in the tracker the next
-      # morning rather than being buried in a red workflow badge.
-      - name: Report red result to issue tracker
-        if: failure()
-        uses: actions/github-script@v7
-        with:
-          # All workflow inputs the script needs are pulled from process.env,
-          # NOT from ${{ }} interpolation inside the script body. context.*
-          # values (runId, repo, serverUrl) come from the GHA-trusted runtime
-          # context, never from user input.
-          script: |
-            const today = new Date().toISOString().slice(0, 10);
-            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            const title = `[nightly-windows-soak] FAIL - ${today}`;
-            const body = [
-              `## Windows soak FAILED - ${today}`,
-              ``,
-              `**Run**: ${runUrl}`,
-              ``,
-              `**Artifacts**: windows-soak-logs-${context.runId} attached to the run`,
-              ``,
-              `### Triage`,
-              `1. Download the artifact and grep F-build.log, G-nextest.log,`,
-              `   H-mutants.log for the first failing step.`,
-              `2. Reproduce locally with pwsh scripts/wayland-e2e-windows-soak.ps1`,
-              `   on a Windows machine if the failure isn't environment-specific.`,
-              `3. PR the fix. The next GREEN nightly tick closes this issue`,
-              `   automatically (see the success-path step in the same workflow).`,
-              ``,
-              `_Auto-opened by .github/workflows/nightly-windows-soak.yml_`,
-            ].join('\n');
-
-            const { data: issues } = await github.rest.issues.listForRepo({
-              owner: context.repo.owner,
-              repo:  context.repo.repo,
-              state: 'open',
-              labels: ['windows-soak', 'test-debt'],
-            });
-            const existing = issues.find(i => i.title.startsWith('[nightly-windows-soak] FAIL'));
-
-            if (existing) {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo:  context.repo.repo,
-                issue_number: existing.number,
-                body,
-              });
-            } else {
-              await github.rest.issues.create({
-                owner:  context.repo.owner,
-                repo:   context.repo.repo,
-                title,
-                body,
-                labels: ['windows-soak', 'test-debt'],
-              });
-            }
-
   # --------------------------------------------------------------------------
   # The OAuth-sized-secret leg: does a real Windows Credential Manager hold a
   # whole token set?
@@ -347,6 +254,16 @@ jobs:
       contents: read
 
     steps:
+      # The RED sibling of the core#325 c2 rehearsal, and the only job that
+      # runs during one. First step, so nothing else executes and the rehearsal
+      # costs about a minute.
+      - name: Deliberate red sibling (tracker rehearsal only)
+        if: ${{ github.event.inputs.tracker_rehearsal == 'true' }}
+        shell: bash
+        run: |
+          echo "::notice title=Tracker rehearsal::failing on purpose so soak-tracker sees a RED sibling (core#325 c2). This step is unreachable from the schedule."
+          exit 1
+
       # Which Windows executor served this job (gh#1146). Fails closed: a job
       # that cannot name the box that served it reports nothing rather than
       # reporting anonymously. Why, and what enforces it:
@@ -480,6 +397,7 @@ jobs:
     needs: f20-windows-candidate
     if: >-
       ${{ !cancelled()
+      && github.event.inputs.tracker_rehearsal != 'true'
       && (github.event.inputs.f20_candidate != 'true'
       || needs.f20-windows-candidate.result == 'success') }}
     runs-on:
@@ -764,3 +682,223 @@ jobs:
             --expected-commit "$EXPECTED_COMMIT" \
             --expected-tree "$expected_tree" \
             --nonce "$F20_REQUEST_NONCE"
+
+  # --------------------------------------------------------------------------
+  # THE TRACKER, LIFTED OUT OF THE JOB THAT COULD NOT SEE THE RUN (core#325).
+  #
+  # The close and report steps used to live inside `windows-soak`, gated on
+  # `if: success()` / `if: failure()`. Those are JOB-scoped: they mean "this job
+  # has not failed", and they are blind to `keyring-blob-size` and
+  # `windows-live-acceptance`. Two measured consequences:
+  #
+  #   * Runs 32103885715 / 32220451402 / 32336640709 were each
+  #     `success :: Windows soak` + `failure :: Windows live-acceptance`.
+  #     Three consecutive reds, zero issues opened.
+  #   * Run 33053333326 (2026-08-27) had run conclusion FAILURE and still
+  #     CLOSED #319 at 08:56:03Z, because the reporting job itself was green.
+  #
+  # This job depends on every scheduled test job, runs `if: always()` so a red
+  # sibling cannot skip it, and delegates the verdict to
+  # `.github/scripts/soak-tracker-decision.sh` — which closes ONLY on an
+  # all-green roster and closes NOTHING when it cannot read the whole run.
+  # Keeping the rule in a script rather than in a `${{ }}` expression is what
+  # makes it testable: `.github/scripts/tests/soak-tracker-truth.test.sh` runs
+  # every branch of it, plus a lint that REQUIRED_JOBS still names every job the
+  # scheduled soak runs — so adding a fourth test job and forgetting the tracker
+  # reds a test instead of silently narrowing the tracker's view again.
+  # --------------------------------------------------------------------------
+  soak-tracker:
+    name: Soak tracker (whole-run truth)
+    needs: [windows-soak, keyring-blob-size, windows-live-acceptance]
+    if: ${{ always() && github.event.inputs.f20_candidate != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # `needs.<job>.result` is the ONLY input. It is a GHA-trusted enum, landed
+      # in env before the script reads it, never interpolated into a shell body.
+      - name: Decide from the WHOLE run, not from one job
+        id: decide
+        env:
+          REQUIRED_JOBS: "windows-soak keyring-blob-size windows-live-acceptance"
+          JOB_RESULTS: |
+            windows-soak=${{ needs.windows-soak.result }}
+            keyring-blob-size=${{ needs.keyring-blob-size.result }}
+            windows-live-acceptance=${{ needs.windows-live-acceptance.result }}
+        run: bash .github/scripts/soak-tracker-decision.sh
+
+      # Closes ONLY an issue this workflow opened, identified by BOTH its labels
+      # and its title prefix, and always leaves an auditable comment naming the
+      # green run. It never touches a human-filed issue.
+      - name: Close the failure issue on a green RUN
+        if: >-
+          ${{ steps.decide.outputs.action == 'close'
+          && github.event.inputs.tracker_rehearsal != 'true' }}
+        uses: actions/github-script@v7
+        env:
+          JOB_RESULTS: |
+            windows-soak=${{ needs.windows-soak.result }}
+            keyring-blob-size=${{ needs.keyring-blob-size.result }}
+            windows-live-acceptance=${{ needs.windows-live-acceptance.result }}
+        with:
+          script: |
+            const today  = new Date().toISOString().slice(0, 10);
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const roster = (process.env.JOB_RESULTS || '').trim().split('\n')
+              .map(l => `- \`${l.trim()}\``).join('\n');
+
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner:  context.repo.owner,
+              repo:   context.repo.repo,
+              state:  'open',
+              labels: ['windows-soak', 'test-debt'],
+            });
+            const existing = issues.find(i => i.title.startsWith('[nightly-windows-soak] FAIL'));
+            if (!existing) {
+              core.info('no open soak failure issue - nothing to close');
+              return;
+            }
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              issue_number: existing.number,
+              body: [
+                `## Windows nightly GREEN - ${today}`,
+                ``,
+                `**Run**: ${runUrl}`,
+                ``,
+                `Every gating job in this run passed:`,
+                roster,
+                ``,
+                `Closing automatically. The close is gated on the WHOLE run, not`,
+                `on one job's own success (core#325) - if any job here had failed,`,
+                `been cancelled or been skipped, this issue would have stayed open.`,
+                `If the soak is flaky rather than fixed, the next red tick reopens`,
+                `a new issue and that recurrence is the signal worth reading.`,
+                ``,
+                `_Auto-closed by .github/workflows/nightly-windows-soak.yml_`,
+              ].join('\n'),
+            });
+
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              issue_number: existing.number,
+              state: 'closed',
+              state_reason: 'completed',
+            });
+            core.info(`closed #${existing.number} on a green run`);
+
+      # The rehearsal's own verdict. This is what makes a dispatch EVIDENCE
+      # rather than a demonstration: it asserts the decision the whole-run
+      # arithmetic produced from real `needs.<job>.result` values, so a
+      # regression that starts closing on a red run makes THIS RUN FAIL.
+      - name: Rehearsal verdict - assert the red sibling did not close anything
+        if: ${{ github.event.inputs.tracker_rehearsal == 'true' }}
+        shell: bash
+        env:
+          ACTION: ${{ steps.decide.outputs.action }}
+          REASON: ${{ steps.decide.outputs.reason }}
+          JOB_RESULTS: |
+            windows-soak=${{ needs.windows-soak.result }}
+            keyring-blob-size=${{ needs.keyring-blob-size.result }}
+            windows-live-acceptance=${{ needs.windows-live-acceptance.result }}
+        run: |
+          set -euo pipefail
+          echo "-- core#325 c2 rehearsal ------------------------------------"
+          printf '%s\n' "$JOB_RESULTS"
+          echo "action=${ACTION} reason=${REASON}"
+          echo "no issue was created, commented on or closed by this run."
+
+          # The red sibling must be real: a rehearsal in which nothing actually
+          # failed would assert `report` against an empty premise.
+          case "$JOB_RESULTS" in
+            *keyring-blob-size=failure*) : ;;
+            *)
+              echo "::error title=Rehearsal premise absent::keyring-blob-size did not report 'failure', so this run has no red sibling and proves nothing."
+              exit 1
+              ;;
+          esac
+
+          if [ "${ACTION}" != "report" ]; then
+            echo "::error title=core#325 REGRESSED::a run with a failed sibling job decided '${ACTION}' (reason '${REASON}'), not 'report'. That is the laundering this issue was opened about."
+            exit 1
+          fi
+          echo "OK: one job red -> action=report, reason=${REASON}. Nothing was closed."
+
+      # Opens (or comments on) the tracker issue when ANY gating job failed —
+      # including the self-hosted live-acceptance job, whose three consecutive
+      # reds produced no issue at all under the old wiring.
+      - name: Report red result to issue tracker
+        if: >-
+          ${{ steps.decide.outputs.action == 'report'
+          && github.event.inputs.tracker_rehearsal != 'true' }}
+        uses: actions/github-script@v7
+        env:
+          JOB_RESULTS: |
+            windows-soak=${{ needs.windows-soak.result }}
+            keyring-blob-size=${{ needs.keyring-blob-size.result }}
+            windows-live-acceptance=${{ needs.windows-live-acceptance.result }}
+        with:
+          script: |
+            const today  = new Date().toISOString().slice(0, 10);
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const title  = `[nightly-windows-soak] FAIL - ${today}`;
+            const rows   = (process.env.JOB_RESULTS || '').trim().split('\n').map(l => l.trim());
+            const failed = rows.filter(l => l.endsWith('=failure')).map(l => l.split('=')[0]);
+            const body = [
+              `## Windows nightly FAILED - ${today}`,
+              ``,
+              `**Run**: ${runUrl}`,
+              ``,
+              `**Failing job(s)**: ${failed.length ? failed.join(', ') : '(none named - see roster)'}`,
+              ``,
+              `**Roster**:`,
+              rows.map(l => `- \`${l}\``).join('\n'),
+              ``,
+              `**Artifacts**: windows-soak-logs-${context.runId} attached to the run`,
+              ``,
+              `### Triage`,
+              `1. Open the failing job above. For \`windows-soak\`, download the`,
+              `   artifact and grep F-build.log, G-nextest.log, H-mutants.log for`,
+              `   the first failing step. For \`windows-live-acceptance\`, read the`,
+              `   self-hosted job log directly.`,
+              `2. Reproduce locally with pwsh scripts/wayland-e2e-windows-soak.ps1`,
+              `   on a Windows machine if the failure isn't environment-specific.`,
+              `3. PR the fix. This issue closes automatically on the next nightly`,
+              `   tick where EVERY gating job is green (core#325) - not merely the`,
+              `   one that opened it.`,
+              ``,
+              `_Auto-opened by .github/workflows/nightly-windows-soak.yml_`,
+            ].join('\n');
+
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              state: 'open',
+              labels: ['windows-soak', 'test-debt'],
+            });
+            const existing = issues.find(i => i.title.startsWith('[nightly-windows-soak] FAIL'));
+
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo:  context.repo.repo,
+                issue_number: existing.number,
+                body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner:  context.repo.owner,
+                repo:   context.repo.repo,
+                title,
+                body,
+                labels: ['windows-soak', 'test-debt'],
+              });
+            }

@@ -1,8 +1,10 @@
 //! `BrowserProvider` trait + supporting value types.
 //!
-//! The trait surface is **backend-neutral**: Camoufox, chromiumoxide, and
-//! Browserbase all implement it. The `BrowserTool` (in `tool.rs`) dispatches
-//! every `BrowserOp` to a single provider for the lifetime of a session.
+//! The trait surface is **backend-neutral**. Two backends implement it in this
+//! crate: `CamoufoxBackend` (the default sidecar) and `BrowserbaseBackend`
+//! (cloud, behind the `browserbase` feature). The `BrowserTool` (in `tool.rs`)
+//! dispatches every `BrowserOp` to a single provider for the lifetime of a
+//! session.
 //!
 //! Design §5.16: ARIA-tree-first. Snapshots return `AriaSnapshot` (compact
 //! text representation, not raw DOM dump) so element refs `@e1`, `@e2`, ...
@@ -156,8 +158,10 @@ pub enum OpResult {
 }
 
 /// Provider-neutral browser backend. Implementations: Camoufox sidecar
-/// (PRIMARY), chromiumoxide (FALLBACK, feature-gated), Browserbase
-/// (cloud, feature-gated).
+/// (PRIMARY, the default) and Browserbase (cloud, behind the `browserbase`
+/// feature). There is no third, CDP-based backend: issue #113 was filed
+/// against this doc comment and the module header above when they still
+/// promised one. `tests/no_phantom_backend_test.rs` keeps them honest.
 ///
 /// Cancellation: long-running impls MUST race their await against a
 /// `tokio_util::sync::CancellationToken` taken from the `ToolContext` —

@@ -419,6 +419,39 @@ pub trait SandboxBackend: Send + Sync + 'static {
         false
     }
 
+    /// Why [`Self::is_available`] answered `false`, when the backend knows.
+    ///
+    /// `is_available()` is a bare `bool`, and a bare `bool` was measured
+    /// costing a developer machine twelve days: AppContainer was disabled on
+    /// SEANDESKTOP from 2026-08-17 by one unrecoverable lease file, every
+    /// sandboxed command was refused, and the only place the cause appeared
+    /// was inside the error text of an `execute()` the operator had to
+    /// PROVOKE to see (FerroxLabs/wayland-core#369). A backend that knows why
+    /// it is down must be able to say so without being asked to run something.
+    ///
+    /// Contract: `None` when the backend is available, or when it genuinely
+    /// has no recorded cause. Never a placeholder — an invented reason is
+    /// worse than silence, because it stops the operator looking.
+    fn unavailable_reason(&self) -> Option<String> {
+        None
+    }
+
+    /// What this backend is KNOWN not to do, in the operator's words.
+    ///
+    /// Capability booleans answer questions someone thought to ask. This
+    /// answers the ones nobody asked, and it exists because the alternative
+    /// has a measured cost: the Windows AppContainer posture announced
+    /// "filesystem allowlists, fs_read_deny and network denial are enforced by
+    /// the OS" while two measured defects sat under it (#368, #369), and an
+    /// operator reading the capability row had no way to learn either.
+    ///
+    /// Each string names the defect AND its tracker, so a claim here is
+    /// checkable rather than asserted. Empty by default: a backend with no
+    /// recorded limitation says nothing rather than reassuring anybody.
+    fn known_limitations(&self) -> Vec<&'static str> {
+        Vec::new()
+    }
+
     /// True only when the backend owns the complete descendant tree even if
     /// an untrusted child calls `setsid` or `setpgid`. Process-group cleanup
     /// alone is not hard ownership and must keep the default `false`.
@@ -600,3 +633,137 @@ mod tests {
         .expect("receiver drop must cancel the backend execution future");
     }
 }
+
+/// The DISCLOSURE SURFACE: the [`SandboxBackend`] methods whose entire value to
+/// an operator is that they are READ, along
+/// backend → [`crate::SandboxRegistry`] → `SandboxStatus` → both arms of
+/// `wayland-core sandbox status`.
+///
+/// Nothing the product DOES changes when one of them is dropped somewhere on
+/// that path, which is precisely why a drop stays invisible. `#368` c6 was
+/// graded `met` while `AppContainerBackend::known_limitations` could be
+/// replaced with `Vec::new()` — it compiled, emptied `known_limitations` in
+/// `sandbox status --json` on real Windows, and left every test green. That
+/// hole was closed for `known_limitations` and MEASURED STILL OPEN for its
+/// sibling: replacing `SandboxRegistry::unavailable_reason`'s delegate with
+/// `None` compiles and leaves the whole `wcore-sandbox` + `wcore-cli` suite
+/// (3927 tests) green, while an operator's only read of a wedged backend's
+/// cause — the twelve silent days of `#369` — goes back to being unreadable.
+///
+/// So this is the SET, and the two checks below are total over the SURFACE
+/// rather than over the one method somebody happened to fix.
+///
+/// `blocks_powershell` joined the set for `#400` c1, and it is the member that
+/// makes the set's name literal rather than figurative: the other two WITHHOLD
+/// information, whereas this one is read at four production sites in
+/// `wcore-tools/src/bash.rs` that REWRITE the operator's argv. An operator who
+/// asks for `powershell -c ...` under a backend that answers `true` gets a
+/// different shell, and until this landed the only surface describing the
+/// sandbox's posture said nothing about it. The one-off `tracing::warn!` on the
+/// rewrite path is not a substitute: with `RUST_LOG` unset only `ERROR` reaches
+/// stderr, so that warning reaches nobody by default.
+pub const DISCLOSURE_METHODS: &[&str] = &[
+    "known_limitations",
+    "unavailable_reason",
+    "blocks_powershell",
+];
+
+/// Which targets a disclosing type is constructible on.
+///
+/// A row whose type does not exist here must be ASSERTED unconstructible by
+/// whoever enumerates the table, never quietly skipped — a skip is how a row
+/// stops being graded without anything going red.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeclaredOn {
+    /// Constructible on every target.
+    EveryTarget,
+    /// `cfg(windows)` only — the real Windows backends.
+    WindowsOnly,
+    /// `cfg(not(windows))` only — the compile stubs, which disclose that their
+    /// `available false` is a fact about the BUILD and not about the host.
+    NonWindowsOnly,
+}
+
+impl DeclaredOn {
+    /// Whether the declaring type exists on the target being compiled.
+    pub const fn constructible_here(self) -> bool {
+        match self {
+            Self::EveryTarget => true,
+            Self::WindowsOnly => cfg!(windows),
+            Self::NonWindowsOnly => !cfg!(windows),
+        }
+    }
+}
+
+/// One file in this crate that overrides at least one [`DISCLOSURE_METHODS`]
+/// method.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DisclosingBackend {
+    /// The backend's own [`SandboxBackend::name`].
+    pub name: &'static str,
+    /// The file, relative to this crate's `src/`, that carries the override.
+    /// Scanned, not decorative — see
+    /// `tests/declared_limitations_are_registered.rs`.
+    pub source_file: &'static str,
+    /// Which targets [`Self::name`]'s type exists on.
+    pub declared_on: DeclaredOn,
+    /// The subset of [`DISCLOSURE_METHODS`] this file overrides. Scanned
+    /// against the source, so it cannot drift from what the file actually
+    /// declares.
+    pub declares: &'static [&'static str],
+}
+
+/// Every override of a [`DISCLOSURE_METHODS`] method in this crate.
+///
+/// # Why a table, and why it is scanned
+///
+/// `#368` c6 asks that the product STATE a defect *where an operator reads the
+/// containment posture*. It was graded by asserting the constant existed, and
+/// that grade was vacuous: replacing `AppContainerBackend::known_limitations`
+/// with `Vec::new()` compiles, deletes the `KNOWN LIMITATIONS` block from
+/// `wayland-core sandbox status` on real Windows, and leaves every test green,
+/// because nothing called that method. The sibling `WindowsJobObjectBackend`
+/// override WAS asserted — so the hole was exactly one backend wide, and a
+/// third backend added tomorrow would open it again.
+///
+/// So the coverage question is inverted into decidable ones. Not "did somebody
+/// remember to grade this?", which is undecidable over an open set of future
+/// backends AND of future disclosure methods, but three total ones:
+///
+/// 1. *Is every override of every [`DISCLOSURE_METHODS`] method in this crate's
+///    source listed here, against the right method?* — answered by scanning
+///    `src/` in `tests/declared_limitations_are_registered.rs`.
+/// 2. *Does every row here survive to BOTH arms of `sandbox status`, for every
+///    method it declares?* — answered by projecting each row through a real
+///    [`crate::SandboxRegistry`] in `wcore_cli::sandbox_cmd::disclosure_tests`,
+///    which panics on a row — or a method — it has no arm for rather than
+///    skipping it.
+/// 3. *Does every FIELD of `SandboxStatus` reach the `--json` arm?* — answered
+///    by `every_status_field_reaches_the_json_arm`, one level further out.
+///
+/// Adding a backend that discloses something and wiring neither reddens (1);
+/// wiring (1) and not (2) reddens (2).
+pub const BACKENDS_THAT_DISCLOSE: &[DisclosingBackend] = &[
+    DisclosingBackend {
+        name: "windows_job_object",
+        source_file: "backends/windows_job_object.rs",
+        declared_on: DeclaredOn::EveryTarget,
+        declares: &["known_limitations"],
+    },
+    DisclosingBackend {
+        name: "appcontainer",
+        source_file: "backends/appcontainer/windows_impl/process.rs",
+        declared_on: DeclaredOn::WindowsOnly,
+        declares: &[
+            "known_limitations",
+            "unavailable_reason",
+            "blocks_powershell",
+        ],
+    },
+    DisclosingBackend {
+        name: "appcontainer_stub",
+        source_file: "backends/appcontainer.rs",
+        declared_on: DeclaredOn::NonWindowsOnly,
+        declares: &["unavailable_reason"],
+    },
+];

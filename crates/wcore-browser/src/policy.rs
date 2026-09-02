@@ -1140,59 +1140,73 @@ fn parse_legacy_octet(s: &str) -> Option<u64> {
 /// no worse than the status quo for an entry that was never a host.
 fn normalize_origin_pattern(pattern: &str) -> Option<(bool, String)> {
     let (wildcard, host) = strip_pattern_decorations(pattern)?;
-    canonical_host(host).map(|host| (wildcard, host))
+    canonical_host(&host).map(|host| (wildcard, host))
 }
 
-/// Textual half of [`normalize_origin_pattern`]: peel the decorations a
-/// URL-shaped spelling carries down to `(is_wildcard, bare_host_text)`.
-/// Borrows rather than allocating — every step is a prefix/suffix trim.
-fn strip_pattern_decorations(pattern: &str) -> Option<(bool, &str)> {
-    let rest = pattern.trim();
-    let rest = strip_scheme_ci(rest, "https://")
-        .or_else(|| strip_scheme_ci(rest, "http://"))
-        .unwrap_or(rest);
-    // Only the two schemes the gate itself accepts were stripped above, so
-    // anything still carrying `://` names a scheme this policy refuses at
-    // step 1 (`javascript:`, `file:`, `ftp:`, ...). Such an entry must match
-    // nothing: normalisation must not resurrect a pattern the gate would
-    // never honour into a working allow entry.
-    if rest.contains("://") {
+/// Textual half of [`normalize_origin_pattern`]: reduce an operator-written
+/// pattern to `(is_wildcard, bare_host_text)` by asking the URL parser which
+/// host the pattern actually names.
+///
+/// ## FerroxLabs/wayland#1252 c2 + c3 — why there is no hand cut here
+///
+/// This function used to peel the decorations by hand: strip the scheme, take
+/// everything before the first `/`, then the LAST `@`-separated part. For a
+/// special scheme the WHATWG parser maps `\` to a path separator, so the
+/// operator entry `https://evil.example\@github.com` is a URL naming the host
+/// `evil.example` with the path `/@github.com` — and the hand cut read
+/// `github.com`. An allow entry then admitted a host other than the one
+/// written, and a deny entry failed to deny the one it named.
+///
+/// The answer is not to add `\` to the cut. `wcore_types::url_authority` is
+/// the one authority parser in this workspace precisely because the next
+/// separator is not enumerable; its module header lists what a cut would have
+/// to track (C0 controls and ASCII whitespace ANYWHERE in the input, IDNA,
+/// IPv4 in four radices, forbidden host code points). So the pattern is handed
+/// to that parser, exactly like the request URL already is.
+///
+/// The parse runs on a URL string assembled here, because the spelling most
+/// operators write — a bare `x.example` — is not a URL. Each assembly rule is
+/// load-bearing:
+///
+/// - A scheme other than `https`/`http` still returns `None`, so
+///   `javascript:` / `file:` / `ftp:` entries stay inert rather than being
+///   resurrected into working ones.
+/// - The `*.` wildcard is peeled BEFORE the parse and re-attached to the
+///   verdict. It is a globbing marker of ours, not part of any host, and
+///   handing it to the IDNA path would only ask that parser a question about
+///   a name that cannot exist.
+/// - An unbracketed IPv6 literal is bracketed first: `Url` requires the
+///   brackets and an operator writes neither. `dialed_host_str` returns the
+///   address without them and [`canonical_host`] re-adds them, which is the
+///   form `Url::host_str()` hands the matcher.
+/// - The port is dropped by the parse rather than by a cut, and userinfo with
+///   it — including the `\@` spelling above, which is not userinfo at all.
+fn strip_pattern_decorations(pattern: &str) -> Option<(bool, String)> {
+    let trimmed = pattern.trim();
+    let (scheme_accepted, rest) = match strip_scheme_ci(trimmed, "https://")
+        .or_else(|| strip_scheme_ci(trimmed, "http://"))
+    {
+        Some(rest) => (true, rest),
+        None => (false, trimmed),
+    };
+    if !scheme_accepted && rest.contains("://") {
         return None;
     }
-    // Path next: a host never contains `/`.
-    let rest = rest.split('/').next().unwrap_or(rest);
-    // Userinfo. WHATWG takes the LAST `@` as the delimiter, so a userinfo
-    // field containing `@` cannot smuggle a different host past this.
-    let rest = match rest.rsplit_once('@') {
-        Some((_userinfo, host)) => host,
-        None => rest,
-    };
-    // Then the port.
-    let host = if rest.starts_with('[') {
-        // An IPv6 literal keeps its brackets, which is the form
-        // `Url::host_str()` hands the matcher.
-        match rest.find(']') {
-            Some(close) => &rest[..=close],
-            None => rest,
-        }
-    } else if rest.matches(':').count() >= 2 {
-        // Two or more colons and no brackets: an IPv6 literal written the way
-        // an operator writes one. `canonical_host` re-adds the brackets.
-        rest
-    } else {
-        match rest.split_once(':') {
-            // A single colon is a port only if what follows it IS a port.
-            // `data:text/html,...` reaches here as `data:text`, and must not
-            // become a working entry for the host `data`.
-            Some((host, port)) if port.chars().all(|c| c.is_ascii_digit()) => host,
-            Some(_) => return None,
-            None => rest,
-        }
-    };
-    Some(match host.strip_prefix("*.") {
+    let (wildcard, rest) = match rest.strip_prefix("*.") {
         Some(suffix) => (true, suffix),
-        None => (false, host),
-    })
+        None => (false, rest),
+    };
+    if rest.is_empty() {
+        return None;
+    }
+    let candidate = if !rest.starts_with('[') && rest.matches(':').count() >= 2 {
+        // An IPv6 literal written the way an operator writes one.
+        format!("https://[{rest}]")
+    } else {
+        format!("https://{rest}")
+    };
+    let host = wcore_types::url_authority::dialed_host_str(&candidate)?;
+    Some((wildcard, host))
 }
 
 /// Canonicalise a bare host through the same parser that produced the
@@ -1743,6 +1757,78 @@ mod tests {
             "a later answer containing the metadata endpoint must be refused \
              by the per-address block-list, pin or no pin: {r:?}"
         );
+    }
+
+    /// FerroxLabs/wayland#1252 c2 + c4 — an operator-written origin pattern
+    /// names the host the URL parser says it names, not the one a hand cut
+    /// reads off the end.
+    ///
+    /// `\` is a path separator for a special scheme, so
+    /// `https://evil.example\@github.com` is a URL for `evil.example` with the
+    /// path `/@github.com`. The cut this replaced took the last `@`-part of
+    /// everything before the first `/` and returned `github.com`, so an ALLOW
+    /// entry admitted a host other than the one written and a DENY entry
+    /// failed to deny the one it named.
+    #[test]
+    fn a_smuggled_authority_in_a_pattern_names_the_host_it_dials() {
+        // THE DEFECT, stated exactly as the ticket's c2 does.
+        assert!(
+            !origin_matches("github.com", r"https://evil.example\@github.com"),
+            "a pattern that PARSES as evil.example must not match github.com"
+        );
+        // ...and the host it really names does match, so this is not passing
+        // because the pattern became inert.
+        assert!(
+            origin_matches("evil.example", r"https://evil.example\@github.com"),
+            "the pattern names evil.example — it must match evil.example"
+        );
+
+        // The same class through the other two separators the authority ends
+        // at. `?` and `#` open the query and the fragment.
+        for pattern in [
+            r"https://evil.example\@github.com",
+            "https://evil.example?z=@github.com",
+            "https://evil.example#@github.com",
+            "https://github.com@evil.example",
+        ] {
+            assert!(
+                !origin_matches("github.com", pattern),
+                "pattern {pattern} does not name github.com"
+            );
+            assert!(
+                origin_matches("evil.example", pattern),
+                "pattern {pattern} names evil.example"
+            );
+        }
+    }
+
+    /// WRONG-REFUSAL CONTROL for
+    /// [`a_smuggled_authority_in_a_pattern_names_the_host_it_dials`]. A fix
+    /// that simply refused every decorated pattern would pass that test and
+    /// silently empty every operator's allow list; the ticket names this
+    /// control on purpose.
+    #[test]
+    fn ordinary_origin_patterns_still_match_what_they_always_matched() {
+        assert!(origin_matches("api.github.com", "*.github.com"));
+        assert!(origin_matches("github.com", "*.github.com"));
+        assert!(origin_matches("api.github.com", "https://*.github.com"));
+        assert!(origin_matches("github.com", "https://github.com"));
+        assert!(origin_matches("github.com", "HTTPS://GitHub.COM"));
+        assert!(origin_matches("github.com", "http://github.com/some/path"));
+        // A port in the pattern is dropped, not honoured (host-granular).
+        assert!(origin_matches("x.example", "https://x.example:8443"));
+        assert!(origin_matches("x.example", "x.example:8443"));
+        // Honest userinfo is userinfo; the host after it still matches.
+        assert!(origin_matches("x.example", "https://user:pw@x.example"));
+        // IPv6, bracketed and bare, and the trailing DNS root dot.
+        assert!(origin_matches("[::1]", "::1"));
+        assert!(origin_matches("[::1]", "[::1]:8443"));
+        assert!(origin_matches("example.com", "example.com."));
+        // A scheme this gate refuses must stay inert, not become an entry.
+        assert!(!origin_matches("evil.example", "javascript://evil.example"));
+        assert!(!origin_matches("evil.example", "ftp://evil.example"));
+        // A wildcard is a suffix glob, never a bare-name match.
+        assert!(!origin_matches("notgithub.com", "*.github.com"));
     }
 
     /// RED. The origin lists still decide first -- the resolution gate is an

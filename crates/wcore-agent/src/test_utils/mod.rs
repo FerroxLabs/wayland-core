@@ -146,6 +146,40 @@ impl TestSinkHandle {
 }
 
 impl OutputSink for TestSink {
+    /// wayland#1219: this sink DOES render the approval (below,
+    /// unconditionally), so it must say so — a blocking approval caller now
+    /// refuses to park on a sink that reports no surface. Keeping this in
+    /// sync with `emit_approval_required` is the whole contract of the
+    /// predicate.
+    fn approval_surface_available(&self) -> bool {
+        true
+    }
+
+    /// Mirrors `ProtocolSink`'s mapping so a test can read the
+    /// `resume_token` the way a HOST reads it — off the wire.
+    ///
+    /// Without this the doorbell's emission is a default no-op here, and the
+    /// only way a test could learn the token is `bridge.pending_tokens()`,
+    /// which is a shortcut no host has. Tests written against that shortcut
+    /// passed vacuously under a mutation that emitted an EMPTY token
+    /// (FerroxLabs/wayland#1180).
+    fn emit_approval_required(
+        &self,
+        call_id: &str,
+        resume_token: &str,
+        reason: &str,
+        context: &str,
+    ) {
+        self.record(&ProtocolEvent::ApprovalRequired {
+            call_id: call_id.to_string(),
+            resume_token: resume_token.to_string(),
+            correlation_id: resume_token.to_string(),
+            reason: reason.to_string(),
+            context: context.to_string(),
+            plan: None,
+        });
+    }
+
     fn emit_midflight_monitor_decision(
         &self,
         directive: wcore_protocol::events::MonitorDirective,
@@ -287,13 +321,19 @@ impl OutputSink for TestSink {
             agent_run_id: agent_run_id.map(str::to_string),
         });
     }
-    fn emit_error(&self, msg: &str, retryable: bool) {
+    fn emit_error(
+        &self,
+        msg: &str,
+        retryable: bool,
+        _category: wcore_protocol::events::FailureCategory,
+    ) {
         self.record(&ProtocolEvent::Error {
             msg_id: None,
             error: ErrorInfo {
                 code: "test_sink_error".to_string(),
                 message: msg.to_string(),
                 retryable,
+                category: wcore_protocol::events::FailureCategory::Unknown,
             },
         });
     }
@@ -403,6 +443,7 @@ mod tests {
             temperature: None,
             omit_max_tokens: false,
             routed_model_hint: None,
+            replay_reasoning_content: false,
         };
         let mut rx = p.stream(&req).await.unwrap();
         let first = rx.recv().await.unwrap();

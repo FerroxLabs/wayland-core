@@ -65,8 +65,11 @@ impl Tool for GrepTool {
     }
 
     async fn execute(&self, input: Value) -> ToolResult {
-        // No `ToolContext` here, so no jail root to anchor the scan to.
-        run_grep(&input, None).await
+        // No `ToolContext` here, so no jail root to anchor the scan to and no
+        // workspace policy to ask. This entry point is the unconfined
+        // top-level one, which installs no `SecretDenyFs` either — the two
+        // layers agree by both being absent.
+        run_grep(&input, None, None).await
     }
 
     /// W8b — vfs-aware variant. Grep itself shells out to rg/grep so it
@@ -92,7 +95,12 @@ impl Tool for GrepTool {
         // the process cwd — mirroring how Read/Write/Edit resolve against the
         // jail root. `None` for an unconstrained vfs (top-level RealFs) leaves
         // the subprocess in the process cwd, preserving existing behaviour.
-        run_grep(&input, ctx.vfs.root()).await
+        // #375: the session's workspace policy travels with the search so the
+        // traversal is held to the SAME read-deny the VFS applies. Grep spawns
+        // `rg`/`grep` directly (see `try_ripgrep`), outside both `ctx.vfs` and
+        // BashTool's OS sandbox, so this is the only layer that can refuse what
+        // the walk reaches.
+        run_grep(&input, ctx.vfs.root(), ctx.workspace.clone()).await
     }
 
     fn max_result_size(&self) -> usize {
@@ -134,7 +142,11 @@ impl Tool for GrepTool {
 /// Shared entry point for both `execute` and `execute_with_ctx`. `search_root`
 /// is the jail root the subprocess should run inside (`Some` for a sandboxed
 /// sub-agent, `None` for the unconstrained top-level case).
-async fn run_grep(input: &Value, search_root: Option<&Path>) -> ToolResult {
+async fn run_grep(
+    input: &Value,
+    search_root: Option<&Path>,
+    policy: Option<std::sync::Arc<crate::workspace_policy::WorkspacePolicy>>,
+) -> ToolResult {
     let Some(pattern) = input["pattern"].as_str() else {
         return ToolResult {
             content: "Missing required parameter: pattern".to_string(),
@@ -205,14 +217,37 @@ async fn run_grep(input: &Value, search_root: Option<&Path>) -> ToolResult {
         };
     }
 
+    // #375. The search ROOT itself may be a path the VFS read-deny refuses —
+    // a VCS content store named outright (`Grep(path=".git/objects")`). The
+    // traversal filter below cannot express that: a walk rooted at a pruned
+    // directory yields nothing and would render as "No matches found", which
+    // is the "could not look" / "there was nothing" confusion rule 6 exists to
+    // stop. Refuse it here, with the reason named, exactly as the secret-file
+    // arm above does.
+    if policy
+        .as_ref()
+        .is_some_and(|policy| policy.denies_read_content(&resolved))
+    {
+        return ToolResult {
+            content: format!(
+                "Refused to search {path}: it is a protected secret path \
+                 (Grep returns matched line content)"
+            ),
+            is_error: true,
+        };
+    }
+
     // SR-04/SR-05. Decide what this search may report BEFORE choosing a
     // backend, so `rg`, `grep` and `findstr` are all held to the same answer.
     // See `grep_policy` for the rules and the reasoning.
-    let scope = grep_policy::scope_for(&resolved);
+    // `base` first: it is both the subprocess working directory and the anchor
+    // arm-2 store resolution starts from, because a `.git` ABOVE the search
+    // target can name a store INSIDE it (core#244 c3).
     let base = match search_root {
         Some(root) => root.to_path_buf(),
         None => std::env::current_dir().unwrap_or_else(|_| resolved.clone()),
     };
+    let scope = grep_policy::scope_for(&resolved, &base, policy);
 
     // Try ripgrep first, fallback to grep.
     let raw = match try_ripgrep(pattern, path, glob_pattern, case_insensitive, search_root).await {
@@ -606,7 +641,7 @@ mod tests {
             "pattern": "anything",
             "path": "this_path_does_not_exist_4c81de.txt",
         });
-        let out = run_grep(&input, Some(dir.path())).await;
+        let out = run_grep(&input, Some(dir.path()), None).await;
 
         assert!(
             out.is_error,

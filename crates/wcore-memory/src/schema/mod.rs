@@ -527,7 +527,8 @@ mod tests {
         assert_eq!(
             pre_v7_seed(retired[0].1),
             None,
-            "the retired placeholder must scale to zero simulated successes in              the OLD arithmetic too, got score {}",
+            "the retired placeholder must scale to zero simulated successes in \
+                the OLD arithmetic too, got score {}",
             retired[0].1
         );
 

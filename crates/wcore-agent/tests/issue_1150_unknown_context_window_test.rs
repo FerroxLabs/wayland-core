@@ -81,8 +81,13 @@ impl OutputSink for NoticeSink {
             finish,
         );
     }
-    fn emit_error(&self, msg: &str, retryable: bool) {
-        NullSink.emit_error(msg, retryable);
+    fn emit_error(
+        &self,
+        msg: &str,
+        retryable: bool,
+        category: wcore_protocol::events::FailureCategory,
+    ) {
+        NullSink.emit_error(msg, retryable, category);
     }
     fn emit_info(&self, msg: &str) {
         self.infos.lock().unwrap().push(msg.to_string());
@@ -108,14 +113,57 @@ fn config(model: &str) -> Config {
 const SKILL_DESC: &str = "ISSUE_1150_DESCRIPTION_MARKER a description long enough that a \
 tight character budget must drop it entirely rather than merely trim a word";
 
+/// How many FILLER skills the fixture plants beside the marker one, and how
+/// long each description is.
+///
+/// These are not decoration. Both budget arms under test render a listing that
+/// is CLIPPED to a character budget, so a test that compares two budgets can
+/// only measure anything if the catalogue overflows the LARGER of them. The
+/// budget is 1% of the window in characters (`window x CHARS_PER_TOKEN / 100`),
+/// so the largest arm here — the old fabricated 200,000-token window — buys
+/// 8,000 characters. `FILLER_SKILLS x FILLER_DESC_LEN` is comfortably over
+/// that, and `the_fixture_overflows_every_budget_under_test` asserts it rather
+/// than trusting the arithmetic to stay true.
+///
+/// Before this, the fixture planted ONE skill and the overflow came from
+/// whatever skills happened to be installed on the host. On a developer box or
+/// hetzner there are plenty and the test passed; in a clean CI container there
+/// are none, both arms rendered the identical 4,890 bytes, and the
+/// non-vacuity precondition in
+/// `an_unknown_window_sizes_the_skill_listing_like_the_window_it_assumes`
+/// fired 3/3 — so wayland#1199 c2 and c3 were graded `met` on evidence that was
+/// RED in CI. The sibling test above already carries a comment diagnosing
+/// exactly this ("that composition differs between a developer box with skills
+/// installed and a clean CI container"); the lesson was written down and then
+/// not applied one test over. The fixture now supplies its own overflow, so
+/// what the host has installed cannot decide whether this file grades anything.
+const FILLER_SKILLS: usize = 30;
+const FILLER_DESC_LEN: usize = 400;
+
 fn plant_skill(root: &std::path::Path) {
-    let dir = root.join(".wayland-core").join("skills").join("issue-1150");
+    let skills = root.join(".wayland-core").join("skills");
+    let dir = skills.join("issue-1150");
     std::fs::create_dir_all(&dir).expect("skill dir");
     std::fs::write(
         dir.join("SKILL.md"),
         format!("---\nname: issue-1150-skill\ndescription: {SKILL_DESC}\n---\n\nbody\n"),
     )
     .expect("write SKILL.md");
+
+    for i in 0..FILLER_SKILLS {
+        let dir = skills.join(format!("issue-1150-filler-{i:03}"));
+        std::fs::create_dir_all(&dir).expect("filler skill dir");
+        // Unique per skill so nothing can dedupe them, and long enough that the
+        // catalogue overflows the largest budget under test.
+        let desc = format!("filler {i:03} ")
+            + &"describes a distinct capability so the listing cannot dedupe it "
+                .repeat(FILLER_DESC_LEN / 63 + 1)[..FILLER_DESC_LEN];
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: issue-1150-filler-{i:03}\ndescription: {desc}\n---\n\nbody\n"),
+        )
+        .expect("write filler SKILL.md");
+    }
 }
 
 /// Boot one session through the production path. Returns everything the user
@@ -208,6 +256,71 @@ async fn an_explicit_operator_window_silences_the_notice() {
     );
 }
 
+// -- #1179 c2: the window is KNOWN, and too small to compact inside ---------
+//
+// Same channel, same reason, adjacent branch in the same bootstrap `if`. It
+// lives in this file because `boot()` is the production path both notices are
+// emitted from and duplicating that harness would give the two notices two
+// different definitions of "the user was told".
+
+/// The phrase the #1179 c2 notice is keyed off.
+const TOO_SMALL_MARK: &str = "too small for automatic compaction";
+
+/// An operator who sets `[compact] context_window` below the window core can
+/// compact inside gets a SILENT refusal everywhere else — `should_autocompact_at`
+/// simply returns `false`, forever. A silent refusal on a window the operator
+/// chose is indistinguishable from compaction being broken, so the session says
+/// so once, at boot, on the channel the user reads.
+///
+/// 6,000 is not a made-up number: #1150's own notice tells operators to set
+/// `[compact] context_window`, and a local Ollama `num_ctx` of 6,144 lands in
+/// the same band.
+#[tokio::test]
+async fn a_configured_window_too_small_to_compact_in_is_announced() {
+    let (infos, _prompt) = boot(UNLISTED_MODEL, Some(6_000)).await;
+    let hits: Vec<&String> = infos
+        .iter()
+        .filter(|m| m.contains(TOO_SMALL_MARK))
+        .collect();
+    assert_eq!(
+        hits.len(),
+        1,
+        "compaction is off for the whole session at a 6,000-token window and the user \
+         was told nothing. Everything they WERE told: {infos:?}"
+    );
+    let notice = hits[0];
+    assert!(
+        notice.contains("6000"),
+        "the notice does not name the window it is refusing: {notice}"
+    );
+    assert!(
+        notice.contains("context_window"),
+        "the notice does not name the setting that fixes it: {notice}"
+    );
+    assert!(
+        notice.contains("emergency"),
+        "the notice must say which boundary DOES still apply, or it reads as \
+         'you are now unbounded': {notice}"
+    );
+}
+
+/// The other direction, and the reason the assertion above is `== 1`: a window
+/// compaction CAN work in must not be announced as too small. Without this,
+/// the notice would also pass by firing on every session.
+#[tokio::test]
+async fn a_workable_configured_window_is_not_announced_as_too_small() {
+    let (infos, _prompt) = boot(UNLISTED_MODEL, Some(32_768)).await;
+    let hits: Vec<&String> = infos
+        .iter()
+        .filter(|m| m.contains(TOO_SMALL_MARK))
+        .collect();
+    assert!(
+        hits.is_empty(),
+        "32,768 is workable - threshold 14,748 against a 3,118-token baseline turn - \
+         yet the session announced compaction as off: {hits:?}"
+    );
+}
+
 // -- Bug 2: the dead skills prompt budget -----------------------------------
 
 /// THE #1150 Bug-2 guard, driven through the production
@@ -262,4 +375,117 @@ async fn the_bootstrap_prompt_uses_the_real_window_derived_skill_budget() {
     // assertion duly passed on the build host and failed in CI. The length
     // comparison above is the portable form of the same claim, and it is the one
     // the defect actually breaks.
+}
+
+/// #1150 D16 — the UNKNOWN-window path, which the guard above never touches.
+///
+/// `the_bootstrap_prompt_uses_the_real_window_derived_skill_budget` boots BOTH
+/// arms with an explicit window (`Some(1_000_000)` / `Some(2_000)`), so the
+/// `None` arm — the reporter's exact configuration, an unlisted model with no
+/// `[compact] context_window` — is the one case it cannot see. And that is the
+/// case where the fabricated 200,000 survived: `get_char_budget`'s `None` arm
+/// returned `DEFAULT_CHAR_BUDGET = 8_000`, whose own source comment read
+/// "1% of 200k x 4", while every other boundary in the same session was sized
+/// against `UNVERIFIED_CONTEXT_WINDOW` = 32,768.
+///
+/// Asserted as an IDENTITY against the window the session actually assumes, so
+/// it cannot be satisfied by any other 1,310-character coincidence, and so it
+/// keeps tracking `UNVERIFIED_CONTEXT_WINDOW` if that constant ever moves.
+#[tokio::test]
+async fn an_unknown_window_sizes_the_skill_listing_like_the_window_it_assumes() {
+    let (_infos, unknown) = boot(UNLISTED_MODEL, None).await;
+    let (_infos, assumed) = boot(
+        UNLISTED_MODEL,
+        Some(wcore_config::compact::UNVERIFIED_CONTEXT_WINDOW),
+    )
+    .await;
+    let (_infos, old_fabrication) = boot(
+        UNLISTED_MODEL,
+        Some(wcore_config::compact::DEFAULT_CONTEXT_WINDOW),
+    )
+    .await;
+
+    assert!(
+        unknown.contains("issue-1150"),
+        "precondition: the planted skill never reached the unknown-window prompt"
+    );
+    assert_eq!(
+        unknown.len(),
+        assumed.len(),
+        "an unknown window must budget the skills listing against the same \
+         {} tokens the rest of the session is sized against, not against a \
+         200,000-token window nothing else believes in",
+        wcore_config::compact::UNVERIFIED_CONTEXT_WINDOW,
+    );
+    assert!(
+        old_fabrication.len() > unknown.len(),
+        "precondition: a 200,000-token window really does buy a longer listing \
+         here, or this test could pass on a catalogue with no skills in it \
+         (200k = {} bytes, unknown = {} bytes). The fixture plants \
+         {FILLER_SKILLS} filler skills precisely so this cannot depend on what \
+         the host happens to have installed -- see \
+         the_fixture_overflows_every_budget_under_test",
+        old_fabrication.len(),
+        unknown.len(),
+    );
+}
+
+/// The guard on the guard: the FIXTURE, not the host, must be what overflows
+/// the budgets the tests above compare.
+///
+/// Both arms of `an_unknown_window_sizes_the_skill_listing_like_the_window_it_assumes`
+/// render a listing clipped to `window x CHARS_PER_TOKEN / 100` characters, so
+/// the comparison is only meaningful when the catalogue is bigger than the
+/// LARGER budget. That used to be supplied by whatever skills were installed on
+/// the machine, which is why the file passed on hetzner and failed 3/3 in the
+/// clean CI container. This asserts the planted skills alone exceed the largest
+/// budget any test in this file uses, so the property is decided here rather
+/// than by the host.
+#[tokio::test]
+async fn the_fixture_overflows_every_budget_under_test() {
+    use wcore_config::compact::CHARS_PER_TOKEN;
+
+    // The window whose budget MUST be overflowed for
+    // `an_unknown_window_sizes_the_skill_listing_like_the_window_it_assumes`
+    // to grade anything: its larger arm, the old fabricated 200,000. The
+    // 1,000,000 arm below is deliberately NOT the bound — it exists to show the
+    // clipping is monotone, and its 40,000-character budget is meant to hold the
+    // whole fixture.
+    const HEADROOM_WINDOW: usize = 1_000_000;
+    let must_overflow = wcore_config::compact::DEFAULT_CONTEXT_WINDOW * CHARS_PER_TOKEN / 100;
+
+    let planted = FILLER_SKILLS * FILLER_DESC_LEN;
+    assert!(
+        planted > must_overflow,
+        "the fixture plants {planted} characters of skill description and the \
+         budget it must overflow is {must_overflow}; if the fixture does not \
+         overflow it, the length comparisons in this file measure the host's \
+         installed skills instead of the product"
+    );
+
+    // And the clipping is real, measured through the production bootstrap
+    // rather than asserted from the arithmetic: a 1,000,000-token window must
+    // render strictly more than the fabricated 200,000-token one, which must in
+    // turn render strictly more than the 32,768 the session assumes.
+    let (_i, huge) = boot(UNLISTED_MODEL, Some(HEADROOM_WINDOW)).await;
+    let (_i, fabricated) = boot(
+        UNLISTED_MODEL,
+        Some(wcore_config::compact::DEFAULT_CONTEXT_WINDOW),
+    )
+    .await;
+    let (_i, assumed) = boot(
+        UNLISTED_MODEL,
+        Some(wcore_config::compact::UNVERIFIED_CONTEXT_WINDOW),
+    )
+    .await;
+    assert!(
+        huge.len() > fabricated.len() && fabricated.len() > assumed.len(),
+        "the three budgets must render three strictly decreasing listings, or \
+         the catalogue is not overflowing them: 1M = {} bytes, 200k = {} bytes, \
+         {} = {} bytes",
+        huge.len(),
+        fabricated.len(),
+        wcore_config::compact::UNVERIFIED_CONTEXT_WINDOW,
+        assumed.len()
+    );
 }

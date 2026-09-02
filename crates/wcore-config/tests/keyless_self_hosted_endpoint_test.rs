@@ -27,13 +27,23 @@
 //! Delete any of them and the positive test would also pass against a build
 //! that had simply stopped requiring credentials at all.
 
+use std::collections::HashMap;
+
 use serial_test::serial;
 use tempfile::TempDir;
-use wcore_config::config::{CliArgs, Config};
+use wcore_config::config::{
+    CliArgs, Config, CouncilProviderError, ProviderConfig, resolve_council_provider,
+};
 
 /// A stock Ollama endpoint over its OpenAI-compatible surface — the exact URL
 /// from the issue's reproduction.
 const LOCAL_ENDPOINT: &str = "http://127.0.0.1:11434/v1";
+
+/// #1211 — a PUBLIC host whose query string merely CONTAINS `@` followed by a
+/// loopback literal. Every byte after the `?` is query, so the request goes to
+/// `api.openai.com`; a gate that reads the authority past the `?` calls it
+/// loopback and waives the credential on the open internet.
+const PUBLIC_HOST_WITH_USERINFO_QUERY: &str = "https://api.openai.com?x=@127.0.0.1";
 
 /// Credential-bearing variables that would otherwise satisfy the key chain from
 /// the developer's own shell and mask the behaviour under test.
@@ -270,7 +280,144 @@ fn the_locality_predicate_rejects_public_hosts() {
         "https://127.0.0.1.attacker.example/v1",
         "https://localhost.attacker.example/v1",
         "https://8.8.8.8/v1",
+        // #1211 — the `@` is in the QUERY, not the authority. Reading the
+        // authority as "everything before the first '/'" and then taking the
+        // last `@`-separated part makes both of these read as loopback.
+        PUBLIC_HOST_WITH_USERINFO_QUERY,
+        "https://h?a=@10.0.0.1",
+        // The same confusion one delimiter over: for a special scheme the URL
+        // grammar ends the authority at '#' too, so this is a fragment.
+        "https://api.openai.com#@127.0.0.1",
+        // And why cutting at the first of '/', '?', '#' is not enough on its
+        // own: a special scheme treats '\\' as a path separator, so this is a
+        // request to api.openai.com with the path `/@127.0.0.1/v1`.
+        "https://api.openai.com\\@127.0.0.1/v1",
+        // Real userinfo, pointed the other way: the HOST is public and the
+        // loopback literal is the user name.
+        "https://127.0.0.1@api.openai.com/v1",
     ] {
         assert!(!is_self_hosted_base_url(url), "expected public: {url}");
+    }
+}
+
+/// #1212 — THE SECOND CREDENTIAL GATE. `resolve_council_provider` runs its own
+/// credential chain for council members. It reached the opposite verdict to
+/// `Config::resolve` on identical config: a keyless self-hosted member was
+/// classified `CouncilProviderError::Keyless` and dropped before spawn, so a
+/// user who pointed a council member at a local Ollama silently lost it.
+#[test]
+#[serial]
+fn a_keyless_self_hosted_council_member_is_not_skipped() {
+    let _env = NoCredentialEnv::enter();
+    let home = TempDir::new().unwrap();
+    let _home_guard = HomeGuard::enter(home.path());
+
+    let mut providers = HashMap::new();
+    providers.insert(
+        "openai".to_string(),
+        ProviderConfig {
+            base_url: Some(LOCAL_ENDPOINT.to_string()),
+            ..Default::default()
+        },
+    );
+
+    let (cfg, _model) = resolve_council_provider(&providers, &Config::default(), "openai")
+        .unwrap_or_else(|e| {
+            panic!(
+                "a council member at a keyless self-hosted endpoint must be built, \
+                 not skipped -- the same config starts fine on the main CLI path. \
+                 Got: {e:?}"
+            )
+        });
+
+    assert_eq!(
+        cfg.base_url, LOCAL_ENDPOINT,
+        "the declared endpoint must survive council resolution"
+    );
+    assert!(
+        cfg.api_key.is_empty(),
+        "a keyless local member must not acquire a credential here; the provider \
+         decides what (if anything) goes on the wire. Got a non-empty key"
+    );
+}
+
+/// NEGATIVE CONTROL for the council gate — the exemption must not have been
+/// traded for "the council stopped checking credentials". A public member with
+/// no key anywhere is still `Keyless`, and so is the #1211 spelling of a public
+/// host dressed up to look like loopback.
+#[test]
+#[serial]
+fn a_keyless_public_council_member_is_still_skipped() {
+    let _env = NoCredentialEnv::enter();
+    let home = TempDir::new().unwrap();
+    let _home_guard = HomeGuard::enter(home.path());
+
+    for endpoint in ["https://api.openai.com", PUBLIC_HOST_WITH_USERINFO_QUERY] {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "openai".to_string(),
+            ProviderConfig {
+                base_url: Some(endpoint.to_string()),
+                ..Default::default()
+            },
+        );
+        let err = resolve_council_provider(&providers, &Config::default(), "openai")
+            .err()
+            .unwrap_or_else(|| {
+                panic!("{endpoint}: a public council member with no credential must be skipped")
+            });
+        assert!(
+            matches!(err, CouncilProviderError::Keyless(_)),
+            "{endpoint}: expected Keyless, got {err:?}"
+        );
+    }
+}
+
+/// #1212 c2 — the two gates must AGREE. This drives both credential gates over
+/// the same endpoints with the same declaration and asserts one verdict, so a
+/// future edit that fixes one gate and not the other is red here rather than
+/// discovered by a user whose council member vanished.
+#[test]
+#[serial]
+fn both_credential_gates_agree_on_identical_config() {
+    for (endpoint, exempt) in [
+        ("http://127.0.0.1:11434", true),
+        ("https://api.openai.com", false),
+        (PUBLIC_HOST_WITH_USERINFO_QUERY, false),
+    ] {
+        // Gate 1 — the startup path, declaring the endpoint in config.
+        let startup = resolve_without_credentials(
+            "openai",
+            None,
+            Some(&format!("[providers.openai]\nbase_url = \"{endpoint}\"\n")),
+        )
+        .is_ok();
+
+        // Gate 2 — the council path, the same declaration through the same
+        // `[providers.openai]` shape.
+        let council = {
+            let _env = NoCredentialEnv::enter();
+            let home = TempDir::new().unwrap();
+            let _home_guard = HomeGuard::enter(home.path());
+            let mut providers = HashMap::new();
+            providers.insert(
+                "openai".to_string(),
+                ProviderConfig {
+                    base_url: Some(endpoint.to_string()),
+                    ..Default::default()
+                },
+            );
+            resolve_council_provider(&providers, &Config::default(), "openai").is_ok()
+        };
+
+        assert_eq!(
+            startup, council,
+            "{endpoint}: the startup gate and the council gate must reach the same \
+             verdict on identical config (startup exempt={startup}, council exempt={council})"
+        );
+        assert_eq!(
+            startup, exempt,
+            "{endpoint}: expected exempt={exempt}, both gates said {startup}"
+        );
     }
 }

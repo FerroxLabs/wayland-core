@@ -1224,6 +1224,7 @@ mod tests {
             async fn check(
                 &self,
                 _request: &wcore_egress::reqwest::Request,
+                _origin: wcore_egress::EgressOrigin,
             ) -> wcore_egress::EgressDecision {
                 wcore_egress::EgressDecision::Deny {
                     reason: "session denied".to_string(),
@@ -1279,9 +1280,20 @@ mod tests {
             denied.health().get("deferred"),
             Some(McpServerHealth::Failed { reason }) if reason.contains("session denied")
         ));
+        // FerroxLabs/wayland#1175 — assert the DENIED session's absence
+        // directly rather than through a total request count. The allowed
+        // session now also opens the standalone `GET` event stream (the only
+        // channel a Streamable HTTP server has for `tools/list_changed`), so a
+        // total count both changes and races with that background task. A leak
+        // from the denied session would show up as its own `initialize`, which
+        // this counts exactly.
+        let received = server.received_requests().await.expect("request log");
+        let initializes = received
+            .iter()
+            .filter(|r| String::from_utf8_lossy(&r.body).contains("\"method\":\"initialize\""))
+            .count();
         assert_eq!(
-            server.received_requests().await.expect("request log").len(),
-            2,
+            initializes, 1,
             "the denied session must not emit any network request"
         );
     }

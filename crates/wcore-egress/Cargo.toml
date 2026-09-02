@@ -21,5 +21,10 @@ thiserror.workspace   = true
 async-trait.workspace = true
 sha2.workspace       = true
 tokio.workspace      = true
+# Only for `refused_port`: std cannot bind a TCP socket WITHOUT calling
+# listen(), and bind-without-listen is precisely what makes a port both
+# unstealable and connection-refusing. Already a workspace dependency, so
+# this adds nothing to Cargo.lock.
+socket2.workspace    = true
 
 workspace-hack.workspace = true

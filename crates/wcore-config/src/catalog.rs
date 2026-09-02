@@ -277,7 +277,9 @@ mod tests {
         let catalog = ProviderCatalog::load_bundled().expect("parses");
         for e in &catalog.providers {
             let compat = ProviderCompat::from_catalog_entry(&e.id, e.api_path.as_deref());
-            let url = format!("{}{}", e.base_url, compat.api_path());
+            // #1178: grade the REAL composition, not a concatenation the
+            // provider no longer performs.
+            let url = compat.endpoint_url(&e.base_url);
             assert!(
                 url.contains("/chat/completions") || url == e.base_url,
                 "entry {} resolves to a non-chat endpoint: {}",
@@ -300,7 +302,7 @@ mod tests {
         let e = catalog.get("deepseek").expect("deepseek present");
         // deepseek omits api_path → default suffix.
         let compat = ProviderCompat::from_catalog_entry(&e.id, e.api_path.as_deref());
-        let url = format!("{}{}", e.base_url, compat.api_path());
+        let url = compat.endpoint_url(&e.base_url);
         assert_eq!(url, "https://api.deepseek.com/v1/chat/completions");
     }
 }

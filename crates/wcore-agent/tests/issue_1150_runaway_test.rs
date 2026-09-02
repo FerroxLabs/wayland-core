@@ -38,7 +38,13 @@ const REPORTED_TOKENS: u64 = 83_208;
 /// The compaction fallback for a model whose window is unverified, and the
 /// boundaries that follow from it under the shipped buffer defaults.
 const UNVERIFIED_WINDOW: u64 = 32_768;
-const EXPECTED_EMERGENCY_LIMIT: usize = 29_768; // 32_768 - emergency_buffer 3_000
+// #1179: 32_768 - SCALED emergency_buffer (3_000 x 0.546 = 1_638). The buffers
+// are scaled to the window before they are subtracted, so the hard stop on an
+// unverified window is 31_130 rather than 29_768. The property #1150 asserts is
+// unchanged and is what the test name says: the stop is derived from the
+// conservative 32,768 window, not from a fabricated 200,000, and the reporter's
+// 83,208-token watermark is far past it either way.
+const EXPECTED_EMERGENCY_LIMIT: usize = 31_130;
 
 /// Records what the user is told; every other surface is inert.
 #[derive(Default)]
@@ -88,8 +94,17 @@ impl OutputSink for NoticeSink {
             finish,
         );
     }
-    fn emit_error(&self, msg: &str, retryable: bool) {
-        NullSink.emit_error(msg, retryable);
+    fn emit_error(
+        &self,
+        msg: &str,
+        retryable: bool,
+        _category: wcore_protocol::events::FailureCategory,
+    ) {
+        NullSink.emit_error(
+            msg,
+            retryable,
+            wcore_protocol::events::FailureCategory::Unknown,
+        );
     }
     fn emit_info(&self, msg: &str) {
         self.infos.lock().unwrap().push(msg.to_string());

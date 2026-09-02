@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# ADMISSION: caller-decides -- this is a build step inside a platform matrix,
+# not a gate. Its callers select it by `runner.os`, which is the point.
+#
 # Build the release binary for a Linux target inside a PINNED container.
 #
 # Run by .github/workflows/release.yml, and runnable by hand on any Docker host

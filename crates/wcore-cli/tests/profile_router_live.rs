@@ -43,6 +43,10 @@ use wcore_acp::protocol::{MessageEvent, MessageSendRequest, SessionCreateRequest
 #[path = "support/mod.rs"]
 mod support;
 use support::mock_llm::MockLlm;
+use support::owned_tree::OwnedTree;
+// The descendant walk is only consulted by the `#[cfg(unix)]` assertions below.
+#[cfg(unix)]
+use support::owned_tree::child_pids;
 
 /// Path to the debug binary under test (Cargo wires this env var for
 /// integration tests of the package that defines the binary).
@@ -96,7 +100,7 @@ fn free_port() -> u16 {
 /// hermetic home, the throwaway profiles root, and a known API key. Provider
 /// credentials are stripped so the child's identity can only come from its own
 /// profile home.
-fn spawn_supervisor(port: u16, home: &Path, profiles_root: &Path, key: &str) -> Child {
+fn spawn_supervisor(port: u16, home: &Path, profiles_root: &Path, key: &str) -> OwnedTree<Child> {
     let bind = format!("127.0.0.1:{port}");
     let mut cmd = Command::new(binary());
     cmd.args(["acp", "serve", "--enable-profile-router", "--bind", &bind])
@@ -111,7 +115,7 @@ fn spawn_supervisor(port: u16, home: &Path, profiles_root: &Path, key: &str) -> 
     for k in STRIPPED_PROVIDER_ENV {
         cmd.env_remove(k);
     }
-    cmd.spawn().expect("spawn supervisor")
+    OwnedTree::new(cmd.spawn().expect("spawn supervisor"))
 }
 
 /// Poll the supervisor's ACP surface until it answers (server is up + the key
@@ -125,66 +129,6 @@ async fn await_supervisor(client: &AcpClient) {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     panic!("supervisor did not become healthy within 30s");
-}
-
-/// Direct child PIDs of `parent` (Unix only). Used to assert a profile child
-/// spawned under the supervisor and was reaped on delete. The router spawns the
-/// child with `process_group(0)` (setsid), which changes its process group but
-/// NOT its parent, so a parent-PID query still sees it.
-///
-/// # Why this does not shell out to `pgrep` on Linux
-///
-/// It used to. The `CI (linux-containerized)` job's image ships without
-/// procps, so `Command::new("pgrep")` failed there with
-/// `Os { code: 2, kind: NotFound }` and this test could not run at all in one
-/// of the required jobs — every attempt of `retries = 2` exhausted, on a test
-/// whose subject was working fine.
-///
-/// Linux already exposes the parent of every process in `/proc/<pid>/status`,
-/// so the query needs no external binary. There is deliberately NO fallback to
-/// `pgrep` here: a silent fallback would let the procps dependency creep back
-/// in unnoticed, which is how it got here.
-#[cfg(target_os = "linux")]
-fn child_pids(parent: u32) -> Vec<u32> {
-    let mut out = Vec::new();
-    let entries = std::fs::read_dir("/proc").expect("read /proc");
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(pid) = name.to_str().and_then(|n| n.parse::<u32>().ok()) else {
-            continue; // /proc also holds non-numeric entries
-        };
-        // A process can exit between the readdir and this read; that is not an
-        // error, it just means it is not a child any more.
-        let Ok(status) = std::fs::read_to_string(entry.path().join("status")) else {
-            continue;
-        };
-        // `PPid:` is on its own line, so this cannot be confused by a `comm`
-        // containing spaces or parentheses the way parsing `stat` can.
-        for line in status.lines() {
-            if let Some(rest) = line.strip_prefix("PPid:")
-                && rest.trim().parse::<u32>() == Ok(parent)
-            {
-                out.push(pid);
-                break;
-            }
-        }
-    }
-    out
-}
-
-/// macOS and other Unixes have no `/proc`. `pgrep` is part of the base system
-/// there, so it is a safe dependency in a way it is not inside a minimal Linux
-/// container image.
-#[cfg(all(unix, not(target_os = "linux")))]
-fn child_pids(parent: u32) -> Vec<u32> {
-    let out = Command::new("pgrep")
-        .args(["-P", &parent.to_string()])
-        .output()
-        .expect("run pgrep");
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|l| l.trim().parse::<u32>().ok())
-        .collect()
 }
 
 /// Wait until the supervisor has exactly `want` direct children, or the budget
@@ -238,7 +182,10 @@ async fn profile_session_spawns_child_routes_turn_and_reaps() {
 
     let key = "supervisor-live-test-key";
     let port = free_port();
-    let mut sup = spawn_supervisor(port, sup_home.path(), profiles_root.path(), key);
+    // Held for its `Drop`: on Windows nothing below reads it, but it still owns
+    // and reaps the supervisor on every exit path (FerroxLabs/wayland#1156).
+    #[cfg_attr(windows, allow(unused_variables))]
+    let sup = spawn_supervisor(port, sup_home.path(), profiles_root.path(), key);
 
     let client = AcpClient::new(format!("http://127.0.0.1:{port}"))
         .expect("acp client")
@@ -260,6 +207,7 @@ async fn profile_session_spawns_child_routes_turn_and_reaps() {
             tools: Vec::new(),
             system_prompt: None,
             agent: Some("profile:livetest".to_string()),
+            mcp_servers: Vec::new(),
         })
         .await
         .expect("open profile session (child must spawn + become healthy)");
@@ -326,9 +274,6 @@ async fn profile_session_spawns_child_routes_turn_and_reaps() {
         0,
         "deleting the last session for a profile must reap its child process"
     );
-
-    let _ = sup.kill();
-    let _ = sup.wait();
 }
 
 /// FAIL CLOSED, live: selecting an unknown profile is rejected and spawns no
@@ -350,7 +295,10 @@ async fn unknown_profile_fails_closed_and_spawns_no_child() {
 
     let key = "supervisor-live-test-key-2";
     let port = free_port();
-    let mut sup = spawn_supervisor(port, sup_home.path(), profiles_root.path(), key);
+    // Held for its `Drop`: on Windows nothing below reads it, but it still owns
+    // and reaps the supervisor on every exit path (FerroxLabs/wayland#1156).
+    #[cfg_attr(windows, allow(unused_variables))]
+    let sup = spawn_supervisor(port, sup_home.path(), profiles_root.path(), key);
     let client = AcpClient::new(format!("http://127.0.0.1:{port}"))
         .expect("acp client")
         .with_api_key(key);
@@ -363,6 +311,7 @@ async fn unknown_profile_fails_closed_and_spawns_no_child() {
             tools: Vec::new(),
             system_prompt: None,
             agent: Some("profile:does-not-exist".to_string()),
+            mcp_servers: Vec::new(),
         })
         .await
         .expect_err("an unknown profile must be rejected");
@@ -373,9 +322,6 @@ async fn unknown_profile_fails_closed_and_spawns_no_child() {
         0,
         "an unknown profile must never spawn a child"
     );
-
-    let _ = sup.kill();
-    let _ = sup.wait();
 }
 
 /// Is `pid` still a live process? A zombie is NOT live for this test's purpose:
@@ -439,6 +385,7 @@ async fn a_sigkilled_supervisor_does_not_leave_an_orphaned_profile_child() {
             tools: Vec::new(),
             system_prompt: None,
             agent: Some("profile:orphantest".to_string()),
+            mcp_servers: Vec::new(),
         })
         .await
         .expect("open profile session (child must spawn + become healthy)");
@@ -453,8 +400,13 @@ async fn a_sigkilled_supervisor_does_not_leave_an_orphaned_profile_child() {
 
     // SIGKILL: no handler, no unwinding, no Drop — the supervisor gets no
     // chance to reap anything.
-    let _ = sup.kill();
-    let _ = sup.wait();
+    //
+    // `kill_direct_only` rather than the guard's full `reap`: this test's whole
+    // subject is whether the CHILD dies when its parent is killed, so the
+    // harness must not kill the child itself and mask the answer. The guard
+    // still snapshotted the child before the kill, so its `Drop` remains a real
+    // safety net if the assertion below panics.
+    sup.kill_direct_only();
 
     let deadline = Instant::now() + Duration::from_secs(30);
     while is_running(child) && Instant::now() < deadline {
@@ -470,4 +422,95 @@ async fn a_sigkilled_supervisor_does_not_leave_an_orphaned_profile_child() {
              init and holds this profile's credentials forever (FerroxLabs/wayland#1156)"
         );
     }
+}
+
+/// FerroxLabs/wayland#1156 — the HARNESS must own the tree it spawned, on the
+/// exit path the leak actually took: a panic.
+///
+/// The nine orphans in the ticket were not left by tests that returned
+/// normally; every site here ended with `let _ = child.kill()`, which a failing
+/// assertion jumps straight over. Measured on this file before the fix: a test
+/// that panicked after spawning left BOTH the supervisor (`PPID 1`, still bound
+/// to its loopback port) and its profile child alive after the test binary had
+/// exited.
+///
+/// The guard is dropped inside a caught unwind, which is the same `Drop` the
+/// runtime would run on a real assertion failure, so this grades the mechanism
+/// rather than the happy path. `is_running` answers TRUE for a zombie, so
+/// asserting the supervisor is gone also grades the `wait()`: a guard that
+/// killed without reaping would leave a zombie and fail here.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_panicking_test_body_still_reaps_the_supervisor_tree() {
+    let profiles_root = TempDir::new().expect("profiles root");
+    let sup_home = TempDir::new().expect("supervisor home");
+    let mock = MockLlm::new().text("unused");
+    let server = mock.start().await;
+    seed_profile(profiles_root.path(), "panictest", &server.uri());
+    std::fs::write(
+        sup_home.path().join("config.toml"),
+        config_toml(&server.uri()),
+    )
+    .expect("write supervisor config");
+
+    let key = "supervisor-live-test-key-4";
+    let port = free_port();
+    let sup = spawn_supervisor(port, sup_home.path(), profiles_root.path(), key);
+    let client = AcpClient::new(format!("http://127.0.0.1:{port}"))
+        .expect("acp client")
+        .with_api_key(key);
+    await_supervisor(&client).await;
+
+    client
+        .create_session(SessionCreateRequest {
+            model: None,
+            tools: Vec::new(),
+            system_prompt: None,
+            agent: Some("profile:panictest".to_string()),
+            mcp_servers: Vec::new(),
+        })
+        .await
+        .expect("open profile session (child must spawn + become healthy)");
+
+    let sup_pid = sup.id();
+    assert_eq!(
+        await_child_count(sup_pid, 1, Duration::from_secs(10)),
+        1,
+        "expected one profile child before the panic"
+    );
+    let profile_child = child_pids(sup_pid)[0];
+
+    // The unwind the leaking sites never survived. The guard moves in, so its
+    // `Drop` runs here and nowhere else.
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let _owned = sup;
+        panic!("deliberate panic with the supervisor tree still running");
+    }));
+    assert!(panicked.is_err(), "the deliberate panic must have unwound");
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while (is_running(sup_pid) || is_running(profile_child)) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let sup_alive = is_running(sup_pid);
+    let child_alive = is_running(profile_child);
+    if sup_alive || child_alive {
+        // Never leave the orphan the assertion is about to report — that would
+        // be this very defect, planted by its own regression test.
+        // SAFETY: plain SIGKILLs to pids this test is responsible for.
+        unsafe {
+            libc::kill(profile_child as libc::pid_t, libc::SIGKILL);
+            libc::kill(sup_pid as libc::pid_t, libc::SIGKILL);
+        }
+    }
+    assert!(
+        !sup_alive,
+        "supervisor {sup_pid} outlived the panicking test that spawned it — the \
+         harness does not own what it spawns (FerroxLabs/wayland#1156)"
+    );
+    assert!(
+        !child_alive,
+        "profile child {profile_child} outlived the panicking test — the harness \
+         owns the leaf but not the TREE (FerroxLabs/wayland#1156)"
+    );
 }

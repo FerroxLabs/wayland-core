@@ -123,7 +123,11 @@ Prompt caching stores system prompts and tool definitions on Anthropic's servers
 ```toml
 [providers.anthropic]
 api_key = "sk-ant-xxx"
-prompt_caching = true   # default true (Anthropic only)
+prompt_caching = true   # default true for the Anthropic family (Anthropic,
+                        # Bedrock, Vertex) — they share one cache_control
+                        # dialect. Other providers either cache implicitly
+                        # (OpenAI-shaped) or do not honour explicit
+                        # breakpoints, so the flag does nothing there.
 ```
 
 ### Token Stats
@@ -388,6 +392,27 @@ micro_pressure_fraction = 0.5
                             # it on the first turn back from an hour away — both
                             # in an almost-empty window.
                             # Set 0.0 to restore the ungated triggers.
+
+[compact.tool_results]      # Ceiling on the TOTAL size of accumulated tool
+                            # results (FerroxLabs/wayland#1150). Every tool
+                            # already truncates ONE result at its own
+                            # `max_result_size` (50,000 chars by default), and
+                            # microcompact clears old ones — but only under
+                            # context pressure. Between them, N results at the
+                            # per-result cap ride in history at full size and
+                            # are re-sent whole on every turn. This bounds the
+                            # sum instead, and is ungated for that reason.
+enabled = true
+total_budget_bytes = 120000 # Once the sum of all tool-result bodies exceeds
+                            # this, the OLDEST are replaced with a stub naming
+                            # the tool and the size dropped.
+keep_recent = 4             # Newest results never bounded, however large.
+                            # So carried bytes stay under total_budget_bytes
+                            # plus these — both constants, which is what stops
+                            # the carried size growing with session length.
+epoch_results = 4           # Advance the boundary in batches of this many, so
+                            # it does not flip one message per turn inside the
+                            # provider's cached prompt prefix.
 ```
 
 ### Smart auto-compaction (#280)

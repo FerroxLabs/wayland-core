@@ -49,6 +49,33 @@ on:
       # because GitHub exposes it only for workflows present on the DEFAULT
       # branch and ci.yml on `main` has no such trigger.
       - 'lane/**'
+      # 2026-08-29. THE INTEGRATION BRANCH HAD NEVER RUN CI. NOT ONCE.
+      #
+      # The matrix note above states that "`main`, the integration branch and
+      # every pull_request keep the full matrix". That was true of the MATRIX
+      # but not of the TRIGGER: `integ/**` matches neither `push` (main,
+      # lane/**) nor `pull_request` (base main), and the integration branch has
+      # no open PR while it is being assembled. Measured 2026-08-29:
+      # `gh run list --branch integ/f13 --workflow CI` returned EMPTY for the
+      # entire life of the branch, while six lane branches each burned a full
+      # ~67-minute matrix that day.
+      #
+      # So the branch that gets merged, released and tagged was the ONE branch
+      # with no cross-platform coverage, and every lane paid for coverage of a
+      # tree that would never ship in that shape. Exactly inverted.
+      #
+      # A draft PR would also have armed `pull_request` and needs no workflow
+      # change, but opening a PR on this repo is the maintainer's action, not
+      # an agent's. Naming the ref here is the route that does not take a
+      # decision that is not ours.
+      #
+      # This does NOT double-run: the `plan/f20-unified-audit-repair` entry
+      # above was removed because an open PR made every push fire BOTH `push`
+      # and `pull_request` under different concurrency groups. That risk
+      # returns the moment a PR opens from `integ/**` — when the release PR
+      # opens, REMOVE this entry, because the PR then provides exactly the
+      # coverage it was added for.
+      - 'integ/**'
 
 permissions:
   contents: read
@@ -205,6 +232,7 @@ jobs:
     if: >-
       github.event_name == 'pull_request'
       || github.ref_name == 'main'
+      || startsWith(github.ref_name, 'integ/')
       || github.ref_name == 'plan/f20-unified-audit-repair'
       || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]')
       || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')
@@ -253,7 +281,7 @@ jobs:
       # hosted-`windows-latest` workflows remain the cheaper route for a
       # narrow proof.
       matrix:
-        os: ${{ fromJSON(((github.event_name == 'pull_request' || github.ref_name == 'main' || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]') || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')) && (github.event_name == 'pull_request' || github.ref_name == 'main' || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-windows]'))) && '["macos-latest",["self-hosted","Windows","X64","msvc"]]' || ((github.event_name == 'pull_request' || github.ref_name == 'main' || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]') || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')) && '["macos-latest"]' || '[["self-hosted","Windows","X64","msvc"]]')) }}
+        os: ${{ fromJSON(((github.event_name == 'pull_request' || github.ref_name == 'main' || startsWith(github.ref_name, 'integ/') || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]') || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')) && (github.event_name == 'pull_request' || github.ref_name == 'main' || startsWith(github.ref_name, 'integ/') || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-windows]'))) && '["macos-latest",["self-hosted","Windows","X64","msvc"]]' || ((github.event_name == 'pull_request' || github.ref_name == 'main' || startsWith(github.ref_name, 'integ/') || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]') || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')) && '["macos-latest"]' || '[["self-hosted","Windows","X64","msvc"]]')) }}
         # 2026-08-04 — an `appcontainer` label requirement was added here and
         # then REVERTED the same day. Recording why, so it is not re-attempted.
         #
@@ -565,6 +593,47 @@ jobs:
       - name: Run tests (nextest CI profile)
         run: vx just test-ci
 
+
+      # ── core#238 c4: PRINT the NUL-device measurement, do not just assert it ─
+      #
+      # `crates/wcore-tools/tests/windows_nul_device_probe.rs` is `#![cfg(windows)]`
+      # and carries no `#[ignore]`, so the step above ALREADY executes it and
+      # already asserts on it: a green Windows leg is the verdict arm. What that
+      # buys is the VERDICT, not the RECORD — nextest captures stdout for a
+      # PASSING test, so the measured table (kernel `GetFileType` for bare `NUL`
+      # and for `<dir>\NUL`, whether `fs::metadata` reports `is_file()`, the OS
+      # build string, and the liveness control on an ordinary file) is invisible
+      # on exactly the runs where it holds.
+      #
+      # core#238 c4 asks for the numbers on the build under test, on EVERY
+      # Windows run rather than once by hand, because the answer is a property of
+      # the Windows build and the fleet's builds move. Server 2019/2022
+      # (build 20348) is a known-open residual precisely because no such host has
+      # ever printed its row here.
+      #
+      # Cheap: the binary was compiled and run seconds ago by `just test-ci`, so
+      # this is a re-run of one already-built test. `if: !cancelled()` so the
+      # record still lands when some OTHER test failed the leg — a failing leg is
+      # when the measurement is most wanted.
+      - name: Record the Windows NUL-device measurement (core#238 c4)
+        if: ${{ runner.os == 'Windows' && !cancelled() }}
+        # `pwsh`, not `bash`: EVERY other `vx` invocation on a Windows leg in
+        # this file runs under the default pwsh shell, and none runs under bash.
+        # A record step that dies on a PATH difference records nothing.
+        shell: pwsh
+        run: |
+          vx cargo nextest run -p wcore-tools --no-capture `
+            -E 'binary(windows_nul_device_probe)' 2>&1 |
+            Tee-Object -FilePath nul-probe.log
+          $record = Get-Content nul-probe.log -Raw
+          @(
+            '### core#238 c4 - bare NUL on this Windows build',
+            '',
+            '```',
+            $record,
+            '```'
+          ) | Add-Content -Path $env:GITHUB_STEP_SUMMARY
+
       # PER-LEG test-signal gate. The `report` job at the bottom of this file
       # already refuses a run where NO leg produced JUnit, but it cannot see a
       # single leg going dark: macOS uploads a report, `COUNT` is non-zero, and
@@ -848,8 +917,53 @@ jobs:
     # self-hosted boxes ever die, Windows work QUEUES rather than passing
     # vacuously — visible as a pending required check, never a false green —
     # and this leg is one `[ci-windows]` commit tag away from covering it.
+    #
+    # 2026-08-31 (`lane/f13-s2-win-proc`, FerroxLabs/wayland-core#409 c6). A
+    # `lane/**` push now reaches this leg WITHOUT a commit marker. #409 is the
+    # measurement that forced it: five tests were red on real Windows on
+    # `lane/f13-windows`, none of them a regression from `main`, and no gate on
+    # that branch could say so. Verbatim from run 33384055203 on a sibling lane
+    # — `CI (windows-latest, hosted)` **skipped**, `CI (${{ matrix.os }})`
+    # **skipped** (the matrix job's `if:` fired before `matrix.os` could even
+    # resolve, which is why that check has an unexpanded name) — while the
+    # Linux legs ran. The one Windows job a lane DID get, `Build
+    # (x86_64-pc-windows-msvc)`, is `cargo build`: it never compiles a test
+    # target, so a test-target defect is structurally unreachable on a lane.
+    #
+    # WHY THIS LEG AND NOT THE SELF-HOSTED ONE, which stays marker-gated. The
+    # two legs were rationed for two DIFFERENT measured harms, and only one of
+    # them applies to a lane:
+    #   * the self-hosted matrix entry (2026-08-02): there is exactly ONE
+    #     self-hosted Windows runner and it serves one job at a time, so six
+    #     concurrent lanes kept it saturated and the INTEGRATION branch's own
+    #     `CI (Array)` queued behind them for ninety minutes. That harm is
+    #     real and unchanged, so lanes still do not get the self-hosted box
+    #     without `[ci-windows]`.
+    #   * this hosted leg (2026-08-04): it was DUPLICATION — "a SECOND full
+    #     Windows compile+test on top of the self-hosted one, on every commit"
+    #     — on `main`, PRs and `integ/**`. On a `lane/**` push the self-hosted
+    #     leg does not run at all, so on a lane there is nothing to duplicate:
+    #     this is the only Windows test signal that exists. The stated reason
+    #     for switching it off does not reach the case being switched back on.
+    # `windows-latest` is an elastic hosted pool, so a lane taking it cannot
+    # queue the integration branch behind it. That is the whole trade.
+    #
+    # PRICE, stated rather than buried: a lane push now costs one cold hosted
+    # Windows compile+test (measured at 39+ min on this image, `timeout-minutes:
+    # 180` below), billed at the 2x Windows rate, and this workflow's
+    # `concurrency:` deliberately does NOT cancel branch pushes, so successive
+    # pushes to one lane stack rather than supersede. A lane that wants no
+    # Windows leg should say so by not being a `lane/**` branch; there is no
+    # opt-OUT marker, because an opt-out is the same hand-pushed-marker failure
+    # mode as the opt-in, pointed the other way.
+    #
+    # Enforced, both ways, by `scripts/check-windows-attribution.py` R4: it
+    # EVALUATES these `if:` expressions under a synthetic markerless lane push
+    # and asserts a Windows leg that actually runs tests is admitted — and, so
+    # the gate can still fail, asserts an unrelated markerless branch is NOT.
     if: >-
-      contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-windows]')
+      startsWith(github.ref_name, 'lane/')
+      || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-windows]')
     # Bounded on purpose. The matrix job is unbounded (GHA default 6h), which is
     # tolerable on a box whose target/ is warm; a cold hosted compile that wedges
     # would otherwise burn six hours of hosted minutes per run. Sized from the
@@ -984,6 +1098,32 @@ jobs:
       - name: Run tests (nextest CI profile)
         run: vx just test-ci
 
+      # core#238 c4, second Windows supplier. Same step as the matrix leg's:
+      # `just test-ci` above already RAN and asserted the probe, and this
+      # re-runs that one already-built binary with `--no-capture` so the
+      # measured table reaches the log and the step summary. This leg is
+      # `windows-latest` (a hosted image), so its build row is a DIFFERENT
+      # Windows build from the self-hosted msvc leg's — which is the reason
+      # both legs record rather than one.
+      - name: Record the Windows NUL-device measurement (core#238 c4)
+        if: ${{ !cancelled() }}
+        # `pwsh`, not `bash`: EVERY other `vx` invocation on a Windows leg in
+        # this file runs under the default pwsh shell, and none runs under bash.
+        # A record step that dies on a PATH difference records nothing.
+        shell: pwsh
+        run: |
+          vx cargo nextest run -p wcore-tools --no-capture `
+            -E 'binary(windows_nul_device_probe)' 2>&1 |
+            Tee-Object -FilePath nul-probe.log
+          $record = Get-Content nul-probe.log -Raw
+          @(
+            '### core#238 c4 - bare NUL on this Windows build',
+            '',
+            '```',
+            $record,
+            '```'
+          ) | Add-Content -Path $env:GITHUB_STEP_SUMMARY
+
       # Byte-identical intent to the matrix job's per-leg gate: a leg that ran
       # zero tests must be reported as an ABSENCE of signal, never as a pass.
       # This job exists to supply a Windows verdict, so a vacuous run here is
@@ -1087,7 +1227,35 @@ jobs:
     # artifacts) and costs ~16 min, appended to a job that already sat at ~81.
     # A cancelled required context is not a verdict, so the cost is a whole
     # cycle every time it tips over.
-    timeout-minutes: 120
+    # MEASURED, this job, four consecutive runs on integ/f13:
+    #   33437649161  101.9 min (failure)
+    #   33462025536   99.5 min (success)
+    #   33488263125  120.3 min -> KILLED by this timeout at step 30 of 34
+    # 99-102 min against a 120 limit is ~18% headroom, which is too thin for a
+    # job of this length: 33488263125 lost the F01 driver gate, the security
+    # audit and the release-manifest drill to the wall, having ALREADY passed
+    # every test step including the shared-process integration suite. A run
+    # that does all the work and is then killed before it can report is the
+    # most expensive possible outcome -- 2 hours for no verdict.
+    #
+    # 150 is ~50% over the measured figure. Deliberately NOT larger: this
+    # timeout is the only thing that catches a genuine hang, so it has to stay
+    # close enough to the real duration to still mean something. If the
+    # measured figure moves materially, move this WITH it and update the table
+    # above rather than widening the gap.
+    #
+    # NOT a cache problem: THIS JOB caches nothing. Its only `uses:` are
+    # actions/checkout, nick-fields/retry and actions/upload-artifact, so there
+    # is no cross-run cache to go cold and repeated cancellations cannot have
+    # caused this. It is hosted-runner variance against a limit set too close.
+    #
+    # Scope that claim to this job and verify it by reading this job's body --
+    # NOT by grepping the whole file. Other jobs here do set `cache: 'true'`,
+    # and sibling workflows use actions/cache and Swatinem/rust-cache. An
+    # earlier version of this comment cited `grep -c 'actions/cache' ci.yml ==
+    # 0` and its own text then matched that grep, so the check it named
+    # returned 2 and falsified the comment that named it.
+    timeout-minutes: 150
     # A job-level `permissions:` block REPLACES the workflow-level one at the
     # top of this file wholesale (GHA semantics) — the same rule that cost the
     # `report` job "multiple weeks of red" when `contents: read` was dropped by
@@ -1249,7 +1417,7 @@ jobs:
       # condition in the two `strategy.matrix` expressions.
       - name: Report macOS runner budget (DARWIN_REQUESTED / DARWIN_SKIPPED)
         env:
-          DARWIN: ${{ (github.event_name == 'pull_request' || github.ref_name == 'main' || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]') || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')) && 'true' || 'false' }}
+          DARWIN: ${{ (github.event_name == 'pull_request' || github.ref_name == 'main' || startsWith(github.ref_name, 'integ/') || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]') || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')) && 'true' || 'false' }}
         run: |
           set -euo pipefail
           {
@@ -1290,6 +1458,54 @@ jobs:
           fi
 
       - uses: actions/checkout@v6
+        with:
+          # The `Criteria ledger is anchored and parseable` step below resolves
+          # every ledger entry's `last_verified_commit` with `git cat-file -t`.
+          # actions/checkout defaults to fetch-depth 1, where only HEAD resolves,
+          # so on a shallow checkout that check produced one guaranteed problem
+          # per ledger file -- 63 of them -- and the step could never pass on any
+          # branch or any tree. The script now DETECTS a shallow clone and skips
+          # the sha resolution with a named NOTE rather than failing, so the two
+          # failure modes are separated: without this line the gate is green but
+          # permanently SKIPPED, which is a gate that never runs. Full history
+          # here is what actually arms it.
+          fetch-depth: 0
+
+      # MOVED 2026-09-01: this block used to sit immediately below the Desktop
+      # contract corpus pre-flight, which is `if: github.event_name ==
+      # 'pull_request'` and runs `cargo run` inside a ROOT container over the
+      # mounted workspace. On every push run that step is skipped, so the
+      # ordering held by accident; the FIRST pull_request run to reach it
+      # created target/ as root BEFORE this reservation and the step below died
+      # with `mkdir: cannot create directory 'target/nextest': Permission
+      # denied` -- exactly the #1177 failure this block exists to prevent,
+      # re-entered through a step added in front of its own guard. Measured on
+      # PR #417, run 33532957667 job 99944176453.
+      #
+      # It now sits directly after checkout, which is what the comment below
+      # always claimed ("before anything root touches target/") and is the only
+      # position that cannot be undercut by a later step being inserted above.
+      # wayland#1177 c1. The outer-retry wrapper at the test step below runs on
+      # the HOST as uid 1001, but every `$DOCKER_RUN` step in this job runs as
+      # root (there is no `-u`; see the DOCKER_RUN note above), so the first
+      # `cargo build` creates `target/` root-owned. The wrapper then died at
+      # `mkdir -p "$ATTEMPT_DIR"` with `Permission denied` BEFORE it invoked
+      # nextest -- nextest never ran, no junit.xml was written, and the required
+      # `report` check received ZERO evidence from this leg while the step
+      # reported only "Child_process exited with error code 2". Measured on run
+      # 33227927478, both attempts, 2026-08-29T02:33:48Z.
+      #
+      # Creating the tree here -- as the runner user, before anything root
+      # touches target/ -- is sufficient and cheap: root can still write INTO a
+      # 1001-owned directory, and delete permission on the junit report comes
+      # from the containing directory, which the runner now owns.
+      #
+      # A recursive `chown` of target/ was rejected: it is the same full-tree
+      # walk that makes a cold workspace slow, and it would run on every job to
+      # repair a directory that need never have been root-owned.
+      - name: Reserve the outer-retry evidence tree for the runner user
+        if: ${{ !cancelled() }}
+        run: mkdir -p target/nextest/ci/outer-attempts
 
       # ── anti-vacuity gate ─────────────────────────────────────────────
       # THIS STEP USED TO BE DEAD, TWICE, IN TWO DIFFERENT WAYS.
@@ -1318,6 +1534,7 @@ jobs:
       # moved again, confirm from a real run's log that it printed a scan
       # result — not merely that the job was green.
       - name: No vacuous `cargo test` invocations
+        if: ${{ !cancelled() }}
         run: |
           python3 scripts/check-no-vacuous-cargo-test.py --self-test
           python3 scripts/check-no-vacuous-cargo-test.py
@@ -1335,6 +1552,7 @@ jobs:
       # sail through every release green, which is the same "green-looking
       # absence of signal" the step above was moved twice to avoid.
       - name: Model-limits freshness checker self-test
+        if: ${{ !cancelled() }}
         run: python3 scripts/check-model-limits-freshness.py --self-test
 
       # ── pre-publish personal-identifier gate ──────────────────────────
@@ -1367,6 +1585,7 @@ jobs:
       # self-test drives the real scanner over throwaway git repos to prove
       # exactly that split, in both directions, on every run.
       - name: No personal identifiers in committed content
+        if: ${{ !cancelled() }}
         run: |
           python3 scripts/check-no-personal-identifiers.py --self-test
           python3 scripts/check-no-personal-identifiers.py
@@ -1394,9 +1613,148 @@ jobs:
       # against the four defects the shared-process leg found and would have
       # flagged none of them while calling the binary compliant.
       - name: No unserialized test writes to shared process globals
+        if: ${{ !cancelled() }}
         run: |
           python3 scripts/check-test-env-globals.py --self-test
           python3 scripts/check-test-env-globals.py
+
+      # ── message-whitespace gate (FerroxLabs/wayland#1162, defect D22) ──
+      # A multi-line message written with `\`-newline continuations gets
+      # collapsed onto one source line by a tooling pass, and the SOURCE
+      # indentation that used to follow the continuation survives inside the
+      # string. The operator then reads "keyed by the engine's internal
+      #           conversation id" on the terminal. Nothing else in the
+      # toolchain can see it: rustfmt does not format string contents, and the
+      # assertions written over these messages are `contains("cache list")`
+      # shaped, which the mangled text satisfies. 23 messages were shipped this
+      # way, including the one #1162 was opened to improve.
+      #
+      # It fails only on a run of 4+ spaces BETWEEN TWO WORDS OF PROSE, at
+      # least three words into the literal, in a literal carrying no explicit
+      # `\n`/`\t`. That triple is what keeps deliberate column padding
+      # ("bundle        intact", "health:        UNAVAILABLE"), key hints
+      # ("↑↓ move   i details") and embedded code fixtures out of it. The
+      # `--self-test` drives both directions -- 12 cases, 3 that must fire and
+      # 9 that must stay silent -- so a scanner that has stopped matching fails
+      # loudly rather than passing everything.
+      - name: No collapsed continuation whitespace in messages
+        if: ${{ !cancelled() }}
+        run: |
+          python3 scripts/check-message-whitespace.py --self-test
+          python3 scripts/check-message-whitespace.py crates
+
+      # ── criteria-ledger gate ──────────────────────────────────────────
+      # `.planning/ledger/<repo>-<number>.md` says what must be TRUE for an
+      # issue to close and anchors every `met` claim to something a machine
+      # can resolve -- a test name that can be grepped, a symbol that is
+      # declared, a line that exists. It is here for the same reason as the
+      # three steps above: a pure text scan, no toolchain, so a build failure
+      # cannot shadow it.
+      #
+      # This is the OFFLINE arm. It catches the rot -- a `met` criterion
+      # whose test was deleted, a `blocked` criterion owned by `core`, a
+      # malformed entry, and a run that scanned nothing. It deliberately does
+      # NOT check tracker coverage: that needs `gh` against two repositories,
+      # and a network dependency in the per-PR path buys flakiness for
+      # nothing. The offline run prints, in as many words, that coverage was
+      # not checked, so the green here cannot be read as more than it is.
+      #
+      # Coverage runs at RELEASE time (`release.yml` prepare-release), where
+      # every publishing job depends on it and a FAIL actually stops the
+      # release. That is where the miss happened: the sweep that produced
+      # 0.13.9 filtered one tracker on `area:core` and the entire second
+      # tracker was invisible for a full release.
+      #
+      # `--self-test` runs first and proves BOTH directions -- it builds
+      # throwaway ledgers in a temp dir and asserts the gate fires on each
+      # defect class and stays silent on the control, with every red arm
+      # asserting the message it fired on, so an arm whose mutation stopped
+      # applying fails loudly instead of reading as a pass.
+      # The macOS/Windows admission condition is duplicated across the `ci` os
+      # matrix, the `build` matrix and the reporting step, because GitHub Actions
+      # supports neither YAML anchors nor the `env` context inside `strategy`.
+      # gate.py asserts those copies stay byte-identical and evaluates the
+      # condition against a truth table.
+      #
+      # It was never wired to anything. It went RED when the `[ci-windows]`
+      # opt-in nested the `ci` matrix into a shape its regex no longer matched --
+      # so it silently stopped covering the matrix that schedules the macOS test
+      # leg, reported "found 2, expected 3", and nobody saw. A gate nothing runs
+      # is a gate that cannot fail.
+      - name: macOS/Windows admission control is consistent
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          python3 .planning/evidence/ci-macos-budget/gate.py --self-test .github/workflows/ci.yml
+          python3 .planning/evidence/ci-macos-budget/gate.py .github/workflows/ci.yml
+
+      # ── Criteria ledger: STRUCTURE here, COVERAGE at release ───────────
+      # `--offline` is deliberate and it is not free, so the cost is written
+      # down rather than left for the next reader to discover.
+      #
+      # Two arms exist. The STRUCTURAL arm parses every ledger and resolves
+      # every `met` criterion's evidence anchor; it needs nothing but the
+      # checkout and runs here, on every push. The COVERAGE arm asks the one
+      # question this repo cannot answer from its own files -- is there an OPEN
+      # in-scope issue with NO ledger at all -- and to ask it, it queries BOTH
+      # FerroxLabs/wayland and FerroxLabs/wayland-core. The repo-scoped
+      # GITHUB_TOKEN cannot see the second tracker, so the arm cannot run on a
+      # PR from a fork or on any leg without `LEDGER_ISSUES_TOKEN`.
+      #
+      # It DOES run, and can fail, at release.yml:104 -- with that token, on the
+      # release path, which is the moment coverage decides something.
+      #
+      # What that costs: between releases a missing ledger is invisible here. It
+      # is not hypothetical. On 2026-08-31 the live arm was run by hand for the
+      # first time in this cycle and reported 29 open in-scope issues with no
+      # ledger file, filed over the preceding two days, none of which any green
+      # run on this leg could have seen. If you are widening this step, the
+      # question to ask is whether it should also run on a schedule.
+      - name: One red measures one thing (ci-linux step suppression)
+        if: ${{ !cancelled() }}
+        run: |
+          python3 scripts/check-ci-step-suppression.py --self-test
+          python3 scripts/check-ci-step-suppression.py
+      - name: Criteria ledger is anchored and parseable
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          python3 scripts/check-criteria-ledger.py --self-test
+          python3 scripts/check-criteria-ledger.py --offline | tee /tmp/ledger-offline.log
+          # The gate prints "THIS IS NOT A PASS for coverage" and, inside a
+          # green step, that sentence reaches nobody. Project it where a reader
+          # of the run actually looks. A disclosure nothing surfaces is the
+          # defect wayland-core#400 is about, one layer up in our own tooling.
+          {
+            echo "### Criteria ledger (structural arm only)"
+            echo
+            echo "\`--offline\`: tracker COVERAGE was **not** checked on this run."
+            echo "An open in-scope issue with no ledger file would not be seen here."
+            echo "The coverage arm runs on the release path (\`release.yml\`), which"
+            echo "is the moment it decides something."
+            echo
+            grep -E "^(OK|OFFLINE)" /tmp/ledger-offline.log || true
+          } >> "$GITHUB_STEP_SUMMARY"
+      # ── Release-readiness gate: SELF-TEST ONLY ─────────────────────────
+      # The gate itself is NOT run here, and that is the whole design. It
+      # refuses a release while any in-scope defect still owes core work, so
+      # it is red by design for as long as any defect is open -- which,
+      # mid-cycle, is always. Running it per-PR would make it red on every
+      # in-progress lane, and a gate everyone bypasses is a gate nobody
+      # reads. It runs at RELEASE time (`release.yml` prepare-release), where
+      # every publishing job depends on it and a FAIL actually stops the cut.
+      #
+      # What runs here is the half that rots silently in between: the proof
+      # that the gate can still FAIL. `--self-test` builds throwaway ledgers
+      # in a temp dir and asserts it fires on each defect class -- a not-met
+      # core criterion on a defect, a remainder handed out with no `handoff:`,
+      # a missing `kind:` -- and stays silent on the control, with every red
+      # arm asserting the message it fired on. It touches no network and does
+      # not read .planning/ledger at all, so it says nothing about whether a
+      # release is ready; only that the thing which would say so still works.
+      - name: Release-readiness gate can still fail
+        if: ${{ !cancelled() }}
+        run: python3 scripts/check-release-readiness.py --self-test
       # ── Windows-attribution gate (#1146) ──────────────────────────────
       # Same placement reasoning as the two steps above: AFTER checkout (it
       # reads the workflow YAML and .config/nextest.toml out of the working
@@ -1417,6 +1775,7 @@ jobs:
       # `--self-test` runs first and proves the checker fires AND stays silent
       # on the fixtures, so a checker that has stopped matching fails loudly.
       - name: Windows CI failures stay attributable
+        if: ${{ !cancelled() }}
         run: |
           python3 scripts/check-windows-attribution.py --self-test
           python3 scripts/check-windows-attribution.py
@@ -1426,6 +1785,7 @@ jobs:
           python3 scripts/flake-ledger.py --self-test
 
       - name: Free disk space (drop unused preinstalled toolchains)
+        if: ${{ !cancelled() }}
         run: |
           set -e
           echo "=== BEFORE ==="; df -h /
@@ -1441,6 +1801,8 @@ jobs:
           echo "=== AFTER ==="; df -h /
 
       - name: Build CI image (deps + cargo tools baked in)
+        if: ${{ !cancelled() }}
+        id: ci_image
         run: |
           docker build -t "$CI_IMAGE" -f - . <<'EOF'
           FROM rust:1.95-slim-bookworm
@@ -1531,7 +1893,7 @@ jobs:
       # failing emits a ::warning, so a future permissions regression is visible
       # rather than merely absent.
       - name: Desktop contract corpus pre-flight hint (advisory)
-        if: github.event_name == 'pull_request'
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1548,15 +1910,19 @@ jobs:
             cargo run -q -p wcore-protocol --bin wcore-contract -- preflight < "$list"
 
       - name: Pre-build tool_token_bench
+        if: ${{ !cancelled() }}
         run: $DOCKER_RUN "$CI_IMAGE" cargo build -p wcore-agent --bin tool_token_bench --features test-utils
 
       - name: Pre-build wcore-cli release binary
+        if: ${{ !cancelled() }}
         run: $DOCKER_RUN "$CI_IMAGE" cargo build --release -p wcore-cli
 
       - name: Check formatting
+        if: ${{ !cancelled() && steps.ci_image.outcome == 'success' }}
         run: $DOCKER_RUN "$CI_IMAGE" cargo fmt --all -- --check
 
       - name: Clippy (warnings = errors)
+        if: ${{ !cancelled() && steps.ci_image.outcome == 'success' }}
         run: $DOCKER_RUN "$CI_IMAGE" cargo clippy --workspace --all-targets -- -D warnings
 
       # `--workspace` above does NOT cover this. `live-docker` is an optional
@@ -1575,6 +1941,7 @@ jobs:
       # `cfg(target_os = "macos")` branch inside the same file is unreachable
       # from here and is covered by the macOS leg's twin of this step.
       - name: Clippy the live-docker feature graph (not covered by --workspace)
+        if: ${{ !cancelled() && steps.ci_image.outcome == 'success' }}
         run: |
           $DOCKER_RUN "$CI_IMAGE" cargo clippy -p wcore-sandbox --features live-docker --all-targets -- -D warnings
           $DOCKER_RUN "$CI_IMAGE" cargo clippy -p wcore-swarm --features wcore-sandbox/live-docker --all-targets -- -D warnings
@@ -1598,12 +1965,32 @@ jobs:
       # is not limited to that run: every historical CI failure count on this
       # repository is a LOWER BOUND, not a total, and any triage that treated a
       # count as complete was reading a truncated suite.
+      # PER-ATTEMPT EVIDENCE (wayland#1177). The retry re-runs the SAME
+      # nextest command, and the `ci` profile writes its report to the FIXED
+      # path target/nextest/ci/junit.xml — so attempt 2 used to OVERWRITE
+      # attempt 1. A test that genuinely failed on attempt 1 and passed on
+      # attempt 2 left no structured trace anywhere: not a `<failure>`, not
+      # even a `<flakyFailure>`, because the flake record lived in the file
+      # that was just destroyed. The retry-flake grader added for #1169 reads
+      # exactly that file, so its gate was complete one layer down and blind
+      # one layer up.
+      #
+      # The retry is NOT dropped in favour of nextest's own graded `retries`:
+      # it exists for the runner-agent crash documented above, which SIGTERMs
+      # the nextest PROCESS. Per-test retries inside a process being killed
+      # cannot absorb that; only re-running the process can. So the wrapper
+      # keeps the retry and stops the evidence being destroyed — an agent
+      # crash writes no JUnit at all (nothing preserved, nothing graded, the
+      # retry absorbs it as designed), while a real attempt-1 test failure is
+      # preserved as outer-attempts/outer-attempt-1.xml and reds the required
+      # `report` check.
       - name: Run tests (nextest CI profile)
+        if: ${{ !cancelled() && steps.ci_image.outcome == 'success' }}
         uses: nick-fields/retry@v3
         with:
           timeout_minutes: 45
           max_attempts: 2
-          command: $DOCKER_RUN_SANDBOX "$CI_IMAGE" cargo nextest run --workspace --profile ci --no-fail-fast
+          command: bash .github/scripts/run-tests-with-attempt-evidence.sh $DOCKER_RUN_SANDBOX "$CI_IMAGE" cargo nextest run --workspace --profile ci --no-fail-fast
 
       # ── Swarm delegated-dispatch gate ────────────────────────────────────
       # THE COUNTERWEIGHT TO THE HONEST SKIP.
@@ -1662,6 +2049,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
+          # Runs with `if: !cancelled()`, so it executes even when the image
+          # build was skipped by an earlier failure. Without this the docker
+          # failure below would be reported as a swarm delegated dispatch regression.
+          bash .github/scripts/require-ci-image.sh "Swarm delegated dispatch"
           # A ledger left by an earlier step would be read as this step's
           # result. Clear it so what we read back is only what we produced.
           rm -f target/swarm-delegated-skips.txt
@@ -1721,6 +2112,7 @@ jobs:
       # would otherwise steal cargo's exit status. Floors are the counts
       # measured at the commit that added this step (agent 14, tools 32).
       - name: Voice suite (--features voice; runs in no other configuration)
+        if: ${{ !cancelled() && steps.ci_image.outcome == 'success' }}
         run: |
           set -euo pipefail
           run_suite() {
@@ -1803,6 +2195,7 @@ jobs:
       # below reads only 'test result: ok.' lines; the enclosing test's own
       # verdict is what decides the step.
       - name: Shared-process lib suite (cargo test, one process per binary)
+        if: ${{ !cancelled() && steps.ci_image.outcome == 'success' }}
         run: |
           set -euo pipefail
           MIN=11000
@@ -1868,6 +2261,7 @@ jobs:
       # no reason, and refuses one naming a target it no longer selects, so that
       # list cannot rot into a standing excuse.
       - name: Shared-process integration suite (cargo test, one process per target)
+        if: ${{ !cancelled() && steps.ci_image.outcome == 'success' }}
         run: |
           set -euo pipefail
           MIN_TARGETS=60
@@ -1926,6 +2320,7 @@ jobs:
       # WCORE_SMOKE_REQUIRE_PREBUILT=1 (passed into the container): a missing
       # release artifact is a hard failure here, never a silent skip (#190).
       - name: Release binary smoke (catches plugin dead-code-strip)
+        if: ${{ !cancelled() && steps.ci_image.outcome == 'success' }}
         run: $DOCKER_RUN -e WCORE_SMOKE_REQUIRE_PREBUILT=1 "$CI_IMAGE" cargo nextest run -p wcore-cli --test release_binary_smoke
 
       # F01 E3 — non-optional packaged boundary proof. The release Core binary
@@ -1937,9 +2332,11 @@ jobs:
       # (`cargo install --locked cargo-nextest` in the Dockerfile heredoc), and
       # the two neighbouring steps in this job already use it.
       - name: F01 packaged wayland-eval driver gate
+        if: ${{ !cancelled() && steps.ci_image.outcome == 'success' }}
         run: $DOCKER_RUN -e WAYLAND_BUILD_SOURCE_SHA=${{ github.sha }} "$CI_IMAGE" cargo nextest run --no-tests=fail --locked -p wcore-eval-scenarios --features packaged-driver-gate --test packaged_driver_gate
 
       - name: Security audit
+        if: ${{ !cancelled() && steps.ci_image.outcome == 'success' }}
         run: $DOCKER_RUN "$CI_IMAGE" cargo audit
 
       - name: Upload nextest JUnit report
@@ -1947,7 +2344,13 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: nextest-junit-linux-containerized
-          path: target/nextest/ci/junit.xml
+          # The surviving report AND every attempt the outer retry used to
+          # destroy (wayland#1177). Two paths make the artifact root
+          # target/nextest/ci, so the `report` job's download lands junit.xml
+          # next to outer-attempts/ and grade-retry-flakes.sh reads both.
+          path: |
+            target/nextest/ci/junit.xml
+            target/nextest/ci/outer-attempts/
           if-no-files-found: ignore
 
       # 2026-07-29: this leg now runs WITH bubblewrap and WITH the namespace
@@ -2001,6 +2404,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
+          # Runs with `if: !cancelled()`, so it executes even when the image
+          # build was skipped by an earlier failure. Without this the docker
+          # failure below would be reported as a signed release-manifest drill regression.
+          bash .github/scripts/require-ci-image.sh "Signed release-manifest drill"
           DRILL=.github/scripts/release-manifest-drill.sh
           TARGET=crates/wcore-cli/tests/release_manifest_pipeline.rs
           # Fail CLOSED and say which of the two states this is. A missing check
@@ -2091,7 +2498,7 @@ jobs:
       # only job that UPLOADS the arm64 binary (ci.yml:600 below) and it does so
       # independently of whether the test suite passed, which is exactly when a
       # lane needs a binary most. The saving would have been ~1.2% of pool load.
-      matrix: ${{ fromJSON((github.event_name == 'pull_request' || github.ref_name == 'main' || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]') || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')) && '{"include":[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"ubuntu-latest","target":"aarch64-unknown-linux-gnu","use_cross":true},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"},{"os":"windows-latest","target":"aarch64-pc-windows-msvc"},{"os":"macos-latest","target":"x86_64-apple-darwin"},{"os":"macos-latest","target":"aarch64-apple-darwin"}]}' || '{"include":[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"ubuntu-latest","target":"aarch64-unknown-linux-gnu","use_cross":true},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"},{"os":"windows-latest","target":"aarch64-pc-windows-msvc"}]}') }}
+      matrix: ${{ fromJSON((github.event_name == 'pull_request' || github.ref_name == 'main' || startsWith(github.ref_name, 'integ/') || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]') || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')) && '{"include":[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"ubuntu-latest","target":"aarch64-unknown-linux-gnu","use_cross":true},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"},{"os":"windows-latest","target":"aarch64-pc-windows-msvc"},{"os":"macos-latest","target":"x86_64-apple-darwin"},{"os":"macos-latest","target":"aarch64-apple-darwin"}]}' || '{"include":[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"ubuntu-latest","target":"aarch64-unknown-linux-gnu","use_cross":true},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"},{"os":"windows-latest","target":"aarch64-pc-windows-msvc"}]}') }}
 
     steps:
       # Which Windows executor served this job (gh#1146). Fails closed: a job
@@ -2445,7 +2852,35 @@ jobs:
     # contributed to a green. `if: always()` below already carries `report`
     # through a skipped dependency, so nothing about WHEN this job runs changes;
     # what changes is that it can now say so out loud.
-    needs: [ci, ci-windows-hosted]
+    # `ci-linux` WAS ABSENT UNTIL 2026-08-30 AND THAT MADE THIS CHECK HOLLOW.
+    # `report` is a REQUIRED status context, and it depended only on the matrix
+    # legs. `ci-linux` -- which runs the workspace nextest suite, both
+    # shared-process suites, the corpus drift check, the security audit, the
+    # signed-manifest drill and every host-side gate -- was not a dependency, so
+    # `report` could and did go GREEN while `ci-linux` was RED (measured: run
+    # 33262552890). On run 33264117264 `report` started and finished in ELEVEN
+    # SECONDS, at the same instant `ci-linux` began.
+    #
+    # `eval-gate-linux`, `build` and `all-features-check` were absent for the
+    # same reason and are added with it.
+    # not-aggregated: build-darwin-selfhosted
+    #
+    # DELIBERATE, and it is the only job excluded. `build-darwin-selfhosted`
+    # runs on `push` to `lane/**` ONLY -- never on `pull_request` -- so on the
+    # path that actually gates `main` (a PR) its `if:` is false and it is
+    # SKIPPED. Aggregating a job that cannot run on the gating path adds no
+    # signal to the required check.
+    #
+    # It also adds a liveness hazard. On a `lane/**` push where the job DOES
+    # run, `needs` waits for it to conclude; if the self-hosted Mac is offline
+    # the job sits QUEUED and GitHub only cancels it after 24h, so `report`
+    # -- a required context -- would pend for a day. `if: always()` does not
+    # help: it decides whether the job runs once its needs RESOLVE, and a
+    # queued need never resolves. That machine goes offline routinely.
+    #
+    # No signal is lost: the job publishes its own check,
+    # `Build (aarch64-apple-darwin) [self-hosted]`, which is visible on the run.
+    needs: [ci, ci-windows-hosted, ci-linux, eval-gate-linux, build, all-features-check]
     if: always()
     runs-on: ubuntu-latest
     # gh#1072. Pure aggregation — measures under a minute in every sampled
@@ -2464,7 +2899,55 @@ jobs:
       checks: write
       pull-requests: write
     steps:
+      # THE AGGREGATE ASSERTION. `if: always()` is what lets this job report on a
+      # skipped or failed dependency -- and it is also what makes the job succeed
+      # by default when one FAILED, because a job's own steps decide its result,
+      # not its needs'. Every gate below this line is downstream of that: if a
+      # dependency died, its evidence never existed, and the checks that grade
+      # evidence cannot notice its absence (see wayland#1177).
+      #
+      # SKIPPED is deliberately NOT a failure here: the macOS/Windows legs are
+      # rationed by design and a skipped leg contributes no red. That is exactly
+      # why the step below cannot be the only gate -- it is gated on
+      # `needs.ci.result != 'skipped'`, and `ci` is the leg most often skipped,
+      # so on a rationed run the one assertion that would catch a hollow pass
+      # skipped too and `report` asserted NOTHING.
+      # PREREQUISITE OF A GATE, so it carries the gate's own admission.
+      # Measured on run 33320774111: the evidence gate ran (it had
+      # `!cancelled()`) and died exit 127 with "assert-test-evidence.sh: No
+      # such file or directory", because the step above it had FAILED and
+      # this checkout, carrying no condition, was skipped along with the
+      # artifact download. A required check reported "No such file" where
+      # it meant "a dependency failed".
       - uses: actions/checkout@v6
+        if: ${{ !cancelled() }}
+
+      # ORDER MATTERS AND IT BIT US: this step runs a script FROM THE REPO, so it
+      # must come AFTER checkout. It previously sat above it -- carried over from
+      # when it was an inline `run:` block that needed no working tree -- and on
+      # PR #417 run 33542986300 it died with
+      #   bash: .github/scripts/assert-no-dependency-failed.sh: No such file or directory
+      # while EVERY dependency had actually succeeded. A required check that reds
+      # for a missing file when nothing failed is the same "red naming the wrong
+      # cause" this job's own comments warn about, one step over.
+      - name: No dependency failed (a required check must grade what it aggregates)
+        # ADMISSION: `!cancelled()` and nothing else. A step with no `if:` is
+        # implicitly `if: success()`, which is NOT unconditional -- it stands
+        # down the moment anything before it fails, which is exactly when a
+        # gate matters most. `always() && <expr>` is worse: it reads as
+        # unconditional and is a gate ANDed back off.
+        if: ${{ !cancelled() }}
+        # THE SET GRADED IS THE SET DEPENDED ON, BY CONSTRUCTION. This was six
+        # hand-written `check <job> "${{ needs.<job>.result }}"` lines beside a
+        # six-name `needs:` list, with nothing keeping them in sync. Deleting
+        # one `check` line left this required check silently passing over that
+        # job with every self-test on the branch still green, and the same
+        # class one level up let `report` go GREEN over a RED `ci-linux`
+        # (run 33262552890). Passing `toJSON(needs)` removes the second list,
+        # so a dependency cannot be added to `needs:` and forgotten here.
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: bash .github/scripts/assert-no-dependency-failed.sh
 
       # `merge-multiple: true` was REMOVED 2026-08-02 (lane/ci-windows-fallback).
       # Every producing leg uploads its report under the SAME filename,
@@ -2480,6 +2963,8 @@ jobs:
       # it — but the defect predates the addition and cost the aggregate report
       # its per-leg detail for as long as more than one leg has been uploading.
       - name: Download nextest JUnit artifacts
+        # Prerequisite of the evidence gate -- see the checkout above.
+        if: ${{ !cancelled() }}
         uses: actions/download-artifact@v8
         with:
           pattern: nextest-junit-*
@@ -2541,15 +3026,57 @@ jobs:
       # shared with e2e.yml's report job. It was inline here and simply ABSENT
       # there, which is how e2e.yml's identically named `report` check went
       # green on a suite that never ran (wayland#1115). One implementation, two
-      # callers, no room to diverge again. EXPECTED_MIN stays at 1 — the same
-      # "zero reports is a failure" rule this step has always enforced; the ci
-      # matrix legs are conditioned per platform, so a per-leg count would be a
-      # different (and riskier) gate than the one being preserved here.
+      # callers, no room to diverge again.
+      #
+      # EXPECTED_MIN stays at 1 and is NO LONGER THE ONLY FLOOR (wayland#1216).
+      # An aggregate count cannot say WHICH leg reported: every leg's artifact
+      # lands in one directory, so `EXPECTED_MIN: 1` is satisfied the moment any
+      # one of them uploads a junit.xml — including runs where `ci-linux`, the
+      # leg that runs the WHOLE WORKSPACE SUITE, contributed nothing at all.
+      # `if-no-files-found: ignore` on its upload makes that silent. Raising the
+      # number does not fix it, because the `ci` matrix legs are conditioned per
+      # platform and any fixed count is either unreachable on a lane push or met
+      # by the wrong legs.
+      #
+      # REQUIRED_LEGS names the leg instead of counting, one line of
+      # `<artifact-subdirectory> <job> <job-result>`. `ci-linux` is listed
+      # because it is UNCONDITIONAL (no job-level `if:`) and because its
+      # coverage — the workspace nextest run, both shared-process suites, the
+      # corpus drift check, the audit, the signed-manifest drill — exists on no
+      # other leg. The `ci` matrix legs are deliberately NOT listed: their
+      # artifact name renders from `matrix.os`, which is the literal string
+      # `Array` for the label-array Windows entry, and the whole job is skipped
+      # on a `lane/**` push that opted into no platform. A leg whose job was
+      # cancelled or skipped is not required to report, so this cannot turn a
+      # conditioned platform into a permanent red.
+      #
+      # The `if:` now also fires when `ci` was skipped but `ci-linux` produced a
+      # verdict. Without that widening, the per-leg floor would be unreachable
+      # on exactly the lane pushes where `ci-linux` is the only leg that ran.
+      # ADMISSION WAS a hand-written needs-result expression, which is a gate
+      # that stands itself down: when BOTH `ci` and `ci-linux` were cancelled
+      # or skipped it evaluated false, the step was SKIPPED, and a skipped step
+      # is not a failure -- so `report` could conclude success having asserted
+      # NOTHING about test evidence. It is now a status-check function and
+      # nothing else; whether the evidence is ADEQUATE is
+      # assert-test-evidence.sh's job, and that script fails closed.
+      #
+      # `!cancelled()` also strictly covers the wayland#1216 case the old
+      # expression existed for -- the gate must still fire when `ci` was
+      # skipped but the required `ci-linux` leg ran -- because it fires on
+      # every outcome except cancellation.
+      #
+      # KEEP THIS COMMENT ABOVE THE `- name:` LINE. outer-retry-evidence.test.sh
+      # extracts this step's condition with `awk` from the step name down to
+      # `env:` and compares the result for equality, so a comment placed
+      # BETWEEN them is read as part of the condition and fails the check.
       - name: Assert test evidence exists (a skipped test step is not a pass)
-        if: ${{ needs.ci.result != 'cancelled' && needs.ci.result != 'skipped' }}
+        if: ${{ !cancelled() }}
         env:
           EVIDENCE_DIR: junit-reports
           EXPECTED_MIN: 1
+          REQUIRED_LEGS: |
+            nextest-junit-linux-containerized ci-linux ${{ needs.ci-linux.result }}
           LABEL: ci matrix (unit + integration)
           UPSTREAM_RESULT: ${{ needs.ci.result }}
           HINT: >-

@@ -10,10 +10,29 @@
 use wcore_exec_backend::conformance::{ConformanceReport, reference_budget, run_conformance};
 use wcore_exec_backend::reference_backends;
 
-fn temp_state() -> tempfile::TempDir {
+/// A private state directory for THIS TEST, injected PER THREAD.
+///
+/// Deliberately NOT `WAYLAND_EXEC_BACKEND_STATE_DIR`. That variable is a
+/// PROCESS global, and `cargo test` -- which the shared-process CI leg runs,
+/// and which nextest's process-per-test can never see -- puts every test of
+/// this binary on a thread of ONE process. The env var therefore pointed
+/// every concurrently-running sibling's registry at this `TempDir`, which was
+/// then deleted out from under them when it dropped. That is the race that
+/// failed `conformance_matrix` on ci-linux at e37e72f0b: `reference_backends`
+/// could not construct because its state dir had just been removed by a
+/// sibling finishing first (gh#1233).
+///
+/// `StateDirGuard` is the per-thread override built for exactly this; see
+/// `registry.rs`, whose doc comment names this defect. `fail_closed_matrix`
+/// was migrated to it and this binary was not. Both halves are returned so
+/// the directory outlives every read taken through the guard.
+fn temp_state() -> (
+    tempfile::TempDir,
+    wcore_exec_backend::registry::StateDirGuard,
+) {
     let dir = tempfile::tempdir().expect("tempdir");
-    unsafe { std::env::set_var("WAYLAND_EXEC_BACKEND_STATE_DIR", dir.path()) };
-    dir
+    let guard = wcore_exec_backend::registry::StateDirGuard::set(dir.path());
+    (dir, guard)
 }
 
 #[tokio::test(flavor = "multi_thread")]

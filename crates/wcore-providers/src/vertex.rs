@@ -207,6 +207,15 @@ impl VertexProvider {
             });
         }
 
+        // Codex audit parity with `AnthropicProvider::build_request_body`:
+        // `build_messages` above already translated the engine's cache hint
+        // into a wire `cache_control` marker. With caching off that marker
+        // must not reach the wire — a body with caching disabled has to be
+        // byte-identical to an uninjected one.
+        if !self.cache_enabled {
+            crate::anthropic::strip_message_cache_markers(&mut body);
+        }
+
         // Crucible #3: emit an explicit `temperature` when set, gated by the
         // provider's `supports_temperature` flag + the per-model exclusion (see
         // `openai_compat::emit_temperature`). Anthropic-on-Vertex accepts it.
@@ -692,5 +701,66 @@ mod tests {
         }
         let tok = p.get_access_token().await.expect("cached token returned");
         assert_eq!(tok, "ya29.fake-bearer-for-test");
+    }
+    // --- wayland#559 c3: caching is real on Vertex, both ways ---------------
+
+    fn caching_provider(enabled: bool) -> VertexProvider {
+        VertexProvider::new(
+            "my-proj",
+            "us-central1",
+            GcpAuth::ApplicationDefault,
+            enabled,
+            ProviderCompat::anthropic_defaults(),
+            DebugConfig::default(),
+        )
+    }
+
+    fn hinted_claude_req() -> LlmRequest {
+        let mut r = req("claude-sonnet-4@20250514");
+        r.messages = vec![wcore_types::message::Message::new(
+            wcore_types::message::Role::User,
+            vec![wcore_types::message::ContentBlock::Text { text: "hi".into() }],
+        )];
+        r.messages[0].cache_breakpoint = Some(wcore_types::message::MessageCacheHint::Breakpoint);
+        r
+    }
+
+    fn wire_marker_count(body: &serde_json::Value) -> usize {
+        fn walk(v: &serde_json::Value) -> usize {
+            match v {
+                serde_json::Value::Object(m) => {
+                    usize::from(m.contains_key("cache_control"))
+                        + m.values().map(walk).sum::<usize>()
+                }
+                serde_json::Value::Array(a) => a.iter().map(walk).sum(),
+                _ => 0,
+            }
+        }
+        walk(body)
+    }
+
+    /// With caching ON the Anthropic-on-Vertex body carries the system marker
+    /// AND the engine's message hint.
+    #[test]
+    fn caching_on_marks_the_system_prefix_and_the_engine_hint() {
+        let body = caching_provider(true).build_anthropic_body(&hinted_claude_req());
+        assert!(
+            body["system"][0].get("cache_control").is_some(),
+            "the stable system prefix must be marked when caching is on"
+        );
+        assert!(wire_marker_count(&body) >= 2);
+    }
+
+    /// With caching OFF the body must be byte-identical to an uninjected one.
+    /// Before this, the engine's hint still leaked through `build_messages`,
+    /// so `prompt_caching = false` was not actually off.
+    #[test]
+    fn caching_off_leaks_no_marker_from_the_engine_hint() {
+        let body = caching_provider(false).build_anthropic_body(&hinted_claude_req());
+        assert_eq!(
+            wire_marker_count(&body),
+            0,
+            "caching off must mean no cache_control anywhere: {body}"
+        );
     }
 }

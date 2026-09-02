@@ -41,7 +41,7 @@ fn an_unlisted_model_gets_no_fabricated_kernel_denominator() {
         "a `% full` gauge computed against a guessed window is a lie the user acts on"
     );
     assert_eq!(
-        ctx.input_ceiling(cfg.output_reserve as u64, cfg.emergency_buffer as u64),
+        ctx.input_ceiling(&cfg),
         None,
         "the pre-flight shed/overflow ceiling must fail open on an unknown window rather \
          than fire at 200_000 - 20_000 - 3_000 = 177_000 tokens on a 32k model"
@@ -65,13 +65,19 @@ fn an_operator_override_is_still_handed_to_the_kernel() {
     );
     assert_eq!(ctx.window, Some(32_768));
     // 83,208 against a real 32,768 window is 254% full, and the pre-flight
-    // ceiling (32_768 - 20_000 - 3_000 = 9_768) is long since crossed — the
-    // guard the reporter never got.
+    // ceiling is long since crossed — the guard the reporter never got.
     assert_eq!(ctx.percent(), Some(254));
     let ceiling = ctx
-        .input_ceiling(cfg.output_reserve as u64, cfg.emergency_buffer as u64)
+        .input_ceiling(&cfg)
         .expect("a known window yields a ceiling");
-    assert_eq!(ceiling, 9_768);
+    // #1179: 20,208, not the old 32_768 - 20_000 - 3_000 = 9_768. The absolute
+    // reserves are 70% of this window, and taking them raw put the ceiling
+    // BELOW the autocompact threshold (22,937) — so the guard shed and aborted
+    // 13,169 tokens before compaction could ever fire. Scaled, the ceiling is
+    // above the threshold again and compaction gets its chance first. The
+    // property #1150 asserts here is unchanged: the reporter's watermark is
+    // past it either way.
+    assert_eq!(ceiling, 20_208);
     assert!(ctx.used_tokens >= ceiling);
 }
 

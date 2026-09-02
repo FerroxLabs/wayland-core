@@ -1,0 +1,62 @@
+---
+issue: 1186
+repo: FerroxLabs/wayland
+kind: task
+title: "[Credentials request] Five platform credentials needed to measure adapter message caps (#934 c5)"
+status: open
+last_verified_commit: f0060a2e8
+criteria:
+  - id: c1
+    text: "telegram: a credential exists and a boundary probe sends at max_message_len() and at +1 against the real platform"
+    state: met
+    evidence: "file:docs/delivery-semantics.md:525:LIVE_CAP_OVER scalars=4097"
+    owner: maintainer
+    note: "RE-ANCHORED 2026-08-30 for wayland#1198: was :834, prose about the DISCORD idempotency correction -- a different platform and a different claim. It now cites the telegram probe's over-cap arm, which is the `+1 against the real platform` half of this criterion. MEASURED 2026-08-29: 4096 accepted, 4097 refused with 400 Bad Request message is too long. telegram.cap_measured is now live. RESIDUAL: the probe was driven in ASCII, so whether the platform counts characters or UTF-16 code units is STILL OPEN and must not be read as settled."
+  - id: c2
+    text: "sms (Twilio): a credential exists and a boundary probe sends at max_message_len() and at +1 against the real platform"
+    state: met
+    evidence: "file:docs/delivery-semantics.md:965:sms.cap_measured = live"
+    owner: maintainer
+    note: "RE-ANCHORED 2026-08-30 for wayland#1198: was :838, a BLANK line -- it passed on the line count alone and asserted nothing whatever. This file records the sms verdict but, unlike telegram at :523-525, carries NO probe transcript for it, so :965 is the strongest anchor the tree offers and it is weaker than telegram's. The at-and-+1 measurement (1600 accepted, 1601 refused with 400 code 21617) survives only in this note. Flagged, not re-graded: the state of this criterion belongs to #1186's lane. MEASURED 2026-08-29: 1600 accepted, 1601 refused with 400 code 21617. Twilio names the unit itself, so unlike telegram the unit is unambiguous. sms.cap_measured is now live."
+  - id: c3
+    text: "matrix: the declared 16384 cap is verified against the real platform limit"
+    state: superseded
+    successor: FerroxLabs/wayland#934
+    owner: core
+    note: "RESCOPED 2026-08-29 and handed back to wayland#934 c7, which is open and carries it. This is NOT a credentials problem: the cap derives from a byte budget (the assembled PDU), so BOTH probe arms land inside the accepted region and the harness enum Above has no variant meaning accepted-normally. A token would not close it; a probe-shape change would, and that is core's."
+  - id: c4
+    text: "msteams: the declared 20480 cap is verified against the real platform limit"
+    state: superseded
+    successor: FerroxLabs/wayland#934
+    owner: core
+    note: "RESCOPED 2026-08-29 and handed back to wayland#934 c7, which is open and carries it. Same refutation as matrix: the 20,480 figure is derived from an 80 KB UTF-16 budget on the serialized Activity, so both arms land inside the accepted region. The Bot Framework credential is still the highest-setup item on the original list but it is no longer the binding constraint."
+  - id: c5
+    text: "whatsapp (Meta Cloud API): a credential exists and a boundary probe sends at cap and at +1"
+    state: blocked
+    owner: maintainer
+    handoff: "FerroxLabs/wayland-core#364"
+    note: "AUDITED 2026-08-29 and CONFIRMED a genuine maintainer item -- unlike two of the six this audit checked, this one holds. Meta's 15-app-per-developer cap against an account already holding 44 apps is not a token anybody can issue; it needs slots freed, a separate developer account, or a decision that the row stays unmeasured permanently. #1186 is itself the credentials ticket, so handing this to #1186 would have been self-referential; the carrier is wayland-core#364, filed 2026-08-29, which states the three outcomes and what each obliges -- outcome 3 is not 'do nothing', it obliges core to change the docs/delivery-semantics.md wording from 'not yet obtained' to 'not obtainable', the way the two QR-paired bridge backends are already worded. The Meta reason is now recorded on this ticket too, which c6's note said was still owed"
+  - id: c6
+    text: "Any credential that cannot be obtained is recorded with its reason, so cap_measured = no stays an honest disclosure"
+    state: met
+    evidence: "file:docs/delivery-semantics.md:415:**Neither correction is a measurement**, and both remain `cap_measured = no`"
+    owner: core
+    note: "RE-ANCHORED 2026-08-30 for wayland#1198: moved three lines onto the sentence that states the disclosure, rather than the sentence above it about the Matrix arithmetic. docs/delivery-semantics.md records for matrix and msteams that neither correction is a measurement and why the real limit is on something the client cannot compute. The WhatsApp bridge disclosure sits at :417-426. The Meta app-cap reason still needs recording on the ticket itself."
+---
+
+Split out of `wayland#934` so its `c5` blocker is a shopping list rather than a
+sentence. Every item was an account or a token the core lane cannot obtain for
+itself.
+
+RESCOPED 2026-08-29 and the shape of the request changed materially. Two of the
+five are DONE by live measurement: Telegram at 4,096/4,097 and Twilio SMS at
+1,600/1,601, both now `cap_measured = live`. Two more turned out not to be
+credential problems at all — Matrix and MS Teams are NOT MEASURABLE by the
+two-point boundary probe, because each cap is derived from a byte budget and both
+probe arms therefore land inside the accepted region, which the harness has no
+vocabulary for. That is a code change, and it is core's. The fifth, WhatsApp
+Cloud API, is blocked on Meta's 15-app-per-developer limit against an account
+holding 44 apps, which no credential can lift.
+
+So the list is no longer five credentials. It is one account decision, two
+core-owned probe changes, and two measurements already banked.

@@ -26,6 +26,8 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use wcore_config::compat::join_endpoint;
+
 use crate::ProviderError;
 
 /// HTTP header carrying the idempotency key for billing dedupe (contract §4.7).
@@ -118,14 +120,13 @@ impl FluxFetchClient {
     /// `/v1` (e.g. [`crate::flux_router::FLUX_ROUTER_DEFAULT_BASE_URL`]); the
     /// `/fetch` path is appended. A trailing slash on `base_url` is tolerated.
     pub fn new(api_key: &str, base_url: &str) -> Self {
-        let base = base_url.trim_end_matches('/');
         Self {
             // Tool client: connect + read timeouts PLUS a request-level
             // wall-clock cap. A fetch is a single finite response, not a token
             // stream, so the cap is correct here.
             client: crate::http_client::build_tool_client(),
             api_key: api_key.to_string(),
-            endpoint: format!("{base}/fetch"),
+            endpoint: join_endpoint(base_url, "/fetch"),
         }
     }
 

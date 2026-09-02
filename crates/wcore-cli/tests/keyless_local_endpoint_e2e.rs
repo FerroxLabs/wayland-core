@@ -29,6 +29,10 @@ use serde_json::{Value, json};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Respond, ResponseTemplate};
 
+#[path = "support/mod.rs"]
+mod support;
+use support::owned_tree::OwnedTree;
+
 /// The bearer `OpenAIProvider::select_key` sends when no key is configured and
 /// the endpoint is self-hosted (`SELF_HOSTED_PLACEHOLDER_KEY`, openai.rs).
 const PLACEHOLDER_BEARER: &str = "Bearer wayland-local";
@@ -96,6 +100,22 @@ fn recorded_authorization(rt: &tokio::runtime::Runtime, server: &MockServer) -> 
                     .unwrap_or("<absent>")
                     .to_string()
             })
+            .collect()
+    })
+}
+
+/// Every request PATH the mock received, in order. The bearer helper above
+/// cannot see this: a run that posts to `/v1/v1/chat/completions` is refused by
+/// the mock before any header is recorded, so "no request arrived" and "the
+/// request arrived at the wrong path" would be the same observation.
+fn recorded_paths(rt: &tokio::runtime::Runtime, server: &MockServer) -> Vec<String> {
+    rt.block_on(async {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|req| req.url.path().to_string())
             .collect()
     })
 }
@@ -177,9 +197,7 @@ fn run_headless(dir: &Path, base_url: &str) -> Capture {
         cmd.env_remove(key);
     }
 
-    let out = cmd
-        .spawn()
-        .expect("spawn wayland-core")
+    let out = OwnedTree::new(cmd.spawn().expect("spawn wayland-core"))
         .wait_with_output()
         .expect("wait for wayland-core");
     Capture {
@@ -237,6 +255,71 @@ fn keyless_local_endpoint_starts_and_dispatches_with_the_placeholder_bearer() {
     );
 }
 
+/// #1173 c3 — THE TICKET'S REPRO VERBATIM, `/v1` suffix and all.
+///
+/// The positive above drives the bare root, which is the invocation that
+/// already worked: `openai_defaults()` appends `/v1/chat/completions` itself,
+/// so a bare root can never produce the doubled path. The ticket body types
+/// `--base-url http://127.0.0.1:11434/v1`, and c3's two halves — keyless AND
+/// `/v1`-suffixed — therefore only meet here. Nothing else in the tree drives
+/// them jointly: `compat.rs::join_endpoint_collapses_a_duplicated_v1_segment`
+/// is a pure string test in a crate that cannot observe the CLI's startup
+/// credential gate at all, so no regression in "the invocation works" can
+/// redden it.
+///
+/// Before wayland#1178's `join_endpoint` this posted to
+/// `/v1/v1/chat/completions`. The mock serves ONLY `/v1/chat/completions`, so
+/// the doubled path is answered 404 and the run fails — the criterion is
+/// graded by a request path a server had to accept, not by a join read on its
+/// own. The path is also asserted explicitly, so a future mock that answered
+/// everything could not turn this green by accident.
+#[test]
+fn the_verbatim_repro_starts_and_dispatches_with_the_v1_suffix() {
+    let (rt, server) = start_mock("ok from the local model");
+    let dir = case_dir("local-v1");
+    let base_url = format!("{}/v1", server.uri());
+    let cap = run_headless(&dir, &base_url);
+
+    assert!(
+        !cap.stderr.contains("No API key found"),
+        "the keyless half of the repro regressed: {base_url} was refused for a \
+         missing credential. rc={:?}\nstderr:\n{}\nstdout:\n{}",
+        cap.status,
+        cap.stderr,
+        cap.stdout
+    );
+    assert_eq!(
+        cap.status,
+        Some(0),
+        "the verbatim repro must complete. stderr:\n{}\nstdout:\n{}",
+        cap.stderr,
+        cap.stdout
+    );
+
+    let paths = recorded_paths(&rt, &server);
+    assert_eq!(
+        paths,
+        vec!["/v1/chat/completions".to_string()],
+        "the `/v1` the user typed was not collapsed against the provider's own \
+         api_path. stdout:\n{}\nstderr:\n{}",
+        cap.stdout,
+        cap.stderr
+    );
+
+    let seen = recorded_authorization(&rt, &server);
+    assert!(
+        seen.iter().all(|v| v == PLACEHOLDER_BEARER),
+        "every dispatch must carry the self-hosted placeholder bearer -- not an \
+         empty credential and not one harvested elsewhere. Got: {seen:?}"
+    );
+    assert!(
+        cap.stdout.contains("ok from the local model"),
+        "the model's answer must reach the user. stdout:\n{}\nstderr:\n{}",
+        cap.stdout,
+        cap.stderr
+    );
+}
+
 /// NEGATIVE CONTROL — passes in BOTH arms. A public endpoint with no
 /// credential anywhere is still refused at startup, so the exemption cannot be
 /// read as "the credential requirement was dropped". Nothing is dispatched, so
@@ -255,6 +338,34 @@ fn a_remote_endpoint_without_a_key_is_still_refused() {
     assert!(
         cap.stderr.contains("No API key found"),
         "the refusal must still name the missing credential. stderr:\n{}",
+        cap.stderr
+    );
+}
+
+/// NEGATIVE CONTROL, #1211 — the same refusal for a public host SPELLED to look
+/// local. Every byte after the `?` is query, so this request goes to
+/// `api.openai.com`; the gate used to read the authority past the `?`, take the
+/// last `@`-separated part, see `127.0.0.1`, waive the credential and dispatch
+/// the user's prompt to the public host (observed: "API error 421", not "No API
+/// key found"). Driven through the real binary because the defect was in what
+/// the SHIPPED path decided, not in the predicate read on its own.
+#[test]
+fn a_public_host_spelled_as_loopback_in_the_query_is_still_refused() {
+    let dir = case_dir("query-userinfo");
+    let cap = run_headless(&dir, "https://api.openai.com?x=@127.0.0.1");
+
+    assert_ne!(
+        cap.status,
+        Some(0),
+        "a public host with no credential must refuse to start however its URL \
+         is spelled. stdout:\n{}\nstderr:\n{}",
+        cap.stdout,
+        cap.stderr
+    );
+    assert!(
+        cap.stderr.contains("No API key found"),
+        "the refusal must still name the missing credential -- reaching the \
+         network at all means the exemption fired on a public host. stderr:\n{}",
         cap.stderr
     );
 }

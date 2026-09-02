@@ -1525,6 +1525,89 @@ pub fn changed_under_write(display_path: &str, why: &str) -> String {
     )
 }
 
+/// What to tell the user about a refused checked publish.
+///
+/// The single place the choice is made, called from both tool call sites
+/// (`edit.rs` and `write.rs`), because the choice is the whole of #1239 c2: a
+/// refusal that destroyed nothing and a refusal that displaced somebody's save
+/// were the same sentence, so the user could not tell them apart.
+pub fn refusal_message(display_path: &str, refusal: &wcore_config::Refusal) -> String {
+    conflict_message(display_path, refusal.why(), refusal.intercepted_save())
+}
+
+/// The same choice, for a caller that has the two facts without holding a
+/// [`wcore_config::Refusal`] — the VFS path, whose reason is composed from the
+/// outcome it was handed and whose displaced save arrives on
+/// [`crate::vfs::FileMutationOutcome::Conflict`] (#1248).
+///
+/// This is the ONE decision site for the whole distinction, on every path.
+/// [`refusal_message`] is a thin delegation to it. A call site that renders a
+/// refused publish does not choose a sentence: the sentence is a total
+/// function of `intercepted_save`, so a path that forgets the distinction can
+/// only do it by not having the value, never by picking the wrong wording —
+/// which is why the value is carried on the outcome instead of being
+/// re-derived from the filesystem, where it does not exist.
+pub fn conflict_message(
+    display_path: &str,
+    why: &str,
+    intercepted_save: Option<&std::path::Path>,
+) -> String {
+    match intercepted_save {
+        Some(preserved) => changed_under_write_displacing_a_save(display_path, why, preserved),
+        None => changed_under_write(display_path, why),
+    }
+}
+
+/// #1239 — the same refusal, rendered against what the retraction actually
+/// cost.
+///
+/// [`changed_under_write`]'s "Nothing was changed." is a statement about the
+/// DESTINATION, and it stays true here. It is not a statement about the save
+/// that arrived inside the guard's own exchange→verdict window: putting the
+/// original back displaces that save, and until #1239 it was then deleted and
+/// the user handed a refusal byte-identical to one that had cost nobody
+/// anything. This is the wording for the case where it cost somebody
+/// something, so the two are no longer the same sentence.
+pub fn changed_under_write_displacing_a_save(
+    display_path: &str,
+    why: &str,
+    preserved_at: &std::path::Path,
+) -> String {
+    let preserved = preserved_at.display();
+    format!(
+        "Refused to overwrite {display_path}: {why} while this write was being checked. The \
+         content about to be written was composed against contents that no longer exist, so \
+         writing it now would destroy whatever just arrived — most often the user saving in \
+         their editor. {display_path} itself is back to exactly what it held. A save that \
+         landed WHILE the check was running was displaced by putting it back; those bytes were \
+         NOT deleted — they are preserved at {preserved}. Read {display_path} as it stands now, \
+         reconcile it with {preserved}, and redo the change against that."
+    )
+}
+
+/// #1241 — the guard refused and the refusal could not be undone.
+///
+/// Distinct from every other message in this module because the destination is
+/// NOT as it was: the new bytes are published and the pre-image survives only
+/// under `preserved_at`. Reporting this as a plain success — which the direct
+/// Write path did, by rewriting the same bytes through an unchecked
+/// `fs::write` — tells the user their write landed cleanly at the one moment
+/// their file is in the state they most need to know about.
+pub fn refused_but_not_rolled_back(
+    display_path: &str,
+    why: &str,
+    preserved_at: &std::path::Path,
+) -> String {
+    let preserved = preserved_at.display();
+    format!(
+        "Refused to overwrite {display_path}: {why} while this write was being checked — and \
+         the refusal could NOT be undone. The new content is published at {display_path} and \
+         the contents it replaced are preserved at {preserved}. Nothing was deleted, but \
+         {display_path} is not the file the user last saved. Reconcile {display_path} with \
+         {preserved} before making any further change to it."
+    )
+}
+
 /// Did the copy come back as the same bytes — every byte of them, not the
 /// same number of them?
 ///

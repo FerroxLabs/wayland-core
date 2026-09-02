@@ -1,0 +1,1651 @@
+{
+  "_comment": [
+    "Assignment for every outstanding criterion: which lane owns it and which machine it needs.",
+    "The plan render FAILS if an outstanding criterion is missing here. That is deliberate:",
+    "core#113 and wayland#863 sat outside every lane this cycle purely because nothing forced",
+    "them to be assigned. An unrouted criterion is how work goes missing.",
+    "kind_overrides marks feature-request issues, which do not gate a defect release."
+  ],
+  "criteria": {
+    "core#113 c5": {
+      "host": "hetzner",
+      "lane": "browser-revive",
+      "phase": "3-unrouted-pickup"
+    },
+    "core#238 c4": {
+      "host": "SeanDesktop",
+      "lane": "win-runs",
+      "note": "probe AUTHORED by bookkeeping lane; this criterion is the RUN",
+      "phase": "2-platform"
+    },
+    "core#244 c3": {
+      "host": "hetzner",
+      "lane": "vfs-store-reach",
+      "phase": "1-build"
+    },
+    "core#253 c4": {
+      "host": "hetzner",
+      "lane": "bookkeeping",
+      "note": "issue is a feature, but c4 is defect hygiene - extract the Telegram defect to its own ticket",
+      "phase": "1-build"
+    },
+    "core#314 c5": {
+      "host": "gh",
+      "lane": "decompose",
+      "phase": "2-decompose"
+    },
+    "core#322 c4": {
+      "host": "hetzner",
+      "lane": "atref-residuals",
+      "phase": "1-build"
+    },
+    "core#323 c4": {
+      "host": "hetzner",
+      "lane": "vfs-store-reach",
+      "phase": "1-build"
+    },
+    "core#324 c1": {
+      "host": "SeanDesktop",
+      "lane": "win-runs",
+      "phase": "2-platform"
+    },
+    "core#324 c2": {
+      "host": "SeanDesktop",
+      "lane": "win-runs",
+      "phase": "2-platform"
+    },
+    "core#324 c3": {
+      "host": "SeanDesktop",
+      "lane": "win-runs",
+      "phase": "2-platform"
+    },
+    "core#325 c2": {
+      "host": "hetzner",
+      "lane": "ci-evidence",
+      "phase": "1-build"
+    },
+    "core#335 c3": {
+      "host": "hetzner",
+      "lane": "atref-walk",
+      "phase": "1-build"
+    },
+    "core#336 c2": {
+      "host": "hetzner",
+      "lane": "test-instruments",
+      "phase": "1-build"
+    },
+    "core#336 c3": {
+      "host": "hetzner",
+      "lane": "instrument-integrity",
+      "phase": "1-build"
+    },
+    "core#336 c4": {
+      "host": "hetzner",
+      "lane": "instrument-integrity",
+      "phase": "1-build"
+    },
+    "core#337 c2": {
+      "host": "hetzner",
+      "lane": "instrument-integrity",
+      "phase": "1-build"
+    },
+    "core#337 c3": {
+      "host": "hetzner",
+      "lane": "instrument-integrity",
+      "phase": "1-build"
+    },
+    "core#338 c2": {
+      "host": "hetzner",
+      "lane": "plugin-quarantine",
+      "phase": "1-build"
+    },
+    "core#339 c2": {
+      "host": "hetzner",
+      "lane": "vfs-store-reach",
+      "phase": "1-build"
+    },
+    "core#339 c3": {
+      "host": "hetzner",
+      "lane": "atref-residuals",
+      "phase": "1-build"
+    },
+    "core#339 c6": {
+      "host": "hetzner",
+      "lane": "atref-residuals",
+      "phase": "1-build"
+    },
+    "core#340 c1": {
+      "host": "hetzner",
+      "lane": "doc-truth",
+      "note": "the shipped operator doc still carries the guarantee the ticket exists to remove",
+      "phase": "1-build"
+    },
+    "core#342 c3": {
+      "host": "SeanDesktop",
+      "lane": "win-runs",
+      "phase": "2-platform"
+    },
+    "core#342 c5": {
+      "host": "SeanDesktop",
+      "lane": "win-runs",
+      "phase": "2-platform"
+    },
+    "core#350 c3": {
+      "host": "hetzner",
+      "lane": "instrument-integrity",
+      "phase": "1-build"
+    },
+    "core#350 c5": {
+      "host": "SeanDesktop",
+      "lane": "win-runs",
+      "note": "issue's own close condition: a green nightly-windows-soak against this tree",
+      "phase": "2-platform"
+    },
+    "core#352 c4": {
+      "host": "macOS CI",
+      "lane": "macos-ci",
+      "note": "the only prior macOS run FAILED and its branch was deleted - do not cite it",
+      "phase": "2-platform"
+    },
+    "core#352 c5": {
+      "host": "hetzner",
+      "lane": "instrument-integrity",
+      "phase": "1-build"
+    },
+    "core#353 c5": {
+      "host": "hetzner",
+      "lane": "instrument-integrity",
+      "phase": "1-build"
+    },
+    "core#354 c1": {
+      "host": "hetzner",
+      "lane": "mcp-gate-mode",
+      "phase": "1-build"
+    },
+    "core#354 c2": {
+      "host": "hetzner",
+      "lane": "mcp-gate-mode",
+      "phase": "1-build"
+    },
+    "core#354 c3": {
+      "host": "hetzner",
+      "lane": "mcp-gate-mode",
+      "phase": "1-build"
+    },
+    "core#354 c4": {
+      "host": "hetzner",
+      "lane": "mcp-gate-mode",
+      "phase": "1-build"
+    },
+    "core#354 c5": {
+      "host": "hetzner",
+      "lane": "mcp-gate-mode",
+      "phase": "1-build"
+    },
+    "core#354 c6": {
+      "host": "hetzner",
+      "lane": "mcp-gate-mode",
+      "phase": "1-build"
+    },
+    "core#354 c7": {
+      "host": "hetzner",
+      "lane": "mcp-gate-mode",
+      "phase": "1-build"
+    },
+    "core#355 c1": {
+      "host": "hetzner",
+      "lane": "floor-disclosure",
+      "phase": "1-build"
+    },
+    "core#355 c2": {
+      "host": "hetzner",
+      "lane": "floor-disclosure",
+      "phase": "1-build"
+    },
+    "core#355 c3": {
+      "host": "hetzner",
+      "lane": "floor-disclosure",
+      "phase": "1-build"
+    },
+    "core#355 c4": {
+      "host": "hetzner",
+      "lane": "floor-disclosure",
+      "phase": "1-build"
+    },
+    "core#356 c4": {
+      "host": "hetzner",
+      "lane": "vfs-store-reach",
+      "phase": "1-build"
+    },
+    "core#358 c1": {
+      "host": "hetzner",
+      "lane": "win-owned-tree",
+      "phase": "1-build"
+    },
+    "core#358 c2": {
+      "host": "SeanDesktop",
+      "lane": "win-runs",
+      "phase": "2-platform"
+    },
+    "core#358 c3": {
+      "host": "SeanDesktop",
+      "lane": "win-runs",
+      "note": "red arm must be quoted verbatim from a real Windows run",
+      "phase": "2-platform"
+    },
+    "core#358 c4": {
+      "host": "hetzner",
+      "lane": "win-owned-tree",
+      "phase": "1-build"
+    },
+    "core#358 c5": {
+      "host": "SeanDesktop",
+      "lane": "win-runs",
+      "phase": "2-platform"
+    },
+    "core#358 c6": {
+      "host": "hetzner",
+      "lane": "win-owned-tree",
+      "phase": "1-build"
+    },
+    "core#360 c1": {
+      "host": "hetzner",
+      "lane": "channel-caps",
+      "phase": "1-build"
+    },
+    "core#360 c2": {
+      "host": "hetzner",
+      "lane": "channel-caps",
+      "phase": "1-build"
+    },
+    "core#360 c4": {
+      "host": "hetzner",
+      "lane": "channel-caps",
+      "phase": "1-build"
+    },
+    "core#360 c5": {
+      "host": "hetzner",
+      "lane": "channel-caps",
+      "phase": "1-build"
+    },
+    "core#361 c1": {
+      "host": "hetzner",
+      "lane": "flake-584",
+      "phase": "1-build"
+    },
+    "core#361 c2": {
+      "host": "hetzner",
+      "lane": "flake-584",
+      "phase": "1-build"
+    },
+    "core#361 c3": {
+      "host": "hetzner",
+      "lane": "flake-584",
+      "phase": "1-build"
+    },
+    "core#361 c4": {
+      "host": "hetzner",
+      "lane": "flake-584",
+      "phase": "1-build"
+    },
+    "core#361 c5": {
+      "host": "hetzner",
+      "lane": "flake-584",
+      "phase": "1-build"
+    },
+    "core#361 c6": {
+      "host": "hetzner",
+      "lane": "flake-584",
+      "phase": "1-build"
+    },
+    "core#362 c1": {
+      "host": "hetzner",
+      "lane": "bwrap-race",
+      "phase": "1-build"
+    },
+    "core#362 c2": {
+      "host": "hetzner",
+      "lane": "bwrap-race",
+      "phase": "1-build"
+    },
+    "core#362 c3": {
+      "host": "hetzner",
+      "lane": "bwrap-race",
+      "phase": "1-build"
+    },
+    "core#362 c4": {
+      "host": "hetzner",
+      "lane": "bwrap-race",
+      "phase": "1-build"
+    },
+    "core#362 c5": {
+      "host": "hetzner",
+      "lane": "bwrap-race",
+      "phase": "1-build"
+    },
+    "core#363 c1": {
+      "host": "hetzner",
+      "lane": "telegram-topic",
+      "phase": "1-build"
+    },
+    "core#363 c2": {
+      "host": "hetzner",
+      "lane": "telegram-topic",
+      "phase": "1-build"
+    },
+    "core#363 c3": {
+      "host": "hetzner",
+      "lane": "telegram-topic",
+      "phase": "1-build"
+    },
+    "core#363 c4": {
+      "host": "hetzner",
+      "lane": "telegram-topic",
+      "phase": "1-build"
+    },
+    "core#363 c5": {
+      "host": "hetzner",
+      "lane": "telegram-topic",
+      "phase": "1-build"
+    },
+    "core#363 c6": {
+      "host": "hetzner",
+      "lane": "telegram-topic",
+      "phase": "1-build"
+    },
+    "core#364 c1": {
+      "host": "Sean",
+      "lane": "maintainer",
+      "phase": "2-maintainer"
+    },
+    "core#364 c2": {
+      "host": "Sean",
+      "lane": "maintainer",
+      "phase": "2-maintainer"
+    },
+    "core#365 c1": {
+      "host": "hetzner",
+      "lane": "container-latch",
+      "phase": "1-build"
+    },
+    "core#365 c2": {
+      "host": "hetzner",
+      "lane": "container-latch",
+      "phase": "1-build"
+    },
+    "core#365 c3": {
+      "host": "hetzner",
+      "lane": "container-latch",
+      "phase": "1-build"
+    },
+    "core#365 c4": {
+      "host": "hetzner",
+      "lane": "container-latch",
+      "phase": "1-build"
+    },
+    "core#365 c5": {
+      "host": "hetzner",
+      "lane": "container-latch",
+      "phase": "1-build"
+    },
+    "core#365 c6": {
+      "host": "hetzner",
+      "lane": "container-latch",
+      "phase": "1-build"
+    },
+    "core#366 c1": {
+      "host": "hetzner",
+      "lane": "container-latch-2",
+      "phase": "1-build"
+    },
+    "core#366 c2": {
+      "host": "hetzner",
+      "lane": "container-latch-2",
+      "phase": "1-build"
+    },
+    "core#366 c3": {
+      "host": "hetzner",
+      "lane": "container-latch-2",
+      "phase": "1-build"
+    },
+    "core#366 c4": {
+      "host": "hetzner",
+      "lane": "container-latch-2",
+      "phase": "1-build"
+    },
+    "core#366 c5": {
+      "host": "hetzner",
+      "lane": "container-latch-2",
+      "phase": "1-build"
+    },
+    "core#367 c2": {
+      "host": "hetzner",
+      "lane": "test-instruments-2",
+      "phase": "1-build"
+    },
+    "core#367 c3": {
+      "host": "hetzner",
+      "lane": "test-instruments-2",
+      "phase": "1-build"
+    },
+    "core#368 c1": {
+      "host": "SeanDesktop",
+      "lane": "win-runs-2",
+      "phase": "2-platform"
+    },
+    "core#368 c2": {
+      "host": "SeanDesktop",
+      "lane": "win-runs-2",
+      "phase": "2-platform"
+    },
+    "core#369 c1": {
+      "host": "SeanDesktop",
+      "lane": "win-runs-2",
+      "phase": "2-platform"
+    },
+    "core#369 c2": {
+      "host": "SeanDesktop",
+      "lane": "win-runs-2",
+      "phase": "2-platform"
+    },
+    "core#369 c3": {
+      "host": "SeanDesktop",
+      "lane": "win-runs-2",
+      "phase": "2-platform"
+    },
+    "core#369 c4": {
+      "host": "SeanDesktop",
+      "lane": "win-runs-2",
+      "phase": "2-platform"
+    },
+    "core#370 c1": {
+      "host": "SeanDesktop",
+      "lane": "win-runs-2",
+      "phase": "2-platform"
+    },
+    "core#370 c2": {
+      "host": "SeanDesktop",
+      "lane": "win-runs-2",
+      "phase": "2-platform"
+    },
+    "core#371 c1": {
+      "host": "hetzner",
+      "lane": "test-instruments-2",
+      "phase": "1-build"
+    },
+    "core#371 c2": {
+      "host": "hetzner",
+      "lane": "test-instruments-2",
+      "phase": "1-build"
+    },
+    "core#372 c1": {
+      "host": "hetzner",
+      "lane": "gepa-selection",
+      "phase": "1-build"
+    },
+    "core#372 c2": {
+      "host": "hetzner",
+      "lane": "gepa-selection",
+      "phase": "1-build"
+    },
+    "core#372 c3": {
+      "host": "hetzner",
+      "lane": "gepa-selection",
+      "phase": "1-build"
+    },
+    "core#372 c4": {
+      "host": "hetzner",
+      "lane": "gepa-selection",
+      "phase": "1-build"
+    },
+    "core#372 c5": {
+      "host": "hetzner",
+      "lane": "gepa-selection",
+      "phase": "1-build"
+    },
+    "core#372 c6": {
+      "host": "hetzner",
+      "lane": "gepa-selection",
+      "phase": "1-build"
+    },
+    "core#373 c1": {
+      "host": "hetzner",
+      "lane": "instrument-integrity-3",
+      "phase": "1-build"
+    },
+    "core#373 c2": {
+      "host": "hetzner",
+      "lane": "instrument-integrity-3",
+      "phase": "1-build"
+    },
+    "core#373 c3": {
+      "host": "hetzner",
+      "lane": "instrument-integrity-3",
+      "phase": "1-build"
+    },
+    "core#373 c4": {
+      "host": "hetzner",
+      "lane": "instrument-integrity-3",
+      "phase": "1-build"
+    },
+    "core#373 c5": {
+      "host": "hetzner",
+      "lane": "instrument-integrity-3",
+      "phase": "1-build"
+    },
+    "core#374 c1": {
+      "host": "SeanDesktop",
+      "lane": "win-runs-2",
+      "phase": "2-platform"
+    },
+    "core#374 c2": {
+      "host": "SeanDesktop",
+      "lane": "win-runs-2",
+      "phase": "2-platform"
+    },
+    "core#374 c3": {
+      "host": "SeanDesktop",
+      "lane": "win-runs-2",
+      "phase": "2-platform"
+    },
+    "core#375 c1": {
+      "host": "hetzner",
+      "lane": "vfs-store-reach",
+      "phase": "1-build"
+    },
+    "core#375 c2": {
+      "host": "hetzner",
+      "lane": "vfs-store-reach",
+      "phase": "1-build"
+    },
+    "core#375 c3": {
+      "host": "hetzner",
+      "lane": "vfs-store-reach",
+      "phase": "1-build"
+    },
+    "core#375 c4": {
+      "host": "hetzner",
+      "lane": "vfs-store-reach",
+      "phase": "1-build"
+    },
+    "core#376 c1": {
+      "host": "hetzner",
+      "lane": "vfs-store-reach",
+      "phase": "1-build"
+    },
+    "core#376 c2": {
+      "host": "hetzner",
+      "lane": "vfs-store-reach",
+      "phase": "1-build"
+    },
+    "core#376 c3": {
+      "host": "hetzner",
+      "lane": "vfs-store-reach",
+      "phase": "1-build"
+    },
+    "core#376 c4": {
+      "host": "hetzner",
+      "lane": "vfs-store-reach",
+      "phase": "1-build"
+    },
+    "core#377 c1": {
+      "host": "hetzner",
+      "lane": "atref-walk",
+      "phase": "1-build"
+    },
+    "core#377 c2": {
+      "host": "hetzner",
+      "lane": "atref-walk",
+      "phase": "1-build"
+    },
+    "core#377 c3": {
+      "host": "hetzner",
+      "lane": "atref-walk",
+      "phase": "1-build"
+    },
+    "core#377 c4": {
+      "host": "hetzner",
+      "lane": "atref-walk",
+      "phase": "1-build"
+    },
+    "core#378 c1": {
+      "host": "hetzner",
+      "lane": "test-instruments",
+      "phase": "1-build"
+    },
+    "core#378 c2": {
+      "host": "hetzner",
+      "lane": "test-instruments",
+      "phase": "1-build"
+    },
+    "core#378 c3": {
+      "host": "hetzner",
+      "lane": "test-instruments",
+      "phase": "1-build"
+    },
+    "core#379 c1": {
+      "host": "hetzner",
+      "lane": "plugin-quarantine",
+      "phase": "1-build"
+    },
+    "core#379 c2": {
+      "host": "hetzner",
+      "lane": "plugin-quarantine",
+      "phase": "1-build"
+    },
+    "core#379 c3": {
+      "host": "hetzner",
+      "lane": "plugin-quarantine",
+      "phase": "1-build"
+    },
+    "core#380 c1": {
+      "host": "SeanDesktop",
+      "lane": "win-quarantine",
+      "phase": "2-platform"
+    },
+    "core#380 c2": {
+      "host": "SeanDesktop",
+      "lane": "win-quarantine",
+      "phase": "2-platform"
+    },
+    "core#380 c3": {
+      "host": "SeanDesktop",
+      "lane": "win-quarantine",
+      "note": "Windows-only: the run must be quoted verbatim from SeanDesktop",
+      "phase": "2-platform"
+    },
+    "core#381 c1": {
+      "host": "hetzner",
+      "lane": "atref-walk",
+      "phase": "1-build"
+    },
+    "core#381 c2": {
+      "host": "hetzner",
+      "lane": "atref-walk",
+      "phase": "1-build"
+    },
+    "core#381 c3": {
+      "host": "hetzner",
+      "lane": "atref-walk",
+      "phase": "1-build"
+    },
+    "core#381 c4": {
+      "host": "hetzner",
+      "lane": "atref-walk",
+      "phase": "1-build"
+    },
+    "core#382 c1": {
+      "host": "hetzner",
+      "lane": "small-window",
+      "phase": "1-build"
+    },
+    "core#382 c2": {
+      "host": "hetzner",
+      "lane": "small-window",
+      "phase": "1-build"
+    },
+    "core#382 c3": {
+      "host": "hetzner",
+      "lane": "small-window",
+      "phase": "1-build"
+    },
+    "core#383 c1": {
+      "host": "hetzner",
+      "lane": "vfs-store-reach",
+      "phase": "1-build"
+    },
+    "core#383 c2": {
+      "host": "hetzner",
+      "lane": "vfs-store-reach",
+      "phase": "1-build"
+    },
+    "core#383 c3": {
+      "host": "hetzner",
+      "lane": "vfs-store-reach",
+      "phase": "1-build"
+    },
+    "core#384 c1": {
+      "host": "hetzner",
+      "lane": "vfs-store-reach",
+      "phase": "1-build"
+    },
+    "core#384 c2": {
+      "host": "hetzner",
+      "lane": "vfs-store-reach",
+      "phase": "1-build"
+    },
+    "core#384 c3": {
+      "host": "hetzner",
+      "lane": "vfs-store-reach",
+      "phase": "1-build"
+    },
+    "core#385 c1": {
+      "host": "hetzner",
+      "lane": "test-instruments",
+      "phase": "1-build"
+    },
+    "core#385 c2": {
+      "host": "hetzner",
+      "lane": "test-instruments",
+      "phase": "1-build"
+    },
+    "core#385 c3": {
+      "host": "hetzner",
+      "lane": "test-instruments",
+      "phase": "1-build"
+    },
+    "wl#1088 c2": {
+      "host": "gh",
+      "lane": "decompose",
+      "phase": "2-decompose"
+    },
+    "wl#1134 c3": {
+      "host": "hetzner",
+      "lane": "ci-evidence",
+      "phase": "1-build"
+    },
+    "wl#1150 c4": {
+      "host": "hetzner",
+      "lane": "prompt-cache",
+      "phase": "1-build"
+    },
+    "wl#1150 c5": {
+      "host": "hetzner",
+      "lane": "small-window",
+      "phase": "1-build"
+    },
+    "wl#1151 c2": {
+      "host": "hetzner",
+      "lane": "win-bash",
+      "phase": "1-build"
+    },
+    "wl#1151 c3": {
+      "host": "gh",
+      "lane": "decompose",
+      "phase": "2-decompose"
+    },
+    "wl#1155 c2": {
+      "host": "hetzner",
+      "lane": "test-instruments",
+      "phase": "1-build"
+    },
+    "wl#1155 c4": {
+      "host": "hetzner",
+      "lane": "instrument-integrity",
+      "phase": "1-build"
+    },
+    "wl#1164 c1": {
+      "host": "hetzner",
+      "lane": "win-bash",
+      "phase": "1-build"
+    },
+    "wl#1164 c2": {
+      "host": "hetzner",
+      "lane": "win-bash",
+      "phase": "1-build"
+    },
+    "wl#1164 c3": {
+      "host": "hetzner",
+      "lane": "win-bash",
+      "phase": "1-build"
+    },
+    "wl#1164 c4": {
+      "host": "hetzner",
+      "lane": "win-bash",
+      "phase": "1-build"
+    },
+    "wl#1164 c5": {
+      "host": "SeanDesktop",
+      "lane": "win-runs",
+      "phase": "2-platform"
+    },
+    "wl#1165 c1": {
+      "host": "hetzner",
+      "lane": "acp-mcp",
+      "phase": "1-build"
+    },
+    "wl#1172 c3": {
+      "host": "hetzner",
+      "lane": "small-window",
+      "phase": "1-build"
+    },
+    "wl#1175 c1": {
+      "host": "hetzner",
+      "lane": "mcp-transports",
+      "phase": "1-build"
+    },
+    "wl#1176 c5": {
+      "host": "hetzner",
+      "lane": "model-limits",
+      "note": "re-graded not-met 2026-08-29: the pointer names another change's code and the property is false on passthrough.rs's own contents",
+      "phase": "1-build"
+    },
+    "wl#1177 c1": {
+      "host": "hetzner",
+      "lane": "ci-evidence",
+      "note": "the mechanism has never once worked on a real runner; wl#1215 is the live instance",
+      "phase": "1-build"
+    },
+    "wl#1177 c2": {
+      "host": "hetzner",
+      "lane": "ci-evidence",
+      "phase": "1-build"
+    },
+    "wl#1179 c2": {
+      "host": "hetzner",
+      "lane": "small-window",
+      "phase": "1-build"
+    },
+    "wl#1181 c1": {
+      "host": "hetzner",
+      "lane": "bookkeeping",
+      "phase": "1-build"
+    },
+    "wl#1181 c2": {
+      "host": "hetzner",
+      "lane": "bookkeeping",
+      "phase": "1-build"
+    },
+    "wl#1181 c3": {
+      "host": "hetzner",
+      "lane": "bookkeeping",
+      "phase": "1-build"
+    },
+    "wl#1181 c4": {
+      "host": "hetzner",
+      "lane": "bookkeeping",
+      "phase": "1-build"
+    },
+    "wl#1182 c3": {
+      "host": "hetzner",
+      "lane": "ci-evidence",
+      "phase": "1-build"
+    },
+    "wl#1186 c5": {
+      "host": "Sean",
+      "lane": "maintainer",
+      "phase": "2-maintainer"
+    },
+    "wl#1197 c1": {
+      "host": "hetzner",
+      "lane": "ci-evidence",
+      "phase": "1-build"
+    },
+    "wl#1197 c2": {
+      "host": "hetzner",
+      "lane": "ci-evidence",
+      "phase": "1-build"
+    },
+    "wl#1197 c3": {
+      "host": "hetzner",
+      "lane": "ci-evidence",
+      "phase": "1-build"
+    },
+    "wl#1198 c1": {
+      "host": "hetzner",
+      "lane": "ci-evidence",
+      "phase": "1-build"
+    },
+    "wl#1198 c2": {
+      "host": "hetzner",
+      "lane": "ci-evidence",
+      "phase": "1-build"
+    },
+    "wl#1198 c3": {
+      "host": "hetzner",
+      "lane": "ci-evidence",
+      "phase": "1-build"
+    },
+    "wl#1199 c1": {
+      "host": "hetzner",
+      "lane": "small-window",
+      "phase": "1-build"
+    },
+    "wl#1199 c2": {
+      "host": "hetzner",
+      "lane": "small-window",
+      "phase": "1-build"
+    },
+    "wl#1199 c3": {
+      "host": "hetzner",
+      "lane": "small-window",
+      "phase": "1-build"
+    },
+    "wl#1200 c1": {
+      "host": "hetzner",
+      "lane": "small-window",
+      "phase": "1-build"
+    },
+    "wl#1200 c2": {
+      "host": "hetzner",
+      "lane": "small-window",
+      "phase": "1-build"
+    },
+    "wl#1200 c3": {
+      "host": "hetzner",
+      "lane": "small-window",
+      "phase": "1-build"
+    },
+    "wl#1202 c1": {
+      "host": "hetzner",
+      "lane": "atomic-write",
+      "phase": "1-build"
+    },
+    "wl#1202 c2": {
+      "host": "hetzner",
+      "lane": "atomic-write",
+      "phase": "1-build"
+    },
+    "wl#1202 c3": {
+      "host": "hetzner",
+      "lane": "atomic-write",
+      "phase": "1-build"
+    },
+    "wl#1202 c4": {
+      "host": "hetzner",
+      "lane": "atomic-write",
+      "phase": "1-build"
+    },
+    "wl#1203 c1": {
+      "host": "hetzner",
+      "lane": "cache-truth",
+      "phase": "1-build"
+    },
+    "wl#1203 c2": {
+      "host": "hetzner",
+      "lane": "cache-truth",
+      "phase": "1-build"
+    },
+    "wl#1203 c3": {
+      "host": "hetzner",
+      "lane": "cache-truth",
+      "note": "an observed-outcome criterion: a live spend-audit.jsonl, not a call-site reading",
+      "phase": "1-build"
+    },
+    "wl#1204 c1": {
+      "host": "hetzner",
+      "lane": "cli-messages",
+      "phase": "1-build"
+    },
+    "wl#1204 c2": {
+      "host": "hetzner",
+      "lane": "cli-messages",
+      "phase": "1-build"
+    },
+    "wl#1204 c3": {
+      "host": "hetzner",
+      "lane": "cli-messages",
+      "phase": "1-build"
+    },
+    "wl#1205 c1": {
+      "host": "hetzner",
+      "lane": "cache-truth",
+      "phase": "1-build"
+    },
+    "wl#1205 c2": {
+      "host": "hetzner",
+      "lane": "cache-truth",
+      "phase": "1-build"
+    },
+    "wl#1205 c3": {
+      "host": "hetzner",
+      "lane": "cache-truth",
+      "phase": "1-build"
+    },
+    "wl#1205 c4": {
+      "host": "hetzner",
+      "lane": "cache-truth",
+      "phase": "1-build"
+    },
+    "wl#1206 c1": {
+      "host": "hetzner",
+      "lane": "cache-truth",
+      "phase": "1-build"
+    },
+    "wl#1206 c2": {
+      "host": "hetzner",
+      "lane": "cache-truth",
+      "phase": "1-build"
+    },
+    "wl#1206 c3": {
+      "host": "hetzner",
+      "lane": "cache-truth",
+      "phase": "1-build"
+    },
+    "wl#1206 c4": {
+      "host": "hetzner",
+      "lane": "cache-truth",
+      "phase": "1-build"
+    },
+    "wl#1207 c1": {
+      "host": "hetzner",
+      "lane": "cache-truth",
+      "phase": "1-build"
+    },
+    "wl#1207 c2": {
+      "host": "hetzner",
+      "lane": "cache-truth",
+      "phase": "1-build"
+    },
+    "wl#1208 c1": {
+      "host": "hetzner",
+      "lane": "tool-wire-order",
+      "phase": "1-build"
+    },
+    "wl#1208 c2": {
+      "host": "hetzner",
+      "lane": "tool-wire-order",
+      "phase": "1-build"
+    },
+    "wl#1208 c3": {
+      "host": "hetzner",
+      "lane": "tool-wire-order",
+      "phase": "1-build"
+    },
+    "wl#1209 c1": {
+      "host": "hetzner",
+      "lane": "tool-wire-order",
+      "phase": "1-build"
+    },
+    "wl#1209 c2": {
+      "host": "hetzner",
+      "lane": "tool-wire-order",
+      "phase": "1-build"
+    },
+    "wl#1209 c3": {
+      "host": "hetzner",
+      "lane": "tool-wire-order",
+      "phase": "1-build"
+    },
+    "wl#1210 c1": {
+      "host": "hetzner",
+      "lane": "small-window",
+      "phase": "1-build"
+    },
+    "wl#1210 c2": {
+      "host": "hetzner",
+      "lane": "small-window",
+      "phase": "1-build"
+    },
+    "wl#1210 c3": {
+      "host": "hetzner",
+      "lane": "small-window",
+      "phase": "1-build"
+    },
+    "wl#1211 c1": {
+      "host": "hetzner",
+      "lane": "provider-urls",
+      "phase": "1-build"
+    },
+    "wl#1211 c2": {
+      "host": "hetzner",
+      "lane": "provider-urls",
+      "phase": "1-build"
+    },
+    "wl#1211 c3": {
+      "host": "hetzner",
+      "lane": "provider-urls",
+      "phase": "1-build"
+    },
+    "wl#1211 c4": {
+      "host": "hetzner",
+      "lane": "provider-urls",
+      "phase": "1-build"
+    },
+    "wl#1212 c1": {
+      "host": "hetzner",
+      "lane": "provider-urls",
+      "phase": "1-build"
+    },
+    "wl#1212 c2": {
+      "host": "hetzner",
+      "lane": "provider-urls",
+      "phase": "1-build"
+    },
+    "wl#1212 c3": {
+      "host": "hetzner",
+      "lane": "provider-urls",
+      "phase": "1-build"
+    },
+    "wl#1213 c1": {
+      "host": "hetzner",
+      "lane": "mcp-transports",
+      "phase": "1-build"
+    },
+    "wl#1213 c2": {
+      "host": "hetzner",
+      "lane": "mcp-transports",
+      "phase": "1-build"
+    },
+    "wl#1213 c3": {
+      "host": "hetzner",
+      "lane": "mcp-transports",
+      "phase": "1-build"
+    },
+    "wl#1213 c4": {
+      "host": "hetzner",
+      "lane": "mcp-transports",
+      "phase": "1-build"
+    },
+    "wl#1214 c1": {
+      "host": "hetzner",
+      "lane": "model-limits",
+      "phase": "1-build"
+    },
+    "wl#1214 c2": {
+      "host": "hetzner",
+      "lane": "model-limits",
+      "phase": "1-build"
+    },
+    "wl#1214 c3": {
+      "host": "hetzner",
+      "lane": "model-limits",
+      "phase": "1-build"
+    },
+    "wl#1214 c4": {
+      "host": "hetzner",
+      "lane": "model-limits",
+      "phase": "1-build"
+    },
+    "wl#1215 c1": {
+      "host": "hetzner",
+      "lane": "ci-evidence",
+      "phase": "1-build"
+    },
+    "wl#1215 c2": {
+      "host": "hetzner",
+      "lane": "ci-evidence",
+      "note": "an observed-outcome criterion: a real CI run URL, not a code reading",
+      "phase": "1-build"
+    },
+    "wl#1215 c3": {
+      "host": "hetzner",
+      "lane": "ci-evidence",
+      "phase": "1-build"
+    },
+    "wl#1216 c1": {
+      "host": "hetzner",
+      "lane": "ci-evidence",
+      "phase": "1-build"
+    },
+    "wl#1216 c2": {
+      "host": "hetzner",
+      "lane": "ci-evidence",
+      "phase": "1-build"
+    },
+    "wl#1216 c3": {
+      "host": "hetzner",
+      "lane": "ci-evidence",
+      "phase": "1-build"
+    },
+    "wl#1217 c1": {
+      "host": "hetzner",
+      "lane": "provider-urls",
+      "phase": "1-build"
+    },
+    "wl#1217 c2": {
+      "host": "hetzner",
+      "lane": "provider-urls",
+      "phase": "1-build"
+    },
+    "wl#1217 c3": {
+      "host": "hetzner",
+      "lane": "provider-urls",
+      "phase": "1-build"
+    },
+    "wl#1217 c4": {
+      "host": "hetzner",
+      "lane": "provider-urls",
+      "phase": "1-build"
+    },
+    "wl#1218 c1": {
+      "host": "hetzner",
+      "lane": "small-window",
+      "phase": "1-build"
+    },
+    "wl#1218 c2": {
+      "host": "hetzner",
+      "lane": "small-window",
+      "phase": "1-build"
+    },
+    "wl#1218 c3": {
+      "host": "hetzner",
+      "lane": "small-window",
+      "phase": "1-build"
+    },
+    "wl#1219 c1": {
+      "host": "hetzner",
+      "lane": "json-stream-consent",
+      "phase": "1-build"
+    },
+    "wl#1219 c2": {
+      "host": "hetzner",
+      "lane": "json-stream-consent",
+      "phase": "1-build"
+    },
+    "wl#1219 c3": {
+      "host": "hetzner",
+      "lane": "json-stream-consent",
+      "phase": "1-build"
+    },
+    "wl#1219 c4": {
+      "host": "hetzner",
+      "lane": "json-stream-consent",
+      "phase": "1-build"
+    },
+    "wl#1220 c1": {
+      "host": "hetzner",
+      "lane": "ci-evidence",
+      "phase": "1-build"
+    },
+    "wl#1220 c2": {
+      "host": "hetzner",
+      "lane": "ci-evidence",
+      "phase": "1-build"
+    },
+    "wl#1220 c3": {
+      "host": "hetzner",
+      "lane": "ci-evidence",
+      "phase": "1-build"
+    },
+    "wl#1221 c1": {
+      "host": "hetzner",
+      "lane": "reasoning-history",
+      "phase": "1-build"
+    },
+    "wl#1221 c2": {
+      "host": "hetzner",
+      "lane": "reasoning-history",
+      "phase": "1-build"
+    },
+    "wl#1221 c3": {
+      "host": "hetzner",
+      "lane": "reasoning-history",
+      "phase": "1-build"
+    },
+    "wl#1221 c4": {
+      "host": "hetzner",
+      "lane": "reasoning-history",
+      "phase": "1-build"
+    },
+    "wl#1222 c1": {
+      "host": "hetzner",
+      "lane": "reasoning-history",
+      "phase": "1-build"
+    },
+    "wl#1222 c2": {
+      "host": "hetzner",
+      "lane": "reasoning-history",
+      "phase": "1-build"
+    },
+    "wl#1222 c3": {
+      "host": "hetzner",
+      "lane": "reasoning-history",
+      "phase": "1-build"
+    },
+    "wl#1222 c4": {
+      "host": "hetzner",
+      "lane": "reasoning-history",
+      "phase": "1-build"
+    },
+    "wl#174 c2": {
+      "host": "hetzner",
+      "lane": "budget-guards",
+      "phase": "1-build"
+    },
+    "wl#174 c3": {
+      "host": "hetzner",
+      "lane": "budget-guards",
+      "phase": "1-build"
+    },
+    "wl#174 c4": {
+      "host": "hetzner",
+      "lane": "budget-guards",
+      "phase": "1-build"
+    },
+    "wl#174 c5": {
+      "host": "hetzner",
+      "lane": "budget-guards",
+      "phase": "1-build"
+    },
+    "wl#305 c2": {
+      "host": "hetzner",
+      "lane": "approvals-rest",
+      "phase": "1-build"
+    },
+    "wl#305 c3": {
+      "host": "hetzner",
+      "lane": "approvals-rest",
+      "phase": "1-build"
+    },
+    "wl#305 c4": {
+      "host": "gh",
+      "lane": "decompose",
+      "phase": "2-decompose"
+    },
+    "wl#388 c4": {
+      "host": "gh",
+      "lane": "decompose",
+      "phase": "2-decompose"
+    },
+    "wl#434 c2": {
+      "host": "hetzner",
+      "lane": "acp-mcp",
+      "phase": "1-build"
+    },
+    "wl#434 c3": {
+      "host": "gh",
+      "lane": "decompose",
+      "phase": "2-decompose"
+    },
+    "wl#559 c3": {
+      "host": "hetzner",
+      "lane": "prompt-cache",
+      "phase": "1-build"
+    },
+    "wl#559 c4": {
+      "host": "Desktop app",
+      "lane": "desktop-run",
+      "note": "ticket's own close condition: ONE real 26-turn Desktop team run showing non-zero cache_read",
+      "phase": "2-platform"
+    },
+    "wl#559 c5": {
+      "host": "hetzner",
+      "lane": "prompt-cache",
+      "phase": "1-build"
+    },
+    "wl#559 c6": {
+      "host": "hetzner",
+      "lane": "cache-truth",
+      "phase": "1-build"
+    },
+    "wl#863 c3": {
+      "host": "hetzner",
+      "lane": "flux-contract",
+      "phase": "3-unrouted-pickup"
+    },
+    "wl#863 c4": {
+      "host": "hetzner",
+      "lane": "flux-contract",
+      "phase": "3-unrouted-pickup"
+    },
+    "wl#863 c5": {
+      "host": "hetzner",
+      "lane": "flux-contract",
+      "phase": "3-unrouted-pickup"
+    },
+    "wl#908 c3": {
+      "host": "hetzner",
+      "lane": "reasoning-history",
+      "phase": "1-build"
+    },
+    "wl#934 c5": {
+      "host": "Sean",
+      "lane": "maintainer",
+      "phase": "2-maintainer"
+    },
+    "wl#934 c7": {
+      "host": "hetzner",
+      "lane": "channel-caps",
+      "phase": "1-build"
+    },
+    "wl#934 c8": {
+      "host": "hetzner",
+      "lane": "channel-caps",
+      "phase": "1-build"
+    },
+    "wl#998 c5": {
+      "host": "gh",
+      "lane": "decompose",
+      "phase": "2-decompose"
+    },
+    "wl#998 c6": {
+      "host": "hetzner",
+      "lane": "acp-mcp",
+      "phase": "1-build"
+    }
+  },
+  "kind_overrides": {
+    "core#253": "feature",
+    "wl#1165": "feature",
+    "wl#174": "feature",
+    "wl#305": "feature"
+  },
+  "lanes": {
+    "acp-mcp": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "ACP MCP surface and alias resolution"
+    },
+    "approvals-rest": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "REST approvals allowlist + timeout  [FEATURE -> 0.13.13]"
+    },
+    "atomic-write": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "Atomic publish: a rollback that exchanged nothing is reported as success"
+    },
+    "atref-residuals": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "@-ref secret guard: the residuals #339 shipped past"
+    },
+    "atref-walk": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "@-ref directory walk: silent empty payloads and a FIFO wedge"
+    },
+    "bookkeeping": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "Orphan branch outcomes, VFS shell reach, misfiled defect"
+    },
+    "browser-revive": {
+      "host": "hetzner",
+      "phase": "3-unrouted-pickup",
+      "title": "Browser tool non-functional by default"
+    },
+    "budget-guards": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "Runaway token spend guards  [FEATURE -> 0.13.13]"
+    },
+    "bwrap-race": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "bwrap ownership race with ENOENT, and a containment test that retries into a pass"
+    },
+    "cache-truth": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "Cache and spend ledgers: legacy decode, false invalidations, session keys"
+    },
+    "channel-caps": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "Message caps: matrix/msteams probe shape, Telegram UTF-16, WhatsApp"
+    },
+    "ci-evidence": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "CI evidence: the wrapper that cannot write, the floor that cannot see, the anchors that cannot rot"
+    },
+    "cli-messages": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "User-facing message shape: collapsed whitespace in three crates"
+    },
+    "container-latch": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "Container backend latches on a leftover name, and attests a run that never happened"
+    },
+    "container-latch-2": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "Container orphan scan is nonce-scoped and can never see an earlier run's leftover"
+    },
+    "decompose": {
+      "host": "gh",
+      "phase": "2-decompose",
+      "title": "File each cross-team remainder as its OWN ticket with a contract"
+    },
+    "desktop-contract": {
+      "host": "hetzner",
+      "phase": "3-unrouted-pickup",
+      "title": "Published desktop contract schema gaps"
+    },
+    "desktop-run": {
+      "host": "Desktop app",
+      "phase": "2-platform",
+      "title": "Live Desktop session measurement"
+    },
+    "doc-truth": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "Shipped operator docs that overclaim what the code does"
+    },
+    "flake-584": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "Shared-process lib suite: the #584 fixture misses its truncation boundary under load"
+    },
+    "floor-disclosure": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "Command-floor refusal reaches the user, not model improvisation"
+    },
+    "flux-contract": {
+      "host": "hetzner",
+      "phase": "3-unrouted-pickup",
+      "title": "Anvil/Elevation loop-ownership contract"
+    },
+    "gepa-selection": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "GEPA online evolution: close the selection loop before defaulting it on"
+    },
+    "instrument-integrity": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "Prove the instruments can fail: mutation + measurement arms"
+    },
+    "instrument-integrity-2": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "reserved -- kept so an empty lane is visible rather than silently dropped"
+    },
+    "instrument-integrity-3": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "Scoped-subscriber ERROR visibility: name the mechanism, measure at n>=100"
+    },
+    "json-stream-consent": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "json-stream: an egress consent the host is never shown"
+    },
+    "macos-ci": {
+      "host": "macOS CI",
+      "phase": "2-platform",
+      "title": "macOS arms via the lane/** CI wildcard"
+    },
+    "maintainer": {
+      "host": "Sean",
+      "phase": "2-maintainer",
+      "title": "Sean-only: credentials and platform accounts"
+    },
+    "mcp-gate-mode": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "MCP malware gate: explicit permissive/strict operator choice"
+    },
+    "mcp-transports": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "tools/list_changed on the SSE and Streamable-HTTP transports"
+    },
+    "model-limits": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "Model limits: host-variable open-weights ids and the provider-blind ceiling"
+    },
+    "plugin-quarantine": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "Plugin quarantine: teardown after setsid, and the Windows primitive"
+    },
+    "prompt-cache": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "Prompt-cache collapse and re-billed context"
+    },
+    "provider-urls": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "Provider endpoints: Anthropic /v1 doubling and the self-hosted locality predicate"
+    },
+    "reasoning-history": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "Reasoning filter writes the durable record: truncation and the missing flush"
+    },
+    "small-window": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "Small served/configured windows: notice truth, reserves, ceilings, budgets"
+    },
+    "telegram-topic": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "Telegram forum-topic target sent as reply_to_message_id, never message_thread_id"
+    },
+    "test-instruments": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "Instruments that cannot fail: the wrapping ratchet and the 60s test"
+    },
+    "test-instruments-2": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "Harness ownership on Unix, and the guard against merging a red arm"
+    },
+    "tool-wire-order": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "Tool wire order and the frozen system prefix"
+    },
+    "vfs-store-reach": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "VFS/policy: store reach through GrepTool, the weaker resolver, and a dead predicate"
+    },
+    "win-bash": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "Windows: resolve a real bash, never System32\\\\bash.exe"
+    },
+    "win-owned-tree": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "OwnedTree kills the process tree on Windows, not the leaf"
+    },
+    "win-quarantine": {
+      "host": "SeanDesktop",
+      "phase": "2-platform",
+      "title": "Windows: what a quarantine child can still do to the console"
+    },
+    "win-runs": {
+      "host": "SeanDesktop",
+      "phase": "2-platform",
+      "title": "Windows measurement arms - serialize, ONE box"
+    },
+    "win-runs-2": {
+      "host": "SeanDesktop",
+      "phase": "2-platform",
+      "title": "Windows measurement arms from the 0.13.12 sweep - serialize, ONE box"
+    }
+  }
+}

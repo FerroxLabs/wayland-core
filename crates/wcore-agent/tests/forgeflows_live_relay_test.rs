@@ -45,7 +45,7 @@ impl OutputSink for Rec {
     fn emit_tool_result(&self, _: &str, _: bool, _: &str) {}
     fn emit_stream_start(&self, _: &str) {}
     fn emit_stream_end(&self, _: &str, _: usize, _: u64, _: u64, _: u64, _: u64, _: FinishReason) {}
-    fn emit_error(&self, _: &str, _: bool) {}
+    fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
     fn emit_info(&self, _: &str) {}
     fn emit_sub_agent_event(&self, parent_call_id: &str, agent_name: &str, inner: &Value) {
         self.sub_events.lock().unwrap().push((

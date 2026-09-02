@@ -385,11 +385,9 @@ fn strip_fence(text: &str) -> Option<&str> {
     let open = text.find("```")?;
     // Skip the opening fence and any language tag up to the end of that line.
     let after_open = open + 3;
-    let body_start = match text[after_open..].find('\n') {
-        Some(nl) => after_open + nl + 1,
-        // Opening fence with no newline after it — nothing usable inside.
-        None => return None,
-    };
+    // Opening fence with no newline after it — nothing usable inside, so `?`
+    // returns None here.
+    let body_start = after_open + text[after_open..].find('\n')? + 1;
     let close_rel = text[body_start..].find("```")?;
     Some(&text[body_start..body_start + close_rel])
 }

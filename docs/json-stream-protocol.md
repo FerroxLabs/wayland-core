@@ -354,6 +354,33 @@ implement its own `<think>` stripper; if a reasoning tag ever reaches
 `text_delta`, that is an agent defect, and the client rendering it verbatim is
 the correct behaviour for surfacing it.
 
+#### End-of-stream `text_delta` (wayland#1242)
+
+The reasoning splitter is a state machine over a stream, so at any instant it
+may be WITHHOLDING text it cannot classify yet: an undecided `<`-prefix (an
+answer that ends `the answer is 5 <`), or everything after an opening reasoning
+tag that has not closed. While the stream is running that is correct — the next
+chunk may complete a tag. When the stream ends it is not: nothing further is
+coming, so the withheld text was never reasoning and is part of the answer.
+
+The agent therefore emits it as **one last `text_delta` on the same `msg_id`,
+immediately before `stream_end`**, after the last `thinking` event of the turn.
+It is an ordinary `text_delta` in every respect — same shape, same field, same
+message, which is still open at that point — so a client that appends deltas in
+arrival order needs no change whatsoever and simply receives the complete
+answer.
+
+A client that ignores it renders exactly what it rendered before: the same
+turn, truncated at the point the splitter stopped being sure. That is the
+failure mode this replaces, so nothing regresses; what a client must NOT do is
+treat a `text_delta` arriving after the last `thinking` as a new message, or
+assume `stream_end` is the only frame that may follow a `thinking`.
+
+This is why the recovered text is a `text_delta` and not a new event type or a
+correction to the `thinking` already sent: both of those would be a frame no
+existing host knows, arriving on a message some hosts consider closed. Getting
+that wrong is worse for a host than the truncation was.
+
 ### 1.4 `thinking`
 
 The model's private reasoning. Two producers land on this one event:
@@ -380,7 +407,19 @@ them inside the assistant bubble.
 Tag bodies may straddle chunk boundaries, so a single inline block can arrive as
 several `thinking` events; concatenating the `text` of every `thinking` event on
 one `msg_id` reconstructs the block. Two blocks in one turn are separated by a
-newline. An unclosed block is flushed immediately before `stream_end`.
+newline. An unclosed block is flushed immediately before `stream_end` — and
+because an unclosed block was never really a block, wayland#1242 also puts its
+raw text back on the wire as the end-of-stream `text_delta` described above.
+
+**An unclosed block therefore reaches the client TWICE**: once as the
+`thinking` events streamed while it was still open, and once as raw text in the
+end-of-stream `text_delta`. That is deliberate. Reasoning is streamed live, so
+those `thinking` events are already sent by the time the stream ends and the
+block is known never to have closed, and the protocol has no retraction. The
+alternative is to withhold the tail of the answer, which is what wayland#1242
+exists to stop. A client that wants to suppress the duplicate can drop a
+`thinking` run that is a suffix of the final `text_delta`; nothing requires it
+to. A CLOSED block is unaffected and arrives exactly once, as `thinking`.
 
 The event carries no obligation to display. A client may render it collapsed
 (the Wayland CLI TUI shows a one-line `▶ Thought: …` the user can expand), or
@@ -594,10 +633,31 @@ An error occurred. The agent may or may not continue depending on severity.
   "error": {
     "code": "provider_error",
     "message": "Rate limit exceeded",
-    "retryable": true
+    "retryable": true,
+    "category": "unknown"
   }
 }
 ```
+
+`category` (contract 1.23, FerroxLabs/wayland#1237) is the machine-readable
+answer to "why did this run die". It is additive: a host that does not know the
+key ignores it, and a frame written by a Core older than 1.23 simply does not
+carry it.
+
+| `category` | Meaning |
+|------------|---------|
+| `context_limit` | The context window or an output-token ceiling was reached and could not be reduced. |
+| `tool_runtime` | A tool, a sub-agent, or the engine task itself failed or died. |
+| `local_wayland` | The local process refused, aborted or could not proceed: a session-persistence authority fault, a refused or malformed host command, a startup failure, an operator abort. Nothing upstream is implicated. |
+| `unknown` | Core cannot decide, and says so instead of choosing. |
+
+`unknown` is a claim, not an absence. Every provider non-2xx lands here on
+purpose: whether a 429 or a 503 came from the model provider or from the router
+in front of it is not decidable inside core — both are the same status from the
+same host — and that half of wayland#388 belongs to the router
+(FerroxLabs/wayland#1184). There is deliberately no `rate_limit` or
+`router_failure` value for core to emit, so a host reading `unknown` learns it
+must ask the router rather than that core silently picked a side.
 
 | Error Code | Description |
 |------------|-------------|
@@ -687,6 +747,12 @@ be byte-identical to the one above, so it is annotated:
 | `name` | string | Server name (as provided in `add_mcp_server`) |
 | `tools` | string[] | List of tool names registered from this server |
 | `already_connected` | boolean | Optional; omitted when false. `true` means this receipt acknowledges a **skipped** re-add of an already-connected server, not a new connection. Absent means a real connect -- but see the feature-detect note below |
+
+To reconfigure a connected server on purpose, send `"replace": true` (§2.8).
+That is the only way to change a live server's configuration, and it is opt-in
+precisely because a retry, a reconnect, or two hosts racing the same add must
+never tear a working server down as a side effect. A successful replace is a
+REAL connect, so its `mcp_ready` carries no `already_connected` annotation.
 
 Feature-detect `mcp_ready_skip_annotation_v1` in the contract capabilities before
 reading anything into the field's absence: a Core that predates the annotation
@@ -979,6 +1045,16 @@ After any `grant_path` or `revoke_path`, Core re-emits
 event is the authoritative answer to "what can this chat actually reach" — prefer
 it over tracking grants host-side.
 
+**Including a refused one.** A `grant_path` that is refused — by the missing
+launch opt-in or by a §2.3.2 rule — emits the receipt too, unchanged, ahead of
+the `info` that names the reason. So does `revoke_path` for a `grant_id` it does
+not hold, and so does `grant_workspace_capability` (§2.7a). The receipt is
+therefore emitted on **every** exit of all three commands, which is what makes
+the sentence above literally true rather than true-on-the-happy-path. A host
+must not read the ABSENCE of a receipt as a refusal: an absent frame is
+indistinguishable from one that has not arrived yet. Read the `info` for the
+reason and the receipt for the state.
+
 ### 2.4 `tool_deny`
 
 Deny a pending tool execution.
@@ -1088,9 +1164,11 @@ Core accepts this command only when all of these are true:
    stores.
 
 Success emits an updated `workspace_policy` receipt followed by an `info`
-event. Refusal emits an `info` event explaining the failed condition. The
-command never adds writable roots, changes approval posture, or disables the OS
-sandbox. Hosts should expose it only behind an explicit local approval UI.
+event. **Refusal emits the same pair**: the (unchanged) receipt, then an `info`
+explaining the failed condition — see the receipt rule under `grant_path`
+(§2.3.3). The command never adds writable roots, changes approval posture, or
+disables the OS sandbox. Hosts should expose it only behind an explicit local
+approval UI.
 
 ### 2.7b `continue_with_budget`
 
@@ -1250,6 +1328,7 @@ Dynamically inject an MCP server before the conversation starts. This command is
 | `url` | string | sse/http only | Server URL |
 | `headers` | object | no | HTTP headers (for sse/http) |
 | `allowed_tools` | string[] | no | Per-tool allow-list. **Omit for the previous behaviour** (every advertised tool registered). When present, ONLY the named tools are registered — an advertised tool the list omits is denied, and `[]` disables the server's tools entirely. Names are the tool names the server advertises. The camelCase spelling `allowedTools` (the Wayland desktop model's own) is accepted as an alias. Added in 0.13.10 (#998). |
+| `replace` | boolean | no | **Opt-in destructive reconfigure.** Omit (or `false`) for the default: a re-add of an already-connected server is skipped and its connection, configuration and lifecycle generation are untouched (see the `already_connected` annotation in §`mcp_ready`). `true` tears the existing connection DOWN -- the stdio child exits, the tools are unregistered -- and re-establishes it from THIS command's configuration. Only a server this process introduced at runtime may be replaced; a config-declared name is still refused, and a server that is connecting, stopping, or whose prior cleanup is unverified is refused rather than interrupted. Added in 0.13.10 (#1165). |
 
 **Lifecycle:**
 

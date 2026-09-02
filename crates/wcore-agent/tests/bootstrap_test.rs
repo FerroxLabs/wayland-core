@@ -913,7 +913,7 @@ mod resilience_wrap {
             _: FinishReason,
         ) {
         }
-        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_error(&self, _: &str, _: bool, _: wcore_protocol::events::FailureCategory) {}
         fn emit_info(&self, _: &str) {}
         fn emit_provider_circuit_event(
             &self,
@@ -986,6 +986,7 @@ mod resilience_wrap {
                 temperature: None,
                 omit_max_tokens: false,
                 routed_model_hint: None,
+                replay_reasoning_content: false,
             };
             let _ = result.provider.stream(&req).await;
         }
@@ -1041,6 +1042,7 @@ mod resilience_wrap {
                 temperature: None,
                 omit_max_tokens: false,
                 routed_model_hint: None,
+                replay_reasoning_content: false,
             };
             let _ = result.provider.stream(&req).await;
         }
