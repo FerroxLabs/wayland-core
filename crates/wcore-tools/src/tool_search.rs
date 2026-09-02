@@ -148,8 +148,11 @@ fn miss_message(echoed_query: &str, deferred: &[&str]) -> String {
     if total == 0 {
         return format!(
             "{head} This session has NO deferred tools at all, so ToolSearch \
-             cannot return one however it is phrased. Proceed without the \
-             tool, or tell the user the capability is unavailable."
+             cannot return one however it is phrased. This says NOTHING about \
+             skills, or about MCP connector tools already attached to this \
+             session: ToolSearch indexes neither. Invoke a skill by name with \
+             the Skill tool, and test a connector by CALLING one of its own \
+             tools. Proceed without the deferred tool."
         );
     }
 
@@ -175,11 +178,15 @@ fn miss_message(echoed_query: &str, deferred: &[&str]) -> String {
     format!(
         "{head} All {total} deferred tools in this session were compared \
          against that query and none matched. The deferred set is: \
-         {inventory}. ToolSearch can only ever return tools from that set, so \
-         if the capability you want is not in it, this session does not have \
-         it and re-running ToolSearch with different wording cannot make it \
-         appear. Proceed without it, or tell the user the capability is \
-         unavailable."
+         {inventory}. ToolSearch indexes DEFERRED TOOLS ONLY. It does not \
+         index skills, and it does not index MCP connector tools that are \
+         already attached to this session, so a miss here is NOT evidence \
+         that a skill or a connector is absent - report either as missing \
+         only after invoking the skill by name with the Skill tool, or \
+         CALLING one of the connector's own tools, and seeing that fail. If \
+         what you wanted really is a deferred tool, this session does not \
+         have it and re-running ToolSearch with different wording cannot make \
+         it appear."
     )
 }
 
@@ -1046,6 +1053,62 @@ mod tests {
     /// A miss is terminal only if it says what IS here and that the query was
     /// already compared against all of it.
     ///
+    /// A ToolSearch miss must NOT be usable as evidence that a SKILL or an
+    /// attached MCP CONNECTOR is missing. ToolSearch indexes deferred tools
+    /// only; skills and already-connected MCP tools are not in that index.
+    ///
+    /// Measured on a live Wayland Desktop session (2026-09-02): the engine
+    /// logged `Connected to 'com.ferroxlabs-tvcontrol': 112 tools` and copied
+    /// `skills/tide-morning-brief` into the workspace, yet
+    /// `ToolSearch("tide-morning-brief")` answered "All 158 deferred tools in
+    /// this session were compared ... none matched" and the model then told
+    /// the user the skill AND the connector were "not available in this
+    /// session". Both were present. The old wording closed with "tell the
+    /// user the capability is unavailable", which is what licensed that.
+    /// See also `wcore-mcp/src/tool_proxy.rs` on the 101-tool instance.
+    ///
+    /// MUTANT: restore the unscoped "this session does not have it ... tell
+    /// the user the capability is unavailable" wording and this fails.
+    #[tokio::test]
+    async fn a_miss_is_not_evidence_that_a_skill_or_connector_is_absent() {
+        let tool = ToolSearchTool::new(build_measured_defs());
+        let result = tool.execute(json!({"query": "tide-morning-brief"})).await;
+        assert!(!result.is_error);
+        assert!(
+            result.content.starts_with("No deferred tools matching"),
+            "precondition: this query must miss; got: {}",
+            result.content
+        );
+
+        let lower = result.content.to_lowercase();
+        // It must name the limit of its own index...
+        assert!(
+            lower.contains("does not index skills"),
+            "a miss must say ToolSearch does not index skills; got: {}",
+            result.content
+        );
+        assert!(
+            lower.contains("mcp connector tools"),
+            "a miss must say ToolSearch does not index attached MCP connector \
+             tools; got: {}",
+            result.content
+        );
+        // ...and it must name the instrument that CAN answer the question,
+        // so a miss cannot be reported as an absence without a real check.
+        assert!(
+            lower.contains("skill tool"),
+            "a miss must point at the Skill tool for skills; got: {}",
+            result.content
+        );
+        // The sentence that licensed the false report must be gone.
+        assert!(
+            !lower.contains("tell the user the capability is unavailable"),
+            "a miss must not instruct the caller to declare a capability \
+             unavailable; got: {}",
+            result.content
+        );
+    }
+
     /// MUTANT: return the bare one-line miss and this fails.
     #[tokio::test]
     async fn a_miss_says_what_is_available_and_that_re_searching_cannot_help() {
