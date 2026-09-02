@@ -126,6 +126,17 @@ pub(crate) const PASSTHROUGH_VENDOR_MODELS: &[(&str, u32, u32)] = &[
     // amazon-bedrock (incl. the us./eu./jp./au./global. regional spellings and
     // the anthropic. prefix, all of which the substring lookup covers).
     ("claude-fable-5", 128_000, 1_000_000),
+    // Added 2026-09-02. models.dev lists this id on all THREE vendor-operated
+    // endpoints (anthropic, google-vertex, amazon-bedrock) at the same
+    // 1,000,000 context / 128,000 output as claude-fable-5, so the figures are
+    // taken from agreeing vendor rows rather than guessed, and there is no
+    // lower vendor figure to prefer.
+    //
+    // The if-chain arm ALREADY resolved it -- `m.contains("fable-5")` matches
+    // this id -- but with no row here nothing GRADED that it does. That is
+    // customer bug #165 exactly: a model nothing arms silently takes the
+    // CompactConfig default. The release freshness gate failed for it.
+    ("claude-fable-5-1", 128_000, 1_000_000),
     ("claude-haiku-4-5", 64_000, 200_000),
     ("claude-haiku-4-5-20251001", 64_000, 200_000),
     ("claude-opus-4", 32_000, 200_000),
