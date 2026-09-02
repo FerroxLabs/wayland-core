@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "main is red: every squash-merged lane orphans its ledger last_verified_commit, and the release path can never see it"
 status: open
-last_verified_commit: 93ede3424
+last_verified_commit: 51731e29
 criteria:
   - id: c1
     text: "Every ledger entry's `last_verified_commit` resolves to a commit that is an ancestor of the tree being shipped, so a reader of a release can re-derive each grading from the history they actually have."

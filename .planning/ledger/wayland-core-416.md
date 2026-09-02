@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "[nightly-windows-soak] FAIL - 2026-09-01"
 status: closed
-last_verified_commit: 93ede3424
+last_verified_commit: 2f309a19
 criteria:
   - id: c1
     text: "The nightly Windows soak failure is triaged: either the failing soak assertion is fixed, or the run is shown to have failed for an infrastructure reason and the issue is closed by the maintainer."
