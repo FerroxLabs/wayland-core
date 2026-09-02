@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "The #1134 CI lint is structurally blind to the defect shape it was filed for: a set_var inside a non-test helper"
 status: closed
-last_verified_commit: 70a47aaed
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "Either the lint audits writes inside helper functions reachable from a test (the enclosing-fn machinery and closure() are already present), or the exclusion is stated where the criterion is GRADED rather than only in a ci.yml comment"

@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "Both model-limits guards are blind to provider-native passthrough ids — the #165 failure class is still uncovered"
 status: closed
-last_verified_commit: 856df7d0
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "A guard covers model ids that reach users by provider-native --model passthrough in the if-chain families"

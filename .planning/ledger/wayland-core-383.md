@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "is_project_secret still uses the weaker resolver, so a dangling symlink to a not-yet-existing project secret is not refused"
 status: closed
-last_verified_commit: 3b860623
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "policy.is_project_secret(<in-root dangling symlink to a missing .env>) returns true"

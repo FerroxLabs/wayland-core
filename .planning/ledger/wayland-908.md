@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "Bug report: reasoning tags leak into answers; sandbox child timed out; further sub-symptoms"
 status: closed
-last_verified_commit: 6c87400b2
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "Reasoning tags no longer leak into answers, history or hosts"

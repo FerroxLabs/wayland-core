@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "@dir with an escaping spelling resolves to a silently empty payload: no files, no error, no warning"
 status: closed
-last_verified_commit: 607d6ba9
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "@../repo/ and @/abs/outside/ either attach their files or are REFUSED with a message the user sees -- never Ok with files: []"

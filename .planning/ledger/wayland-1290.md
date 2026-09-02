@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "f14_sigkill_recovery: expected exactly one provider-dispatch recovery checkpoint fails on first attempt - possible real exactly-once defect"
 status: open
-last_verified_commit: 67fa14db6
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "The two tests are run at --retries 0 at n>=20 on a macOS host and the failing runs are inspected to establish whether the journal genuinely contains two provider-dispatch checkpoints (a product defect) or the assertion races the journal fsync (a test defect)."

@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "The report job's evidence floor cannot notice that the leg running the whole workspace suite contributed nothing"
 status: closed
-last_verified_commit: 70a47aaed
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "The evidence floor is per-leg: a leg that uploads zero junit files fails the required report check rather than being covered by another leg's upload"

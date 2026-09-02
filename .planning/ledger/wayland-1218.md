@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "The scaled output_reserve is decoupled from the max_tokens core actually sends, so the pre-flight ceiling admits a request that cannot fit"
 status: open
-last_verified_commit: dd1e58703
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "size_output_cap and scaled_reserves agree: the max_tokens sent is never larger than the reserve the ceiling withheld"

@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "is_session_write_granted documents itself as the write-grant enforcement predicate and has no production call site"
 status: closed
-last_verified_commit: 607d6ba9
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "Either is_session_write_granted is the predicate the mutating VFS path actually asks, or it is deleted together with the two tests that grade it"

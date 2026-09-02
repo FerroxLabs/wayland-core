@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "The VFS write path discards the intercepted-save notice, so a preserved file is left on disk with nothing naming it"
 status: closed
-last_verified_commit: e581dda5a
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "FileMutationOutcome::Conflict (or an equivalent typed channel out of compare_exchange_file) carries the intercepted-save path instead of discarding the Refusal"

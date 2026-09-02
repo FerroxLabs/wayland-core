@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "CLI refuses to start against a keyless local endpoint despite having a self-hosted placeholder path"
 status: closed
-last_verified_commit: 43848f75
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "A keyless self-hosted endpoint the user declared starts and dispatches, with the placeholder bearer pinned on the wire"

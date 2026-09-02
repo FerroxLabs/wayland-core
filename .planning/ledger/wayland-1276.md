@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "No standing gate stops a FOURTH hand-cut URL authority parser (split from #1252 c3)"
 status: open
-last_verified_commit: a07bf29e5
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "Adding a function to `crates/` that returns a host- or authority-shaped value by string surgery rather than through `url::Url` / `wcore_types::url_authority` fails a gate rather than passing silently -- shown RED by adding one."

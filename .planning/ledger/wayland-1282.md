@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "dangerous_expiry_cancels_production_streaming_bash_process_tree fails only under full-suite contention, and is not allowlisted"
 status: open
-last_verified_commit: ff00e4be9
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "The failure rate is MEASURED where it actually occurs -- at --retries 0 under a concurrent full-suite load, n at least 20 -- rather than inferred from isolated runs"

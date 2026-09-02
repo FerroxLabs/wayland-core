@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "One mock turn with a 480 KB tool result costs 63.6 s of CPU; the spill/read-back test is killed by the default nextest budget 3/3"
 status: closed
-last_verified_commit: 4a738f2e
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "The 63.6 s of USER CPU is ATTRIBUTED to a named function on the turn loop by measurement -- a profiler or bisecting instrumentation inside the turn path -- and not inferred from reading. 0.10 s system and 38 MB RSS already rule out disk and swap, so the remaining question is which computation, not whether."

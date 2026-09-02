@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "The skills prompt budget still sizes against the fabricated 200,000-token window for exactly the unlisted-model case #1150 c1 removed"
 status: closed
-last_verified_commit: 5a7e3bee4
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "get_char_budget(None) no longer grants a budget derived from 200k: the unknown-window case is sized against UNVERIFIED_CONTEXT_WINDOW or refuses to guess, the rule compact.rs:449-454 already states"

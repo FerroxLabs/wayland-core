@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "A runtime-added MCP server's tools/list_changed is ignored for the life of the session"
 status: closed
-last_verified_commit: 6cb9a119d
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "An MCP server attached at runtime has its tools/list_changed honoured, or the product plainly says it will not be"

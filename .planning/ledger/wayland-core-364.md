@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: task
 title: "[Maintainer] Two 0.13.12 dispositions no lane can perform: close core#113 as refuted, and decide the future of the WhatsApp cap"
 status: open
-last_verified_commit: f0060a2e8
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "wayland-core#113 is closed as refuted, or Q-113 is reversed and a lane is named to build the opposite"

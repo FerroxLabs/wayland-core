@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "macOS keyring does not answer within the 5s credential-store timeout; f14_sigkill_recovery hard-fails 3/3"
 status: open
-last_verified_commit: 67fa14db6
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "The 5s credential-store wait is either shown to be adequate under parallel nextest on macOS, or the timeout is raised, retried, or the affected tests are serialised so a contended keychain does not hard-fail them."

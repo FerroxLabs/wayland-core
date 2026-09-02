@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "Windows: the local-operator shell applies no OS read-deny, so the VCS content store is readable to Bash (split from #244 c4)"
 status: closed
-last_verified_commit: a278f8c3
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "Whether the Windows local-operator shell is expected to confine the VCS content store is a DECIDED question, recorded with its reason, rather than an unexamined gap"

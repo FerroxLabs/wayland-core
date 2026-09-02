@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "ReasoningFilter has no end-of-stream flush, so a pending ambiguous prefix is dropped from stored history"
 status: closed
-last_verified_commit: f72d97de
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "'the answer is 5 <' and 'result: <th' survive byte-exact through a completed turn"

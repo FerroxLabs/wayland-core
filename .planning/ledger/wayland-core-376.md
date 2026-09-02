@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "SecretDenyFs rebuilds the VCS content-store list from the filesystem on every ordinary path operation"
 status: closed
-last_verified_commit: 3b860623
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "The per-operation cost is MEASURED before anything changes: a benchmark or a counted-syscall figure for Read/exists/list/metadata on an ordinary path, recorded on this issue"

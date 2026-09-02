@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "Eight helper-attributed env-global hazards, now audited and carried as dated debt"
 status: open
-last_verified_commit: 4a738f2e
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "Each of the eight pairs in .config/env-global-helper-debt.txt reaches a terminal state: the helper stops writing the process global (the value is stated at the call site, the shape ContainerBackend::with_image already used), or the pair is serialized, or the entry is re-dated with a measured reason. None is left listed with nobody having looked at it."

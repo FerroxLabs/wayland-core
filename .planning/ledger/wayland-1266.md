@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "ErrorInfo.category is unknown on the in-band emit_error seam and across the sub-agent relay, where the raising code knew better"
 status: closed
-last_verified_commit: 56b54a06e
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "— `OutputSink`'s error seam carries a category at every call site that has one"

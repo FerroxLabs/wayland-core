@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "CI runs the ledger coverage gate with --offline, so a tracker can go invisible — and 29 issues did, for two days"
 status: closed
-last_verified_commit: 07ee39f6
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "The coverage arm runs somewhere it can FAIL — the release path, a schedule, or a required job — not only in `just ledger-check-live`, which nothing invokes automatically. Where it runs and what it fails is stated."

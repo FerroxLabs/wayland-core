@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "Windows: a quarantine git abort kills the leaf and leaves its descendants running (split from #379)"
 status: closed
-last_verified_commit: 4f2ef0ae
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "On Windows, both quarantine abort paths terminate the child's descendants, not the direct process alone"

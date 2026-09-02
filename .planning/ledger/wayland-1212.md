@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "The #1173 keyless self-hosted exemption is applied at one credential gate and not at resolve_council_provider"
 status: closed
-last_verified_commit: 65b95a87
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "A keyless self-hosted council member is not classified CouncilProviderError::Keyless"

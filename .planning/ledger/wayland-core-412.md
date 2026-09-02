@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "A redaction violation in one ledger file silently disables 24 ci-linux gate steps on the shipping tree"
 status: closed
-last_verified_commit: c7f188c49
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "The two violations on the shipping tree are resolved -- redacted, or allowlisted in the checker with the one-line reason the checker itself asks for -- proven by `scripts/check-no-personal-identifiers.py` exiting 0 on that tree, with `main` re-run in the same session as the control that a 0 means the checker still fires."

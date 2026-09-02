@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "The #338 setsid hardening turns a quarantine git timeout into an unreaped detached process tree"
 status: closed
-last_verified_commit: 8fdae557c
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "The quarantine timeout path kills the whole session/process group it created, not the direct child alone"

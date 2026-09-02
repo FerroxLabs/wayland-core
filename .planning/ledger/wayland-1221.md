@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "An assistant answer that merely mentions a reasoning-tag name in prose has everything after that word deleted from durable history"
 status: closed
-last_verified_commit: f72d97de
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "The input measured here -- 'Use the <thinking> tag to wrap reasoning. Then answer.' -- survives intact in the stored assistant text"

@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: feature
 title: "GEPA online evolution is mutation without selection: close the loop before defaulting it on"
 status: open
-last_verified_commit: 1798076f
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "The online path scores the CANDIDATE, not the session: incumbent and child are scored on the same observations and the child is only eligible if it beats the incumbent, with the fitness function stated and justified"

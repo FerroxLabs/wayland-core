@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "The #1177 evidence wrapper cannot create target/nextest and kills the containerized Linux test leg on both attempts"
 status: closed
-last_verified_commit: 1798076f
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "run-tests-with-attempt-evidence.sh creates its attempt directory successfully on the hosted runner in the presence of a root-owned target/ left by the container steps"

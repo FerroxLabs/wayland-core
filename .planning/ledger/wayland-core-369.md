@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "One unrecoverable AppContainer lease permanently disables the Windows sandbox, and it leaked a whole-home-directory package grant"
 status: closed
-last_verified_commit: 4f2ef0ae
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "A lease that cannot be recovered is quarantined and reported, not retried forever at the cost of the whole backend"

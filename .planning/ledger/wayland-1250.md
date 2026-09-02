@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "wcore-exec-backend tests race on the WAYLAND_EXEC_BACKEND_STATE_DIR process global in the shared-process suite"
 status: open
-last_verified_commit: 4a738f2e
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "temp_state() stops writing the process global: the state directory is passed to the constructor, the shape ContainerBackend::with_image already used for WAYLAND_EXEC_CONTAINER_IMAGE."

@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "core#238 c6's evidence test cannot establish its premise on Windows: ENOTDIR provocation maps to NotFound, and it hard-fails the nightly soak"
 status: closed
-last_verified_commit: b52fb934
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "The test has a Windows arm that produces a genuinely non-NotFound fs::metadata failure"

@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "sandbox status never says the backend refuses PowerShell, while four production sites silently downgrade the shell"
 status: closed
-last_verified_commit: 6c87400b2
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "sandbox status states, in both the human and the --json arm, that the active backend refuses PowerShell whenever blocks_powershell() is true"

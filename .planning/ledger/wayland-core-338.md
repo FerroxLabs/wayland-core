@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "Untrusted plugin install can make Wayland prompt the user for credentials via /dev/tty"
 status: closed
-last_verified_commit: a278f8c3
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "A quarantine clone of untrusted plugin content cannot open /dev/tty to prompt the user directly"

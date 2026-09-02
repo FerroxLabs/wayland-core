@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "[nightly-windows-soak] FAIL - 2026-08-28"
 status: closed
-last_verified_commit: 43848f75
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "The latency half of the streaming-timeout test refuses to grade when the derived timeout does not dominate the host's own measured timer allowance"

@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "atomic_write_checked treats a restore that exchanged nothing as a successful rollback, then deletes the user's only copy"
 status: closed
-last_verified_commit: a268075fe
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "restore() distinguishes an actual exchange from Swap::Vacant / Swap::Unsupported, and a non-exchange is a restore FAILURE"

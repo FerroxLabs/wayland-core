@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "notifications/tools/list_changed is silently ignored for every SSE and Streamable-HTTP MCP server, at boot and at runtime"
 status: closed
-last_verified_commit: 6cb9a119d
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "An SSE server's notifications/tools/list_changed reaches McpManager::refresh_signalled_tools, or the product says plainly at attach time that this transport will not honour it"

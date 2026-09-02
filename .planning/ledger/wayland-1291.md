@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "report-gate wiring: 5 self-test assertions fail on integ/f13; build-darwin-selfhosted is aggregated by nothing"
 status: open
-last_verified_commit: 67fa14db6
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "The report job's aggregate gate grades the set it depends on by construction rather than by a hand-written list, every ci.yml job is either aggregated or declared not-aggregated, and the gate's prerequisites carry the gate's own admission."

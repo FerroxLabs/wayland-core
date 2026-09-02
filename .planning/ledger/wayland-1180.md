@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "The bridge-backed approval resume path in main.rs is untestable where it lives, and is the one approval seam still ungraded"
 status: closed
-last_verified_commit: 43848f75
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "A test drives the bridge-backed approval resume in the active-turn command handler, by extraction or as an integration test"

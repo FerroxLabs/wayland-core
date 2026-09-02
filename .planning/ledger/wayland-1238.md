@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "Flaky: parallel_spawn_caps_active_child_engines_across_shared_calls fails on a 15s wall-clock budget above loadavg ~190, not on its invariant"
 status: open
-last_verified_commit: 4a738f2e
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "— The test's second phase does not fail on a wall-clock budget that host load can exhaust. Either the 15s `tokio::time::timeout` is replaced by a condition the test can wait on unboundedly (with the harness-level timeout as the only backstop), or the budget is derived from something measured rather than a literal, with the derivation stated in the source."

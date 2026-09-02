@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "On Windows the #338 credential-prompt elimination is bypassable: DETACHED_PROCESS is not setsid"
 status: closed
-last_verified_commit: a278f8c3
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "A Windows test drives harden_against_credential_prompt and establishes what a quarantine child can do to the user's console, exercising both AllocConsole() and AttachConsole(ATTACH_PARENT_PROCESS)"

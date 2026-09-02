@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: task
 title: "[Maintainer] wayland#1218 c1 cannot be met as written: the literal clamp is a measured wrong refusal (128,000 -> 23,000)"
 status: open
-last_verified_commit: f0ed28422
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "The maintainer decides whether Q-1218 stands: either wayland#1218 c1 is amended to the property the product guarantees (est + ask <= the window in force) and closed, or the literal clamp is adopted and the truncation regression it causes for large catalogued models is owned with a plan"

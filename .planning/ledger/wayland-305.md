@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: feature
 title: "[Feature]: improve Win/WSL interop"
 status: open
-last_verified_commit: 43848f75
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "acp serve boots in a headless WSL with no OS secret service, persisting its server key rather than hard-exiting"

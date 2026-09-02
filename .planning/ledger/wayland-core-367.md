@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "A never-merge red-arm instrument reached integ/f13: OwnedTree owns the leaf only again on Unix"
 status: closed
-last_verified_commit: 1798076f
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "The leaf-only instrument is out of the tree, and the guard's own regression test proves it"

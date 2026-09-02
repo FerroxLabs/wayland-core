@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "The accumulated-tool-result pass leaves one 130-byte stub per tool call, so carried bytes grow without bound and cross a 32k window at ~238 calls"
 status: closed
-last_verified_commit: e58300bdf
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "The bytes bound_accumulated_tool_results leaves behind are bounded in the number of tool calls, or the prompt-cache cost of bounding them is measured and the tradeoff recorded as a decision"

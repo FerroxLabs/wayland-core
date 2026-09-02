@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "a_save_during_an_edit_is_not_lost is a real Edit-vs-save data loss, not a load flake"
 status: closed
-last_verified_commit: 43848f75
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "A guarded write publishes through one atomic name swap, so there is no second observation of the destination left to be stale"

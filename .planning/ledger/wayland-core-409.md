@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "Five tests are red on real Windows on lane/f13-windows, none of them a regression from main"
 status: closed
-last_verified_commit: 2df6a2665
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "`wcore-cli::permission_mode_matrix a_read_outside_the_workspace_escalates_in_every_mode_except_force` passes on real Windows, or its expectation is corrected against measured Windows behaviour with the reason recorded."

@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "[Bug]: Clean install of 0.12.4 / core 0.13.6 — the Bash tool is cmd.exe, and the transcript still assembles out of order"
 status: open
-last_verified_commit: f0060a2e8
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "The Bash tool discloses which shell it really runs, and the disclosure reaches the model"

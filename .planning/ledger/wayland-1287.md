@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "macOS process-tree containment intermittently refuses to attach - root NOT in its own group at recheck (fails closed)"
 status: open
-last_verified_commit: 67fa14db6
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "process_tree.rs stops refusing containment when the root process is spawned with process_group(0) but is observed outside its own group at recheck, or the recheck is corrected to tolerate the macOS reassignment it is actually observing."

@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "Four orphaned lane branches carry unmerged fixes, two of them in the 'a check that ran nothing' class"
 status: closed
-last_verified_commit: 43848f75
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "lane/walk-parallel has a recorded outcome: rebased and merged, superseded by a named commit, or closed as obsolete"

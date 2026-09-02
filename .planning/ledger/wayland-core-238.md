@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "Windows reserved DOS device names (NUL/CON/COMn) bypass path guard"
 status: closed
-last_verified_commit: f0060a2e8
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "A Write or Edit to a path whose final component is a Windows device does not report success while discarding the bytes"

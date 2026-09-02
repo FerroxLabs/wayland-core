@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "Static arms for two open-weights passthrough families served at wildly different limits by different hosts"
 status: closed
-last_verified_commit: 4d7aa2757
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "The claim in passthrough.rs's module docs matches the table's contents"

@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "AppContainer ACL race: a deny identity strips a concurrent allow identity's access (4 of last 8 nightlies, never tracked)"
 status: closed
-last_verified_commit: 43848f75
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "An instrumented run establishes whether the failure is a product race in AppContainer ACE application or a race in the test fixture"

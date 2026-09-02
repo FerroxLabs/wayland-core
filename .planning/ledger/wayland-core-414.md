@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "gate-admission.py fails 5 of its own assertions on the shipping branch, and has for some time"
 status: open
-last_verified_commit: 852f5acaa
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "Each of the five failing assertions is either FIXED, or declared with the reason it is permanently inapplicable -- decided one at a time, not waved through as a block."

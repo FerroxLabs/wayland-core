@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "GrepTool reads a VCS content store in plaintext when the store's parent is named as the search path"
 status: closed
-last_verified_commit: 3b860623
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "Grep(pattern, path='.git') and Grep(pattern, path='.svn') return no bytes from .git/lfs/objects or .svn/pristine under WorkspacePolicy::contained"

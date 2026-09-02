@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "Unmerged lane/f13-* branches held out of 0.13.12: four carry work integ lacks, two await their owning lane, five archived as redundant"
 status: open
-last_verified_commit: 4a738f2e
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "Each of the four 'carries work `integ` lacks' branches reaches a terminal state: merged after an adversarial pass, archived with the reason recorded, or filed as its own ticket. None is left as a bare branch."

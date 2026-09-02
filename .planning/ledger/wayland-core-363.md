@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 title: "[Bug]: A Telegram forum-topic target is sent as reply_to_message_id, never as message_thread_id"
 status: closed
 kind: defect
-last_verified_commit: 0df4c47d
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "OutgoingMessage carries a destination thread distinct from the quoted message it replies to"

@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: feature
 title: "A planning-only lane push buys a full cold hosted Windows compile+test it cannot use"
 status: open
-last_verified_commit: 2df6a2665
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "A `lane/**` push that changes only `.planning/` and `*.md` does not pay a full cold hosted Windows compile+test, PROVEN by a live run showing the leg short-circuiting, not by reading the YAML."

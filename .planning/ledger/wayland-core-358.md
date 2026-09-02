@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "OwnedTree owns only the LEAF on Windows: the grandchild case #1156 was filed about is still open on all 49 swept sites"
 status: closed
-last_verified_commit: f92d5007
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "OwnedTree kills the process TREE on Windows, not just the direct child"

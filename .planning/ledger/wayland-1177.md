@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "An outer workflow retry overwrites junit.xml, erasing a genuine failure before any grader sees it"
 status: open
-last_verified_commit: 9de21aa1
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "A failure on attempt 1 followed by a pass on attempt 2 leaves evidence the required report check can read"

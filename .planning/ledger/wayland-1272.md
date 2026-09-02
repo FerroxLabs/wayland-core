@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "0.13.12 release board: all 32 blocking issues mapped to an owner (17 in flight, 15 unassigned)"
 status: open
-last_verified_commit: 4a738f2e
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "Every issue in `check-release-readiness.py`'s blocking list appears on this board with a named owner, and the board is updated whenever the list changes. An unowned issue is a bug in this ticket."

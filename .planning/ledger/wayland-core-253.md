@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: feature
 title: "[Feature]: Bind conversation topics and threads to authorized agents"
 status: closed
-last_verified_commit: 43848f75
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "The bindings umbrella feature is either scheduled or explicitly deferred, in writing"
