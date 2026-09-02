@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "Egress: an allowlisted apex is admitted on the host match alone, so tool-driven traffic is never shape-checked (split from #1195 c8)"
 status: closed
-last_verified_commit: 4a738f2e
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "A decision is recorded in `.planning/DECISIONS.md` with its reasoning: either the allowlist grant is split by traffic origin (provider vs tool-driven), or the current posture is affirmed as intended and the reason is written down where an operator reading the egress policy can see it."

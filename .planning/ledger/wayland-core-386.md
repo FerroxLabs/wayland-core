@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "core#325 c2 remainder: one real nightly-windows-soak run with a red sibling"
 status: open
-last_verified_commit: 4a738f2e
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "One real nightly-windows-soak.yml run with a genuinely red sibling job is shown to NOT close the tracker issue -- observed on GitHub, against the live Octokit, not against the stub."

@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "core#356 c4's resolver gate is keyed to two literal names, so a third path resolver arrives ungated"
 status: closed
-last_verified_commit: 7e159c955
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "Adding a path-resolving function to `workspace_policy.rs` that is not one of the two named resolvers fails a gate, rather than passing silently -- shown RED by adding one."

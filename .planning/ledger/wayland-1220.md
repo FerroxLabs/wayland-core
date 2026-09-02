@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "A cleared flaky-allowlist entry came back through a merge, and nothing in this repo can detect a resurrected line"
 status: closed
-last_verified_commit: 70a47aaed
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: ".config/flaky-allowlist.txt on the integration branch no longer carries the gh#1182 line"

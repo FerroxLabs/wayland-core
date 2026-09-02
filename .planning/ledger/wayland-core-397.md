@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "Stale doc comment on CredentialsBackend::Auto claims a plaintext fallback the code refuses"
 status: closed
-last_verified_commit: 488fbbae9
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "The doc comment at crates/wcore-config/src/credentials.rs:40-47 and the module header at :8-12 state the fail-closed behaviour the implementation actually has: build_ladder mounts keyring then encrypted vault and nothing else, and put refuses when no secure rung is mounted."

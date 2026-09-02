@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "An all-reasoning turn still gives the user no answer, only an accurate explanation of why there is none"
 status: closed
-last_verified_commit: 56b54a06e
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "REPRODUCED AGAINST A REAL MODEL: a captured stream from a model that emits its reasoning as ordinary inline text deltas over the OpenAI-compatible route, in which the filtered assistant text is empty while raw_text_chars > 0; the captured stream becomes the fixture. A hand-authored TextDelta does not satisfy this"

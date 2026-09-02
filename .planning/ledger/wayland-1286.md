@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "macOS retry-flake cluster: redundant_walk_root_is_not_walked_twice is the 5th member; discovery is one per CI cycle"
 status: open
-last_verified_commit: 67fa14db6
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "The cluster is characterised as a population rather than discovered one member per CI cycle, so the allowlist stops being written reactively."

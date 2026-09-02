@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "engine.run() cost is ~linear in tool-result size (~100 s/MB in the test profile), and it is not the spill path"
 status: closed
-last_verified_commit: 4a738f2e
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "The debug-vs-release question is SETTLED by measurement: the same probe is run under `--release` at 240,000 and 480,000 chars, and the per-byte term is either reproduced (a product finding) or shown to collapse (a test-profile artifact). Whichever it is, the numbers and the host load are recorded."

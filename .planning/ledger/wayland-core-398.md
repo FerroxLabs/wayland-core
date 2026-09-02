@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "Arm 3's lexical gate makes a guard on any path named objects/modules/store cost one syscall per workspace directory (split from #390 c3)"
 status: closed
-last_verified_commit: 7e159c955
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "The warm per-guard cost of a gate-admitted path is INDEPENDENT of the workspace-s directory count, graded as a SLOPE by `vfs_guard_cost.rs::a_store_named_path_costs_the_same_at_any_workspace_size` and `::the_post_walk_freshness_check_scales_with_checkouts_not_directories`, both of which assert the slope rather than a single reading."

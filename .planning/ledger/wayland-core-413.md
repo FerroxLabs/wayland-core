@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "The DENY_CACHE_MAX_DIRS branch of deny_cache is ungraded and needs 100,001 directories to reach (split from #398 c5)"
 status: open
-last_verified_commit: 6fdf05215
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "The `DENY_CACHE_MAX_DIRS` cap in `deny_cache` is reachable from a test without building a 100,001-directory fixture -- the cap is injectable, or the branch is removed if it is dead -- with the choice and its reason recorded."

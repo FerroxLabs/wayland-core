@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "an_unknown_window_sizes_the_skill_listing fails 3/3 in the CI container on its own non-vacuity precondition, on integ/f13 too"
 status: open
-last_verified_commit: 4a738f2e
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "— the test's non-vacuity is established from something the test itself controls, not from whatever skills the host image happens to ship: it plants enough catalogue to overflow the smaller budget, or it skips with a stated reason when it cannot, or it asserts the budget number rather than the rendered length. Evidence: the test passing in the CI container AND on a developer host, from one run of each."

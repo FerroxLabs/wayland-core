@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "Workflows and scheduled tasks run blanket auto-approve on every backend except Claude"
 status: open
-last_verified_commit: 70a47aaed
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "The engine's gating behaviour under each of the three session modes is MEASURED on the real json-stream wire (not inferred from a predicate unit test) and pinned, so a change to any mode's classification reddens"

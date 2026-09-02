@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "AppContainer deny is categorical: a deny identity strips a concurrent identity's grant, and a grant cannot reach an already-protected object"
 status: open
-last_verified_commit: ca15a48bf
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "apply_protected_deny deletes only the calling identity's own package-SID ALLOW aces, never every S-1-15-2 ALLOW on the object"

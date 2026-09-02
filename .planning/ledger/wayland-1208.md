@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "The Current date line is frozen for the life of a session while the same prompt forbids the model correcting it"
 status: closed
-last_verified_commit: b692c911
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "A session that crosses midnight either reports the real date or stops telling the model the baked date is authoritative"

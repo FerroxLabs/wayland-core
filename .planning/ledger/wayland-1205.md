@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "A cache ledger written by v0.13.9 reproduces #1163 verbatim on the fixed build, and the fix now certifies the fabricated saving as trustworthy"
 status: closed
-last_verified_commit: 7a7cf1f6
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "LEDGER_SCHEMA is bumped, and a v1 row's uncached_equivalent_usd: 0.0 no longer decodes as a genuine priced zero"

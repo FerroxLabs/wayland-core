@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "Skills are still injected on every ordinary turn, with no relevance or activation gate (#1280 c3/c4/c5, #1150 c5 skills half)"
 status: open
-last_verified_commit: ffaa0d839
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "Skills are injected only when relevant or explicitly activated (#1150 c5's text for the skills half), on a turn whose text relates to none of them, measured on the real bootstrap path"

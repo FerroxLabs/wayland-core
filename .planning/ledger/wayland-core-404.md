@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "A ci-linux cancellation at the 120-minute budget destroys the JUnit evidence the run already produced"
 status: open
-last_verified_commit: 4a738f2e
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: ": JUnit evidence produced by the test step survives a cancellation of a"

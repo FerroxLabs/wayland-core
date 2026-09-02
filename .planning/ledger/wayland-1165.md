@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: feature
 title: "Opt-in: /mcp add --replace to deliberately reconfigure a connected server"
 status: closed
-last_verified_commit: 43848f75
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "An explicit opt-in exists that tears down and re-establishes a connected MCP server's connection deliberately"

@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "Close the quarantine console bypass with a restricting-SID token, without removing the feature (from #389 c1)"
 status: open
-last_verified_commit: d11ee24fd
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "Measured on real Windows with the reproduction control alive in the SAME run: a restricting-SID quarantine child cannot reach the operator-s console (WROTE_TO_USER_CONSOLE=false) while git --version, git status and cmd /c echo ok all exit 0 inside it. Both halves, or it is not a fix."

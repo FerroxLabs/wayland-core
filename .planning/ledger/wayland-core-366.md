@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "Container orphan scan is nonce-scoped, so it can never see a leftover from an earlier run"
 status: closed
-last_verified_commit: 6c87400b2
+last_verified_commit: 93ede3424
 criteria:
   - id: d1
     text: "The product can enumerate wayland-created containers WITHOUT being given a nonce -- a key-presence scan reachable from an operator-facing surface, not only from a nonce-scoped path"

@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: task
 title: "[Maintainer] Decide the permanent disposition of the WhatsApp BRIDGE chunk width (core#360 c1)"
 status: open
-last_verified_commit: 1798076f
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "One of the two WhatsApp BRIDGE outcomes is chosen: accept BRIDGE_UNMEASURED_CHUNK_WIDTH as a documented chunking policy and reword core#360 c1 to the property actually wanted, or fund a measurement by naming who supplies a QR-paired WhatsApp number and a bridge host"

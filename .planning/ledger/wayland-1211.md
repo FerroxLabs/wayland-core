@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "is_self_hosted_base_url reads the authority past a query string, so a public host spelled with ?x=@127.0.0.1 is treated as self-hosted"
 status: closed
-last_verified_commit: 65b95a87
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "https://api.openai.com?x=@127.0.0.1 and https://h?a=@10.0.0.1 are classified NOT self-hosted"

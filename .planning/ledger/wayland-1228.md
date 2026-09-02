@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: task
 title: "[Destination needed] Telegram cap 4096 may be UTF-16 code units: the astral arm is committed and needs a chat id (#934 c8)"
 status: open
-last_verified_commit: 9d716bcb
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "A chat id the bot may post to is RECORDED in the live-cap credentials home, not merely used once"

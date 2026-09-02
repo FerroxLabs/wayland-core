@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 title: "cargo test --workspace --lib --no-fail-fast cannot be run 10x consecutively: osv_check::tests::ssrf_refusal_is_visible_at_default_log_levels fails ~5% of runs"
 status: open
 kind: defect
-last_verified_commit: adb822b6
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "The mechanism is named in code: what makes the ERROR not reach the scoped subscriber. Not inferred -- two inferences have already failed"

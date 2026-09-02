@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "With builtin_tools.defer_cold.catalog = false, ToolSearch hydration still re-sorts tools[] mid-array: #1171 is fully live on that path"
 status: closed
-last_verified_commit: 56b54a06e
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "In stub mode a hydration leaves the wire prefix stable: the measured turn1/turn2 arrays no longer differ at index 1"

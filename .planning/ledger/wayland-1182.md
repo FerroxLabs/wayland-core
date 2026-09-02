@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "The workspace-walk instrument check declares itself dead under load: a wall-clock ratio decides whether the control is alive"
 status: closed
-last_verified_commit: 856df7d0
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "Liveness of the workspace walk is established by a direct observation, not by comparing two wall-clock timings"

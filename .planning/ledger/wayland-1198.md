@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "check-criteria-ledger.py cannot detect drift in a file:<path>:<line> anchor, which is the drift it exists to catch"
 status: closed
-last_verified_commit: da0c8a31
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "A file: anchor carries a required content fragment that must be present at or near the named line, or bare line anchors are refused on files above a stated size"

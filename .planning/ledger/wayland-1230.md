@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "A served context slot below core's own baseline turn still truncates: 2,457 of a 4,096 slot is tool schemas before the user types"
 status: closed
-last_verified_commit: f8488dde
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "— The un-compactable floor of a turn (system prompt + tool schemas —"

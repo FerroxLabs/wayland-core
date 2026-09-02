@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "A lane can break the Desktop contract corpus and pass its own gate: preflight.sh never asks whether the corpus is current"
 status: open
-last_verified_commit: 6cb9a119d
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "scripts/preflight.sh FAILS on a stale Desktop contract corpus rather than emitting an advisory hint or nothing at all"

@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "Bug report: Chat Interface Bug and Restricted Read / Glob / Write / Edit"
 status: open
-last_verified_commit: f0060a2e8
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "The typed event exists and the generated contract corpus row is correct"

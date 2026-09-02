@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "Nested/vendored VCS object stores are not secret-denied (deny walk inspects the workspace root only)"
 status: closed
-last_verified_commit: 43848f75
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "A vendored or nested VCS object store is refused at any depth, not only directly under the workspace root"

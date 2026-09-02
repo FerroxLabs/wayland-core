@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: task
 title: "[Maintainer] AppContainer categorical-deny disposition: Q-368-honesty forbids the fix while a required soak job tests for it (core#368 c1-c5)"
 status: open
-last_verified_commit: ca15a48bf
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "One of the four recorded outcomes is chosen and stated on this ticket: retire the assertion, reverse Q-368-honesty for this one defect, delete the AppContainer backend, or accept a permanently amber soak"

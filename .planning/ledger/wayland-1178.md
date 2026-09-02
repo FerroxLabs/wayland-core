@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "A base_url with the conventional /v1 suffix builds /v1/v1/chat/completions and 404s"
 status: closed
-last_verified_commit: 43848f75
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "A base URL carrying the conventional /v1 suffix either reaches the endpoint or fails with an error naming the doubled path"

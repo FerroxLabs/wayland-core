@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "Three Linux retry-flakes surfaced in the run that overran its 120-min timeout; rate unmeasured, entries expire 2026-09-20"
 status: open
-last_verified_commit: 67fa14db6
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "Each of the three entries is either deleted at expiry because a normal-duration ci-linux run does not reproduce it, or carries a measured rate from a run that did not overrun its timeout."

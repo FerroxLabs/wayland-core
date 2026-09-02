@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "Core cannot see a self-hosted endpoint's served context window: stock Ollama silently discards the system prompt while core reports 6% pressure"
 status: closed
-last_verified_commit: d1f27e6e
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "Core learns the window an endpoint actually serves, from the token counts already in its responses"

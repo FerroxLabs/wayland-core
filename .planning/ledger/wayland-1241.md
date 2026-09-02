@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "The Write tool converts a refusal it could not roll back into an unchecked republish and reports success"
 status: closed
-last_verified_commit: 09d06e1ff
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "The direct Write path distinguishes \"atomic_write_checked never reached a verdict\" from \"the verdict REFUSED and the rollback could not be made\", and does not take the unchecked std::fs::write fallback in the second case"

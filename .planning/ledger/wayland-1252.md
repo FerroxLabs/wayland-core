@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "Three more hand-cut authority parsers survive #1243: /doctor suppresses its base-url caveat, a browser origin pattern normalises to a different host, and a redaction renders the smuggled host as the surviving one"
 status: closed
-last_verified_commit: 488fbbae9
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "With base_url = https://evil.example\\@api.openai.com/v1 and provider openai, /doctor PRINTS the base-url caveat naming the vendor host"

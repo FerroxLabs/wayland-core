@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "Static context/output arms are live for host-variable open-weights ids, and model_output_ceiling ignores the provider entirely"
 status: closed
-last_verified_commit: 1798076f
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "The minimax-m* and deepseek-v4* arms either resolve per provider, or are removed under the rule host_variable_open_weights_stay_unknown already enforces for qwen"

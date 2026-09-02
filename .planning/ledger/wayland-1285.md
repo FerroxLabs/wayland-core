@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "Two more macOS-only retry flakes: harness_tui_flow resume_repaints and wcore-mcp f016_real_spawn"
 status: open
-last_verified_commit: 67fa14db6
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "Both tests are either made deterministic under parallel nextest on macOS, or their allowlist entries are deleted at expiry because a normal-duration run stopped reproducing them."

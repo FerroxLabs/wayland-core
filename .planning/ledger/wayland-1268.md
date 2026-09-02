@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "The #1248 notice path IS reachable on Windows: a structural-impossibility claim contradicts atomic_io.rs's own correction (split from #1248)"
 status: closed
-last_verified_commit: 4f2ef0ae
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "The false sentence is corrected wherever it is committed — `write.rs`, `edit.rs`'s reference to it, and the `wayland-1248` ledger note — and the corrected text states the real reason the tests are gated (no Windows executor in this workspace), not a structural impossibility."

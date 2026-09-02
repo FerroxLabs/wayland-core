@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "[Bug]: acp serve survives its parent and reparents to PPID 1 — 9 orphans found, oldest 24h, pinning 160GB"
 status: closed
-last_verified_commit: 9de21aa1
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "acp serve profile children are bound to a parent-death channel, so the product does not leave the reported orphans"

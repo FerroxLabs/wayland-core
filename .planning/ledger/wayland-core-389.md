@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "Windows: a DETACHED_PROCESS quarantine child takes the user's console back with AttachConsole (split from #338 c2)"
 status: closed
-last_verified_commit: 4f2ef0ae
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "On Windows, a quarantine child that calls AttachConsole(ATTACH_PARENT_PROCESS) or AttachConsole(<wayland pid>) cannot end up sharing the user's console, measured by GetConsoleProcessList from inside that child"

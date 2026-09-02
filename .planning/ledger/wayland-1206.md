@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "The #1166 absolute floor reports PartialMiss{TtlExpiry} and writes a durable 'expired' invalidation on a healthy turn"
 status: closed
-last_verified_commit: 7a7cf1f6
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "A turn whose cache_read is unchanged from the previous turn while total input grows is not attributed to TtlExpiry"

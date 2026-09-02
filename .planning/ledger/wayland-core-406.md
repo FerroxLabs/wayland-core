@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "Arm 3s gate cannot see a store created after the walk at a path it never recorded (residual of #390 c2)"
 status: closed
-last_verified_commit: 7e159c955
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "A nested store created after the arm-3 walk by a control directory the walk FOUND, at a path that is neither store-shaped nor in the last scan-s list, is refused on the next guard -- measured with a wrong-refusal control in the same fixture."

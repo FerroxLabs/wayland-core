@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "Turn-1 transient injection poisons the prompt-cache prefix: both fixes (system-prefix date / trailing transient message) have measured collisions"
 status: closed
-last_verified_commit: 894ace48d
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "The turn-1 transient no longer lands at messages[1]; it moves into the cached system prefix"

@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "Windows: use a real bash when one is present, resolved explicitly (never System32 bash.exe)"
 status: closed
-last_verified_commit: 43848f75
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "Git Bash is resolved by known install location rather than by a bare PATH lookup for bash.exe"

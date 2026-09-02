@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "A command-floor refusal makes the model improvise and hand the user a confident wrong answer instead of blocked by policy"
 status: closed
-last_verified_commit: d647fbba
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "A floor refusal is distinguishable by the model from a transient tool failure, carrying a marker that says this is a policy decision"

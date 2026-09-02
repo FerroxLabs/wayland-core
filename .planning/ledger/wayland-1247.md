@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "wcore-swarm worktree linux tests fail under full-workspace load, reddening ci-linux for unrelated lanes"
 status: open
-last_verified_commit: 4a738f2e
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "Both named deadlines are addressed as a FAMILY: linux.rs:693 (read_child_pid's 3 s poll) and linux.rs:972. The issue found a second test on the first reproduction attempt, so fixing the one CI named would close the instance and leave the class."

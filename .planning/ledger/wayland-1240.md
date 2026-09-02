@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "await_completion_returns_on_match reds the shared-process lib leg on a timing race, not a process global"
 status: open
-last_verified_commit: 4a738f2e
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "The rate is MEASURED on the containerised CI image -- not on hetzner-dsm, whose four local passes the issue itself says do not exonerate the leg -- at --retries 0 over N of at least 20, and the rate is recorded."

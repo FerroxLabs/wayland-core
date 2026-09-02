@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "A superseded criterion's successor is the first #N in its note, so prose decides where a residual is tracked"
 status: closed
-last_verified_commit: 07ee39f6
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "The successor is read from a dedicated field, not from prose. A note that mentions other issue numbers cannot change where a residual is tracked."

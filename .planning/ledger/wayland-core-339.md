@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "SECURITY: the @-ref secret guard is lexical, so a symlink bypasses it"
 status: closed
-last_verified_commit: 52b7bc5b
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "The secret guard and the read observe the same resolved file identity, so a symlink cannot be graded as one thing and read as another"

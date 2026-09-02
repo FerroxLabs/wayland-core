@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "The #1162 error message ships with runs of literal spaces mid-sentence, and the same collapse appears in acp.rs and main.rs"
 status: closed
-last_verified_commit: 782064d63
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "The message at cache_cmd.rs:486 and the sibling bail at :476 read as one sentence with single spaces between words"

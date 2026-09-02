@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "Display-side reasoning filters still have no end-of-stream flush, so the screen and the stored turn disagree"
 status: closed
-last_verified_commit: 8ace76d61
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "Each of the six display-side consumers either calls ReasoningFilter::finish() at its end-of-stream hook, or carries a comment at the construction site saying why it must not"

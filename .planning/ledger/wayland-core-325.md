@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "nightly-windows-soak closes its tracker issue from a job that cannot see half the run's failures"
 status: closed
-last_verified_commit: 43848f75
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "The tracker close is gated on the result of every job in the run, not on one job's step-level success()"

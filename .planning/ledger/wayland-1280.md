@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "The skills listing is injected on every ordinary turn, and its 1%-of-window budget is not a ceiling (#1150 c5, skills half)"
 status: closed
-last_verified_commit: ffaa0d839
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "The skills listing respects a ceiling derived from the resolved context window, with no term that grows without bound in the skill count: bundled entries are inside the budget rather than subtracted from it, and the names-only fallback is itself bounded. Graded at 100 bundled / 1,000 project skills"

@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "every_spawn_site_owns_its_tree grades WRAPPING, never ownership, so it stayed green through a period the guard owned nothing"
 status: closed
-last_verified_commit: 70a47aaed
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "The ratchet cannot pass while OwnedTree's descendant walk is a stub -- either it asserts a behavioural property, or #352/#1156 stop citing it as class closure and the criterion text says it is a wrapping ratchet only"

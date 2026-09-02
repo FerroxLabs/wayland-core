@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "The @dir walk blocks forever on a FIFO in the workspace, wedging the turn with no cancellation path"
 status: closed
-last_verified_commit: b437de07
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "@./ in a workspace containing a named pipe completes rather than blocking"

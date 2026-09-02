@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "build-darwin-selfhosted is a ci.yml job the required report check never aggregates"
 status: open
-last_verified_commit: 4a738f2e
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "The disposition is DECIDED and recorded: either report gains build-darwin-selfhosted in its needs: list, or it does not and the reason is written AT the needs: list where the next reader looks, not only in this ticket."

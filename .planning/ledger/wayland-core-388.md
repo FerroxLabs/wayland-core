@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "GitTool reconstructs VCS content-store bytes in a Contained workspace (split from #244 c3)"
 status: closed
-last_verified_commit: 30fd6cfde
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "— In a `WorkspacePolicy::contained` workspace, `Git(op=diff, rev=…)` does not return the content of a file that `is_secret_path_static` denies, whether or not that file is named in `path`. The whole-repo form is the one that matters: it needs no path argument."

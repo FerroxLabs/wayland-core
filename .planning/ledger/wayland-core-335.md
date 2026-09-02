@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "@-ref: absolute paths escape the workspace root and skip the gitignore check"
 status: closed
-last_verified_commit: 52b7bc5b
+last_verified_commit: 93ede3424
 criteria:
   - id: c1
     text: "The policy question - whether an explicitly attached path outside the workspace obeys the workspace gitignore - is decided and written down"
