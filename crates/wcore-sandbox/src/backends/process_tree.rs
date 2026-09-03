@@ -655,13 +655,15 @@ impl MacProcessGroupAuthority {
             // `Corpse` arm below accepts, reached one window earlier.
             None => MacIdentityRecheck::Corpse,
         };
-        let root_ok = match &root_state {
-            MacIdentityRecheck::Same => root.as_ref().is_some_and(|root| {
-                macos_process_group(root.pid).is_ok_and(|group| group == process_group)
-            }),
-            MacIdentityRecheck::Corpse => true,
-            MacIdentityRecheck::Recycled | MacIdentityRecheck::Unreadable(_) => false,
-        };
+        let root_pid = root.as_ref().map(|root| root.pid);
+        let root_authority = mac_root_authority(process_group, &root_state, || match root_pid {
+            Some(pid) => macos_process_group(pid),
+            // Unreachable: a `None` root produced `Corpse` above, and `Corpse`
+            // never probes. ESRCH is nonetheless the honest answer for a pid
+            // we never opened, and it lands on the same `Exited` verdict.
+            None => Err(std::io::Error::from_raw_os_error(libc::ESRCH)),
+        });
+        let root_ok = root_authority.leaves_the_group_ours();
         if !(sentinel_holds_the_group && root_ok) {
             unsafe {
                 libc::kill(sentinel_pid, libc::SIGKILL);
@@ -669,28 +671,17 @@ impl MacProcessGroupAuthority {
             }
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
-                // `root_state` is the value the DECISION was made on. Calling
-                // `recheck()` again here would let the diagnostic disagree
-                // with the branch that produced it.
-                //
-                // Destructured rather than `{root_state:?}` so the io::Error
-                // inside `Unreadable` actually reaches a human. Derived Debug
-                // does NOT count as a read for dead-code analysis, so the
-                // `{:?}` form left field 0 unread — which is a `-D warnings`
-                // error on macOS, and it meant the one variant that carries a
-                // diagnosis was the one that discarded it.
+                // `root_authority` is the value the DECISION was made on, so
+                // the diagnostic cannot disagree with the branch that produced
+                // it. It also cannot re-probe: the previous form derived the
+                // decision from one probe and the message from `root_state`
+                // alone, which is why a failed group probe was reported as
+                // "NOT in its own group" — a claim about a group that was
+                // never read (wayland#1287).
                 format!(
                     "macOS process-group authority changed while containment was attached \
                      (sentinel in group: {sentinel_holds_the_group}, root: {})",
-                    match &root_state {
-                        MacIdentityRecheck::Same =>
-                            "same generation, but NOT in its own group".to_owned(),
-                        MacIdentityRecheck::Corpse => "exited".to_owned(),
-                        MacIdentityRecheck::Recycled =>
-                            "REPLACED by a different process".to_owned(),
-                        MacIdentityRecheck::Unreadable(error) =>
-                            format!("could not be read: {error}"),
-                    }
+                    root_authority.describe(process_group)
                 ),
             ));
         }
@@ -789,6 +780,191 @@ enum MacIdentityRecheck {
     Recycled,
     /// Could not be read at all. Not a measurement; never treated as Corpse.
     Unreadable(std::io::Error),
+}
+
+/// The workload root's authority verdict at the END of the attach window.
+///
+/// Exists because the decision needs THREE probe outcomes the two-valued
+/// `is_ok_and` collapsed into one: the root leads its group, the root left it,
+/// and *the group could not be read*. On Darwin the third is routine — a
+/// zombie's `getpgid` answers ESRCH — so the collapse turned a root that
+/// merely FINISHED between the two probes into "authority changed", refused
+/// containment with `PermissionDenied`, and reported it as
+/// "same generation, but NOT in its own group": a statement about a group
+/// nothing had read (wayland#1287).
+///
+/// The identical race one window earlier — between `MacProcessIdentity::open`
+/// and the first `macos_process_group` in [`MacProcessGroupAuthority::attach_with_hook`]
+/// — was already handled correctly, and this brings the recheck into line
+/// with it. A root that finished is the SUCCESS case; only a LIVE root that
+/// has left its group, a REPLACED root, or a probe that failed for any other
+/// reason are refusals. An unreadable probe is never read as absence, which is
+/// the same rule [`MacIdentityRecheck::Unreadable`] already carries.
+#[cfg(target_os = "macos")]
+#[derive(Debug)]
+enum MacRootAuthority {
+    /// A live root still in the process group it was spawned to lead.
+    LeadsItsGroup,
+    /// The root is gone: already a corpse at recheck, or finished between the
+    /// recheck and the group probe. Its group-leadership is vacuous.
+    Exited,
+    /// A LIVE root has moved to another group, so teardown would signal a
+    /// group the workload has already left.
+    LeftItsGroup(libc::pid_t),
+    /// The pid resolves to a different process generation.
+    Replaced,
+    /// A probe failed in a way that is not a measurement.
+    Unreadable(String),
+}
+
+#[cfg(target_os = "macos")]
+impl MacRootAuthority {
+    /// Whether the process group this authority is about to own is still ours.
+    fn leaves_the_group_ours(&self) -> bool {
+        matches!(self, Self::LeadsItsGroup | Self::Exited)
+    }
+
+    fn describe(&self, process_group: libc::pid_t) -> String {
+        match self {
+            Self::LeadsItsGroup => "leads its own group".to_owned(),
+            Self::Exited => "exited".to_owned(),
+            Self::LeftItsGroup(group) => {
+                format!("same generation, but in group {group} rather than {process_group}")
+            }
+            Self::Replaced => "REPLACED by a different process".to_owned(),
+            Self::Unreadable(error) => format!("could not be read: {error}"),
+        }
+    }
+}
+
+/// Decide the root's authority from its identity recheck and a LAZY group probe.
+///
+/// The probe is a closure so it runs only in the one state that needs it, and
+/// so the decision can be exercised without a live process — the race this
+/// function exists to handle opens for microseconds between two syscalls and
+/// cannot be scheduled from a test.
+#[cfg(target_os = "macos")]
+fn mac_root_authority(
+    process_group: libc::pid_t,
+    root_state: &MacIdentityRecheck,
+    probe_group: impl FnOnce() -> std::io::Result<libc::pid_t>,
+) -> MacRootAuthority {
+    match root_state {
+        MacIdentityRecheck::Same => match probe_group() {
+            Ok(group) if group == process_group => MacRootAuthority::LeadsItsGroup,
+            Ok(group) => MacRootAuthority::LeftItsGroup(group),
+            // The root was alive at `recheck()` and a corpse by this probe.
+            // Darwin answers ESRCH for a zombie's `getpgid`, so this is the
+            // `Corpse` case reached one window later, not an authority change.
+            Err(error) if error.raw_os_error() == Some(libc::ESRCH) => MacRootAuthority::Exited,
+            Err(error) => MacRootAuthority::Unreadable(error.to_string()),
+        },
+        MacIdentityRecheck::Corpse => MacRootAuthority::Exited,
+        MacIdentityRecheck::Recycled => MacRootAuthority::Replaced,
+        MacIdentityRecheck::Unreadable(error) => MacRootAuthority::Unreadable(error.to_string()),
+    }
+}
+
+/// The decision arms of [`mac_root_authority`].
+///
+/// These are unit tests and not live-process tests ON PURPOSE. The defect they
+/// pin (wayland#1287) is a race between two syscalls that a test cannot
+/// schedule: the root must be alive for `recheck()` and dead by the group
+/// probe. Driving a real child can only ever sample that window by luck, which
+/// is how the defect reached production in the first place — the live
+/// `MacProcessGroupAuthority` tests all exercise a root that is comfortably
+/// alive or comfortably dead, so they RAN without ever reaching the arm that
+/// was wrong.
+#[cfg(all(test, target_os = "macos"))]
+mod mac_root_authority_tests {
+    use super::{MacIdentityRecheck, MacRootAuthority, mac_root_authority};
+
+    const GROUP: libc::pid_t = 4242;
+
+    #[test]
+    fn a_root_that_exits_between_the_recheck_and_the_group_probe_keeps_containment() {
+        // wayland#1287. `recheck()` saw a live root; by the time `getpgid` ran
+        // it was an unreaped zombie, and on Darwin that answers ESRCH. The
+        // previous `is_ok_and` read the failed probe as "not in its own group"
+        // and refused containment with PermissionDenied, so every fast child
+        // (`git config`, and the Bash tool path behind it) could lose the race.
+        let authority = mac_root_authority(GROUP, &MacIdentityRecheck::Same, || {
+            Err(std::io::Error::from_raw_os_error(libc::ESRCH))
+        });
+        assert!(
+            authority.leaves_the_group_ours(),
+            "a root that merely finished must not fail containment closed: {authority:?}"
+        );
+        assert_eq!(authority.describe(GROUP), "exited");
+    }
+
+    #[test]
+    fn a_live_root_that_left_its_group_is_still_refused_and_names_both_groups() {
+        let authority = mac_root_authority(GROUP, &MacIdentityRecheck::Same, || Ok(GROUP + 1));
+        assert!(
+            !authority.leaves_the_group_ours(),
+            "teardown must not signal a group the workload has left"
+        );
+        let message = authority.describe(GROUP);
+        assert!(
+            message.contains(&(GROUP + 1).to_string()) && message.contains(&GROUP.to_string()),
+            "the diagnostic must name the group that was actually read, not assert one \
+             nothing read: {message}"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_group_probe_is_never_read_as_absence() {
+        // Only ESRCH may be read as absence: EPERM is the answer for a group
+        // that exists in another session, which `macos_process_group_is_gone`
+        // already documents from measurement.
+        let authority = mac_root_authority(GROUP, &MacIdentityRecheck::Same, || {
+            Err(std::io::Error::from_raw_os_error(libc::EPERM))
+        });
+        assert!(!authority.leaves_the_group_ours());
+        assert!(
+            authority.describe(GROUP).starts_with("could not be read"),
+            "an unreadable probe must not be reported as a group membership fact"
+        );
+    }
+
+    #[test]
+    fn a_live_root_leading_its_own_group_is_accepted() {
+        let authority = mac_root_authority(GROUP, &MacIdentityRecheck::Same, || Ok(GROUP));
+        assert!(authority.leaves_the_group_ours());
+        assert!(matches!(authority, MacRootAuthority::LeadsItsGroup));
+    }
+
+    #[test]
+    fn a_corpse_root_is_accepted_without_probing_its_group() {
+        // Probing a corpse is what produced the defect. The corpse arm must
+        // not reach the probe at all.
+        let probed = std::cell::Cell::new(false);
+        let authority = mac_root_authority(GROUP, &MacIdentityRecheck::Corpse, || {
+            probed.set(true);
+            Ok(GROUP)
+        });
+        assert!(authority.leaves_the_group_ours());
+        assert!(!probed.get(), "the corpse arm must not probe the group");
+    }
+
+    #[test]
+    fn a_replaced_root_is_refused() {
+        let authority = mac_root_authority(GROUP, &MacIdentityRecheck::Recycled, || Ok(GROUP));
+        assert!(!authority.leaves_the_group_ours());
+        assert_eq!(authority.describe(GROUP), "REPLACED by a different process");
+    }
+
+    #[test]
+    fn an_unreadable_identity_carries_its_diagnosis_into_the_message() {
+        let state = MacIdentityRecheck::Unreadable(std::io::Error::from_raw_os_error(libc::EIO));
+        let authority = mac_root_authority(GROUP, &state, || Ok(GROUP));
+        assert!(!authority.leaves_the_group_ours());
+        assert!(
+            authority.describe(GROUP).contains("could not be read"),
+            "the one variant that carries a diagnosis must not discard it"
+        );
+    }
 }
 
 #[cfg(target_os = "macos")]
