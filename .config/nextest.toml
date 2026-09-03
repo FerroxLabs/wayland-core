@@ -644,6 +644,57 @@ test-group = 'native-windows-live'
 filter = 'package(wcore-swarm)'
 threads-required = 4
 
+# ── f14 recovery tests: reserve slots, because the failure IS starvation ─────
+#
+# MEASURED 2026-09-03, hetzner-dsm (96 cores), `main @ 6e4eca07` (wayland#1289).
+# The payload is a PRODUCT refusal, not a test assertion:
+#
+#   persist recoverable seed checkpoint: SessionAuthority("the configured
+#   credential store did not answer within 5s, so this profile's recovery key
+#   could not be obtained. Unlock or repair the OS keyring for this profile...")
+#
+# The issue's stated hypothesis was that the OS serialises keychain access. On
+# Linux that is REFUTED: neither rung of the store is slow. The keyring rung
+# fails in 0-4ms (no bus, or a locked `login` collection) and the fallback vault
+# is local CPU -- Argon2id measured at 142ms single-threaded and 1244ms worst
+# case at 192-way. Nothing there approaches 5s.
+#
+# `KEY_STORE_ACQUIRE_BUDGET` (recovery_confidential.rs:223) is a WALL-CLOCK
+# deadline on a thread doing that work, so exceeding it means the thread was not
+# SCHEDULED. The A/B says exactly that -- same tree, same box, same detector,
+# only `--test-threads` differing:
+#
+#   96  threads (the configured `num-cpus`)   0/20 runs,  0 occurrences
+#   192 threads (2x oversubscription)        19/20 runs, 79 occurrences
+#
+# So this is not a Linux defect at the parallelism CI uses; 80 runs at nominal
+# `-j` were clean. It is why `macos-latest` fails: a 3-4 vCPU runner, where each
+# of these tests spawns several full engine processes (a seeder child plus a
+# CoreProcess), is ALREADY oversubscribed at nominal `num-cpus` -- the same
+# regime as the 192-thread arm here.
+#
+# `threads-required`, NOT a test-group. The block above records why, from its own
+# measurement: a group with `max-threads` bounds concurrency WITHIN the group,
+# and the pressure here comes from the other ~17,800 tests in the run, not from
+# f14 tests competing with each other. Reserving slots from the global pool is
+# the lever that matches the mechanism.
+#
+# Scoped to the BINARY rather than the three reported tests: all four callers of
+# `seed_recoverable_profile` reach this path (the fourth is `cfg(target_os =
+# "linux")`, which is why macOS shows three), and siblings fail in the same
+# regime for the same reason.
+#
+# TRIGGER FOR REMOVAL, so this does not decay into permanence: delete it when
+# `KEY_STORE_ACQUIRE_BUDGET` stops being a wall-clock deadline on a schedulable
+# thread, or when three consecutive `macos-latest` runs are clean with it removed.
+#
+# SCHEDULING ONLY. No test, assertion, timeout or selector is added, removed or
+# loosened -- a starved test still fails, it is just not starved by our own
+# runner. If this fails again, that failure is real.
+[[profile.ci.overrides]]
+filter = 'binary(f14_sigkill_recovery)'
+threads-required = 4
+
 # ── PTY/TUI tests: no retry mask, and a starvation claim the tree refutes ────
 #
 # THIS BLOCK USED TO SAY the failures below were reader-thread starvation
