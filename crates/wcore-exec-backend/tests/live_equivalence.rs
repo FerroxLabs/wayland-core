@@ -15,10 +15,19 @@ use wcore_exec_backend::{ExecutionReceipt, normalized_equivalence, reference_bac
 /// and which nextest's process-per-test can never see -- puts every test of
 /// this binary on a thread of ONE process. The env var therefore pointed
 /// every concurrently-running sibling's registry at this `TempDir`, which was
-/// then deleted out from under them when it dropped. That is the race that
-/// failed `conformance_matrix` on ci-linux at e37e72f0b: `reference_backends`
-/// could not construct because its state dir had just been removed by a
-/// sibling finishing first (gh#1233).
+/// then deleted out from under them when it dropped, redirecting their
+/// `record`/`load`/`list` calls (gh#1233).
+///
+/// That redirection is real, and it is why this override exists. It is NOT,
+/// however, what failed `conformance_matrix` on ci-linux at e37e72f0b. That
+/// run's payload was `backend signing seed at <path> is not 32 bytes`, and
+/// reading its one emitter (`backends::load_or_create_seed`) settles it: the
+/// error is reachable ONLY when the file exists and reads at a length other
+/// than 32. A REMOVED state dir makes `fs::read` fail and falls through to
+/// create-and-write, so it cannot produce that string at all. The cause was a
+/// torn `fs::write` seen by a concurrent reader sharing one keys directory --
+/// reproduced on the first round of 16 threads against the pre-fix body, and
+/// fixed by publishing the seed atomically (gh#1298).
 ///
 /// `StateDirGuard` is the per-thread override built for exactly this; see
 /// `registry.rs`, whose doc comment names this defect. `fail_closed_matrix`
