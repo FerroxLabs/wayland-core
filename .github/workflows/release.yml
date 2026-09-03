@@ -43,6 +43,26 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: refs/tags/${{ inputs.tag_name || github.ref_name }}
+          # `fetch-depth: 0`, and this is not hygiene. This job runs
+          # `scripts/check-criteria-ledger.py` below, whose
+          # `last_verified_commit` arm resolves each anchor through git and
+          # DOWNGRADES ITSELF TO A NAMED SKIP on a shallow clone -- the script
+          # says so in `_is_shallow` and prints "Set `fetch-depth: 0` on the
+          # checkout to arm it". actions/checkout defaults to depth 1, so the
+          # one arm that verifies a grading can still be re-derived from the
+          # shipped history has never run on the release path.
+          #
+          # MEASURED, two arms, same tree, one corrupted anchor
+          # (wayland-core-401.md `last_verified_commit: deadbeef1`):
+          #   full clone     1 problem naming deadbeef1   <- the arm is live
+          #   depth-1 clone  0 problems                   <- it is not
+          # So a bad pointer shipped silently. Every OTHER ledger check --
+          # divergence, coverage, `file:` anchors -- runs at either depth and
+          # is unaffected; this closes the one gap.
+          #
+          # Costs a full history fetch once per release, which is the job that
+          # can least afford to be wrong and most easily afford the seconds.
+          fetch-depth: 0
 
       # ── model-limits freshness gate ───────────────────────────────────
       # Every release must refresh `crates/wcore-config/src/limits.rs`
