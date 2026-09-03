@@ -17,7 +17,7 @@ criteria:
     state: met
     evidence: "symbol:scripts/check-model-limits-freshness.py::self_test"
     owner: core
-    note: "P2 (FAIL when a vendor passthrough id has no row - the #165 shape) is the acceptance red arm, with P3/P4/P5 as three further FAIL directions and P1/P6/P7/P8 as controls. Wired to CI on every PR (ci.yml:1338) and at release (release.yml:71). CAVEAT: the red is demonstrated on the SCRIPT arm by removing a row; the Rust arm's None means no-arm-at-all branch is structural and has never been exercised red."
+    note: "P2 (FAIL when a vendor passthrough id has no row - the #165 shape) is the acceptance red arm, with P3/P4/P5 as three further FAIL directions and P1/P6/P7/P8 as controls. Wired to CI on every PR (ci.yml:1364) and at release (release.yml:71). CAVEAT: the red is demonstrated on the SCRIPT arm by removing a row; the Rust arm's None means no-arm-at-all branch is structural and has never been exercised red."
   - id: c3
     text: "The replacement builds consensus from vendor-operated providers only, never aggregators"
     state: met
