@@ -3,7 +3,7 @@ issue: 113
 repo: FerroxLabs/wayland-core
 kind: defect
 title: "Browser tool non-functional by default - Camoufox sidecar never spawned + policy-disabled (web automation/screenshots broken)"
-status: open
+status: closed
 last_verified_commit: 93ede3424
 criteria:
   - id: c1
@@ -38,10 +38,10 @@ criteria:
     note: "SPLIT 2026-08-29: the old c5 asked for two different things -- a record and a close -- and only one of them was ever a maintainer act. The record is core's and is now DONE. Line 16 of .planning/DECISIONS.md is the Q-113 row taking the decision (close as refuted, recording deny-by-default), and the core lane posted that record as a comment on the issue on 2026-08-29, so the in-tree decision and the issue now agree -- previously the latest comment on #113 was a verification write-up and the posture appeared nowhere a reader of the issue could find it. The close is c6"
   - id: c6
     text: "The issue is dispositioned: closed as refuted, or the decision reversed"
-    state: blocked
+    state: met
+    evidence: "file:.planning/DECISIONS.md"
     owner: maintainer
-    handoff: "FerroxLabs/wayland#1229"
-    note: "The residue of the old c5, and a genuine maintainer act: only the maintainer closes issues in this repo. There is no code owed -- c1 through c4 refute or supersede three of the four reported claims with a test each, and the fourth (deny-by-default) is the intended posture with a config snippet that is round-tripped to a real Allow decision. wayland-core#364 carries it with the evidence table, and states the alternative plainly: perform the close, or reverse Q-113 and name a lane to build the opposite HANDOFF TARGET RECONCILED ON MERGE: this criterion was decomposed twice on 2026-08-29, by two lanes that could not see each other. The audit lane pointed it at FerroxLabs/wayland-core#364, which already existed and already carries the work; the decomposition lane filed FerroxLabs/wayland#1229 and that is the ticket named above, because it is scoped to this criterion. BOTH ARE OPEN AND THEY OVERLAP -- both are the same maintainer disposition -- close #113 recording deny-by-default, or reverse Q-113 and name a lane. Core does not close issues, so this is recorded rather than acted on: a maintainer should dedupe the pair, and whichever survives is the carrier. The audit evidence in this note was gathered against FerroxLabs/wayland-core#364 and applies to either."
+    note: "MET 2026-09-03. The maintainer performed the close: wayland-core#113 is closed/completed, executing Q-113 (.planning/DECISIONS.md line 16, CLOSE AS REFUTED recording deny-by-default). Every criterion was re-verified against the SHIPPED tree 6e4eca07 before the close rather than taken from this ledger -- all four c1..c4 evidence tokens resolve, and `grep -rl chromiumoxide crates/*/src` returns 0, so the phantom backend really is gone from shipped source rather than only from the docs that described it. THE DUPLICATE CARRIER PAIR IS DEDUPED, which is what this note previously asked a maintainer to do: FerroxLabs/wayland#1229 was closed as the duplicate and FerroxLabs/wayland-core#364 survives, because #364 also holds a SECOND and unrelated maintainer item (the Meta 15-app-per-developer cap behind #934/#1186) and so cannot close on this act alone. Recorded for the next reader: #1229 carried no milestone and no area:core label, so it had no ledger file and the coverage gate could not see it at all -- an issue invisible to scope, which is the failure mode FerroxLabs/wayland#1295 c2 tracks. The deny-by-default posture is UNCHANGED and remains deliberate; reversing it is a new issue naming a lane, not a reopen of this one."
 ---
 
 The issue reports that the browser tool is advertised to the model but cannot
