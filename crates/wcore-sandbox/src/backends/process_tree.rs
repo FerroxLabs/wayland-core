@@ -853,10 +853,10 @@ fn mac_root_authority(
         MacIdentityRecheck::Same => match probe_group() {
             Ok(group) if group == process_group => MacRootAuthority::LeadsItsGroup,
             Ok(group) => MacRootAuthority::LeftItsGroup(group),
-            // The root was alive at `recheck()` and a corpse by this probe.
-            // Darwin answers ESRCH for a zombie's `getpgid`, so this is the
-            // `Corpse` case reached one window later, not an authority change.
-            Err(error) if error.raw_os_error() == Some(libc::ESRCH) => MacRootAuthority::Exited,
+            // RED ARM (not for merge): the ESRCH case is removed, restoring
+            // the pre-fix behaviour where a failed probe was indistinguishable
+            // from a lost group. If the new tests still pass here they are
+            // vacuous and prove nothing.
             Err(error) => MacRootAuthority::Unreadable(error.to_string()),
         },
         MacIdentityRecheck::Corpse => MacRootAuthority::Exited,
