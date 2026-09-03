@@ -329,6 +329,76 @@ fn prepared_provider_request_snapshot_keeps_a_thinking_block_without_extra_byte_
         format!("{:?}", request.messages)
     );
 }
+/// core#425. The wayland#1170 test above pins `extra: None`. It does NOT pin
+/// `extra: Some(Value::Null)`, and that is the arm that was wrong: with
+/// `skip_serializing_if = "Option::is_none"` an explicit null encodes as
+/// `"extra":null`, decodes back to `Some(Null)`, and re-encodes WITHOUT the
+/// field -- so recovery's canonicality re-check refuses the snapshot forever.
+///
+/// Same class as the 23B-H1 `effect_receipt` defect: the write succeeds and the
+/// conversation is never readable again. LATENT here -- the one production
+/// producer (`engine.rs`) builds `extra` with a `.map()` that can only yield an
+/// object -- so this test is the guard, not a regression witness.
+#[test]
+fn a_thinking_block_with_an_explicit_null_extra_still_decodes() {
+    let mut request = fully_populated_llm_request();
+    request.messages[0].content = vec![ContentBlock::Thinking {
+        thinking: "reasoning".into(),
+        extra: Some(serde_json::Value::Null),
+    }];
+
+    let snapshot = prepared_provider_request_snapshot(&request).unwrap();
+    // Against the pre-fix predicate this call returns
+    // Err(InvalidTransition("prepared provider request snapshot is not
+    // canonical")). Assert on the message, not merely on Ok: a bare unwrap
+    // would not distinguish this defect from any other decode failure.
+    let restored = decode_prepared_provider_request_snapshot(&snapshot)
+        .unwrap_or_else(|error| panic!("an explicit null extra must survive recovery: {error}"));
+    assert_eq!(
+        format!("{:?}", restored.messages),
+        format!("{:?}", request.messages)
+    );
+}
+
+/// The encoding must be a BIJECTION over the field's whole domain, not merely
+/// survivable at the two shapes a producer happens to emit today.
+#[test]
+fn a_thinking_block_re_encodes_identically_at_every_shape_of_extra() {
+    for extra in [
+        None,
+        Some(serde_json::Value::Null),
+        Some(serde_json::json!({"thoughtSignature": "s"})),
+    ] {
+        let mut request = fully_populated_llm_request();
+        request.messages[0].content = vec![ContentBlock::Thinking {
+            thinking: "reasoning".into(),
+            extra: extra.clone(),
+        }];
+        let once = prepared_provider_request_snapshot(&request).unwrap();
+        let decoded = decode_prepared_provider_request_snapshot(&once)
+            .unwrap_or_else(|error| panic!("extra={extra:?} did not decode: {error}"));
+        let twice = prepared_provider_request_snapshot(&decoded).unwrap();
+        assert_eq!(once, twice, "extra={extra:?} does not re-encode identically");
+    }
+}
+
+/// The sibling arm, pinned so nobody "tidies" a `skip_serializing_if` onto it.
+/// `ToolUse.extra` is safe precisely BECAUSE it has no such attribute; adding
+/// `Option::is_none` there would reproduce core#425 one field over.
+#[test]
+fn a_tool_use_block_with_an_explicit_null_extra_still_decodes() {
+    let mut request = fully_populated_llm_request();
+    request.messages[0].content = vec![ContentBlock::ToolUse {
+        id: "call-1".into(),
+        name: "Read".into(),
+        input: serde_json::json!({"path": "/tmp/x"}),
+        extra: Some(serde_json::Value::Null),
+    }];
+    let snapshot = prepared_provider_request_snapshot(&request).unwrap();
+    decode_prepared_provider_request_snapshot(&snapshot)
+        .unwrap_or_else(|error| panic!("ToolUse extra=null must survive recovery: {error}"));
+}
+
 #[test]
 fn prepared_provider_request_snapshot_rejects_unknown_structural_fields() {
     let request = LlmRequest {
