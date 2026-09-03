@@ -213,7 +213,39 @@ pub enum SpawnError {
 /// live in a different crate (`wcore-eval-scenarios`), so we must
 /// discover the artifact.
 pub fn discover_binary() -> Result<PathBuf, SpawnError> {
-    if let Ok(p) = std::env::var("WCORE_EVAL_BIN") {
+    discover_binary_from(
+        std::env::var_os("WCORE_EVAL_BIN"),
+        std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from),
+    )
+}
+
+/// [`discover_binary`] with its two environment inputs passed in.
+///
+/// The env reads live in the thin wrapper above so that NOTHING has to mutate a
+/// process global to exercise this resolution order. That is not a stylistic
+/// preference: `WCORE_EVAL_BIN` and `CARGO_TARGET_DIR` are process-wide, and
+/// under a plain `cargo test` run every test of a binary shares one process, so
+/// a test that set either of them was steering `discover_binary()` for every
+/// concurrently-running sibling.
+///
+/// That is wayland#1296. `binary_discovery_honors_absolute_cargo_target_dir`
+/// pointed `CARGO_TARGET_DIR` at a `TempDir` holding an EMPTY file named
+/// `wayland-core`. Inside that window `spawns_and_captures_help` called
+/// `discover_binary()`, was handed the fixture path (`cand.exists()` is true of
+/// an empty file), and by the time it reached `exec` the `TempDir` had been
+/// dropped -- so an existing path spawned ENOENT, and `ci-linux` went red on
+/// `main` for a race that has nothing to do with either test's subject.
+///
+/// The two discovery tests were already in a shared `serial_test` group with
+/// each other. The two SPAWN tests were not, and they call this same function.
+/// Widening that group would have worked; removing the mutation entirely is
+/// better, because the next test to call `discover_binary()` does not have to
+/// know it must join a group.
+pub fn discover_binary_from(
+    eval_bin: Option<std::ffi::OsString>,
+    target_dir: Option<PathBuf>,
+) -> Result<PathBuf, SpawnError> {
+    if let Some(p) = eval_bin.map(|v| v.to_string_lossy().into_owned()) {
         let pb = PathBuf::from(&p);
         if pb.exists() {
             return Ok(pb);
@@ -241,7 +273,7 @@ pub fn discover_binary() -> Result<PathBuf, SpawnError> {
         "wayland-core"
     };
 
-    if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from) {
+    if let Some(target_dir) = target_dir {
         for profile in ["release", "debug"] {
             let cand = target_dir.join(profile).join(bin_name);
             if cand.exists() {

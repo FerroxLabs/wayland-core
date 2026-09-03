@@ -16,13 +16,14 @@
 //! it would fail fast — but the test never gets that far because
 //! the wall-time is set to 1 second and we kill on Elapsed.
 
-use std::path::Path;
 use std::time::Duration;
 
 use tokio::io::AsyncReadExt;
 
 use wcore_eval_scenarios::providers::{ProviderConfig, ProviderId};
-use wcore_eval_scenarios::runner::{discover_binary, spawn_for_run, spawn_with_args};
+use wcore_eval_scenarios::runner::{
+    discover_binary, discover_binary_from, spawn_for_run, spawn_with_args,
+};
 use wcore_eval_scenarios::tempenv;
 
 /// Locate the binary or skip the test with a clear message. The
@@ -143,25 +144,33 @@ async fn hung_scenario_does_not_leak_pid() {
     let _ = pid;
 }
 
-/// Sanity: `discover_binary` rejects a missing `WCORE_EVAL_BIN`
-/// override even when the auto-discovery would otherwise succeed.
-/// Guards a future regression where a typo'd env var path is silently
-/// ignored and the test falls back to the default — that would make
-/// `WCORE_EVAL_BIN` a footgun.
+/// Sanity: discovery rejects a missing `WCORE_EVAL_BIN` override even when
+/// auto-discovery would otherwise succeed. Guards a regression where a typo'd
+/// path is silently ignored and the caller falls back to the default -- that
+/// would make `WCORE_EVAL_BIN` a footgun.
+///
+/// Drives `discover_binary_from` with explicit inputs rather than setting the
+/// env var. `WCORE_EVAL_BIN` and `CARGO_TARGET_DIR` are PROCESS globals, and a
+/// plain `cargo test` run puts every test of this binary in one process, so
+/// setting either here steered `discover_binary()` for the two spawn tests
+/// running concurrently (wayland#1296). No serial group is needed once nothing
+/// mutates the global -- and the next test to touch discovery does not have to
+/// know it should join one.
 #[test]
-#[serial_test::serial(wcore_eval_bin_env)]
 fn binary_discovery_rejects_missing_override() {
-    let guard = EnvGuard::set("WCORE_EVAL_BIN", "/nonexistent/path/to/wayland-core");
-    let r = discover_binary();
-    drop(guard);
+    let r = discover_binary_from(
+        Some(std::ffi::OsString::from(
+            "/nonexistent/path/to/wayland-core",
+        )),
+        None,
+    );
     assert!(
         r.is_err(),
-        "discover_binary should reject a nonexistent WCORE_EVAL_BIN, got {r:?}"
+        "discovery should reject a nonexistent WCORE_EVAL_BIN, got {r:?}"
     );
 }
 
 #[test]
-#[serial_test::serial(wcore_eval_bin_env)]
 fn binary_discovery_honors_absolute_cargo_target_dir() {
     let temp = tempfile::TempDir::new().expect("target tempdir");
     let bin_name = if cfg!(windows) {
@@ -174,54 +183,39 @@ fn binary_discovery_honors_absolute_cargo_target_dir() {
         .expect("create debug target");
     std::fs::write(&expected, []).expect("seed binary artifact");
 
-    let eval_bin = EnvGuard::remove("WCORE_EVAL_BIN");
-    let target_dir = EnvGuard::set("CARGO_TARGET_DIR", temp.path());
-    let discovered = discover_binary().expect("discover binary in CARGO_TARGET_DIR");
-    drop(target_dir);
-    drop(eval_bin);
+    let discovered = discover_binary_from(None, Some(temp.path().to_path_buf()))
+        .expect("discover binary in CARGO_TARGET_DIR");
 
     assert_eq!(discovered, expected);
 }
 
-/// Minimal RAII env-var guard for the discovery test.
-///
-/// Restoring on drop is NOT sufficient on its own: it does nothing for the
-/// window between set and restore, during which a concurrent test sees the
-/// mutated value. The previous comment leaned on nextest's
-/// `[profile.eval] test-threads = 1`, which is true for that profile and FALSE
-/// under plain `cargo test` -- where both discovery tests run in parallel in
-/// one process and both mutate `WCORE_EVAL_BIN`. They are now in a shared
-/// serial group; this guard still restores state on the way out.
-struct EnvGuard {
-    key: &'static str,
-    prev: Option<std::ffi::OsString>,
-}
-impl EnvGuard {
-    fn set(key: &'static str, value: impl AsRef<Path>) -> Self {
-        let prev = std::env::var_os(key);
-        // SAFETY: tests in this crate run with test-threads=1 (eval
-        // profile) and no sibling thread reads this env. set_var is
-        // marked unsafe in newer std editions because of the FFI race
-        // on libc envp, which we explicitly avoid here.
-        unsafe { std::env::set_var(key, value.as_ref()) };
-        Self { key, prev }
-    }
+/// The override must WIN over the target dir, which the old env-mutating pair
+/// could not assert: it could only ever set one global at a time without the
+/// other test seeing it.
+#[test]
+fn an_explicit_override_wins_over_the_target_dir() {
+    let temp = tempfile::TempDir::new().expect("target tempdir");
+    let bin_name = if cfg!(windows) {
+        "wayland-core.exe"
+    } else {
+        "wayland-core"
+    };
+    let in_target = temp.path().join("debug").join(bin_name);
+    std::fs::create_dir_all(in_target.parent().expect("debug parent")).expect("create debug");
+    std::fs::write(&in_target, []).expect("seed target artifact");
 
-    fn remove(key: &'static str) -> Self {
-        let prev = std::env::var_os(key);
-        // SAFETY: see `set`; this test process does not share its environment
-        // with another nextest case.
-        unsafe { std::env::remove_var(key) };
-        Self { key, prev }
-    }
-}
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        unsafe {
-            match &self.prev {
-                Some(v) => std::env::set_var(self.key, v),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
+    let override_dir = tempfile::TempDir::new().expect("override tempdir");
+    let overridden = override_dir.path().join(bin_name);
+    std::fs::write(&overridden, []).expect("seed override artifact");
+
+    let discovered = discover_binary_from(
+        Some(overridden.clone().into_os_string()),
+        Some(temp.path().to_path_buf()),
+    )
+    .expect("discover with both inputs present");
+
+    assert_eq!(
+        discovered, overridden,
+        "WCORE_EVAL_BIN must win over CARGO_TARGET_DIR"
+    );
 }
