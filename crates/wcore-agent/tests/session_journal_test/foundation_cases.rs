@@ -354,9 +354,25 @@ fn a_thinking_block_with_an_explicit_null_extra_still_decodes() {
     // would not distinguish this defect from any other decode failure.
     let restored = decode_prepared_provider_request_snapshot(&snapshot)
         .unwrap_or_else(|error| panic!("an explicit null extra must survive recovery: {error}"));
+
+    // The null COLLAPSES to absent, deliberately, and that is the whole fix:
+    // both shapes now encode the same way, so the re-check cannot disagree
+    // with the writer. Restoring `Some(Null)` on the way out would need a
+    // recovery shim like `restore_explicit_null_receipt`, and none is owed
+    // here -- `extra` is built by us as an object or None (engine.rs), never
+    // echoed raw from a provider, so a null in it carries no information to
+    // preserve. Asserting the collapse rather than eliding it, so a future
+    // change that quietly starts preserving it has to come past this line.
+    let ContentBlock::Thinking { extra, .. } = &restored.messages[0].content[0] else {
+        panic!("expected a thinking block, got {:?}", restored.messages[0].content[0]);
+    };
     assert_eq!(
-        format!("{:?}", restored.messages),
-        format!("{:?}", request.messages)
+        extra, &None,
+        "an explicit null must decode as absent, not be preserved"
+    );
+    assert!(
+        !serde_json::to_string(&snapshot).unwrap().contains("extra"),
+        "an explicit null must not reach the wire at all"
     );
 }
 
