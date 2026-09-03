@@ -681,19 +681,33 @@ fn try_read_child_pid(path: &std::path::Path) -> Option<u32> {
 ///
 /// Deliberately a bounded wait and NOT a bare retry-forever: if the script never
 /// writes a PID that is a real failure and must still fail, just not by racing.
-/// Mirrors `wait_until_process_gone`'s shape (3s deadline, 20ms tick) so both
-/// waits in this file behave the same way.
+///
+/// The bound is a LIVENESS BACKSTOP, not the property under test. What these
+/// tests assert is that the script DID write a pid and that the process was
+/// reaped -- never that it managed it inside some budget. A 3s deadline made
+/// the budget the assertion, so a loaded CI box failed the test for being busy:
+/// `linux.rs:693` was the single most frequent red in `CI (linux-containerized)`
+/// and it reddened `report` for lanes that had not touched this crate
+/// (wayland#1247). The window it was fighting is now closed at the source --
+/// the fixtures publish the pid with a rename, so the file never exists empty --
+/// and what remains is only "has the shell reached that line yet", which under
+/// full-workspace load is a scheduling question with no honest short answer.
+///
+/// 60s is chosen so it can only fire on a genuine hang: a fixture that never
+/// writes still fails, one minute later, with the same message. Making it
+/// generous costs nothing on a passing run, because the loop returns the
+/// instant the pid appears.
 #[cfg(target_os = "linux")]
 async fn read_child_pid(path: &std::path::Path) -> u32 {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     loop {
         if let Some(pid) = try_read_child_pid(path) {
             return pid;
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "fixture script never wrote a parseable child PID to {} within 3s \
-             (exists: {}, contents: {:?})",
+            "fixture script never wrote a parseable child PID to {} within 60s \
+             -- that is a hang, not a slow runner (exists: {}, contents: {:?})",
             path.display(),
             path.exists(),
             std::fs::read_to_string(path).ok()
@@ -924,7 +938,7 @@ async fn status_output_cap_kills_git_descendant() {
     let pid_file = fixture.path().join("flood-child.pid");
     let mut manager = WorktreeManager::new_with_git_script_and_limits(
         fixture.path(),
-        "case \" $* \" in *\" config \"*) exit 1;; esac\n(while :; do printf 0123456789abcdef; done) &\nchild=$!\nprintf %s \"$child\" > \"$WAYLAND_TEST_PID_FILE\"\nwait \"$child\"",
+        "case \" $* \" in *\" config \"*) exit 1;; esac\n(while :; do printf 0123456789abcdef; done) &\nchild=$!\nprintf %s \"$child\" > \"$WAYLAND_TEST_PID_FILE.tmp\" && mv \"$WAYLAND_TEST_PID_FILE.tmp\" \"$WAYLAND_TEST_PID_FILE\"\nwait \"$child\"",
         CaptureLimits {
             stdout_bytes: 4096,
             stderr_bytes: 4096,
@@ -954,11 +968,25 @@ async fn worktree_add_timeout_kills_tree_and_reports_preserved_residual() {
         // build host at PPID 1, alive 7d11h, each pinning ~99% of a core.
         // `sleep 2147483647` is portable to plain `sh`; `sleep infinity` is a
         // GNU extension and is deliberately not used.
-        "case \" $* \" in *\" config \"*) exit 1;; esac\nmkdir -p .swarm-worktrees/worker-1\n(sleep 2147483647) &\nchild=$!\nprintf %s \"$child\" > \"$WAYLAND_TEST_PID_FILE\"\nwait \"$child\"",
+        "case \" $* \" in *\" config \"*) exit 1;; esac\nmkdir -p .swarm-worktrees/worker-1\n(sleep 2147483647) &\nchild=$!\nprintf %s \"$child\" > \"$WAYLAND_TEST_PID_FILE.tmp\" && mv \"$WAYLAND_TEST_PID_FILE.tmp\" \"$WAYLAND_TEST_PID_FILE\"\nwait \"$child\"",
         CaptureLimits {
             stdout_bytes: 4096,
             stderr_bytes: 4096,
-            timeout: Duration::from_millis(200),
+            // 2s, not 200ms, and the reason is not "flaky test needs longer".
+            // This budget is applied to EVERY git invocation, including the
+            // `git config` safety check that the script above answers with an
+            // immediate `exit 1`. At 200ms a loaded runner could spend the whole
+            // budget just spawning that fast stage, so the timeout fired at the
+            // CONFIG stage -- before `mkdir -p .swarm-worktrees/worker-1` had
+            // run, so no residual existed and the residual assertion failed
+            // while the "timed out" assertion still passed (wayland#1247).
+            // Load was choosing which stage the test measured.
+            //
+            // The stage that is SUPPOSED to time out blocks forever, so it
+            // exceeds any budget; the stage that must NOT time out exits
+            // immediately, so it only needs a margin wide enough that process
+            // spawn cannot eat it. 2s matches the sibling test above.
+            timeout: Duration::from_secs(2),
         },
     )
     .unwrap();
@@ -968,7 +996,17 @@ async fn worktree_add_timeout_kills_tree_and_reports_preserved_residual() {
         .await
         .unwrap_err()
         .to_string();
-    assert!(error.contains("timed out after 200ms"), "{error}");
+    // PIN THE STAGE. Asserting only "timed out" cannot tell the intended
+    // `git worktree add` timeout from a `git config safety check` timeout, and
+    // those are different outcomes: the second means the test never reached the
+    // behaviour it exists to check. Without this, a config-stage timeout was
+    // reported as a missing residual -- a red naming the wrong cause.
+    assert!(
+        !error.contains("git config safety check"),
+        "the SAFETY CHECK timed out, not `git worktree add` -- this test never \
+         reached the behaviour it asserts, so a residual could not exist: {error}"
+    );
+    assert!(error.contains("timed out after"), "{error}");
     assert!(
         error.contains("residual worktree path preserved"),
         "{error}"
@@ -989,7 +1027,7 @@ async fn cancelled_cleanup_kills_git_and_reports_residual() {
         // grandchild above: an interrupted run must not leave a core-burner on
         // a shared host. The recorded pid is this shell's own, and it stays
         // alive and unkillable-by-itself either way.
-        "printf %s \"$$\" > \"$WAYLAND_TEST_PID_FILE\"\nsleep 2147483647",
+        "printf %s \"$$\" > \"$WAYLAND_TEST_PID_FILE.tmp\" && mv \"$WAYLAND_TEST_PID_FILE.tmp\" \"$WAYLAND_TEST_PID_FILE\"\nsleep 2147483647",
         GIT_CAPTURE_LIMITS,
     )
     .unwrap();
