@@ -136,9 +136,17 @@ slow-timeout = { period = "90s", terminate-after = 2 }
 # reading was investigated and DISPROVED rather than assumed. The cost is real
 # and is recorded so it stays visible: ~47ms of inline CPU per dispatch in a
 # debug build, 44.8ms of it inside `engine.run()`, against 6.9ms in release.
-# Note this test already PASSES in CI, whose 90s x 2 = 180s budget covers it;
-# only the stricter local default profile killed it, so this aligns the two
-# rather than loosening either.
+# CORRECTED 2026-09-03 (gh#1301 c2). This block used to read "this test already
+# PASSES in CI, whose 90s x 2 = 180s budget covers it; only the stricter local
+# default profile killed it". That was false, and it certified a budget the test
+# has never once passed inside: ALL TEN measured Windows (`CI (Array)`) runs
+# exceed 180s, at 185.46-226.28s. It passes only because nextest inherits THIS
+# override into `--profile ci`, giving it 120s x 2 = 240s. It is also drifting
+# toward that ceiling -- 185-194s on 2026-09-02 against 216.9/221.0/226.3s on
+# 2026-09-03, i.e. 90-94% of the kill line -- so the headroom this override was
+# meant to provide is nearly gone. Linux (83.70-99.33s) and macOS (54.76-96.23s)
+# are unaffected. The durable fix is terminate-after 2 -> 3, or fewer dispatches;
+# a retry cannot help because the cost is inline CPU, not a race.
 #
 # A HIGH concurrency defect was suspected here (`buffer_unordered` measuring
 # 0.96x across widths 1/4/20) and then RETRACTED: varying only provider latency
