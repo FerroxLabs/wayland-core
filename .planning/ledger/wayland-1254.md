@@ -10,7 +10,7 @@ criteria:
     text: "On a shallow clone of a tree whose full-clone python3 scripts/check-criteria-ledger.py --offline is EXIT=1, bash scripts/preflight.sh does NOT exit 0 and does NOT print PRE-FLIGHT PASSED"
     state: not-met
     owner: core
-    note: "Filed 2026-08-30 by lane f13-w2-provider-url while answering its own refutation. Nothing has been done. MEASURED on 388de5d70 with three ledgers carrying a non-ancestor last_verified_commit: full clone -> ledger EXIT=1 (3 problems) and preflight EXIT=1 'PRE-FLIGHT FAILED'; shallow clone of the SAME commit, same working tree, same bad anchors -> ledger EXIT=0 and preflight EXIT=0 'PRE-FLIGHT PASSED'. CI is not fooled: ci.yml sets fetch-depth: 0 on the ledger job at .github/workflows/ci.yml:1387-1399 precisely to arm this. So preflight, whose stated purpose is to predict CI's host-side gates, predicts PASS where CI gives FAIL."
+    note: "Filed 2026-08-30 by lane f13-w2-provider-url while answering its own refutation. Nothing has been done. MEASURED on 388de5d70 with three ledgers carrying a non-ancestor last_verified_commit: full clone -> ledger EXIT=1 (3 problems) and preflight EXIT=1 'PRE-FLIGHT FAILED'; shallow clone of the SAME commit, same working tree, same bad anchors -> ledger EXIT=0 and preflight EXIT=0 'PRE-FLIGHT PASSED'. CI is not fooled: ci.yml sets fetch-depth: 0 on the ledger job at .github/workflows/ci.yml:1413-1425 precisely to arm this. So preflight, whose stated purpose is to predict CI's host-side gates, predicts PASS where CI gives FAIL."
   - id: c2
     text: "On any tree where check-criteria-ledger.py --offline exits 0, the string THIS IS NOT A PASS appears in bash scripts/preflight.sh's own stdout"
     state: not-met
