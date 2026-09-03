@@ -360,6 +360,13 @@ fn case_integrity_only_verification_does_not_establish_identity() {
 #[tokio::test]
 async fn case_denied_secret_is_decided_before_execution_and_no_value_can_be_carried() {
     let limits = reference_budget();
+    // `reference_backends` constructs all four backends, and each `::new`
+    // loads or creates its signing seed under `registry::state_dir()`. Without
+    // an override that resolves to the OPERATOR'S REAL config directory, so an
+    // ordinary test run wrote into it and raced the other unguarded tests in
+    // this binary over the same `keys/*.key` (gh#1298).
+    let _state = TempDir::new().unwrap();
+    let _state_dir = wcore_exec_backend::registry::StateDirGuard::set(_state.path());
     let task = reference_task("f25-secret-case", "f25-secret-nonce", limits);
     for reference in reference_backends(limits).unwrap() {
         let policy = reference
@@ -410,6 +417,13 @@ fn case_a_value_shaped_secret_name_is_refused() {
 #[tokio::test]
 async fn case_egress_decision_is_read_from_the_shared_policy_and_never_re_derived() {
     let limits = reference_budget();
+    // `reference_backends` constructs all four backends, and each `::new`
+    // loads or creates its signing seed under `registry::state_dir()`. Without
+    // an override that resolves to the OPERATOR'S REAL config directory, so an
+    // ordinary test run wrote into it and raced the other unguarded tests in
+    // this binary over the same `keys/*.key` (gh#1298).
+    let _state = TempDir::new().unwrap();
+    let _state_dir = wcore_exec_backend::registry::StateDirGuard::set(_state.path());
     let task = reference_task("f25-egress-case", "f25-egress-nonce", limits);
     for reference in reference_backends(limits).unwrap() {
         let policy = reference.backend.effective_policy(&task).unwrap();
@@ -499,6 +513,13 @@ fn case_no_fallback_a_refused_node_does_not_hand_its_work_to_a_healthy_one() {
 #[tokio::test]
 async fn case_no_fallback_an_unavailable_backend_refuses_rather_than_degrading() {
     let limits = reference_budget();
+    // `reference_backends` constructs all four backends, and each `::new`
+    // loads or creates its signing seed under `registry::state_dir()`. Without
+    // an override that resolves to the OPERATOR'S REAL config directory, so an
+    // ordinary test run wrote into it and raced the other unguarded tests in
+    // this binary over the same `keys/*.key` (gh#1298).
+    let _state = TempDir::new().unwrap();
+    let _state_dir = wcore_exec_backend::registry::StateDirGuard::set(_state.path());
     for reference in reference_backends(limits).unwrap() {
         let availability = reference.backend.availability().await;
         if availability.available {
