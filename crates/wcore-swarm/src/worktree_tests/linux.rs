@@ -709,20 +709,28 @@ fn try_read_child_pid(path: &std::path::Path) -> Option<u32> {
 /// reached that line yet", which under full-workspace load is a scheduling
 /// question with no honest short answer.
 ///
-/// 60s is chosen so it can only fire on a genuine hang: a fixture that never
-/// writes still fails, one minute later, with the same message. Making it
-/// generous costs nothing on a passing run, because the loop returns the
-/// instant the pid appears.
+/// 25s is chosen so it can only fire on a genuine hang while STILL FITTING
+/// INSIDE THE HARNESS'S OWN KILL. The default nextest profile is
+/// `slow-timeout = { period = "30s", terminate-after = 2 }`, i.e. a 60s hard
+/// kill, so a 60s deadline here is exactly the budget nextest allows and this
+/// assertion can never reach a developer running the default profile: the
+/// message that says "this is a hang, not a slow runner" was replaced by a bare
+/// `TIMEOUT [60.005s]`. Measured, mutating the fixture to publish an
+/// unterminated record: at 60s the run reports only the harness timeout; the
+/// diagnostic below is what makes that failure readable. 25s still leaves ~550x
+/// the isolated pass time (0.045s) and ~8x the 3s budget that was too tight,
+/// and a generous value costs nothing on a passing run because the loop returns
+/// the instant the pid appears.
 #[cfg(target_os = "linux")]
 async fn read_child_pid(path: &std::path::Path) -> u32 {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
     loop {
         if let Some(pid) = try_read_child_pid(path) {
             return pid;
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "fixture script never wrote a parseable child PID to {} within 60s \
+            "fixture script never wrote a parseable child PID to {} within 25s \
              -- that is a hang, not a slow runner (exists: {}, contents: {:?})",
             path.display(),
             path.exists(),
