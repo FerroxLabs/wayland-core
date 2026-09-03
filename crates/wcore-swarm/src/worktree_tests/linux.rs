@@ -650,12 +650,12 @@ async fn wait_until_process_gone(pid: u32) {
 /// value is not there YET — file absent, or present but not yet holding a
 /// parseable number.
 ///
-/// The "present but empty" case is the whole reason this exists, and it is not
-/// theoretical. Every fixture script writes its child PID as
-/// `printf %s "$child" > "$WAYLAND_TEST_PID_FILE"`, and a `>` redirection
-/// CREATES AND TRUNCATES the file when the shell sets the redirection up —
-/// strictly before `printf` puts any bytes in it. So there is a window in which
-/// the file exists and is zero bytes long.
+/// The "present but incomplete" case is the whole reason this exists, and it is
+/// not theoretical. Every fixture script publishes its child PID with
+/// `echo "$child" > "$WAYLAND_TEST_PID_FILE"`, and a `>` redirection CREATES
+/// AND TRUNCATES the file when the shell sets the redirection up — strictly
+/// before `echo` puts any bytes in it. So there is a window in which the file
+/// exists and is zero bytes long.
 ///
 /// `status_output_cap_kills_git_descendant` lands in that window: its child
 /// floods stdout in a busy loop, so `assert_clean()` can hit the 4096-byte cap
@@ -668,13 +668,28 @@ async fn wait_until_process_gone(pid: u32) {
 /// attempts of `retries = 2` included. Load widens the gap between the
 /// redirection and the write; it does not create it. Checking `.exists()` first
 /// does not help, because `exists()` is true for the empty file.
+///
+/// THE TERMINATOR IS THE ATOMICITY, and it is deliberately NOT a rename. The
+/// fixtures published to `$F.tmp` and `mv`-ed into place for one day, and `mv`
+/// is an EXTERNAL BINARY: a publish that had cost one `write(2)` inside a shell
+/// whose process tree is killed mid-flight became a `fork`, an `exec`, a `PATH`
+/// resolution and a second path operation. `status_output_cap_kills_git_
+/// descendant` then HARD-FAILED BOTH outer attempts of `CI (linux-container-
+/// ized)` in run 33713740549 with `exists: false` — the final path never
+/// appeared at all — while every main-based tree in the same window passed that
+/// test. `echo` is a shell BUILTIN and supplies the newline itself, so the
+/// publish is one write with a terminator on the end: a reader that requires
+/// the terminator can never observe a prefix of the pid, and nothing new has to
+/// resolve on `PATH` or outlive a fork.
 #[cfg(target_os = "linux")]
 fn try_read_child_pid(path: &std::path::Path) -> Option<u32> {
-    std::fs::read_to_string(path)
-        .ok()?
-        .trim()
-        .parse::<u32>()
-        .ok()
+    let record = std::fs::read_to_string(path).ok()?;
+    // A record with no terminator is a PARTIAL WRITE, not a short pid: `1234`
+    // observed as `12` parses happily and then names an unrelated process.
+    if !record.ends_with('\n') {
+        return None;
+    }
+    record.trim().parse::<u32>().ok()
 }
 
 /// Poll until a fixture script's child PID is readable, or fail loudly.
@@ -689,9 +704,10 @@ fn try_read_child_pid(path: &std::path::Path) -> Option<u32> {
 /// `linux.rs:693` was the single most frequent red in `CI (linux-containerized)`
 /// and it reddened `report` for lanes that had not touched this crate
 /// (wayland#1247). The window it was fighting is now closed at the source --
-/// the fixtures publish the pid with a rename, so the file never exists empty --
-/// and what remains is only "has the shell reached that line yet", which under
-/// full-workspace load is a scheduling question with no honest short answer.
+/// the fixtures terminate the pid with a newline and `try_read_child_pid`
+/// refuses an unterminated record -- and what remains is only "has the shell
+/// reached that line yet", which under full-workspace load is a scheduling
+/// question with no honest short answer.
 ///
 /// 60s is chosen so it can only fire on a genuine hang: a fixture that never
 /// writes still fails, one minute later, with the same message. Making it
@@ -938,7 +954,7 @@ async fn status_output_cap_kills_git_descendant() {
     let pid_file = fixture.path().join("flood-child.pid");
     let mut manager = WorktreeManager::new_with_git_script_and_limits(
         fixture.path(),
-        "case \" $* \" in *\" config \"*) exit 1;; esac\n(while :; do printf 0123456789abcdef; done) &\nchild=$!\nprintf %s \"$child\" > \"$WAYLAND_TEST_PID_FILE.tmp\" && mv \"$WAYLAND_TEST_PID_FILE.tmp\" \"$WAYLAND_TEST_PID_FILE\"\nwait \"$child\"",
+        "case \" $* \" in *\" config \"*) exit 1;; esac\n(while :; do printf 0123456789abcdef; done) &\nchild=$!\necho \"$child\" > \"$WAYLAND_TEST_PID_FILE\"\nwait \"$child\"",
         CaptureLimits {
             stdout_bytes: 4096,
             stderr_bytes: 4096,
@@ -968,7 +984,7 @@ async fn worktree_add_timeout_kills_tree_and_reports_preserved_residual() {
         // build host at PPID 1, alive 7d11h, each pinning ~99% of a core.
         // `sleep 2147483647` is portable to plain `sh`; `sleep infinity` is a
         // GNU extension and is deliberately not used.
-        "case \" $* \" in *\" config \"*) exit 1;; esac\nmkdir -p .swarm-worktrees/worker-1\n(sleep 2147483647) &\nchild=$!\nprintf %s \"$child\" > \"$WAYLAND_TEST_PID_FILE.tmp\" && mv \"$WAYLAND_TEST_PID_FILE.tmp\" \"$WAYLAND_TEST_PID_FILE\"\nwait \"$child\"",
+        "case \" $* \" in *\" config \"*) exit 1;; esac\nmkdir -p .swarm-worktrees/worker-1\n(sleep 2147483647) &\nchild=$!\necho \"$child\" > \"$WAYLAND_TEST_PID_FILE\"\nwait \"$child\"",
         CaptureLimits {
             stdout_bytes: 4096,
             stderr_bytes: 4096,
@@ -1027,7 +1043,7 @@ async fn cancelled_cleanup_kills_git_and_reports_residual() {
         // grandchild above: an interrupted run must not leave a core-burner on
         // a shared host. The recorded pid is this shell's own, and it stays
         // alive and unkillable-by-itself either way.
-        "printf %s \"$$\" > \"$WAYLAND_TEST_PID_FILE.tmp\" && mv \"$WAYLAND_TEST_PID_FILE.tmp\" \"$WAYLAND_TEST_PID_FILE\"\nsleep 2147483647",
+        "echo \"$$\" > \"$WAYLAND_TEST_PID_FILE\"\nsleep 2147483647",
         GIT_CAPTURE_LIMITS,
     )
     .unwrap();
