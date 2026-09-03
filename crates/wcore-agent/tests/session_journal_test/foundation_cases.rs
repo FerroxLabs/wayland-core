@@ -348,12 +348,31 @@ fn a_thinking_block_with_an_explicit_null_extra_still_decodes() {
     }];
 
     let snapshot = prepared_provider_request_snapshot(&request).unwrap();
-    // Against the pre-fix predicate this call returns
-    // Err(InvalidTransition("prepared provider request snapshot is not
-    // canonical")). Assert on the message, not merely on Ok: a bare unwrap
-    // would not distinguish this defect from any other decode failure.
-    let restored = decode_prepared_provider_request_snapshot(&snapshot)
-        .unwrap_or_else(|error| panic!("an explicit null extra must survive recovery: {error}"));
+    // core#425 c1 asks for the pre-fix failure to be asserted ON THE STRING,
+    // not merely observed as an Err. `unwrap_or_else` only interpolates the
+    // error into a panic message -- a DIFFERENT decode failure would fail this
+    // test in a way that reads identically, which is exactly the distinction
+    // the criterion exists to force. So match both outcomes: on a fixed tree
+    // the Ok arm is taken and the assertion never runs; against the pre-fix
+    // predicate the Err arm runs, PINS the message, and only then fails.
+    //
+    // The expected text carries the `invalid journal state transition:`
+    // wrapper. c1 quotes only the inner phrase; `JournalError`'s Display adds
+    // the prefix, and asserting the whole rendered message is strictly
+    // stronger than matching the fragment.
+    let restored = match decode_prepared_provider_request_snapshot(&snapshot) {
+        Ok(restored) => restored,
+        Err(error) => {
+            assert_eq!(
+                error.to_string(),
+                "invalid journal state transition: prepared provider request \
+                 snapshot is not canonical",
+                "decode failed, but NOT with the core#425 canonicality refusal \
+                 -- this test must not pass off an unrelated failure as the defect"
+            );
+            panic!("an explicit null extra must survive recovery: {error}");
+        }
+    };
 
     // The null COLLAPSES to absent, deliberately, and that is the whole fix:
     // both shapes now encode the same way, so the re-check cannot disagree
