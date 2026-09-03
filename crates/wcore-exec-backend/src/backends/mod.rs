@@ -410,70 +410,75 @@ pub fn load_or_create_seed(backend_id: &str) -> Result<[u8; 32]> {
 /// then chmod — published a private key at the umask default first.
 ///
 /// The temporary name is unique per CALL (pid plus a process-local counter),
-/// so no two writers can collide on the staging file either; `rename(2)` over
-/// an existing path is atomic, so the loser of the race simply publishes an
-/// identical-length file and every reader sees one whole seed or the other,
-/// never a fragment.
+/// so no two writers can collide on the staging file either, and the file is
+/// published with `hard_link`, which is atomic AND exclusive: exactly one
+/// racer creates the identity and every other reads it back.
 pub(crate) fn load_or_create_seed_at(path: &std::path::Path, what: &str) -> Result<[u8; 32]> {
     let dir = path.parent().ok_or_else(|| {
         ExecError::Receipt(format!("{what} path {} has no directory", path.display()))
     })?;
     std::fs::create_dir_all(dir)?;
-    if let Ok(bytes) = std::fs::read(path) {
-        if bytes.len() == 32 {
-            let mut seed = [0u8; 32];
-            seed.copy_from_slice(&bytes);
-            return Ok(seed);
-        }
-        // Kept a hard error rather than silently regenerating: rotating an
-        // identity behind the operator's back is worse than refusing. Now
-        // that we can no longer PRODUCE a short file, this means the file was
-        // corrupted by something else, so the message says how to recover.
-        return Err(ExecError::Receipt(format!(
-            "{what} at {} is not 32 bytes; it is corrupt. Delete it to have a \
-             new identity generated.",
-            path.display()
-        )));
-    }
-    let mut seed = [0u8; 32];
-    {
-        use rand::RngCore as _;
-        rand::rngs::OsRng.fill_bytes(&mut seed);
-    }
     // The staging name must be unique per CALL, not per process: two threads
     // in one process sharing a staging path would tear it exactly as they
-    // would have torn the target, which is the failure this helper exists to
-    // remove.
+    // would have torn the target.
     static STAGING_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let ticket = STAGING_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let staging = path.with_extension(format!("key.tmp.{}.{ticket}", std::process::id()));
-    std::fs::write(&staging, seed)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        let _ = std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o600));
-    }
-    if let Err(error) = std::fs::rename(&staging, path) {
+
+    // Bounded: after our own publish the file exists, so one extra pass is
+    // always enough. The bound exists so that something else deleting the
+    // file in a loop cannot spin here forever.
+    for _ in 0..3 {
+        if let Ok(bytes) = std::fs::read(path) {
+            if bytes.len() == 32 {
+                let mut seed = [0u8; 32];
+                seed.copy_from_slice(&bytes);
+                return Ok(seed);
+            }
+            // Kept a hard refusal rather than silently regenerating: rotating
+            // an identity behind the operator's back is worse than stopping.
+            // Now that we can no longer PRODUCE a short file, this means
+            // something else corrupted it, so the message says how to recover.
+            return Err(ExecError::Receipt(format!(
+                "{what} at {} is not 32 bytes; it is corrupt. Delete it to have a \
+                 new identity generated.",
+                path.display()
+            )));
+        }
+        let mut fresh = [0u8; 32];
+        {
+            use rand::RngCore as _;
+            rand::rngs::OsRng.fill_bytes(&mut fresh);
+        }
+        let ticket = STAGING_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let staging = path.with_extension(format!("key.tmp.{}.{ticket}", std::process::id()));
+        std::fs::write(&staging, fresh)?;
+        #[cfg(unix)]
+        {
+            // Set on the STAGING file, before it is reachable under the real
+            // name. The previous order -- create the target, write, then chmod
+            // -- published a private key at the umask default first.
+            use std::os::unix::fs::PermissionsExt as _;
+            let _ = std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o600));
+        }
+        // `hard_link` rather than `rename`, and that difference is the whole
+        // point. Both publish a COMPLETE file, so neither can be read torn.
+        // Only `hard_link` is also EXCLUSIVE: it fails with AlreadyExists
+        // instead of overwriting. Under `rename`, last writer wins the file,
+        // so an earlier racer returns a seed the disk does not have and signs
+        // with an identity that changes on its next start. Here the loser
+        // simply falls through and reads the winner's seed.
+        let published = std::fs::hard_link(&staging, path);
         let _ = std::fs::remove_file(&staging);
-        return Err(error.into());
+        match published {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
     }
-    // Read back rather than returning the seed we generated. Two processes
-    // reaching first-use together each generate a seed and each rename; the
-    // last rename wins the FILE, so a caller that returned its own seed would
-    // be using an identity the disk does not have and would silently change
-    // identity on its next run. Reading back makes every racer converge on the
-    // one seed that was actually persisted.
-    let published = std::fs::read(path)?;
-    if published.len() != 32 {
-        return Err(ExecError::Receipt(format!(
-            "{what} at {} is not 32 bytes; it is corrupt. Delete it to have a \
-             new identity generated.",
-            path.display()
-        )));
-    }
-    let mut seed = [0u8; 32];
-    seed.copy_from_slice(&published);
-    Ok(seed)
+    Err(ExecError::Receipt(format!(
+        "{what} at {} could not be established: it kept disappearing between \
+         publish and read",
+        path.display()
+    )))
 }
 
 /// The atomic-publish contract of [`load_or_create_seed_at`].
