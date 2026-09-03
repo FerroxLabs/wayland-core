@@ -382,16 +382,56 @@ pub fn local_node_attribution() -> Option<crate::node::attribution::NodeAttribut
 pub fn load_or_create_seed(backend_id: &str) -> Result<[u8; 32]> {
     crate::contract::validate_identifier("backend_id", backend_id)?;
     let dir: PathBuf = crate::registry::state_dir().join("keys");
-    std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{backend_id}.key"));
-    if let Ok(bytes) = std::fs::read(&path) {
+    load_or_create_seed_at(&path, "backend signing seed")
+}
+
+/// Read a persisted 32-byte seed, or generate and publish one ATOMICALLY.
+///
+/// The write is write-then-rename, for the same reason `registry::record`
+/// already is ("a cancel racing a run must never read a half file"): a bare
+/// `fs::write` truncates and then fills, so a concurrent reader inside that
+/// window sees a short file. This is not theoretical for a seed — the length
+/// check below turns a short read into a HARD error rather than a retry, so a
+/// torn write does not merely race, it REFUSES:
+///
+/// ```text
+/// backend signing seed at <path> is not 32 bytes
+/// ```
+///
+/// and after a crash or power loss mid-write it refuses FOREVER, because a
+/// truncated file is never regenerated. Two ordinary wayland-core processes
+/// sharing one machine reach this path concurrently by design — the product
+/// supports independent CLI processes over one state dir — so the window is
+/// reachable in production, not only under a test harness.
+///
+/// The mode is set on the temporary file BEFORE the rename, so the key is
+/// never momentarily world-readable. The previous order — create, write,
+/// then chmod — published a private key at the umask default first.
+///
+/// The temporary name is unique per CALL (pid plus a process-local counter),
+/// so no two writers can collide on the staging file either; `rename(2)` over
+/// an existing path is atomic, so the loser of the race simply publishes an
+/// identical-length file and every reader sees one whole seed or the other,
+/// never a fragment.
+pub(crate) fn load_or_create_seed_at(path: &std::path::Path, what: &str) -> Result<[u8; 32]> {
+    let dir = path.parent().ok_or_else(|| {
+        ExecError::Receipt(format!("{what} path {} has no directory", path.display()))
+    })?;
+    std::fs::create_dir_all(dir)?;
+    if let Ok(bytes) = std::fs::read(path) {
         if bytes.len() == 32 {
             let mut seed = [0u8; 32];
             seed.copy_from_slice(&bytes);
             return Ok(seed);
         }
+        // Kept a hard error rather than silently regenerating: rotating an
+        // identity behind the operator's back is worse than refusing. Now
+        // that we can no longer PRODUCE a short file, this means the file was
+        // corrupted by something else, so the message says how to recover.
         return Err(ExecError::Receipt(format!(
-            "backend signing seed at {} is not 32 bytes",
+            "{what} at {} is not 32 bytes; it is corrupt. Delete it to have a \
+             new identity generated.",
             path.display()
         )));
     }
@@ -400,13 +440,175 @@ pub fn load_or_create_seed(backend_id: &str) -> Result<[u8; 32]> {
         use rand::RngCore as _;
         rand::rngs::OsRng.fill_bytes(&mut seed);
     }
-    std::fs::write(&path, seed)?;
+    // The staging name must be unique per CALL, not per process: two threads
+    // in one process sharing a staging path would tear it exactly as they
+    // would have torn the target, which is the failure this helper exists to
+    // remove.
+    static STAGING_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let ticket = STAGING_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let staging = path.with_extension(format!("key.tmp.{}.{ticket}", std::process::id()));
+    std::fs::write(&staging, seed)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        let _ = std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o600));
     }
+    if let Err(error) = std::fs::rename(&staging, path) {
+        let _ = std::fs::remove_file(&staging);
+        return Err(error.into());
+    }
+    // Read back rather than returning the seed we generated. Two processes
+    // reaching first-use together each generate a seed and each rename; the
+    // last rename wins the FILE, so a caller that returned its own seed would
+    // be using an identity the disk does not have and would silently change
+    // identity on its next run. Reading back makes every racer converge on the
+    // one seed that was actually persisted.
+    let published = std::fs::read(path)?;
+    if published.len() != 32 {
+        return Err(ExecError::Receipt(format!(
+            "{what} at {} is not 32 bytes; it is corrupt. Delete it to have a \
+             new identity generated.",
+            path.display()
+        )));
+    }
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&published);
     Ok(seed)
+}
+
+/// The atomic-publish contract of [`load_or_create_seed_at`].
+///
+/// These target the helper directly rather than going through
+/// [`load_or_create_seed`], which resolves its path from the process-global
+/// state dir: a test that raced on THAT path would write into whatever state
+/// dir the process happens to have, and its behaviour would depend on which
+/// other tests ran alongside it. Pointing the helper at a `TempDir` makes the
+/// concurrency the only variable.
+#[cfg(test)]
+mod seed_publish_tests {
+    use super::load_or_create_seed_at;
+
+    #[test]
+    fn concurrent_first_use_never_observes_a_partial_seed() {
+        // The wayland#1250 signature. With a bare `fs::write` the target is
+        // truncated and then filled, so a reader inside that window gets a
+        // short file and the length check turns it into a HARD refusal:
+        // `... is not 32 bytes`. Sixteen threads against one fresh path make
+        // that window overlap; the atomic publish removes it.
+        //
+        // Repeated because a single round can miss a race by luck, and a test
+        // that samples a window once is how this class survives.
+        for round in 0..24 {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("container.key");
+            let seeds = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(16));
+            std::thread::scope(|scope| {
+                for _ in 0..16 {
+                    let path = path.clone();
+                    let seeds = std::sync::Arc::clone(&seeds);
+                    let barrier = std::sync::Arc::clone(&barrier);
+                    scope.spawn(move || {
+                        // Release them together, or they queue and never race.
+                        barrier.wait();
+                        let seed = load_or_create_seed_at(&path, "backend signing seed")
+                            .unwrap_or_else(|error| {
+                                panic!("round {round}: concurrent first use refused: {error}")
+                            });
+                        seeds.lock().expect("seeds lock").push(seed);
+                    });
+                }
+            });
+            let seeds = seeds.lock().expect("seeds lock");
+            assert_eq!(seeds.len(), 16, "round {round}: every caller must return");
+            // Every racer must end up on the seed that was actually PERSISTED,
+            // or a process is running an identity the disk does not have and
+            // will change identity on its next start.
+            let on_disk = std::fs::read(&path).expect("published seed");
+            assert_eq!(
+                on_disk.len(),
+                32,
+                "round {round}: published seed is 32 bytes"
+            );
+            for (i, seed) in seeds.iter().enumerate() {
+                assert_eq!(
+                    seed.as_slice(),
+                    on_disk.as_slice(),
+                    "round {round}: caller {i} returned a seed that is not the persisted one"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_staging_file_survives_a_successful_publish() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("local.key");
+        load_or_create_seed_at(&path, "backend signing seed").expect("first use");
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("read dir")
+            .filter_map(|entry| entry.ok().map(|entry| entry.file_name()))
+            .filter(|name| name.to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "a completed publish must leave no staging file: {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn a_corrupt_seed_is_refused_with_a_recovery_instruction() {
+        // Kept a hard refusal on purpose: silently regenerating would rotate
+        // an identity behind the operator's back. The message must therefore
+        // say how to recover, because nothing else will.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("ssh.key");
+        std::fs::write(&path, [7u8; 31]).expect("seed a short file");
+        let error = load_or_create_seed_at(&path, "backend signing seed")
+            .expect_err("a 31-byte seed must be refused");
+        let message = error.to_string();
+        assert!(message.contains("is not 32 bytes"), "{message}");
+        assert!(
+            message.contains("Delete it"),
+            "the refusal must be actionable: {message}"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("still there").len(),
+            31,
+            "refusing must not destroy the file the operator may want to inspect"
+        );
+    }
+
+    #[test]
+    fn an_existing_seed_is_returned_unchanged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("cloud.key");
+        let existing = [9u8; 32];
+        std::fs::write(&path, existing).expect("seed");
+        let seed = load_or_create_seed_at(&path, "backend signing seed").expect("load");
+        assert_eq!(seed, existing, "an existing identity must never be rotated");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_seed_is_never_published_world_readable() {
+        // The mode is set on the staging file BEFORE the rename. The previous
+        // order -- create, write, then chmod -- published a private key at the
+        // umask default first, so a reader in that window could take it.
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("local.key");
+        load_or_create_seed_at(&path, "backend signing seed").expect("first use");
+        let mode = std::fs::metadata(&path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "a signing seed must be owner-only, got {mode:o}"
+        );
+    }
 }
 
 #[cfg(test)]

@@ -274,32 +274,10 @@ pub(crate) fn short(s: &str) -> String {
 
 /// Load or create this host's node signing seed, alongside the backend seeds.
 pub fn load_or_create_node_seed() -> Result<[u8; 32]> {
-    let dir = crate::registry::state_dir().join("keys");
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join("node.key");
-    if let Ok(bytes) = std::fs::read(&path) {
-        if bytes.len() == 32 {
-            let mut seed = [0u8; 32];
-            seed.copy_from_slice(&bytes);
-            return Ok(seed);
-        }
-        return Err(ExecError::Receipt(format!(
-            "node signing seed at {} is not 32 bytes",
-            path.display()
-        )));
-    }
-    let mut seed = [0u8; 32];
-    {
-        use rand::RngCore as _;
-        rand::rngs::OsRng.fill_bytes(&mut seed);
-    }
-    std::fs::write(&path, seed)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    }
-    Ok(seed)
+    // Same atomic publish as the backend seeds, through the same helper --
+    // this file carried a byte-identical copy of the torn-write hazard.
+    let path = crate::registry::state_dir().join("keys").join("node.key");
+    crate::backends::load_or_create_seed_at(&path, "node signing seed")
 }
 
 #[cfg(test)]
