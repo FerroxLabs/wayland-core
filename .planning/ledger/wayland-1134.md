@@ -9,13 +9,13 @@ criteria:
   - id: c1
     text: "A shared-process lib leg runs in CI, floored so it cannot pass while scanning nothing"
     state: met
-    evidence: "file:.github/workflows/ci.yml:2201:Executed $total tests, expected at least $MIN. A suite that exits 0 having run nothing"
+    evidence: "file:.github/workflows/ci.yml:2241:Executed $total tests, expected at least $MIN. A suite that exits 0 having run nothing"
     owner: core
-    note: "RE-ANCHORED 2026-08-30 for wayland#1198: the old anchor ci.yml:1806 resolved on a line count alone and landed on a bare `#` inside the retry-evidence comment block, ~230 lines above the step it claimed. It now cites the LIB leg's floor branch itself -- the `exit 1` taken when the summed executed count falls under MIN -- which is the half of this criterion (`floored so it cannot pass while scanning nothing`) that a step-name anchor would not prove. ANCHOR IMPRECISE, NOT BROKEN: ci.yml:1806 now lands inside the 'Shared-process lib suite (#1134)' comment block rather than on the cargo test --workspace --lib command itself."
+    note: "RE-ANCHORED 2026-09-03 by FerroxLabs/wayland-core#404 c3: the measured wall-time table added to the ci-linux timeout rationale shifts everything below it, and this token moved outside the +/-20 window. The anchored CONTENT is byte-identical; only its position changed. A PR that moves lines in a file some ledger anchors into owes that ledger a re-anchor in the same change -- and ci.yml runs the checker --offline, so nothing on the PR would have said so. PREVIOUS: RE-ANCHORED 2026-08-30 for wayland#1198: the old anchor ci.yml:1806 resolved on a line count alone and landed on a bare `#` inside the retry-evidence comment block, ~230 lines above the step it claimed. It now cites the LIB leg's floor branch itself -- the `exit 1` taken when the summed executed count falls under MIN -- which is the half of this criterion (`floored so it cannot pass while scanning nothing`) that a step-name anchor would not prove. ANCHOR IMPRECISE, NOT BROKEN: ci.yml:1806 now lands inside the 'Shared-process lib suite (#1134)' comment block rather than on the cargo test --workspace --lib command itself."
   - id: c2
     text: "A shared-process integration leg runs in CI over the targets that touch process globals"
     state: met
-    evidence: "file:.github/workflows/ci.yml:2277:done < <(python3 scripts/check-test-env-globals.py --shared-process-targets)"
+    evidence: "file:.github/workflows/ci.yml:2317:done < <(python3 scripts/check-test-env-globals.py --shared-process-targets)"
     note: "RE-ANCHORED 2026-08-30 for wayland#1198: the old anchor ci.yml:1888 resolved and landed inside the SWARM delegated-dispatch filterset -- a different step, and the wrong one of the two legs this criterion distinguishes. It now cites the line that feeds the integration loop, which is where `over the targets that touch process globals` is actually decided: the target list is DERIVED from the process-global scanner rather than hand-listed."
     owner: core
   - id: c3

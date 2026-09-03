@@ -1238,11 +1238,37 @@ jobs:
     # that does all the work and is then killed before it can report is the
     # most expensive possible outcome -- 2 hours for no verdict.
     #
-    # 150 is ~50% over the measured figure. Deliberately NOT larger: this
-    # timeout is the only thing that catches a genuine hang, so it has to stay
-    # close enough to the real duration to still mean something. If the
+    # 150 is ~50% over the median measured figure. Deliberately NOT larger:
+    # this timeout is the only thing that catches a genuine hang, so it has to
+    # stay close enough to the real duration to still mean something. If the
     # measured figure moves materially, move this WITH it and update the table
     # above rather than widening the gap.
+    #
+    # RE-MEASURED 2026-09-02/03, n=9 consecutive runs of this job, against the
+    # 150 limit that the three runs above bought. This is FerroxLabs/wayland-core#404 c3:
+    # the point is that the next raise is a decision and not a reaction.
+    #   33705709380   87.0 min  (58%)      33702060702  102.0 min  (68%)
+    #   33711272322   95.5 min  (64%)      33715116459  105.5 min  (70%)
+    #   33715054688   97.0 min  (65%)      33713740549  116.1 min  (77%)
+    #   33707672948  100.1 min  (67%)      33708958434  122.8 min  (82%)
+    #                                      33707789181  123.3 min  (82%)
+    # Median 102.0 min (68%), max 123.3 min (82%), min 87.0 min (58%).
+    #
+    # READ THE MAX, NOT THE MEDIAN. "~50% over" is true of the median and is
+    # NOT the headroom this timeout actually has: the worst of nine runs sits
+    # 18% under the wall, which is the same 18% the block above calls "too thin
+    # for a job of this length" -- the figure that justified moving 90 -> 150 in
+    # the first place. The spread is 87.0-123.3, a 36-minute band on trees of
+    # comparable size, so a raise decided off the median is decided off the
+    # wrong statistic.
+    #
+    # NOT RAISED HERE, deliberately, and this is the decision rather than a
+    # deferral: no run in this sample was killed, the median has not moved
+    # (99-102 before, 102.0 now), and the block above is explicit that widening
+    # the gap costs the timeout its ability to catch a hang. What HAS changed is
+    # that the distribution is now known to be wide rather than tight. The
+    # trigger for the next raise is a single KILLED run or a median above
+    # 115 min (77%), whichever comes first -- not another look at this table.
     #
     # NOT a cache problem: THIS JOB caches nothing. Its only `uses:` are
     # actions/checkout, nick-fields/retry and actions/upload-artifact, so there
