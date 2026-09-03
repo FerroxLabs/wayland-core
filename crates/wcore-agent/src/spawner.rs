@@ -3385,19 +3385,67 @@ mod spawn_task_set_tests {
         );
         assert_eq!(
             provider.peak.load(Ordering::SeqCst),
+            wcore_swarm::MAX_CONCURRENT_WORKERS,
+            "the shared active-child cap was exceeded: peak={} against a limit of {}",
+            provider.peak.load(Ordering::SeqCst),
             wcore_swarm::MAX_CONCURRENT_WORKERS
         );
 
         provider.release.add_permits(TOTAL_CHILDREN);
-        let (first_results, second_results) = tokio::time::timeout(Duration::from_secs(15), run)
-            .await
-            .expect("all queued children must run after permits are released")
+        // A LIVENESS BACKSTOP, not the property. What this phase asserts is that
+        // every queued child RUNS once permits exist -- never that it manages it
+        // inside some budget. The literal 15s made the budget the assertion, so
+        // host load decided the verdict: measured on hetzner-dsm (wayland#1238),
+        // the test passes 36/36 below loadavg ~71, passes in 15.510s at ~192 --
+        // barely inside its own bound -- and fails at 19.282s and 26.997s at
+        // ~260 and ~211. Two byte-different binaries identified by sha256 and
+        // run interleaved were indistinguishable (36/36 each), so the load is
+        // the variable and the tree is not.
+        //
+        // It is also the wrong bound for the leg that actually reddens. This
+        // test fails in `Shared-process lib suite (cargo test, one process per
+        // binary)`, where 2,699 wcore-agent lib tests share ONE process on a
+        // ~4-core runner -- and it PASSED the nextest leg of the same run in
+        // 5.151s (run 33724413765). A budget that survives one regime and not
+        // the other is measuring the regime.
+        //
+        // 120s is chosen so it can only fire on a genuine hang: 4.4x the worst
+        // failure ever measured for it (26.997s) and ~8x the old bound, while
+        // still bounding the step -- `cargo test` applies no per-test timeout of
+        // its own, so removing the bound entirely would let a real hang run to
+        // the job's 150-minute wall. Being generous costs nothing on a passing
+        // run, because the await returns the instant the children finish.
+        /// The backstop, named so the panic below cannot drift away from it.
+        /// A message that hardcodes a number living somewhere else is how a
+        /// comment starts lying.
+        const DRAIN_BACKSTOP: Duration = Duration::from_secs(120);
+        let all_children_ran = tokio::time::timeout(DRAIN_BACKSTOP, run).await;
+        let (first_results, second_results) = all_children_ran
+            .unwrap_or_else(|_| {
+                // NAME THE INVARIANT, NOT THE CLOCK. `active` and `peak` are the
+                // quantities this test exists to bound, so a failure that quotes
+                // them is diagnosable; one that says only "timed out" sends the
+                // next reader to the budget, which is where the last two days
+                // went.
+                panic!(
+                    "queued children did not all run within {DRAIN_BACKSTOP:?} of permits \
+                     being released: active={} peak={} calls={} of {TOTAL_CHILDREN} \
+                     expected, cap={}",
+                    provider.active.load(Ordering::SeqCst),
+                    provider.peak.load(Ordering::SeqCst),
+                    provider.calls.load(Ordering::SeqCst),
+                    wcore_swarm::MAX_CONCURRENT_WORKERS,
+                )
+            })
             .expect("parallel spawn task must not panic");
         assert_eq!(first_results.len(), CHILDREN_PER_CALL);
         assert_eq!(second_results.len(), CHILDREN_PER_CALL);
         assert_eq!(provider.calls.load(Ordering::SeqCst), TOTAL_CHILDREN);
         assert_eq!(provider.active.load(Ordering::SeqCst), 0);
         assert_eq!(
+            provider.peak.load(Ordering::SeqCst),
+            wcore_swarm::MAX_CONCURRENT_WORKERS,
+            "the shared active-child cap was exceeded: peak={} against a limit of {}",
             provider.peak.load(Ordering::SeqCst),
             wcore_swarm::MAX_CONCURRENT_WORKERS
         );
