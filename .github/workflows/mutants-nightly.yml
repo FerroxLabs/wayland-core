@@ -132,6 +132,17 @@ jobs:
           # which is what filed the empty "surviving mutants: none" issues.
           rm -rf "target/mutants-${CRATE}"
 
+          # cargo-mutants does NOT create the parent of `--output`. On a runner
+          # with no `target/` -- which is every run, because the cache below
+          # has never had anything to save -- it exits immediately with
+          #   Error: create output parent directory "target/mutants-<crate>"
+          #     No such file or directory (os error 2)
+          # That is what killed all 87 runs of this workflow, each in under 40
+          # seconds, and it was self-sustaining: no target/ -> mutants fails ->
+          # nothing is built -> "Path Validation Error: Path(s) specified in
+          # the action for caching do(es) not exist" -> no cache -> no target/.
+          mkdir -p target
+
           IN_PLACE_FLAG=""
           if [ "${IN_PLACE}" = "true" ]; then
             IN_PLACE_FLAG="--in-place"
@@ -193,7 +204,17 @@ jobs:
             echo "::warning title=mutants ${CRATE}::cargo-mutants did not produce a summary (exit ${MUTANTS_EXIT}); see the uploaded log artifact"
           fi
 
-          exit 0   # Never fail the matrix leg; results flow via issue/annotation
+          # A leg that produced RESULTS never fails here, however bad the catch
+          # rate: surviving mutants are a finding, and they flow via the issue
+          # and the annotation. But a leg that produced NO DATA is a harness
+          # failure, not a result, and swallowing it is what let this workflow
+          # read `success` 87 times while measuring nothing. A gate that cannot
+          # fail is worth exactly as much as one that cannot pass.
+          if [ "${REAL_DATA}" != "true" ]; then
+            echo "::error title=mutants ${CRATE}::no mutation data was produced (cargo-mutants exit ${MUTANTS_EXIT}). This is a harness failure, not a coverage result."
+            exit 1
+          fi
+          exit 0
         shell: bash
 
       # Safety: --in-place may leave mutated source if the job is cancelled.
