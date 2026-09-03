@@ -1991,6 +1991,16 @@ struct PreparedMessageV1 {
     timestamp: Option<chrono::DateTime<chrono::Utc>>,
     cache_breakpoint: Option<wcore_types::message::MessageCacheHint>,
 }
+/// `skip_serializing_if` for a field where absence and an explicit null must
+/// encode identically, so that encode -> decode -> encode is a bijection over
+/// the field's whole domain.
+///
+/// Unlike `model::is_absent_json_value` this has no legacy branch, because no
+/// already-written journal can carry the collapsed form of the field that uses
+/// it. See the note on `PreparedContentBlockV1::Thinking::extra`.
+fn is_absent_or_explicitly_null(value: &Option<serde_json::Value>) -> bool {
+    matches!(value, None | Some(serde_json::Value::Null))
+}
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", deny_unknown_fields)]
@@ -2023,7 +2033,29 @@ enum PreparedContentBlockV1 {
         /// for every block without metadata, so journals written before this
         /// field existed still decode under `deny_unknown_fields` and no
         /// already-written digest changes.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ///
+        /// The predicate must collapse `Some(Value::Null)` too, and NOT be
+        /// `Option::is_none`. With `is_none`, an explicit null encodes as
+        /// `"extra":null` and decodes back to `Some(Null)`, which re-encodes
+        /// WITHOUT the field -- so the canonicality re-check at
+        /// [`decode_prepared_provider_request_snapshot`] refuses the snapshot
+        /// permanently with "prepared provider request snapshot is not
+        /// canonical". That is the same class as the 23B-H1 `effect_receipt`
+        /// defect (journals written successfully, never readable again),
+        /// remedied there by `is_absent_json_value`. This field was added
+        /// later, for wayland#1170, and never got the remedy. See core#425.
+        ///
+        /// Deliberately NOT `model::is_absent_json_value`: that one consults
+        /// the `LEGACY_EFFECT_RECEIPT_ENCODING` thread-local, which exists so
+        /// journals that already hold the pre-23B-H1 `effect_receipt` bytes
+        /// can be re-read. No journal can hold `"extra":null` for a Thinking
+        /// block, so tying this field to that toggle would make its encoding
+        /// silently revert whenever a legacy receipt is being decoded.
+        ///
+        /// The sibling `ToolUse.extra` needs no predicate at all: it has no
+        /// `skip_serializing_if`, so it round-trips `Some(Null)` already. The
+        /// ABSENCE of the attribute is what makes it safe.
+        #[serde(default, skip_serializing_if = "is_absent_or_explicitly_null")]
         extra: Option<serde_json::Value>,
     },
     #[serde(rename = "image")]
