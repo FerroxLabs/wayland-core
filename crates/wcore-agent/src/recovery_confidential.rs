@@ -203,12 +203,30 @@ pub(crate) enum KeyStoreReach {
 /// cannot drift back into one sentence.
 fn key_store_timeout_message(waited: Duration, reach: KeyStoreReach, backend: &str) -> String {
     let seconds = waited.as_secs();
-    let _ = reach;
-    format!(
-        "the configured credential store ({backend}) did not answer within {seconds}s, so this \
-         profile's recovery key could not be obtained. Unlock or repair the OS keyring for this \
-         profile, or turn durable sessions off with [session] enabled = false"
-    )
+    match reach {
+        // The store WAS asked and did not answer. It is the operator's to
+        // repair, and this arm is why the fix is not just softer wording:
+        // deleting the repair remedy outright would leave a genuinely locked
+        // or wedged keyring with no remedy at all.
+        KeyStoreReach::Asked => format!(
+            "the configured credential store ({backend}) was asked for this profile's recovery \
+             key and did not answer within {seconds}s. Unlock or repair the OS keyring for this \
+             profile, or turn durable sessions off with [session] enabled = false"
+        ),
+        // Nothing was asked of the store, so nothing about the store is
+        // known. Both of the remedies above assume otherwise: one sends the
+        // operator to repair something that may be perfectly healthy, and the
+        // other trades a feature away permanently to work around a transient
+        // scheduling condition that a later turn recovers from by itself.
+        KeyStoreReach::NeverAsked => format!(
+            "the wait for this profile's recovery key expired after {seconds}s before the \
+             configured credential store ({backend}) was ever asked for it: this host did not \
+             run the load in time, so the store was never asked, reported nothing, and nothing \
+             here shows it to be at fault. Send the same request again — and if this keeps \
+             happening, reduce what else is running on this host. A key that loads later is \
+             adopted by a later turn without a restart"
+        ),
+    }
 }
 
 /// Which store a timeout is ABOUT, named from config alone.

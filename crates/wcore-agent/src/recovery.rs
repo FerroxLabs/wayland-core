@@ -725,9 +725,11 @@ fn locked_session_refusal(
     // refusal. Its own text already names the config change that can.
     //
     // `KeyStoreTimedOut` joins it for the same reason from the other
-    // direction: the store was never reached, so nothing is known about
-    // whether a passphrase would help, and its own text already names the
-    // remedy that fits — unlock or repair the OS keyring and resume again.
+    // direction: the store did not answer, so nothing is known about whether
+    // a passphrase would help, and its own text already names the remedy that
+    // fits the reach it actually had — repair the store when the store was
+    // asked and stayed silent, and nothing to repair when the wait expired
+    // before the store was asked anything (wayland#1302).
     let unlock = if matches!(
         cause,
         crate::recovery_confidential::RecoveryConfidentialError::PlaintextBackendRejected
