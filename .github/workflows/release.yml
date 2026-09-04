@@ -326,7 +326,7 @@ jobs:
       # .cargo/config.toml ever selected it as the linker.
       - name: Setup vx (installs Rust from vx.toml)
         if: runner.os != 'Linux'
-        uses: loonghao/vx@v0.9.17
+        uses: loonghao/vx@v0.9.31
         with:
           setup: 'true'
           cache: 'true'
@@ -548,7 +548,7 @@ jobs:
       # by `secret` mode below).
       - name: Azure login (OIDC federation, no stored secret)
         if: steps.winsign.outputs.mode == 'oidc'
-        uses: azure/login@v3.0.1
+        uses: azure/login@v3.0.2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
@@ -731,7 +731,7 @@ jobs:
 
       - name: Setup vx (installs Rust from vx.toml)
         if: steps.manifest_guard.outputs.skip == 'false'
-        uses: loonghao/vx@v0.9.17
+        uses: loonghao/vx@v0.9.31
         with:
           setup: 'true'
           cache: 'true'

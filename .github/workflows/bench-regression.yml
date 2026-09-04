@@ -61,7 +61,7 @@ jobs:
           sudo apt-get install -y libdbus-1-dev libseccomp-dev pkg-config mold
 
       - name: Setup vx (installs Rust from vx.toml)
-        uses: loonghao/vx@v0.9.17
+        uses: loonghao/vx@v0.9.31
         with:
           setup: 'true'
           cache: 'true'
