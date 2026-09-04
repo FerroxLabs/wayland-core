@@ -4159,18 +4159,38 @@ impl<'a> UserTurnInput<'a> {
 enum ReplayProtectionLoss {
     /// The host has nowhere to keep a sealing key.
     NoSecureStore,
-    /// The host has somewhere to keep it, and that somewhere did not
-    /// answer inside the budget the pre-provider path imposes on itself.
-    KeyStoreTimedOut,
+    /// The host has somewhere to keep it, that somewhere was asked, and it
+    /// did not answer inside the budget the pre-provider path imposes on
+    /// itself.
+    KeyStoreSilent,
+    /// The budget expired before the store was asked anything at all — the
+    /// load never ran. Split from [`Self::KeyStoreSilent`] for wayland#1302:
+    /// the two were one arm, and the shared remedy sent operators to repair a
+    /// store that had been measured healthy 104 times.
+    KeyStoreNeverAsked,
 }
 
 impl ReplayProtectionLoss {
+    fn from_key_store_reach(reach: crate::recovery_confidential::KeyStoreReach) -> Self {
+        match reach {
+            crate::recovery_confidential::KeyStoreReach::Asked => Self::KeyStoreSilent,
+            crate::recovery_confidential::KeyStoreReach::NeverAsked => Self::KeyStoreNeverAsked,
+        }
+    }
+
     fn condition(self) -> &'static str {
         match self {
             Self::NoSecureStore => {
                 "this host has no usable OS keyring and no unlocked credentials vault"
             }
-            Self::KeyStoreTimedOut => "this profile's credential store did not answer in time",
+            Self::KeyStoreSilent => {
+                "this profile's credential store was asked for the recovery key and did not \
+                 answer in time"
+            }
+            Self::KeyStoreNeverAsked => {
+                "this host did not run the recovery-key load in time and this profile's \
+                 credential store was never asked for the key"
+            }
         }
     }
 
@@ -4181,11 +4201,37 @@ impl ReplayProtectionLoss {
                  replay, or [session] require_durability = true to refuse to run this way \
                  at all."
             }
-            Self::KeyStoreTimedOut => {
+            Self::KeyStoreSilent => {
                 "Unlock or repair the OS keyring for this profile to restore replay — a \
                  store that answers later is picked up on a later turn without a restart \
                  — or set [session] require_durability = true to refuse to run this way \
                  at all."
+            }
+            Self::KeyStoreNeverAsked => {
+                "Nothing here needs fixing: the store was never consulted, and a key that \
+                 loads later is adopted by a later turn without a restart. Send the message \
+                 again — and if this keeps happening, reduce what else is running on this \
+                 host — or set [session] require_durability = true to refuse to run this way \
+                 at all."
+            }
+        }
+    }
+
+    /// The same guidance for a turn that is being REFUSED rather than
+    /// degraded. `require_durability = true` is already set on that path, so
+    /// offering it as the way out would be advice the operator has taken.
+    fn refusal_remedy(self) -> &'static str {
+        match self {
+            Self::NoSecureStore => {
+                "Set WAYLAND_VAULT_PASSPHRASE_FD or WAYLAND_VAULT_PASSPHRASE and send the \
+                 message again."
+            }
+            Self::KeyStoreSilent => {
+                "Unlock or repair the OS keyring for this profile and send the message again."
+            }
+            Self::KeyStoreNeverAsked => {
+                "Nothing here needs fixing: the store was never consulted. Send the message \
+                 again — and if this keeps happening, reduce what else is running on this host."
             }
         }
     }
@@ -4193,7 +4239,8 @@ impl ReplayProtectionLoss {
     fn log_cause(self) -> &'static str {
         match self {
             Self::NoSecureStore => "no-secure-store",
-            Self::KeyStoreTimedOut => "key-store-timed-out",
+            Self::KeyStoreSilent => "key-store-timed-out",
+            Self::KeyStoreNeverAsked => "key-store-never-asked",
         }
     }
 }
@@ -9903,21 +9950,25 @@ impl AgentEngine {
                 );
             }
             Err(crate::recovery_confidential::RecoveryConfidentialError::KeyStoreTimedOut {
+                reach,
                 ..
             }) => {
+                // WHICH timeout this was decides both halves of what is said:
+                // a store that was asked and stayed silent is the operator's
+                // to repair, and a load that never reached the store is not
+                // evidence about the store at all. Saying the first when the
+                // second happened is wayland#1302.
+                let loss = ReplayProtectionLoss::from_key_store_reach(reach);
                 if self.config.session.require_durability {
-                    return Err(AgentError::SessionAuthority(
-                        "[session] require_durability = true, but this profile's credential \
-                         store did not answer in time, so this turn's provider request cannot \
-                         be sealed for crash recovery. Unlock or repair the OS keyring for this \
-                         profile and send the message again, or set [session] \
-                         require_durability = false to run turns that cannot be replayed."
-                            .to_string(),
-                    ));
+                    return Err(AgentError::SessionAuthority(format!(
+                        "[session] require_durability = true, but {}, so this turn's provider \
+                         request cannot be sealed for crash recovery. {} Or set [session] \
+                         require_durability = false to run turns that cannot be replayed.",
+                        loss.condition(),
+                        loss.refusal_remedy(),
+                    )));
                 }
-                self.announce_replay_protection_unavailable_for_this_turn(
-                    ReplayProtectionLoss::KeyStoreTimedOut,
-                );
+                self.announce_replay_protection_unavailable_for_this_turn(loss);
             }
             Err(error) => return Err(AgentError::SessionAuthority(error.to_string())),
         }
