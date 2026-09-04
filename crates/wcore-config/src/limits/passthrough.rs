@@ -114,7 +114,7 @@
 //! `us.`/`eu.`/`jp.`/`au.`/`global.`, `@default`, `@20250929`, `-v1:0` --
 //! all resolve through the same arm and do not need their own rows.
 //!
-//! Snapshot: models.dev, 2026-08-28 (HTTP 200, 4,424,885 bytes).
+//! Snapshot: models.dev, 2026-09-04 (HTTP 200, 4,483,697 bytes).
 
 /// `(provider-native model id, expected output ceiling, expected context window)`.
 ///
@@ -188,6 +188,18 @@ pub(crate) const PASSTHROUGH_VENDOR_MODELS: &[(&str, u32, u32)] = &[
     ("gpt-5.6-luna", 128_000, 1_050_000),
     ("gpt-5.6-sol", 128_000, 1_050_000),
     ("gpt-5.6-terra", 128_000, 1_050_000),
+    // Added 2026-09-04. New family: the freshness gate failed because
+    // `gpt-6-astra` is served by the vendor-operated `openai` endpoint and
+    // reaches users through provider-native --model passthrough, but nothing
+    // armed it -- so it took the CompactConfig default and a 1,050,000-window
+    // model was silently sized at 200,000. That is customer bug #165 exactly.
+    //
+    // 1,050,000 / 128,000 is the vendor row and it is not a lone reading:
+    // github-copilot, openrouter, kilo, vercel, venice and llmgateway-providers
+    // all report the same pair. The single dissent is llmgateway at
+    // output == context == 1,050,000, which is the aggregator "unknown"
+    // spelling rather than a ceiling, so it is not treated as a lower figure.
+    ("gpt-6-astra", 128_000, 1_050_000),
     // --- xAI Grok 3.x / 4.x - vendor rows: xai, amazon-bedrock (xai. prefix).
     ("grok-4.20-0309-non-reasoning", 30_000, 1_000_000),
     ("grok-4.20-0309-reasoning", 30_000, 1_000_000),
