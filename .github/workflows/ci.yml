@@ -2973,6 +2973,15 @@ jobs:
         # so a dependency cannot be added to `needs:` and forgotten here.
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
+          # A SKIP MUST BE EXPLAINED, NOT ASSUMED (wayland#1291 c2). The gate
+          # reads this file to decide whether a dependency that concluded
+          # `skipped` DECLARED a reason it may not run -- a job-level `if:`, or
+          # a `needs:` it can cascade from. Four of the six jobs above declare
+          # neither, and until 2026-09-04 a skip of any of them was graded
+          # exactly like the rationed macOS leg: `ok`. The permission is read
+          # from the workflow rather than listed in the gate, so this stays the
+          # c1 property -- the only list is `jobs:` itself.
+          WORKFLOW_FILE: .github/workflows/ci.yml
         run: bash .github/scripts/assert-no-dependency-failed.sh
 
       # `merge-multiple: true` was REMOVED 2026-08-02 (lane/ci-windows-fallback).

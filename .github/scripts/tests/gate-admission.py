@@ -334,6 +334,50 @@ emit(
     repr(aggregate),
 )
 
+# ── the aggregate is told which workflow defines the jobs it grades ──────────
+#
+# wayland#1291 c2. The gate decides whether a `skipped` dependency was ALLOWED
+# to skip by reading that job's own definition, so it needs the file that holds
+# it. Getting this wrong is silent in the worst direction: point it at another
+# workflow and every dependency becomes "not defined here", which fails closed
+# and is loud -- but OMIT it and the gate cannot grade a skip at all. It is
+# required unconditionally for that reason, and asserted here rather than
+# trusted, because the env key is one deletion away from being gone with every
+# self-test still green. Discovered from the call sites, not listed: a second
+# caller gets the same rule for free.
+wf_offenders = []
+wf_callers = 0
+for path, doc in parsed.items():
+    for job_id, job in (doc.get("jobs") or {}).items():
+        if not isinstance(job, dict):
+            continue
+        for step in job.get("steps") or []:
+            if not isinstance(step, dict):
+                continue
+            if "assert-no-dependency-failed.sh" not in str(step.get("run") or ""):
+                continue
+            wf_callers += 1
+            env = step.get("env") or {}
+            declared = str(env.get("WORKFLOW_FILE") or "")
+            want = os.path.join(".github", "workflows", os.path.basename(path))
+            if declared != want:
+                wf_offenders.append(
+                    "%s / %s / %r passes WORKFLOW_FILE=%r, wants %r"
+                    % (os.path.basename(path), job_id,
+                       step.get("name") or step.get("uses"), declared, want)
+                )
+emit(
+    not wf_offenders,
+    "the aggregate gate is told which workflow defines its dependencies",
+    "\n".join(wf_offenders),
+)
+emit(
+    wf_callers >= 1,
+    "the WORKFLOW_FILE rule found a caller to grade (anti-vacuity)",
+    "callers seen: %d" % wf_callers,
+)
+info("aggregate-gate call sites graded for WORKFLOW_FILE: %d" % wf_callers)
+
 # ── a step that runs a REPO script must come AFTER the checkout ──────────────
 #
 # MEASURED, PR #417 run 33542986300: the aggregate gate was rewritten from an
