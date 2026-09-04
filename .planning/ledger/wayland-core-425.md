@@ -3,7 +3,7 @@ issue: 425
 repo: FerroxLabs/wayland-core
 kind: defect
 title: "PreparedContentBlockV1::Thinking.extra still uses the pre-23B-H1 Option::is_none skip guard, re-opening the null-collapse class in the provider-request digest preimage"
-status: open
+status: closed
 last_verified_commit: fb6f43dd7
 criteria:
   - id: c1
