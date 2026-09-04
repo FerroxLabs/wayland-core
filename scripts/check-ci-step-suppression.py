@@ -45,6 +45,16 @@ SUPPRESSIBLE = {
     # whoever revisits either sees both.
     "Check Desktop protocol contract corpus drift": "its own gate-topology test forbids any if:",
 }
+# SUBSTRING, not equality, and that is the difference from the OTHER gate that
+# holds a rule about this same fact. .github/scripts/tests/gate-admission.py
+# (core#414/#405) requires a step`s condition to normalise EXACTLY to
+# `always()` or `!cancelled()` for the steps of an unconditional aggregate job,
+# so the guarded form this file admits -- `!cancelled() && steps.ci_image.
+# outcome == 'success'` -- satisfies THIS rule and not that one. The full
+# reconciliation, form by form, is written at the RECONCILIATION block at the
+# end of gate-admission.py; read both before changing either. The rules reach
+# disjoint jobs today (that one grades `report`/`e2e_report`, this one grades
+# `ci-linux`), which is why they have not yet contradicted in place.
 NON_SUPPRESSING = ("!cancelled()", "always()")
 
 
