@@ -2502,6 +2502,53 @@ fn grade_manifest_attribution(
         return true;
     }
 
+    // A DIFFERENT BOUNDED GUARD MAY HAVE SPENT THE BUDGET FIRST (#1142).
+    //
+    // `bounded_unsaved_shell_refusal` sits AHEAD of the manifest build in
+    // `BashTool`'s execute paths and is bounded by the SAME caller `timeout`
+    // (`timeout.min(UNSAVED_GUARD_BUDGET_MS)`), so at the low-millisecond
+    // timeouts these tests DERIVE from the walk, both guards race one budget
+    // and whichever expires first owns the message. Its refusal is CORRECT and
+    // fail-closed -- it names a true cause and says nothing ran -- it simply is
+    // not the manifest build, so this attempt establishes nothing about #1111
+    // acceptance 3 and the panic below would report correct product behaviour
+    // as a product defect.
+    //
+    // This is not hypothetical and it is not a Windows artifact. CI run
+    // 33866807735, linux-containerized, outer-attempt-1.xml, tests.rs:2532:
+    // `... got: Refused to run this command: the unsaved-work check did not
+    // finish - it was still running after 5 ms` against a 75.072468ms walk
+    // floor. REPRODUCED on hetzner-dsm at `--retries 0`, same line and same
+    // shape: 0/25 at ambient load 33-38, 1/30 under 96-way CPU load, payload
+    // `... still running after 2 ms ... (attempt 0, a 2ms timeout against a
+    // walk measured at 25.799839ms)`. The trigger is the cold `spawn_blocking`
+    // dispatch the guard pays on its first call, which a contended host can
+    // stretch past a 2-5ms budget.
+    //
+    // RE-RACED, not asserted on, exactly as a build that beat the deadline is:
+    // the premise was never established on this attempt. The retry is also the
+    // right instrument rather than a hope -- the pool thread is warm by then,
+    // so the condition does not survive its own reproduction.
+    //
+    // Matched through the constant the producer owns, not a string literal, so
+    // the two cannot drift apart; `contains` rather than `starts_with` so a
+    // future wrapper around the refusal cannot silently restore the false red.
+    // The `manifest` arm above returns first, so this cannot swallow a real
+    // manifest message that happened to quote the prefix.
+    if content.contains(super::UNSAVED_GUARD_UNANSWERED_PREFIX) {
+        if last_attempt {
+            eprintln!(
+                "SKIP (#1142) {test}: the P2b unsaved-work guard shares this call's \
+                 {timeout:?} budget and runs BEFORE the manifest build, and it spent \
+                 that budget first on every attempt -- so the manifest build never \
+                 reached the deadline and the message it did not produce grades \
+                 nothing. Got: {content} ({context})"
+            );
+            return true;
+        }
+        return false;
+    }
+
     let floor = walk_floor(root, 3);
     // The deadline does NOT fire at `timeout`: a timer wait returns on the
     // host's next tick, so the earliest honest estimate of when it fired is
