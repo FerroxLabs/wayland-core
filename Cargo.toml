@@ -279,7 +279,7 @@ fd-lock = "4.0.4"
 
 # RON (Rusty Object Notation) — declarative workflow DSL front-end
 # (orchestration/workflow). Lowers to the existing `GraphConfig` IR.
-ron = "0.8"
+ron = "0.12"
 
 # Archive handling (T7 ArchiveTool — pure-Rust, no native libs)
 zip    = { version = "2", default-features = false, features = ["deflate"] }
