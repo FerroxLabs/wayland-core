@@ -12830,6 +12830,17 @@ impl AgentEngine {
         );
     }
 
+    /// Point this engine's request protection at a key load that never
+    /// reaches the store at all — a host too busy to run it, which is the
+    /// condition wayland#1302 measured 104 times against a HEALTHY store.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn use_starved_recovery_key_store(&mut self) {
+        self.recovery_request_protection = Arc::new(
+            crate::recovery_confidential::RecoveryRequestProtector::with_starved_key_store_for_test(
+            ),
+        );
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn commit_provider_recovery_checkpoint(
         &self,
@@ -32856,7 +32867,8 @@ mod audit_2026_05_22_tests {
         assert!(sends > 1, "a 529 must be retried at all");
     }
 
-    /// A journaled engine whose credential store never answers.
+    /// A journaled engine whose recovery key cannot be obtained, in whichever
+    /// of the two ways `install` sets up.
     ///
     /// The tempdir is returned because dropping it deletes the session the
     /// journal is writing to.
@@ -32865,7 +32877,9 @@ mod audit_2026_05_22_tests {
     /// turn only completes when the provider's PHYSICAL attempt is durably
     /// accepted, which needs a real 2xx. Returned so it outlives the turn, as
     /// is the tempdir the journal writes into.
-    async fn journaled_engine_with_a_wedged_key_store() -> (
+    async fn journaled_engine_with_a_key_store(
+        install: fn(&mut super::AgentEngine),
+    ) -> (
         super::AgentEngine,
         crate::test_utils::TestSinkHandle,
         tempfile::TempDir,
@@ -32887,7 +32901,7 @@ mod audit_2026_05_22_tests {
         engine.session_manager = Some(manager);
         engine.current_session = Some(active.session);
         engine.session_journal = Some(active.journal);
-        engine.use_wedged_recovery_key_store();
+        install(&mut engine);
         (engine, events, dir, server)
     }
 
@@ -32915,7 +32929,9 @@ mod audit_2026_05_22_tests {
     /// this test's own deadline could not fire.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_wedged_key_store_still_lets_the_turn_reach_the_provider_and_says_so() {
-        let (mut engine, events, _dir, _server) = journaled_engine_with_a_wedged_key_store().await;
+        let (mut engine, events, _dir, _server) =
+            journaled_engine_with_a_key_store(super::AgentEngine::use_wedged_recovery_key_store)
+                .await;
 
         let started = std::time::Instant::now();
         let result = engine.run("say something", "m-1").await;
@@ -32958,7 +32974,9 @@ mod audit_2026_05_22_tests {
     /// was set to forbid.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn require_durability_refuses_a_turn_whose_key_store_timed_out() {
-        let (mut engine, events, _dir, _server) = journaled_engine_with_a_wedged_key_store().await;
+        let (mut engine, events, _dir, _server) =
+            journaled_engine_with_a_key_store(super::AgentEngine::use_wedged_recovery_key_store)
+                .await;
         engine.config.session.require_durability = true;
 
         let result = engine.run("say something", "m-1").await;
@@ -32972,6 +32990,99 @@ mod audit_2026_05_22_tests {
                 assert!(
                     message.contains("did not answer in time"),
                     "the refusal must name the condition, got {message:?}"
+                );
+            }
+            other => panic!("require_durability must refuse an unsealable turn, got {other:?}"),
+        }
+        assert!(
+            replay_protection_notices(&events).is_empty(),
+            "a refused turn must not also announce a downgrade it did not take"
+        );
+    }
+
+    /// wayland#1302, on the surface a person actually reads.
+    ///
+    /// The unit grade lives in `recovery_confidential`; this is the WIRING
+    /// grade, and it is the one that decides whether the fix reaches anybody:
+    /// the notice travels on `emit_durability_degraded`, not on `tracing`,
+    /// because with `RUST_LOG` unset a `warn!` reaches no user at all.
+    ///
+    /// The store behind this engine is never asked anything, so it is healthy
+    /// by construction — which is exactly the population the 104 measured
+    /// reproductions came from.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_starved_key_load_does_not_tell_the_user_to_repair_the_keyring() {
+        let (mut engine, events, _dir, _server) =
+            journaled_engine_with_a_key_store(super::AgentEngine::use_starved_recovery_key_store)
+                .await;
+
+        let result = engine.run("say something", "m-1").await;
+
+        assert!(
+            result.is_ok(),
+            "a key load that never reached the store must degrade the turn, not fail it: \
+             {result:?}"
+        );
+        let notices = replay_protection_notices(&events);
+        assert_eq!(
+            notices.len(),
+            1,
+            "the user must still be told exactly once that this turn is unreplayable: \
+             {notices:?}"
+        );
+        let lowered = notices[0].to_lowercase();
+        assert!(
+            !lowered.contains("repair"),
+            "the store was never asked anything, so the user must not be sent to repair it, \
+             got {:?}",
+            notices[0]
+        );
+        assert!(
+            !lowered.contains("unlock"),
+            "the store was never asked anything, so the user must not be sent to unlock it, \
+             got {:?}",
+            notices[0]
+        );
+        assert!(
+            lowered.contains("never asked"),
+            "the notice must say what actually happened, got {:?}",
+            notices[0]
+        );
+    }
+
+    /// The hard-refusal half of wayland#1302. `require_durability = true`
+    /// turns this same verdict into a refused turn, so a false diagnosis here
+    /// costs the operator the message AND sends them to fix the wrong thing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn require_durability_refusal_names_starvation_not_a_broken_keyring() {
+        let (mut engine, events, _dir, _server) =
+            journaled_engine_with_a_key_store(super::AgentEngine::use_starved_recovery_key_store)
+                .await;
+        engine.config.session.require_durability = true;
+
+        let result = engine.run("say something", "m-1").await;
+
+        match result {
+            Err(super::AgentError::SessionAuthority(message)) => {
+                assert!(
+                    message.contains("require_durability"),
+                    "the refusal must name the setting that caused it, got {message:?}"
+                );
+                assert!(
+                    message.contains("never asked"),
+                    "the refusal must name the condition that actually occurred, got \
+                     {message:?}"
+                );
+                let lowered = message.to_lowercase();
+                assert!(
+                    !lowered.contains("repair"),
+                    "the store was never asked anything, so the refusal must not send the \
+                     operator to repair it, got {message:?}"
+                );
+                assert!(
+                    !lowered.contains("unlock"),
+                    "the store was never asked anything, so the refusal must not send the \
+                     operator to unlock it, got {message:?}"
                 );
             }
             other => panic!("require_durability must refuse an unsealable turn, got {other:?}"),
