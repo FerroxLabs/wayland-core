@@ -9,7 +9,7 @@ criteria:
   - id: c1
     text: "Resuming a session restores the persisted conversation id instead of minting a new one"
     state: met
-    evidence: "file:crates/wcore-agent/src/engine.rs:5425:let resumed_conversation_id = session"
+    evidence: "file:crates/wcore-agent/src/engine.rs:5472:let resumed_conversation_id = session"
     owner: core
     note: "RE-ANCHORED 2026-08-30 for wayland#1198: was engine.rs:4875, which had drifted onto a skills_lifecycle caching comment unrelated to this criterion; the resume path reads the persisted id at :5041 and threads it at :5265. resume_with_provider_parts reads the persisted id; line-anchored because the change is a statement, not a named item"
   - id: c2
