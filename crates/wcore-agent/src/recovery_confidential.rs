@@ -1,6 +1,7 @@
 //! Confidential persistence for exact provider requests used by recovery.
 
-use std::sync::{Mutex, mpsc};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -12,6 +13,7 @@ use wcore_config::confidential_blob::{
     seal_confidential_blob,
 };
 use wcore_config::config::Config;
+use wcore_config::credentials::CredentialsBackend;
 
 /// The single source of this identifier is `wcore_config`, so the profile-delete
 /// purge (`purge_profile_confidential_keys`) deletes exactly what this writes.
@@ -161,17 +163,70 @@ pub(crate) enum RecoveryConfidentialError {
     /// number: a turn waits [`KEY_STORE_ACQUIRE_BUDGET`] and a resume waits
     /// [`RESUME_KEY_WAIT_BUDGET`]. Rendering a constant here would have told
     /// an operator who waited thirty seconds that we gave up after five.
-    #[error(
-        "the configured credential store did not answer within {}s, so this profile's \
-         recovery key could not be obtained. Unlock or repair the OS keyring for this \
-         profile, or turn durable sessions off with [session] enabled = false",
-        waited.as_secs()
-    )]
-    KeyStoreTimedOut { waited: Duration },
+    #[error("{}", key_store_timeout_message(*waited, *reach, backend))]
+    KeyStoreTimedOut {
+        waited: Duration,
+        /// How far the load got before the wait expired. See [`KeyStoreReach`].
+        reach: KeyStoreReach,
+        /// Which store this timeout is about, from the operator's own config.
+        backend: &'static str,
+    },
     #[error("secure recovery storage is unavailable")]
     Unavailable,
     #[error("recovery confidential request is invalid")]
     Invalid,
+}
+
+/// How far a key load got before its wait expired.
+///
+/// The budget is a WALL-CLOCK deadline on a thread that does the work, so
+/// expiry has two causes with nothing in common: the store was asked and did
+/// not answer, or the load never reached the store at all because this host
+/// had no CPU to run it on. Only the first is the operator's to repair, and
+/// wayland#1302 measured the second 104 times against a HEALTHY store while
+/// the message asserted the first.
+///
+/// Observed rather than inferred: the loader closure sets its flag at the
+/// moment it enters the store call, so a load the host never scheduled — and
+/// a load stuck before the call for any other reason — cannot set it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KeyStoreReach {
+    /// The wait expired before the store was asked anything. Nothing is known
+    /// about the store, and in particular nothing says it is unhealthy.
+    NeverAsked,
+    /// The store was asked and had not answered when the wait expired. This
+    /// one IS the store's condition to answer for.
+    Asked,
+}
+
+/// The one place a key-store timeout is put into words, so the two causes
+/// cannot drift back into one sentence.
+fn key_store_timeout_message(waited: Duration, reach: KeyStoreReach, backend: &str) -> String {
+    let seconds = waited.as_secs();
+    let _ = reach;
+    format!(
+        "the configured credential store ({backend}) did not answer within {seconds}s, so this \
+         profile's recovery key could not be obtained. Unlock or repair the OS keyring for this \
+         profile, or turn durable sessions off with [session] enabled = false"
+    )
+}
+
+/// Which store a timeout is ABOUT, named from config alone.
+///
+/// `storage.credentials.backend` is written in the operator's own cleartext
+/// config, so repeating it discloses nothing — and without it "the credential
+/// store" names nothing an operator with more than one profile can act on.
+fn configured_backend_label(config: &Config) -> &'static str {
+    match config.storage.credentials.backend {
+        CredentialsBackend::Auto => "auto: the OS keyring, then the encrypted vault",
+        CredentialsBackend::Keyring => "the OS keyring",
+        CredentialsBackend::EncryptedFile { .. } => "the encrypted credentials vault",
+        // Unreachable from a wait that can expire: `with_key` runs
+        // `reject_backend_without_confidential_storage` before any store is
+        // opened, so a plaintext backend fails as `PlaintextBackendRejected`
+        // and never reaches `acquire_key`.
+        CredentialsBackend::Plaintext => "plaintext",
+    }
 }
 
 /// The statically decidable half of the confidential-storage requirement.
@@ -299,7 +354,21 @@ struct PendingKeyLoad {
     /// Whether the outstanding load was allowed to CREATE the key. A
     /// read-only load's failure cannot answer a caller that may create one.
     create: bool,
+    /// Set by the loader thread as it enters the store call, and read by
+    /// whichever caller's wait expires. An `Arc` rather than a return value
+    /// because the answer is needed precisely when the load has NOT returned.
+    asked: Arc<AtomicBool>,
     rx: mpsc::Receiver<Result<ConfidentialBlobKey, RecoveryConfidentialError>>,
+}
+
+impl PendingKeyLoad {
+    fn reach(&self) -> KeyStoreReach {
+        if self.asked.load(Ordering::Acquire) {
+            KeyStoreReach::Asked
+        } else {
+            KeyStoreReach::NeverAsked
+        }
+    }
 }
 
 /// Where [`RecoveryRequestProtector`] obtains the key.
@@ -310,6 +379,11 @@ enum KeySource {
     /// that budget on a host whose real store answers (or fails) at once.
     #[cfg(any(test, feature = "test-utils"))]
     WedgedForTest,
+    /// A load that never reaches the store at all — what a thread this host
+    /// never scheduled looks like from the waiting side, and the shape
+    /// wayland#1302 measured 104 times against a healthy store.
+    #[cfg(any(test, feature = "test-utils"))]
+    StarvedForTest,
 }
 
 impl Default for RecoveryRequestProtector {
@@ -456,6 +530,16 @@ impl RecoveryRequestProtector {
         }
     }
 
+    /// A protector whose key load never reaches the store, for grading what
+    /// is said when the wait expires with the store untouched.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn with_starved_key_store_for_test() -> Self {
+        Self {
+            state: Mutex::new(ProtectorState::default()),
+            key_source: KeySource::StarvedForTest,
+        }
+    }
+
     fn with_key<T>(
         &self,
         config: &Config,
@@ -471,7 +555,8 @@ impl RecoveryRequestProtector {
             // Decide the config-determined cause before touching any store, so
             // a plaintext backend is never reported as an environment problem.
             reject_backend_without_confidential_storage(config)?;
-            let key = self.acquire_key(&mut state, config, create, budget)?;
+            let backend = configured_backend_label(config);
+            let key = self.acquire_key(&mut state, config, create, budget, backend)?;
             state.key = Some(key);
         }
         operation(
@@ -495,6 +580,7 @@ impl RecoveryRequestProtector {
         config: &Config,
         create: bool,
         budget: Duration,
+        backend: &'static str,
     ) -> Result<ConfidentialBlobKey, RecoveryConfidentialError> {
         if let Some(pending) = state.pending.take() {
             match pending.rx.try_recv() {
@@ -529,9 +615,12 @@ impl RecoveryRequestProtector {
                         Ok(Err(error)) if pending.create || !create => return Err(error),
                         Ok(Err(_)) => {}
                         Err(mpsc::RecvTimeoutError::Timeout) => {
+                            let reach = pending.reach();
                             state.pending = Some(pending);
                             return Err(RecoveryConfidentialError::KeyStoreTimedOut {
                                 waited: budget,
+                                reach,
+                                backend,
                             });
                         }
                         Err(mpsc::RecvTimeoutError::Disconnected) => {}
@@ -542,7 +631,8 @@ impl RecoveryRequestProtector {
         }
         let (tx, rx) = mpsc::channel();
         let started = std::time::Instant::now();
-        let load = self.key_loader(config, create);
+        let asked = Arc::new(AtomicBool::new(false));
+        let load = self.key_loader(config, create, Arc::clone(&asked));
         std::thread::Builder::new()
             .name("wayland-recovery-key".to_owned())
             .spawn(move || {
@@ -554,12 +644,19 @@ impl RecoveryRequestProtector {
         match rx.recv_timeout(budget) {
             Ok(result) => result,
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                state.pending = Some(PendingKeyLoad {
+                let pending = PendingKeyLoad {
                     create,
+                    asked,
                     rx,
                     started,
-                });
-                Err(RecoveryConfidentialError::KeyStoreTimedOut { waited: budget })
+                };
+                let reach = pending.reach();
+                state.pending = Some(pending);
+                Err(RecoveryConfidentialError::KeyStoreTimedOut {
+                    waited: budget,
+                    reach,
+                    backend,
+                })
             }
             // The loader thread died without sending. Nothing is known about
             // the key, but nothing is outstanding either.
@@ -573,16 +670,32 @@ impl RecoveryRequestProtector {
         &self,
         config: &Config,
         create: bool,
+        asked: Arc<AtomicBool>,
     ) -> Box<dyn FnOnce() -> Result<ConfidentialBlobKey, RecoveryConfidentialError> + Send> {
         match self.key_source {
             KeySource::ConfiguredStore => {
                 // Cloned because the load outlives this call by definition
                 // once it times out. It happens at most once per engine.
                 let config = config.clone();
-                Box::new(move || load_key_from_configured_store(&config, create))
+                Box::new(move || {
+                    // Marked HERE, on the loader thread, immediately before
+                    // the blocking call and never on the spawning side: the
+                    // whole value of the flag is that a load this host never
+                    // ran cannot have set it.
+                    asked.store(true, Ordering::Release);
+                    load_key_from_configured_store(&config, create)
+                })
             }
             #[cfg(any(test, feature = "test-utils"))]
-            KeySource::WedgedForTest => Box::new(|| {
+            KeySource::WedgedForTest => Box::new(move || {
+                asked.store(true, Ordering::Release);
+                loop {
+                    std::thread::park();
+                }
+            }),
+            // Deliberately never marks: a load that never reaches the store.
+            #[cfg(any(test, feature = "test-utils"))]
+            KeySource::StarvedForTest => Box::new(|| {
                 loop {
                     std::thread::park();
                 }
@@ -762,6 +875,7 @@ mod tests {
 
         let protector = RecoveryRequestProtector::with_wedged_key_store_for_test();
         let config = Config::default();
+        let backend = configured_backend_label(&config);
 
         // Spend the turn budget first, so a `pending` load exists. Before
         // this fix, that pending load is precisely what made the resume
@@ -769,7 +883,9 @@ mod tests {
         assert_eq!(
             protector.preflight(&config),
             Err(RecoveryConfidentialError::KeyStoreTimedOut {
-                waited: KEY_STORE_ACQUIRE_BUDGET
+                waited: KEY_STORE_ACQUIRE_BUDGET,
+                reach: KeyStoreReach::Asked,
+                backend,
             }),
             "the turn entry point must still give up at its own budget"
         );
@@ -797,6 +913,7 @@ mod tests {
     fn a_wedged_key_store_gives_up_inside_its_budget_at_every_entry_point() {
         let protector = RecoveryRequestProtector::with_wedged_key_store_for_test();
         let config = Config::default();
+        let backend = configured_backend_label(&config);
         assert_eq!(
             reject_backend_without_confidential_storage(&config),
             Ok(()),
@@ -821,7 +938,9 @@ mod tests {
         assert_eq!(
             first,
             Err(RecoveryConfidentialError::KeyStoreTimedOut {
-                waited: KEY_STORE_ACQUIRE_BUDGET
+                waited: KEY_STORE_ACQUIRE_BUDGET,
+                reach: KeyStoreReach::Asked,
+                backend,
             }),
             "a store that never answers must be reported as not having answered, and must \
              report the budget it actually spent"
@@ -838,7 +957,9 @@ mod tests {
         assert_eq!(
             second,
             Err(RecoveryConfidentialError::KeyStoreTimedOut {
-                waited: KEY_STORE_ACQUIRE_BUDGET
+                waited: KEY_STORE_ACQUIRE_BUDGET,
+                reach: KeyStoreReach::Asked,
+                backend,
             }),
             "the second TURN entry point must inherit the first one's verdict"
         );
@@ -847,6 +968,97 @@ mod tests {
             "a second call against the SAME outstanding load must not spend the budget \
              again — the turn would then pay it once per call site; took {second_took:?}"
         );
+    }
+
+    /// wayland#1302 — the two ways the wait can expire must not be told to
+    /// the operator as one thing, and the one that never touched the store
+    /// must not send them to repair it.
+    ///
+    /// This is the whole defect: the starved arm below reaches the same
+    /// message against a store that was never asked anything, so the store it
+    /// names as broken is, by construction, healthy. 104 measured
+    /// reproductions on a real host (wayland#1289) have exactly this shape.
+    ///
+    /// Both arms run concurrently, on their own threads, because each spends
+    /// a whole [`KEY_STORE_ACQUIRE_BUDGET`] inside a `recv_timeout` that
+    /// cannot be hurried, and because either double parks its loader for the
+    /// life of the test process.
+    #[test]
+    fn both_key_store_timeout_causes_are_told_apart() {
+        let asked_arm = std::thread::spawn(|| {
+            RecoveryRequestProtector::with_wedged_key_store_for_test().preflight(&Config::default())
+        });
+        let starved_arm = std::thread::spawn(|| {
+            RecoveryRequestProtector::with_starved_key_store_for_test()
+                .preflight(&Config::default())
+        });
+        let asked = asked_arm.join().expect("the wedged arm must not panic");
+        let starved = starved_arm.join().expect("the starved arm must not panic");
+
+        let config = Config::default();
+        let backend = configured_backend_label(&config);
+        assert_eq!(
+            asked,
+            Err(RecoveryConfidentialError::KeyStoreTimedOut {
+                waited: KEY_STORE_ACQUIRE_BUDGET,
+                reach: KeyStoreReach::Asked,
+                backend,
+            }),
+            "a store that was asked and never answered must be recorded as asked"
+        );
+        assert_eq!(
+            starved,
+            Err(RecoveryConfidentialError::KeyStoreTimedOut {
+                waited: KEY_STORE_ACQUIRE_BUDGET,
+                reach: KeyStoreReach::NeverAsked,
+                backend,
+            }),
+            "a load that never reached the store must be recorded as never asked"
+        );
+
+        let asked = asked.unwrap_err().to_string();
+        let starved = starved.unwrap_err().to_string();
+        assert_ne!(
+            asked, starved,
+            "a store that refused to answer and a load that never asked it anything are \
+             different failures and cannot share one sentence: {asked:?}"
+        );
+
+        // The CONTROL. A store that really was asked and really did not
+        // answer is the operator's to repair, and must still say so.
+        assert!(
+            asked.contains("Unlock or repair"),
+            "a genuinely unresponsive store must still get the repair remedy, got {asked:?}"
+        );
+
+        // The DEFECT. Nothing was asked of the store, so nothing about it is
+        // known — and neither of the remedies that assume otherwise may be
+        // offered.
+        let lowered = starved.to_lowercase();
+        assert!(
+            !lowered.contains("repair"),
+            "a wait that never reached the store must not send the operator to repair it, \
+             got {starved:?}"
+        );
+        assert!(
+            !lowered.contains("unlock"),
+            "a wait that never reached the store must not send the operator to unlock it, \
+             got {starved:?}"
+        );
+        assert!(
+            !starved.contains("enabled = false"),
+            "giving up durable sessions is not the remedy for a transient scheduling \
+             condition, got {starved:?}"
+        );
+
+        // What IS known reaches the text: which store the wait was about, and
+        // that this one never got as far as asking it.
+        for message in [&asked, &starved] {
+            assert!(
+                message.contains(backend),
+                "the message must name the configured backend, got {message:?}"
+            );
+        }
     }
 
     #[test]
