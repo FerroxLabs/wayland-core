@@ -279,3 +279,51 @@ is why the fold refuses to touch any message carrying model reasoning.
 Shortening `bounded_result_stub` remains **not** a fix, for the reason given above: it moves the
 constant, not the order of growth. So does any scheme leaving `k > 0` bytes per call. The count of
 carried bodies, not their size, is what had to stop growing.
+
+## Why Q-1225 records the residual rather than reopening (the 0.13.13 tag decision)
+
+**Decision, 2026-09-05, maintainer.** `FerroxLabs/wayland#1225` stays CLOSED. Its remaining
+residual is carried by `FerroxLabs/wayland#1323`, which is open and owned by the desktop
+lane. This entry is the evidence for `.planning/ledger/wayland-1225.md`.
+
+**What happened.** The desktop lane closed `#1167` and its duplicate `#1225` at 21:13:51Z
+and 21:13:54Z on 2026-09-04, two minutes into the 0.13.13 release run. `#1225` is the
+`handoff:` target of `wayland-998.md` c5, so the readiness gate went red mid-flight with
+*"CLOSED and has no ledger, so nothing records whether the residual was finished or
+dropped."* The gate was right to fire, and checking the record is what found the rest.
+
+**What actually shipped, verified from Desktop `origin/main` rather than from the closing
+comment.** `allowedTools` travels verbatim at all three Desktop→Core boundaries with the
+empty-array polarity intact: `mcpSessionConfig.ts:221,234,244` (descriptor emission,
+presence-checked `!== undefined`), `:322` (hosted/session path), `:211,312`
+(`wrapSpawnWithToolFilter(resolved, server.allowedTools ?? [])`), and
+`WCoreMcpAgent.ts:146,161` for the `[mcp.servers]` table, commented *"presence-checked,
+NOT truthiness-checked - `[]` must survive."* So c1 and c3 are real, and the dangerous
+trap — `[]` meaning *none* collapsing to absent, enabling every tool at the moment the
+user asked for none — is handled.
+
+**What did not ship.** c4 is absent: `git grep` over all Desktop `src/` returns **0** hits
+for `mcp_tool_selection`/`mcpToolSelection`, against a positive control of 14 `allowedTools`
+hits in the same file, so the zero is an absence and not a failed query.
+`crates/wcore-acp/src/protocol.rs:135` requires a client to consult
+`ServerCapabilities::mcp_tool_selection`, and every ACP request type carries
+`deny_unknown_fields`, so an older core hard-rejects `session/create` instead of ignoring
+the key. c2 is unevidenced: both closures cite a source grep, which cannot show the tool
+list core actually offered on a live session.
+
+**Why the release does not wait for it.** The c4 failure needs a Desktop build carrying the
+c1 emission talking to a core that predates `SessionCreateRequest::mcp_servers`. Shipping
+wayland-core 0.13.13 does not create that pair — a NEWER core is the fix side of the skew,
+and every user it reaches is moved further from the failure, not closer. Holding 0.13.13
+protects nobody who is exposed. Deferring here costs engineering bookkeeping, not a user.
+
+**Why this is recorded by the maintainer and not graded by core.** A `met` criterion needs
+evidence that resolves in this tree; all of the evidence above is Desktop-repo source or a
+live run, and neither can be anchored from wayland-core. Across 199 ledgers every non-core
+criterion graded `met` is `owner: maintainer` — core does not grade another lane's work,
+and a core-authored `met` on desktop criteria would have been the gate being bent rather
+than satisfied. The decision is the evidence, which is what this file is for.
+
+**What this obliges.** The desktop lane owns `#1323` (c4 negotiation, both directions
+shown) and the live end-to-end capture that `#1225` c2 asked for. Neither is discharged by
+this entry; both are tracked.
