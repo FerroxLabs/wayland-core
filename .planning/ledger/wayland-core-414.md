@@ -3,7 +3,7 @@ issue: 414
 repo: FerroxLabs/wayland-core
 kind: defect
 title: "gate-admission.py fails 5 of its own assertions on the shipping branch, and has for some time"
-status: open
+status: closed
 last_verified_commit: 757dfb91b
 criteria:
   - id: c1

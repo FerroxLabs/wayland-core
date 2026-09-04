@@ -3,7 +3,7 @@ issue: 1291
 repo: FerroxLabs/wayland
 kind: defect
 title: "report-gate wiring: 5 self-test assertions fail on integ/f13; build-darwin-selfhosted is aggregated by nothing"
-status: open
+status: closed
 last_verified_commit: 47da0ee86
 criteria:
   - id: c1
