@@ -210,6 +210,14 @@ pub(crate) const PASSTHROUGH_VENDOR_MODELS: &[(&str, u32, u32)] = &[
     ("gemini-3.5-flash-lite", 65_536, 1_048_576),
     ("gemini-3.6-flash", 65_536, 1_048_576),
     ("gemini-3.7-flash", 65_536, 1_048_576),
+    // Added 2026-09-04 for the 0.13.13 release. The `gemini-3` arm in
+    // limits.rs already sized this id correctly -- it matches
+    // `contains("gemini-3")` and none of the -image/-tts/-native-audio/-live
+    // exclusions -- but with no row here NOTHING GRADED that, which is
+    // customer bug #165's exact shape. Both vendor-operated endpoints
+    // (google, google-vertex) report 1,048,576 context / 65,536 output,
+    // matching every other 3.x text tier.
+    ("gemini-3.8-flash", 65_536, 1_048_576),
     ("gemini-flash-latest", 65_536, 1_048_576),
     ("gemini-flash-lite-latest", 65_536, 1_048_576),
     // --- DeepSeek V4 - vendor rows: deepseek, alibaba, alibaba-cn,
