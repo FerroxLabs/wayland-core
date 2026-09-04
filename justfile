@@ -306,8 +306,24 @@ version:
 clean:
     vx cargo clean
 
-# ── Pre-push gate (lint-fix, format, auto-commit fixes, test, then push) ─
-push *ARGS: lint-fix fmt _auto-commit-fixes test
+# ── Lane pre-flight ─────────────────────────────────────
+# Every host-side gate ci.yml runs before it builds the CI image, plus the
+# Desktop contract corpus currency check, in 2-3 minutes instead of CI's ~67.
+# Run: `just preflight`
+preflight:
+    bash scripts/preflight.sh
+
+# ── Pre-push gate (lint-fix, fmt, auto-commit fixes, pre-flight, test, push) ─
+# `preflight` chained 2026-09-04 (wayland#1254 c5). Until then `push` ran lint,
+# fmt and the tests and NOTHING that re-asked the repo gates, while
+# `ledger-check` sat a few recipes away un-chained. That is #1254's shape one
+# step earlier: c1/c2 are the gate ran and misreported, c5 is the gate was not
+# run when the tree changed under it. A `last_verified_commit` is precisely the
+# assertion a squash invalidates without touching a tracked file, so the gate
+# has to run on the tree actually being pushed -- which is why this sits AFTER
+# `_auto-commit-fixes`, not before it. AGENTS.md mandates `just push` over
+# `git push`, so this is the one place that reaches every lane.
+push *ARGS: lint-fix fmt _auto-commit-fixes preflight test
     git push {{ ARGS }}
 
 _auto-commit-fixes:

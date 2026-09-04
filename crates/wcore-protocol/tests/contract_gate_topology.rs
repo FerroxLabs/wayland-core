@@ -474,14 +474,25 @@ fn the_lane_preflight_gates_on_corpus_currency_rather_than_hinting_at_it() {
         .map(|(name, _)| name.trim())
         .filter(|name| !name.contains(' '))
         .expect("the corpus gate is bound to a shell variable this test can follow");
-    assert!(
-        preflight.contains(&format!("if out=\"$(${assigned} 2>&1)\"")),
-        "the corpus gate is defined as `{assigned}` but is never run into the \
-         `fail` accumulator, so a red would print and the script would still \
-         exit 0"
+    // wayland#1254 replaced the two-valued `if out="$(...)"; then ok; else
+    // fail=1` branch with ONE three-valued renderer shared by every gate, so
+    // this follows the renderer instead of the old inline shape. The question
+    // it asks is unchanged and is the whole point of the assertion: is a red
+    // from this gate ACCUMULATED, or merely printed? Only the mechanism moved.
+    assert_eq!(
+        executable_hits(
+            &preflight,
+            &format!("render_gate armed \"${assigned}\""),
+            "#"
+        )
+        .len(),
+        1,
+        "the corpus gate is defined as `{assigned}` but is never rendered \
+         through `render_gate`, so a red would print and the script would \
+         still exit 0"
     );
     assert!(
-        preflight.contains("  fail=1"),
+        preflight.contains("nfail=$((nfail + 1))"),
         "control failed: the pre-flight no longer accumulates failures the way \
          this test assumes it does"
     );

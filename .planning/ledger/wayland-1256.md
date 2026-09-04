@@ -15,7 +15,7 @@ criteria:
   - id: c2
     text: "The currency question is asked of the real generator, not of a second implementation of the digest, so the pre-flight and -p wcore-protocol cannot disagree"
     state: met
-    evidence: "file:scripts/preflight.sh:101:cargo run -q -p wcore-protocol --bin wcore-contract -- check"
+    evidence: "file:scripts/preflight.sh:345:cargo run -q -p wcore-protocol --bin wcore-contract -- check"
     owner: core
     note: "MET 2026-08-30. A cargo-free Python re-implementation of digest_named_bytes was considered and rejected: a second implementation of a hash drifts silently, and when it drifts it either false-reds forever (and gets deleted) or false-greens (and is worse than nothing). The binary that WRITES the corpus is the only honest oracle for whether the corpus is current. Cost: the pre-flight now needs cargo, which is why it is in its own block and not in GATES -- GATES is a mirror of ci.yml's HOST-side steps and its drift guard derives that set from ci.yml, so putting a container-side gate in it would be a false claim about what CI runs on the host."
   - id: c3
