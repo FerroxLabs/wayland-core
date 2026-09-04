@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "The credential-store timeout tells the operator to repair a keyring that is not broken - 104 reproductions with a healthy store"
 status: open
-last_verified_commit: 8bb5fa139
+last_verified_commit: b68f9c1b4
 criteria:
   - id: c1
     text: "The timeout distinguishes 'the store answered slowly or refused' from 'the wait expired without the store being reached', and says which. Graded by a test that drives both and asserts the two messages differ."
