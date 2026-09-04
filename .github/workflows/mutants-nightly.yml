@@ -79,7 +79,7 @@ jobs:
 
       # Restore Cargo registry + build artefacts to cut incremental compile time
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -90,7 +90,7 @@ jobs:
             cargo-reg-${{ runner.os }}-
 
       - name: Cache cargo build (per-crate)
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: target
           key: cargo-target-mutants-${{ runner.os }}-${{ matrix.crate }}-${{ hashFiles('Cargo.lock') }}
