@@ -3,7 +3,7 @@ issue: 405
 repo: FerroxLabs/wayland-core
 kind: defect
 title: "build-darwin-selfhosted is a ci.yml job the required report check never aggregates"
-status: open
+status: closed
 last_verified_commit: 6e4eca07
 criteria:
   - id: c1
