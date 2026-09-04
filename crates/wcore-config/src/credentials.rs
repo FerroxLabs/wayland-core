@@ -2288,6 +2288,19 @@ impl LockPolicy {
     /// the first `create_new` succeeds.
     const POLL: std::time::Duration = std::time::Duration::from_millis(50);
 
+    /// How long a `PermissionDenied` answer to the lockfile create may keep
+    /// reading as Windows delete-pending contention before it is reported as
+    /// the denial it says it is.
+    ///
+    /// Delete-pending ends when the last handle to the unlinked name closes,
+    /// which is microseconds after the releasing holder's `remove_file`
+    /// returns; two seconds is orders of magnitude past that even on a
+    /// saturated hosted runner. It is also the WHOLE cost a genuine
+    /// permission failure pays: a denial the directory probe cannot explain
+    /// is reported immediately, and one it can is reported after at most
+    /// this long. Never retried away.
+    const DELETE_PENDING_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
     /// Migration: give up quickly. The plaintext store keeps serving in the
     /// meantime, so deferring to the next open loses nothing.
     pub const MIGRATION: Self = Self {
@@ -2371,6 +2384,124 @@ impl std::fmt::Debug for ExclusiveFileLock {
     }
 }
 
+/// What a `PermissionDenied` answer to the lockfile `create_new` actually is.
+///
+/// Deliberately a decision type and not a boolean: the hazard here is that
+/// `ERROR_ACCESS_DENIED` has two meanings on Windows and only one of them may
+/// ever be retried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CreateDenial {
+    /// The name is inside the Windows delete-pending window. A holder released
+    /// the lockfile, the last handle to the unlinked name has not closed yet,
+    /// and until it does every `CreateFile` against that name — `CREATE_NEW`
+    /// included — is answered `ERROR_ACCESS_DENIED` (5) rather than
+    /// `ERROR_FILE_EXISTS`. Retryable contention.
+    DeletePending,
+    /// A refusal that means what it says. Report it.
+    Denied,
+}
+
+/// Decide, from two observations and nothing else, whether a denied create may
+/// be retried.
+///
+/// Pure so the decision is provable on hosts that cannot produce the condition:
+/// no POSIX filesystem has a delete-pending state, so `create_new` never
+/// answers `PermissionDenied` for contention there and the Windows arm is
+/// otherwise unreachable outside a CI flake.
+///
+/// BOTH observations must say "transient" or the answer is [`CreateDenial::Denied`].
+/// Either one alone is unsafe:
+/// * the probe alone would retry forever against a persistent denial the
+///   directory permissions do not explain — a name occupied by a directory, an
+///   explicit DENY ace on the lockfile, a reserved device name;
+/// * the clock alone would swallow a genuine `ERROR_ACCESS_DENIED` for the
+///   whole grace on every acquisition in a directory this process may not write
+///   at all.
+///
+/// What a real permission failure pays is therefore bounded and
+/// one-directional: it is still reported, at most `grace` later than before.
+fn classify_create_denial(
+    directory_accepts_a_new_file: bool,
+    denial_age: std::time::Duration,
+    grace: std::time::Duration,
+) -> CreateDenial {
+    if !directory_accepts_a_new_file || denial_age >= grace {
+        return CreateDenial::Denied;
+    }
+    CreateDenial::DeletePending
+}
+
+/// Does `dir` accept a brand-new file from THIS process, right now?
+///
+/// This is the observable that separates delete-pending contention from being
+/// denied the right to create here at all: delete-pending is a property of ONE
+/// name, so a different name in the same directory still succeeds, while a
+/// directory that refuses us refuses every name.
+///
+/// The probe name carries the pid and a process-local sequence, so no other
+/// party can be holding it and the probe can never itself be answered by the
+/// state it exists to detect. EVERY failure — permission or not — answers
+/// `false`, because an unreadable answer must report the denial rather than
+/// retry it.
+fn directory_accepts_a_new_file(dir: &Path) -> bool {
+    static PROBE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let probe = dir.join(format!(
+        ".credentials.lock-probe.{}-{}",
+        std::process::id(),
+        PROBE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    match std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&probe)
+    {
+        Ok(file) => {
+            drop(file);
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+// Test-only seam: force the next `n` lockfile creates ON THIS THREAD to answer
+// exactly what Windows answers for a name in the delete-pending window.
+//
+// Thread-local rather than global, so it names ONE of two racing writers as
+// the loser and can never leak into another test running in parallel.
+#[cfg(test)]
+thread_local! {
+    static FORCED_DELETE_PENDING_DENIALS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn force_delete_pending_denials(n: usize) {
+    FORCED_DELETE_PENDING_DENIALS.with(|left| left.set(n));
+}
+
+#[cfg(test)]
+fn forced_delete_pending_denials_left() -> usize {
+    FORCED_DELETE_PENDING_DENIALS.with(|left| left.get())
+}
+
+/// Byte-for-byte what Windows hands back for a delete-pending name: the io
+/// error kind Rust maps `ERROR_ACCESS_DENIED` onto.
+#[cfg(test)]
+fn take_forced_delete_pending_denial() -> Option<std::io::Error> {
+    FORCED_DELETE_PENDING_DENIALS.with(|left| {
+        let remaining = left.get();
+        if remaining == 0 {
+            return None;
+        }
+        left.set(remaining - 1);
+        Some(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "Access is denied. (os error 5)",
+        ))
+    })
+}
+
 impl ExclusiveFileLock {
     /// `label` names the lock in the busy error, so a caller can tell a wedged
     /// migration from a wedged refresh.
@@ -2378,6 +2509,33 @@ impl ExclusiveFileLock {
         path: PathBuf,
         policy: LockPolicy,
         label: &str,
+    ) -> Result<Self, CredentialsError> {
+        Self::acquire_with(path, policy, label, |path| {
+            #[cfg(test)]
+            if let Some(forced) = take_forced_delete_pending_denial() {
+                return Err(forced);
+            }
+            std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(path)
+        })
+    }
+
+    /// The body of [`ExclusiveFileLock::acquire`], with the one syscall that
+    /// races another process supplied by the caller.
+    ///
+    /// The seam is here because the contention this loop has to classify is
+    /// WINDOWS-ONLY: no POSIX filesystem has a delete-pending state, so
+    /// `create_new` never answers `PermissionDenied` for a collision on Linux
+    /// or macOS. Without it the retry arm would be code no test on the
+    /// developer's host can reach, and the only evidence it worked would be a
+    /// CI flake failing to recur.
+    fn acquire_with(
+        path: PathBuf,
+        policy: LockPolicy,
+        label: &str,
+        mut create_new: impl FnMut(&Path) -> std::io::Result<std::fs::File>,
     ) -> Result<Self, CredentialsError> {
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
@@ -2393,12 +2551,12 @@ impl ExclusiveFileLock {
             SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         );
         let deadline = std::time::Instant::now() + policy.wait_ceiling;
+        // Start of the current UNBROKEN run of denied creates. Any other answer
+        // resets it, because the grace measures how long one refusal has
+        // persisted and not how long the whole acquisition has taken.
+        let mut denied_since: Option<std::time::Instant> = None;
         loop {
-            match std::fs::OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&path)
-            {
+            match create_new(&path) {
                 Ok(mut f) => {
                     use std::io::Write;
                     // Best-effort stamp. Even if the write fails the lock (the
@@ -2434,6 +2592,7 @@ impl ExclusiveFileLock {
                     });
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    denied_since = None;
                     if Self::is_stale(&path, policy.stale_after) {
                         // Crashed holder — steal it and re-race the create_new
                         // (whoever wins the atomic create proceeds).
@@ -2447,6 +2606,41 @@ impl ExclusiveFileLock {
                             path.display(),
                             policy.wait_ceiling
                         )));
+                    }
+                    std::thread::sleep(LockPolicy::POLL);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                    // WINDOWS, gh#1303. `DeleteFile` on a lockfile whose last
+                    // handle has not closed leaves the NAME in the directory in
+                    // a delete-pending state, and every `CreateFile` against it
+                    // — `CREATE_NEW` included — is answered
+                    // `ERROR_ACCESS_DENIED` (5), not `ERROR_FILE_EXISTS`. So a
+                    // waiter that races the holder's release is told "Access is
+                    // denied." for a collision this lock exists to serialise.
+                    // Falling through to the catch-all below made that a hard
+                    // `Err` out of `chunked_put`, and a caller whose rotating
+                    // refresh token has ALREADY been spent server-side then
+                    // loses it and the user is signed out.
+                    //
+                    // `ERROR_ACCESS_DENIED` also means what it says, so this
+                    // must NOT become "denied implies retry" — that would mask
+                    // real permission failures, which is worse than the bug.
+                    // Two independent observations have to agree before we
+                    // retry (see `classify_create_denial`), and a denial the
+                    // directory probe cannot explain, or one that outlives the
+                    // grace, is reported unchanged as the OS error it is.
+                    let first = *denied_since.get_or_insert_with(std::time::Instant::now);
+                    let host = path
+                        .parent()
+                        .filter(|parent| !parent.as_os_str().is_empty())
+                        .unwrap_or(Path::new("."));
+                    let verdict = classify_create_denial(
+                        directory_accepts_a_new_file(host),
+                        first.elapsed(),
+                        LockPolicy::DELETE_PENDING_GRACE,
+                    );
+                    if verdict == CreateDenial::Denied || std::time::Instant::now() >= deadline {
+                        return Err(CredentialsError::Io(e));
                     }
                     std::thread::sleep(LockPolicy::POLL);
                 }
@@ -5954,6 +6148,240 @@ mod tests {
 // `a_second_writer_cannot_commit_over_a_parked_writers_parts` fails with
 // `len=9000 tags=[BA]` — B's first 3000 bytes spliced onto A's last 6000.
 // ===========================================================================
+/// gh#1303. The Windows delete-pending answer to the lockfile create, and the
+/// discriminator that keeps it from swallowing a genuine permission denial.
+///
+/// The condition itself is unreachable on this host — no POSIX filesystem has a
+/// delete-pending state — so the decision is a pure function that is graded
+/// directly, the loop is driven through the real production body via
+/// [`ExclusiveFileLock::acquire_with`], and the genuine-denial control is a REAL
+/// refusal by the OS with nothing injected anywhere.
+#[cfg(test)]
+mod lock_denial_verification {
+    use super::*;
+    use std::io::ErrorKind;
+    use std::time::Duration;
+
+    const GRACE: Duration = Duration::from_secs(2);
+
+    /// The real `create_new`, which every seam test falls back to once its
+    /// scripted denials are spent — so what is under test is the production
+    /// loop and not a simulation of it.
+    fn real_create(path: &Path) -> std::io::Result<std::fs::File> {
+        std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(path)
+    }
+
+    /// What Windows answers for a name in the delete-pending window.
+    fn access_denied() -> std::io::Error {
+        std::io::Error::new(
+            ErrorKind::PermissionDenied,
+            "Access is denied. (os error 5)",
+        )
+    }
+
+    #[test]
+    fn a_denial_the_directory_probe_cannot_explain_is_never_retried() {
+        // THE CONTROL AXIS, and the reason this fix is not strictly worse than
+        // the bug it closes: when the directory itself refuses us, no amount of
+        // waiting changes the answer, and retrying would mask a real permission
+        // failure. Age is irrelevant on this axis — both ends say Denied.
+        assert_eq!(
+            classify_create_denial(false, Duration::ZERO, GRACE),
+            CreateDenial::Denied
+        );
+        assert_eq!(
+            classify_create_denial(false, GRACE, GRACE),
+            CreateDenial::Denied
+        );
+    }
+
+    #[test]
+    fn a_denial_that_outlives_the_grace_is_reported_even_where_the_directory_is_writable() {
+        // The second axis. Delete-pending ends when the last handle to the
+        // unlinked name closes; a refusal that persists past the grace is
+        // something else (a DENY ace on the lockfile, a directory occupying the
+        // name, a reserved device name) and must surface.
+        assert_eq!(
+            classify_create_denial(true, GRACE, GRACE),
+            CreateDenial::Denied
+        );
+        assert_eq!(
+            classify_create_denial(true, GRACE + Duration::from_millis(1), GRACE),
+            CreateDenial::Denied
+        );
+    }
+
+    #[test]
+    fn only_a_young_denial_in_a_writable_directory_reads_as_delete_pending() {
+        assert_eq!(
+            classify_create_denial(true, Duration::ZERO, GRACE),
+            CreateDenial::DeletePending
+        );
+        assert_eq!(
+            classify_create_denial(true, GRACE - Duration::from_millis(1), GRACE),
+            CreateDenial::DeletePending
+        );
+    }
+
+    #[test]
+    fn the_probe_answers_for_the_directory_and_not_for_one_name() {
+        // Why the probe is the right discriminator: delete-pending attaches to
+        // ONE name, so an occupied name must not change the directory's answer,
+        // while a directory that is not there refuses every name.
+        let dir = tempfile::tempdir().unwrap();
+        assert!(directory_accepts_a_new_file(dir.path()));
+        std::fs::write(dir.path().join("occupied"), b"x").unwrap();
+        assert!(directory_accepts_a_new_file(dir.path()));
+        assert!(!directory_accepts_a_new_file(
+            &dir.path().join("no-such-subdir")
+        ));
+    }
+
+    #[test]
+    fn the_probe_leaves_nothing_behind() {
+        // It runs inside the credentials directory, so a leaked probe file would
+        // be a permanent artifact in the user's config dir.
+        let dir = tempfile::tempdir().unwrap();
+        for _ in 0..8 {
+            assert!(directory_accepts_a_new_file(dir.path()));
+        }
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    /// gh#1303 REGRESSION, at the frame that failed.
+    ///
+    /// The waiter's `create_new` is answered "Access is denied." for the length
+    /// of the delete-pending window and then succeeds — the exact syscall
+    /// sequence Windows hands a writer that races the holder's release. Before
+    /// the classification arm existed, the first of those answers fell through
+    /// to `Err(e) => return Err(CredentialsError::Io(e))` and `chunked_put`
+    /// returned `Io(Os { code: 5, kind: PermissionDenied })`.
+    #[test]
+    fn a_waiter_denied_by_a_delete_pending_lockfile_acquires_instead_of_failing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".credentials.chunk.test.lock");
+        let scripted = std::cell::Cell::new(3usize);
+
+        let lock = ExclusiveFileLock::acquire_with(
+            path.clone(),
+            LockPolicy::CREDENTIAL_WRITE,
+            "credential write",
+            |p| {
+                if scripted.get() > 0 {
+                    scripted.set(scripted.get() - 1);
+                    return Err(access_denied());
+                }
+                real_create(p)
+            },
+        )
+        .expect(
+            "a delete-pending collision is contention this lock exists to serialise, not a \
+             failure to report to the caller",
+        );
+
+        assert_eq!(
+            scripted.get(),
+            0,
+            "the loop must have consumed every scripted denial rather than returning on the first"
+        );
+        assert!(path.exists(), "the lock must actually be held");
+        drop(lock);
+        assert!(!path.exists(), "and released");
+    }
+
+    /// CONTROL for the clock axis, exercising the real loop: the directory IS
+    /// writable, so the probe says "retry", and only the grace stops this from
+    /// spinning forever on a denial that is not delete-pending.
+    #[test]
+    fn a_denial_that_never_clears_is_reported_and_not_retried_forever() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".credentials.chunk.test.lock");
+        let attempts = std::cell::Cell::new(0usize);
+        let started = std::time::Instant::now();
+
+        let error = ExclusiveFileLock::acquire_with(
+            path.clone(),
+            LockPolicy::CREDENTIAL_WRITE,
+            "credential write",
+            |_| {
+                attempts.set(attempts.get() + 1);
+                Err(access_denied())
+            },
+        )
+        .expect_err("a denial that outlives the grace must be reported, never retried away");
+
+        assert!(
+            matches!(&error, CredentialsError::Io(e) if e.kind() == ErrorKind::PermissionDenied),
+            "it must surface as the OS error it is, got: {error:?}"
+        );
+        assert!(
+            attempts.get() > 1,
+            "it must have been given the delete-pending benefit of the doubt at least once"
+        );
+        // The 65s wait ceiling is for a HELD lock. A denial is bounded by the
+        // grace, so the caller is not parked for a minute on a permission bug.
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "reported after {:?}, which is not bounded by the grace",
+            started.elapsed()
+        );
+        assert!(!path.exists());
+    }
+
+    /// THE CONTROL THAT MAKES THE FIX FALSIFIABLE: a real refusal by the OS,
+    /// through the real `acquire`, with nothing injected anywhere. If this ever
+    /// passes, `chunked_put` has started swallowing genuine permission failures
+    /// and the fix is worse than the bug.
+    #[test]
+    #[cfg(unix)]
+    fn a_genuine_permission_denial_is_still_a_hard_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let sealed = dir.path().join("sealed");
+        std::fs::create_dir(&sealed).unwrap();
+        std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        // PRECONDITION, CHECKED AND NOT ASSUMED. Root holds CAP_DAC_OVERRIDE and
+        // this directory would accept a write regardless of its mode, so on such
+        // a host the condition under test cannot be produced and a pass here
+        // would prove nothing at all.
+        if directory_accepts_a_new_file(&sealed) {
+            std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o700)).unwrap();
+            eprintln!(
+                "SKIPPED a_genuine_permission_denial_is_still_a_hard_failure: this process can \
+                 write a mode-0500 directory (root?), so this host cannot exhibit the denial \
+                 and its green would be meaningless"
+            );
+            return;
+        }
+
+        let started = std::time::Instant::now();
+        let outcome = ExclusiveFileLock::acquire(
+            sealed.join(".credentials.chunk.test.lock"),
+            LockPolicy::CREDENTIAL_WRITE,
+            "credential write",
+        );
+        let elapsed = started.elapsed();
+        // Restore before any assertion can unwind, or the tempdir cannot clean up.
+        std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let error =
+            outcome.expect_err("a directory this process may not write must never be retried away");
+        assert!(
+            matches!(&error, CredentialsError::Io(e) if e.kind() == ErrorKind::PermissionDenied),
+            "a real denial must surface as the OS error it is, got: {error:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "and promptly, not after the 65s wait ceiling; took {elapsed:?}"
+        );
+    }
+}
+
 #[cfg(test)]
 mod chunk_write_lock_verification {
     use super::*;
@@ -6256,6 +6684,73 @@ mod chunk_write_lock_verification {
         // A key that is not a legal filename must still get a lock.
         let awkward = one.lock_path("oauth./../../etc/passwd\0.tokens");
         assert_eq!(awkward.parent(), Some(one.dir.as_path()));
+    }
+
+    /// gh#1303 REGRESSION, end to end and at the level the user feels it.
+    ///
+    /// The losing writer's lockfile create is answered exactly what Windows
+    /// answers for a name in the delete-pending window — "Access is denied."
+    /// — for the length of that window, and then succeeds. It must still commit
+    /// its WHOLE token set.
+    ///
+    /// Before the delete-pending classification existed this returned
+    /// `Err(Io(Os { code: 5, kind: PermissionDenied }))` out of `chunked_put`,
+    /// which is a rotating refresh token already spent server-side and now not
+    /// stored: the user is signed out. The denial is installed in a thread-local
+    /// on the loser's own thread, so it names ONE writer as the loser and cannot
+    /// reach any other test.
+    #[test]
+    fn a_losing_writer_denied_by_a_delete_pending_lockfile_still_commits_whole() {
+        let lock_dir = tempfile::tempdir().unwrap();
+        let locks = ChunkWriteLockSite::in_dir(lock_dir.path(), LockPolicy::CREDENTIAL_WRITE);
+        let shared = Arc::new(Shared::default());
+
+        // The winner commits and releases; the loser then races that release.
+        // Both are ordinary spanned writes of a rotating token set.
+        chunked_put(
+            &Scheduled::plain(&shared),
+            KEY,
+            &"A".repeat(9000),
+            UNITS,
+            &locks,
+        )
+        .expect("the winning writer commits");
+
+        let loser = "B".repeat(3000);
+        let loser_value = loser.clone();
+        let loser_shared = Arc::clone(&shared);
+        let loser_locks = locks.clone();
+        let (outcome, unspent) = std::thread::spawn(move || {
+            force_delete_pending_denials(3);
+            let outcome = chunked_put(
+                &Scheduled::plain(&loser_shared),
+                KEY,
+                &loser_value,
+                UNITS,
+                &loser_locks,
+            );
+            (outcome, forced_delete_pending_denials_left())
+        })
+        .join()
+        .unwrap();
+
+        outcome.expect(
+            "a delete-pending collision is contention the lock exists to serialise; returning \
+             Err here loses a single-use refresh token the provider has already rotated, and \
+             the user is signed out",
+        );
+        assert_eq!(
+            unspent, 0,
+            "the acquisition must have consumed every scripted denial rather than returning on \
+             the first"
+        );
+        assert_eq!(
+            chunked_get(&Scheduled::plain(&shared), KEY, &locks)
+                .unwrap()
+                .as_deref(),
+            Some(loser.as_str()),
+            "the loser must commit its WHOLE token set, not a fragment and not nothing"
+        );
     }
 }
 
