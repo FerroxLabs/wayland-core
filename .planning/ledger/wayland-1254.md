@@ -3,8 +3,8 @@ issue: 1254
 repo: FerroxLabs/wayland
 kind: defect
 title: "preflight.sh prints PRE-FLIGHT PASSED on a tree CI reds: a gate's self-disclosed downgrade is discarded on the success path"
-status: open
-last_verified_commit: bc9288da5
+status: closed
+last_verified_commit: 77af7f9e6
 criteria:
   - id: c1
     text: "On a shallow clone of a tree whose full-clone python3 scripts/check-criteria-ledger.py --offline is EXIT=1, bash scripts/preflight.sh does NOT exit 0 and does NOT print PRE-FLIGHT PASSED"
