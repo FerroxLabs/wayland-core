@@ -227,7 +227,7 @@ jobs:
         shell: bash
 
       - name: Upload mutation log
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: mutants-log-${{ matrix.crate }}
