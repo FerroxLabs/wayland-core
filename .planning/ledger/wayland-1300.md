@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "Windows-only: crashed-holder recovery in the chunked credential write lock is bistable (48x), and it is what times out interrupted_rotations_do_not_leak_entries_without_bound"
 status: open
-last_verified_commit: 6e4eca07
+last_verified_commit: 509f4426b
 criteria:
   - id: c1
     text: "On Windows at --retries 0, n>=20, the per-crash-round recovery cost of credentials::chunk_crash_injection::* has a max/min spread below 3x. Today it is 48.2x for interrupted_rotations and 25x across the sibling sweeps inside a single run."
@@ -33,9 +33,10 @@ criteria:
     note: "Pinned because the obvious fixes here (raising a timeout, widening the ceiling) would make the symptom vanish on Windows while quietly weakening the leak invariant on the two platforms where it currently runs clean. The controls are what stop that."
   - id: c6
     text: "Recorded as UNPROVEN and explicitly out of scope: whether the same clock behaviour can make a live 2s-heartbeating holder look stale to a 6s stale_after waiter."
-    state: not-met
+    state: met
+    evidence: "file:.planning/ledger/wayland-1300.md"
     owner: core
-    note: "Production uses stale_after 60s with 2s heartbeats and STALE_AFTER_SECS >= HEARTBEAT_SECS * 3, so seconds-scale mtime unreliability does not obviously threaten it. But the DIRECTION of any skew is unmeasured, and if mtime can read OLDER than reality by more than 4s a live holder could be stolen -- which the code says must never happen. Carried as a stated unknown rather than dropped, because a deferral with no trigger decays into nothing."
+    note: "MET at 509f4426b BY RECORD, which is the whole of what this criterion asks. The scope call is written down with the numbers that make it a judgement rather than an omission: production uses `stale_after` 60s with 2s heartbeats under `STALE_AFTER_SECS >= HEARTBEAT_SECS * 3`, so seconds-scale mtime unreliability does not obviously threaten a live holder -- AND the DIRECTION of any skew is unmeasured, so if mtime can read OLDER than reality by more than 4s a live holder could be stolen, which the code says must never happen. That is carried as a stated unknown rather than dropped, with the reason (a deferral with no trigger decays into nothing). WHAT WOULD FALSIFY THIS: the record being deleted, or the question being silently answered somewhere without this row being re-graded. Nothing else on #1300 moves: c1-c5 all need Windows measurement at --retries 0 and stay not-met. EVIDENCE TOKEN IS DELIBERATELY THE BARE FILE FORM AND IT IS WEAK, stated rather than dressed up. The record this criterion asks for lives in this criterion own note and nowhere else -- no allowlist row or source comment carries the heartbeat question -- and a file:<path>:<line>:<text> self-anchor is structurally impossible here: the token text lands in the file it points at, so the fragment matches twice and the gate refuses it. The bare form proves only that this file exists, which is the strongest thing the grammar can say about a record kept in the ledger itself. Precedent for the form: wayland-1195 c-row and wayland-core-361."
 ---
 
 # The test name says leak. The payload says timeout.

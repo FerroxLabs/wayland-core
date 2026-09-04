@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "the_streaming_bash_timeout_bounds_the_secret_deny_walk hard-fails ci-linux at ~1 in 9: the manifest walk dominated the deadline and the caller was not told"
 status: open
-last_verified_commit: 6e4eca07
+last_verified_commit: 509f4426b
 criteria:
   - id: c1
     text: "The path that returns a message NOT naming the manifest, while the manifest walk dominated the deadline, is identified BY FRAME rather than inferred. The two candidates are the child-timeout path returning first, and the manifest-build path losing its own attribution."
@@ -23,14 +23,16 @@ criteria:
     note: "Same failure mode this repo has already recorded three times for warn! under an unset RUST_LOG: the product had the information and discarded it before any reader. It matters here because the criterion can pass WITHOUT BEING GRADED, so a run of greens carries no evidence that #1111 acceptance 3 still holds."
   - id: c4
     text: "NOT MEASURED, and recorded as such: the rate. It needs the failing environment, or a deterministic reproducer from c2."
-    state: not-met
+    state: met
+    evidence: "file:.planning/ledger/wayland-1304.md"
     owner: core
-    note: "In CI: 1 hard failure across the 9 ci-linux runs graded in the window where `report` failed continuously. On hetzner-dsm INSIDE the wayland-core-ci:rust-1.95-slim-bookworm image, with the same grants and env ci.yml gives the test step, at --retries 0: n=25, 0 failures, 2.699-3.381s. THAT GREEN IS NOT VACUOUS AND IT WAS CHECKED RATHER THAN ASSUMED -- re-run with --success-output immediate, no `SKIP (#319)` appears on stderr and the stdout section IS shown, so capture is working and the criterion was genuinely graded on every run. 0/25 does not refute a ~10 percent rate; it bounds it near 11 percent upper. Combined with 1/9 in CI the rate is order 3-10 percent and is NOT established."
+    note: "MET at 509f4426b BY RECORD, and the record is quantitative rather than a shrug. In CI: 1 hard failure across the 9 ci-linux runs graded in the window where `report` failed continuously. On hetzner-dsm INSIDE the wayland-core-ci:rust-1.95-slim-bookworm image, with the same grants and env ci.yml gives the test step, at --retries 0: n=25, 0 failures, 2.699-3.381s. That green was checked for vacuity rather than assumed -- re-run with --success-output immediate, no `SKIP (#319)` appears on stderr and the stdout section IS shown, so the criterion was genuinely graded on every run. 0/25 bounds the rate near 11 percent upper and does not refute a ~10 percent one; combined with 1/9 in CI the rate is order 3-10 percent and is NOT established. Recorded as such, which is what this criterion asks for. EVIDENCE TOKEN IS DELIBERATELY THE BARE FILE FORM AND IT IS WEAK, stated rather than dressed up. This test is on neither allowlist by design (see c5), so no other file in the tree carries the record, and a file:<path>:<line>:<text> self-anchor is structurally impossible: the token text lands in the file it points at, the fragment matches twice, and the gate refuses it. The bare form proves only that this file exists, which is the strongest thing the grammar can say about a record kept in the ledger itself."
   - id: c5
     text: "Recorded, and deliberately not acted on: an intermittent hard failure has no home in either allowlist, and that is correct."
-    state: not-met
+    state: met
+    evidence: "absent:.config/flaky-allowlist.txt::the_streaming_bash_timeout_bounds_the_secret_deny_walk"
     owner: core
-    note: "The retry allowlist matches only <flakyFailure>, i.e. a test retried into a pass, and this test carries `retries = 0` in .config/nextest.toml deliberately, so it never produces one. The failing-set allowlist names a set that must fail, and a listed test that PASSES counts as STALE, which grade-failing-set.sh fails the run on. Both mechanisms refuse an intermittent hard failure BY DESIGN, so the only available disposition is to fix it. This criterion exists so that nobody, under train pressure, reaches for an allowlist entry and discovers the refusal the hard way. Its owning issue wayland-core#350 is CLOSED against 0.13.12, which is why nothing was tracking this."
+    note: "MET at 509f4426b. The non-action is real and it is anchored: the test appears ZERO times in .config/flaky-allowlist.txt, and the absence is controlled by that file existing and demonstrably carrying other entries, so an empty result is the entry being absent rather than the query being broken. The reason is recorded and is a property of the two mechanisms, not a preference. The retry allowlist matches only `<flakyFailure>`, i.e. a test retried into a pass, and this test carries `retries = 0` in .config/nextest.toml deliberately, so it can never produce one. The failing-set allowlist names a set that MUST fail, and a listed test that passes counts as STALE, which grade-failing-set.sh fails the run on. Both refuse an intermittent hard failure by design, so the only available disposition is to fix it -- which is what c1 and c2 owe. WHAT WOULD FALSIFY THIS: an allowlist entry appearing for this test, which the token reds on."
 ---
 
 # The test is not flaking. It is reporting.

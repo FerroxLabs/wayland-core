@@ -4,13 +4,14 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "mutants-nightly has produced zero data in 87 runs: every leg dies in ~30s on a missing target/ parent, and the step exits 0 so it can never go red"
 status: open
-last_verified_commit: 6e4eca07
+last_verified_commit: 509f4426b
 criteria:
   - id: c1
     text: "RED ARM: on a checkout with no target/ present, `cargo mutants -p wcore-cron --no-shuffle --timeout 90 --output target/mutants-wcore-cron` fails in under 60 seconds printing `create output parent directory` and `No such file or directory (os error 2)`."
-    state: not-met
+    state: met
+    evidence: "commit:b593b206e"
     owner: core
-    note: "Filed 2026-09-03. Anchored at 6e4eca07, which does not carry the fix, so every criterion is not-met here by construction. RED ARM ALREADY RUN, cargo-mutants 27.1.0, on a clean `git archive` of 6e4eca07 into /root/scratch-424 with no target/ directory: `Error: create output parent directory \"target/mutants-wcore-cron\"` / `Caused by: No such file or directory (os error 2)` -- the CI string verbatim. cargo-mutants does not create the parent of --output, and the workflow has no `mkdir -p target` and no build step before it."
+    note: "MET at 509f4426b. The red arm this criterion specifies was run and its output is recorded verbatim in the tree: cargo-mutants 27.1.0 against a clean `git archive` of 6e4eca07 with no target/ directory present produced `Error: create output parent directory target/mutants-wcore-cron` / `Caused by: No such file or directory (os error 2)` -- both strings this criterion names -- in roughly 30 seconds, inside the 60s bound. b593b206e carries that before/after pair in its message and is the commit that lands the one-line `mkdir -p target` fix, so the red arm and the change it justifies are anchored to the same object. The cause is also stated there and is self-sustaining: no target/ means mutants fails, so nothing is built, so the cache step saves nothing, so the next run again has no target/. NOT GRADED: c2 needs the summary line from a CI ARTIFACT (the 339-mutant run was measured on the build host); c3 needs a run demonstrating the leg can now conclude failure; c4 and c5 belong to the closing evidence, which is not written."
   - id: c2
     text: "The fix produces real data, read from the artifact and not the job log: a run has a wcore-cron leg whose uploaded log contains a line matching `^[0-9]+ mutants tested in `."
     state: not-met

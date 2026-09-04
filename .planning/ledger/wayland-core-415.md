@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "Close the quarantine console bypass with a restricting-SID token, without removing the feature (from #389 c1)"
 status: open
-last_verified_commit: 93ede3424
+last_verified_commit: 509f4426b
 criteria:
   - id: c1
     text: "Measured on real Windows with the reproduction control alive in the SAME run: a restricting-SID quarantine child cannot reach the operator-s console (WROTE_TO_USER_CONSOLE=false) while git --version, git status and cmd /c echo ok all exit 0 inside it. Both halves, or it is not a fix."
@@ -18,9 +18,10 @@ criteria:
     note: "MOOT, and recorded so rather than left pending: the candidate that would have needed CreateProcessAsUser is refuted (see c1), so no spawn path changes. For the record, measured alongside: CreateProcessAsUserW composes with job objects (create suspended, AssignProcessToJobObject, resume), so containment was never the obstacle -- the token was. ORIGINAL NOTE: CreateProcessAsUser replaces the spawn path core#393 just landed containment on. A fix that closes a console bypass by quietly dropping process-tree reaping is not a fix, and inspection is how that ships unnoticed."
   - id: c3
     text: "If it also proves unworkable, that is recorded with its measurement and core#389-s labelling branch becomes the permanent answer rather than the interim one."
-    state: not-met
+    state: met
+    evidence: "file:.planning/QUARANTINE-CONSOLE-RESTRICTED-TOKEN.md:12:#415 c3 applies"
     owner: core
-    note: "THIS IS THE CRITERION THAT NOW CARRIES THE ISSUE. The measurement exists and is recorded in the tree at .planning/QUARANTINE-CONSOLE-RESTRICTED-TOKEN.md, with its control, its table, the mechanism that kills the premise, and the ONE cell left unmeasured (SetTokenInformation(TokenDefaultDacl) returned 1344 even on an unrestricted duplicate token, so that is a harness defect and Chromium-style default-DACL plumbing was not exercised) stated rather than dressed over. Stays not-met ONLY because this row is anchored at a commit that does not yet carry that file; flip with a post-merge sync anchored at the merge commit. Consistent with the standing Windows decision: the remaining work is the honesty of the claim, not another containment mechanism. ORIGINAL NOTE: A residual that is neither closed nor explicitly declared closed-as-impossible decays into nothing. This criterion is what stops that."
+    note: "MET at 509f4426b, and this is the flip the previous note asked a post-merge sync to make: it said the row stayed not-met ONLY because it was anchored at a commit that did not yet carry the measurement file. dfc9f2273 put that file on main. .planning/QUARANTINE-CONSOLE-RESTRICTED-TOKEN.md now records, in the tree, the refutation with its control alive in the same run (DETECTOR_SELFTEST PASS, and [control-detached] reproducing the 2026-09-01 baseline WROTE_TO_USER_CONSOLE=true byte for byte), the full twelve-arm table on real Windows 10.0.26200.9168, the mechanism that kills the premise rather than only the nine arms, and the one cell left unmeasured stated as such (SetTokenInformation(TokenDefaultDacl) returned 1344 in all three forms attempted, so Chromium-style default-DACL plumbing was not exercised and that is a harness limit, not a null result). It states the consequence this criterion demands: #389 labelling branch becomes the permanent answer rather than the interim one. c1 remains not-met and should be read as NOT ACHIEVABLE rather than pending -- its two halves are strictly anti-correlated across every configuration measured -- and c2 is MOOT, since the candidate that would have needed CreateProcessAsUser is refuted so no spawn path changes."
 ---
 
 Split from core#389 c1 on 2026-09-01. core#389 took its own documented c2 branch --

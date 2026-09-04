@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "First Windows retry-flake cluster: a wall-clock ratio guard and a dispatch-budget test at 94% of its kill line (CI (Array))"
 status: open
-last_verified_commit: 6e4eca07
+last_verified_commit: 509f4426b
 criteria:
   - id: c1
     text: "one_turn_costs_about_two_whole_payload_scrub_passes has its estimator changed to reduce variance WITHOUT moving either bound, and is re-measured at n>=40 under load with a stated failure rate. Widening the 1.5..2.5 window does not satisfy this."
@@ -13,9 +13,10 @@ criteria:
     note: "Filed 2026-09-03. MEASURED, and reproduced off Windows so it is not a platform artifact: Windows 1/10 (run 33707672948, 'one turn now costs 3.06 whole-payload PIIScrubber passes per byte ... small=0.7434s large=1.4755s one_scrub=0.2744s'), and Linux 1/41 at --retries 0 under load 62-151 with payload 'ratios=[1.46, 2.68, 4.61] median_passes=2.68' -- ONE invocation crossing BOTH bounds on a byte-identical tree. Over 120 rounds, 7 were >= 2.5 (max 4.61) and 3 were <= 1.5; only the median-of-3 hides them. NOT A REGRESSION: over 41 Linux runs the asserted median-of-3 is min 1.81 / median 2.00 / max 2.68, exactly the 2.0 that wayland-core#395 measured. The estimator is a DIFFERENCE of two wall-clock samples divided by a third, so noise is amplified and ~290ms of jitter in the large arm moves it a full pass. The criterion forbids widening the bounds on purpose: the LOWER bound is the anti-'stop scrubbing' control and loosening it would silently retire the property the test exists for."
   - id: c2
     text: "The justifying comment in .config/nextest.toml no longer claims CI's 180s budget covers fix1_dispatch_budget_aborts_with_partial_result; it states the real 240s inherited override and the measured 185-226s range."
-    state: not-met
+    state: met
+    evidence: "file:.config/nextest.toml:139:CORRECTED 2026-09-03 (gh#1301 c2)"
     owner: core
-    note: "The comment certified a budget the test has NEVER ONCE passed inside. All ten measured Windows runs exceed 180s (185.46-226.28s); it passes only because nextest inherits [[profile.default.overrides]] into --profile ci, giving 120s x 2 = 240s. A false justification in a config file is worse than none: it tells the next reader the question is settled."
+    note: "MET at 509f4426b. The justifying comment in .config/nextest.toml no longer certifies the 180s budget, and it states both figures this criterion names. Read in the tree at :139-149: it records that the block used to read `this test already PASSES in CI, whose 90s x 2 = 180s budget covers it` and that this was FALSE -- all ten measured Windows (`CI (Array)`) runs exceed 180s, at 185.46-226.28s, so the test has never once passed inside the budget the comment certified. It names the real inherited override (`nextest inherits THIS override into --profile ci, giving it 120s x 2 = 240s`, matching `slow-timeout = { period = 120s, terminate-after = 2 }` at :162) and the measured range and its drift (185-194s on 2026-09-02 against 216.9/221.0/226.3s on 2026-09-03, i.e. 90-94 percent of the kill line). Landed in 774c40f5a. c3 is NOT graded by this: the headroom is still 90-94 percent, not the 1.5x the criterion requires."
   - id: c3
     text: "fix1_dispatch_budget_aborts_with_partial_result has at least 1.5x headroom against its kill line on Windows, measured at n>=10. Today it sits at 90-94%."
     state: not-met
