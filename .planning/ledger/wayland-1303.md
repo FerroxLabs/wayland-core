@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "Windows: a racing chunked credential write fails outright with ACCESS_DENIED (os error 5), and the caller loses a single-use refresh token"
 status: open
-last_verified_commit: 6e4eca07
+last_verified_commit: 509f4426b
 criteria:
   - id: c1
     text: "The Windows file operation that answers ERROR_ACCESS_DENIED is identified BY FRAME rather than inferred, and the answer distinguishes lock acquisition from manifest publish."
@@ -23,9 +23,10 @@ criteria:
     note: "Listed 2026-09-03 with a 2026-09-20 expiry so the debt cannot quietly roll forward. Allowlisting was chosen over a scoped `retries = 0` only because a ten-PR train was blocked on a pre-existing Windows reliability bug; the allowlist header is explicit that retries = 0 is the correct home once the train is clear."
   - id: c4
     text: "NOT MEASURED, and recorded as such: the rate on a hosted Windows runner."
-    state: not-met
+    state: met
+    evidence: "file:.config/flaky-allowlist.txt:87:so this proves it flakes and NOT how often"
     owner: core
-    note: "Negative control on SeanDesktop (the ferrox-win-msvc host) at --retries 0, n=15, 0 failures, 3.240-4.412s each, genuinely executing. That box is fast and has an interactive session, so it does not reproduce hosted-runner full-suite contention; the green is not evidence against the defect and must not be cited as one. A real rate needs the failing environment."
+    note: "MET at 509f4426b BY RECORD. This criterion asks for the rate to be recorded as NOT MEASURED, and it is, together with the negative control and the reason that control does not count as evidence against the defect: SeanDesktop (the ferrox-win-msvc host) at --retries 0, n=15, 0 failures, 3.240-4.412s each and genuinely executing -- but that box is fast and has an interactive session, so it cannot reproduce hosted-runner full-suite contention, and its green is explicitly refused as counter-evidence. A real rate needs the failing environment. WHAT WOULD FALSIFY THIS: a rate being measured and this row not being re-graded, or the record being deleted. c1-c3 stay not-met: the ERROR_ACCESS_DENIED frame is still unidentified, there is no regression test for the losing writer, and the two entries are still on the retry allowlist. ANCHORED ON THE ALLOWLIST ROW, not on this file: .config/flaky-allowlist.txt:87 carries the same record where the gate reads it -- the n=15 control, and the sentence that refuses it as a rate. A self-anchor into this ledger is structurally impossible under the file: grammar, because the token text lands in the file it points at and the fragment then matches twice."
 ---
 
 # The test name says splicing. The payload says the write failed.

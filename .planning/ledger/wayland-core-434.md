@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "The #338 c2 Windows residual pin reports the escape CLOSED while the same report shows it open"
 status: open
-last_verified_commit: 6e4eca07
+last_verified_commit: 509f4426b
 criteria:
   - id: c1
     text: "The pin no longer depends on the PARENT owning the operator console: it is either re-anchored on the _EXPLICIT probe, which does not, or it asserts the precondition (CONSOLE_WINDOW_AT_CREATION != NONE) and skips honestly when it does not hold."
@@ -23,9 +23,10 @@ criteria:
     note: "Listed 2026-09-03 with a 2026-09-20 expiry."
   - id: c4
     text: "NOT MEASURED, and recorded as such: the rate, and whether the _EXPLICIT arm ever moves."
-    state: not-met
+    state: met
+    evidence: "file:.config/flaky-allowlist.txt:89:the _EXPLICIT probe does not depend on the parent and did not move"
     owner: core
-    note: "Observed ONCE, retried into a pass, across the 12 runs in which report failed continuously. Not reproduced on SeanDesktop -- that host has an interactive session, which is exactly the condition the hypothesis says HIDES it, so its green is not evidence against. The _EXPLICIT arm has not been observed to move in any stored artifact, which is the reason the escape is described as still open rather than as intermittent."
+    note: "MET at 509f4426b BY RECORD, which is exactly what this criterion asks -- it names itself NOT MEASURED. Both halves are written down. The RATE: observed ONCE, retried into a pass, across the twelve runs in which `report` failed continuously; not reproduced on SeanDesktop, and that green is explicitly refused as counter-evidence because that host has an interactive session, which is the condition the hypothesis says HIDES the failure. The SECOND HALF: the _EXPLICIT arm has not been observed to move in any stored artifact, which is the reason the escape is described as still open rather than as intermittent. WHAT WOULD FALSIFY THIS: a rate being measured, or the _EXPLICIT arm moving, without this row being re-graded. c1-c3 stay not-met and were checked against the tree rather than assumed: crates/wcore-cli/tests/quarantine_console_authority_windows.rs:596-608 still carries the SHARES_USER_CONSOLE_AFTER pin whose message invites `Re-grade c2 on Windows and replace this pin` without naming the _EXPLICIT field, and the entry is still on .config/flaky-allowlist.txt. ANCHORED ON THE ALLOWLIST ROW, not on this file: .config/flaky-allowlist.txt:89 carries both halves where the gate reads them -- RATE NOT MEASURED, and the _EXPLICIT probe not moving. A self-anchor into this ledger is structurally impossible under the file: grammar, because the token text lands in the file it points at and the fragment then matches twice."
 ---
 
 # A canary that fires in the safe-looking direction
