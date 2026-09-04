@@ -71,6 +71,11 @@ WHAT IT FAILS ON
     * scanning nothing -- no ledger directory, no files, no criteria, or a
       tree in which not one entry is a `defect`. A gate that examined sixty
       files and had no defect to judge did not pass; it abstained.
+    * a workspace version it cannot read, or that does not reduce to an
+      X.Y.Z milestone. The release this gate judges is DERIVED from
+      `[workspace.package] version` in the root Cargo.toml -- it has no
+      default, because a gate that defaults its own scope grades whichever
+      release is convenient rather than the one being cut.
 
 WHAT IT DOES NOT DO
     It does not judge whether a criterion is a GOOD criterion, whether a
@@ -109,17 +114,102 @@ FOREIGN_OWNERS = ("desktop", "flux", "maintainer", "reporter")
 # already passed.
 OPEN_STATES = ("not-met", "blocked")
 
-# The release this gate judges. A SOURCE constant, not a flag: a switch that
-# changes which issues count is a switch that gets typed when a workflow needs
-# green, which is why the `injected` fixture below has no flag either. Bump it
-# when a release is cut. Leftovers become the next release's scope by being
-# re-milestoned on the tracker, in the open, one issue at a time -- never by a
-# default here.
+# The release this gate judges. DERIVED from the tree, not typed into it.
+#
+# It was a constant, and the constant did what constants do: it outlived its
+# release. This file shipped reading `0.13.12` AFTER 0.13.12 was published, so
+# the gate was grading a milestone whose work is finished by definition. It
+# passed trivially and certified nothing about the release actually being cut.
+# That is the same failure class the rest of this file exists to catch -- a
+# check that cannot go red -- sitting in the check's own scope.
+#
+# The number it reads is `[workspace.package] version`, which is already the
+# tree's statement of which release it is: release.yml's "Extract version from
+# tag" step refuses to tag when that value and the tag disagree. Deriving from
+# it means the gate and the tag can never grade different releases.
+#
+# It is still not a flag, for the same reason the `injected` fixture below has
+# none: a switch that changes which issues count is a switch that gets typed
+# when a workflow needs green. The only way to move this one is to bump the
+# version the release is genuinely cut from, in Cargo.toml, in the open.
+# Leftovers become the next release's scope by being re-milestoned on the
+# tracker, one issue at a time -- never by a default here.
 #
 # An OPEN issue carrying no milestone is a hard failure below. Without that this
-# constant would be a bypass and not a scope: an unmilestoned issue would sit
-# outside every release forever and no gate would ever say so.
-RELEASE_MILESTONE = "0.13.12"
+# would be a bypass and not a scope: an unmilestoned issue would sit outside
+# every release forever and no gate would ever say so.
+
+
+class MilestoneError(Exception):
+    pass
+
+
+# The SAME section-scoped read release.yml performs, in Python:
+#
+#     sed -n '/^\[workspace\.package\]/,/^\[/ s/^version *= *"\(.*\)"/\1/p' \
+#         Cargo.toml | head -1
+#
+# Section-scoped on purpose. `version = ` appears in other tables of this
+# manifest, and a whole-file grep would grade a release that does not exist.
+_WS_VERSION = re.compile(r'^version\s*=\s*"([^"]*)"')
+_SEMVER_BASE = re.compile(r"^\d+\.\d+\.\d+$")
+
+
+def workspace_version(root):
+    """-> the `[workspace.package] version` string from <root>/Cargo.toml.
+
+    Raises MilestoneError on every failure. It never returns a fallback: the
+    caller must not be able to keep going with a guessed scope.
+    """
+    path = os.path.join(root, "Cargo.toml")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError as e:
+        raise MilestoneError(
+            "could not read %s (%s). This gate derives the release it judges "
+            "from the workspace version and has no default to fall back on."
+            % (path, e))
+    in_table = False
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("["):
+            if in_table:
+                break  # the sed range closes at the next table header
+            in_table = (s == "[workspace.package]")
+            continue
+        if in_table:
+            m = _WS_VERSION.match(s)
+            if m:
+                return m.group(1)
+    raise MilestoneError(
+        'no `version = "..."` under `[workspace.package]` in %s. That key is '
+        "what release.yml compares a tag against; without it there is no "
+        "release for this gate to grade." % path)
+
+
+def release_milestone(root):
+    """-> the tracker milestone title for the release <root> is cut from.
+
+    A pre-release tree grades the milestone it is a candidate FOR: a tree at
+    `0.13.13-rc.2` is being cut toward `0.13.13`, the tracker has no
+    `0.13.13-rc.2` milestone and never will, and release.yml already requires
+    an rc tag to share its BASE version with the tree (`${version%%-*}`). The
+    strip here is that same rule, so the gate and the tag agree by
+    construction.
+
+    Anything that does not reduce to an X.Y.Z base is REFUSED, not guessed.
+    """
+    version = workspace_version(root)
+    base = version.split("-", 1)[0]
+    if not _SEMVER_BASE.match(base):
+        raise MilestoneError(
+            "workspace version %r in %s does not reduce to an X.Y.Z milestone "
+            "(%r after stripping the pre-release suffix). Refusing to "
+            "guess: a gate that guesses its own scope grades the wrong "
+            "release."
+            % (version, os.path.join(root, "Cargo.toml"), base))
+    return base
 
 HANDOFF = re.compile(r"^(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#(?P<num>\d+)$")
 # Label names that decide the question on GitHub. Anything else is silence,
@@ -233,7 +323,7 @@ def gh_issue_state(ref):
         return None
 
 
-def fetch_tracker_state(repos, handoffs, injected):
+def fetch_tracker_state(repos, handoffs, injected, milestone):
     """-> ({repo: {num: labels}}, {handoff ref: state-or-None}).
 
     `injected` short-circuits the network for --self-test's fixtures. It has
@@ -259,7 +349,7 @@ def fetch_tracker_state(repos, handoffs, injected):
         miles = {}
         for rp, nums in labels.items():
             for num in nums:
-                miles.setdefault(rp, {})[num] = RELEASE_MILESTONE
+                miles.setdefault(rp, {})[num] = milestone
         for ref, title in injected.get("milestones", {}).items():
             rp, _, num = ref.partition("#")
             miles.setdefault(rp, {})[int(num)] = title
@@ -299,6 +389,15 @@ def run(root, offline=False, injected=None):
 
     def say(s=""):
         out.append(s)
+
+    # First, because everything below is scoped by it. A tree that cannot say
+    # which release it is cannot be graded against one, and the only honest
+    # answer at that point is a non-zero exit -- never a default milestone.
+    try:
+        milestone = release_milestone(root)
+    except MilestoneError as e:
+        say("FAIL: %s" % e)
+        return 2, out
 
     try:
         L = load_ledger_module()
@@ -419,7 +518,7 @@ def run(root, offline=False, injected=None):
         repos = sorted({r.get("repo") for r in records if r.get("repo")})
         try:
             labels, miles, ho_state = fetch_tracker_state(
-                repos, handoffs, injected)
+                repos, handoffs, injected, milestone)
         except TrackerError as e:
             say()
             say("FAIL: %s" % e)
@@ -549,7 +648,7 @@ def run(root, offline=False, injected=None):
                 if ms is None:
                     unmilestoned.append((rec.get("repo"), rec.get("issue")))
                     continue
-                if ms != RELEASE_MILESTONE:
+                if ms != milestone:
                     deferred.setdefault(ms, set()).add(
                         "%s#%s" % (rec.get("repo"), rec.get("issue")))
                     continue
@@ -567,7 +666,7 @@ def run(root, offline=False, injected=None):
             say("NOTE: %d issue(s) owe work under milestone `%s`, not `%s`. "
                 "They are tracked and are NOT part of this release's "
                 "definition of done: %s"
-                % (len(deferred[ms]), ms, RELEASE_MILESTONE,
+                % (len(deferred[ms]), ms, milestone,
                    ", ".join(sorted(deferred[ms]))))
         if deferred:
             say()
@@ -591,7 +690,7 @@ def run(root, offline=False, injected=None):
         say("RELEASE BLOCKED (%s): %d defect issue(s) still owe work -- %d "
             "core-owned criterion(s) not met, %d handed to another lane with "
             "nothing tracking the remainder."
-            % (RELEASE_MILESTONE, len(by_issue), len(outstanding),
+            % (milestone, len(by_issue), len(outstanding),
                len(undecomposed)))
         say("This list IS the definition of done for the release. A ticket "
             "ends CLOSED or DECOMPOSED; `partial` is a ticket nobody split.")
@@ -681,14 +780,43 @@ _INJ = {
 # entirely, and a default-argument `None` cannot say both things.
 _KEEP = object()
 
+# The fixture tree's own version, deliberately nothing this repo has ever been
+# or will be. If derivation ever silently read the REAL Cargo.toml instead of
+# the fixture's, every milestone arm below would grade `0.13.x` and the A/B
+# would collapse into two identical runs.
+_FIXTURE_VERSION = "9.9.9"
+_FIXTURE_NEXT = "9.9.10"
 
-def _fixture(root, defect, feature):
+# The decoys are the point. `version = ` appears in three tables here and only
+# one of them is the release. A reader that greps the whole file, or that stops
+# at the first hit, grades a version that does not exist.
+_CARGO = """[workspace]
+resolver = "2"
+members = ["crates/x"]
+version = "0.0.0-decoy-before"
+
+[workspace.package]
+version = "%s"
+edition = "2024"
+
+[workspace.dependencies]
+version = "0.0.0-decoy-after"
+"""
+
+
+def _cargo(version):
+    return _CARGO % version
+
+
+def _fixture(root, defect, feature, cargo):
     d = os.path.join(root, ".planning", "ledger")
     os.makedirs(d, exist_ok=True)
     if defect is not None:
         open(os.path.join(d, "wayland-7.md"), "w").write(defect)
     if feature is not None:
         open(os.path.join(d, "wayland-8.md"), "w").write(feature)
+    if cargo is not None:
+        open(os.path.join(root, "Cargo.toml"), "w").write(cargo)
     return root
 
 
@@ -696,11 +824,12 @@ def self_test():
     cases = []
 
     def case(label, must_fire, defect=_KEEP, feature=_KEEP, expect=None,
-             offline=False, inj=_INJ):
+             offline=False, inj=_INJ, cargo=_KEEP):
         cases.append((label, must_fire,
                       _DEFECT if defect is _KEEP else defect,
                       _FEATURE if feature is _KEEP else feature,
-                      expect, offline, inj))
+                      expect, offline, inj,
+                      _cargo(_FIXTURE_VERSION) if cargo is _KEEP else cargo))
 
     # ── the controls, both arms ─────────────────────────────────────────
     case("clean control: defect done, feature outstanding", False)
@@ -808,23 +937,59 @@ def self_test():
          inj={"labels": _INJ["labels"], "issues": _INJ["issues"],
               "milestones": {"FerroxLabs/wayland#7": None}},
          expect="carries NO milestone")
+    _OWES = _DEFECT.replace(
+        '    state: met\n    evidence: '
+        '"test:src/t.rs::the_boundary_is_probed"\n',
+        "    state: not-met\n")
+    _MS_NEXT = {"labels": _INJ["labels"], "issues": _INJ["issues"],
+                "milestones": {"FerroxLabs/wayland#7": _FIXTURE_NEXT}}
+    _MS_THIS = {"labels": _INJ["labels"], "issues": _INJ["issues"],
+                "milestones": {"FerroxLabs/wayland#7": _FIXTURE_VERSION}}
     case("an OPEN defect milestoned to a LATER release does not block",
-         False,
-         defect=_DEFECT.replace(
-             '    state: met\n    evidence: '
-             '"test:src/t.rs::the_boundary_is_probed"\n',
-             "    state: not-met\n"),
-         inj={"labels": _INJ["labels"], "issues": _INJ["issues"],
-              "milestones": {"FerroxLabs/wayland#7": "0.13.13"}},
-         expect="not `0.13.12`")
+         False, defect=_OWES, inj=_MS_NEXT,
+         expect="not `%s`" % _FIXTURE_VERSION)
     case("control: that same defect in THIS release still blocks", True,
-         defect=_DEFECT.replace(
-             '    state: met\n    evidence: '
-             '"test:src/t.rs::the_boundary_is_probed"\n',
-             "    state: not-met\n"),
-         inj={"labels": _INJ["labels"], "issues": _INJ["issues"],
-              "milestones": {"FerroxLabs/wayland#7": "0.13.12"}},
-         expect="OUTSTANDING   c1")
+         defect=_OWES, inj=_MS_THIS, expect="OUTSTANDING   c1")
+
+    # ── the milestone is DERIVED, and it TRACKS the version ─────────────
+    # An A/B on exactly one variable. Both arms carry the identical ledger
+    # (#7 owes a core criterion) and the identical tracker state (#7 is
+    # milestoned 9.9.10). The ONLY difference is the version in the
+    # fixture's Cargo.toml. Green then red is the whole claim: the scope
+    # followed the bump. If it did not, both arms land the same way and
+    # neither of them means anything -- which is precisely what the
+    # hardcoded constant did to this gate for a whole release.
+    case("tree at 9.9.9: a 9.9.10 defect is the NEXT release's problem",
+         False, defect=_OWES, inj=_MS_NEXT, cargo=_cargo(_FIXTURE_VERSION),
+         expect="not `%s`" % _FIXTURE_VERSION)
+    case("bump the tree to 9.9.10: the SAME defect now blocks",
+         True, defect=_OWES, inj=_MS_NEXT, cargo=_cargo(_FIXTURE_NEXT),
+         expect="RELEASE BLOCKED (%s)" % _FIXTURE_NEXT)
+    # And the release candidate grades the release it is a candidate FOR.
+    # There is no `9.9.10-rc.2` milestone on any tracker; a gate that looked
+    # for one would find nothing in scope and pass an rc on emptiness.
+    case("a 9.9.10-rc.2 tree grades the 9.9.10 milestone", True,
+         defect=_OWES, inj=_MS_NEXT,
+         cargo=_cargo(_FIXTURE_NEXT + "-rc.2"),
+         expect="RELEASE BLOCKED (%s)" % _FIXTURE_NEXT)
+
+    # ── derivation failures are LOUD ────────────────────────────────────
+    # Each of these used to be impossible because the answer was typed in.
+    # Now the answer is read, so every way of failing to read it has to end
+    # the run. A fallback here would re-create the original defect exactly:
+    # a gate quietly grading a release nobody is cutting.
+    case("no Cargo.toml at all", True, cargo=None,
+         expect="has no default to fall back on")
+    case("a Cargo.toml with no [workspace.package] table", True,
+         cargo='[workspace]\nresolver = "2"\nversion = "0.0.0-decoy"\n',
+         expect="under `[workspace.package]`")
+    case("a workspace version that is not a version", True,
+         cargo=_cargo("not-a-version"),
+         expect="does not reduce to an X.Y.Z milestone")
+    case("a two-component workspace version", True, cargo=_cargo("0.13"),
+         expect="does not reduce to an X.Y.Z milestone")
+    case("an empty workspace version string", True, cargo=_cargo(""),
+         expect="does not reduce to an X.Y.Z milestone")
 
     case("a ledger entry with no `kind:` field", True,
          defect=_DEFECT.replace("kind: defect\n", ""),
@@ -888,17 +1053,20 @@ def self_test():
 
     ok = True
     results = []
-    for label, must, d, f, expect, offline, inj in cases:
+    for label, must, d, f, expect, offline, inj, cg in cases:
         # An arm whose fixture is byte-identical to the control, and whose
         # tracker state is the control's too, is testing the control. One arm
         # in this file did exactly that during development and read as a pass.
-        if must and d == _DEFECT and f == _FEATURE and inj is _INJ:
+        # The manifest is in the comparison because several arms below mutate
+        # nothing else, and without it they would read as untested control.
+        if (must and d == _DEFECT and f == _FEATURE and inj is _INJ
+                and cg == _cargo(_FIXTURE_VERSION)):
             print("  %-58s MUTATION DID NOT APPLY -- the arm tests nothing"
                   % label[:58])
             ok = False
             continue
         with tempfile.TemporaryDirectory() as td:
-            _fixture(td, defect=d, feature=f)
+            _fixture(td, defect=d, feature=f, cargo=cg)
             code, out = run(td, offline=offline, injected=inj)
         fired = code != 0
         good = fired == must
@@ -916,6 +1084,11 @@ def self_test():
          lambda td: os.makedirs(os.path.join(td, ".planning", "ledger"))),
     ):
         with tempfile.TemporaryDirectory() as td:
+            # A readable manifest, so these arms fail on the ledger and not on
+            # the derivation. A red for somebody else's reason proves nothing
+            # about the check it was written for.
+            open(os.path.join(td, "Cargo.toml"), "w").write(
+                _cargo(_FIXTURE_VERSION))
             setup(td)
             code, _ = run(td, offline=True)
         results.append((label, True, code != 0, code != 0))
@@ -925,7 +1098,7 @@ def self_test():
     # leaked state between arms shows up as a red control rather than as a
     # silently weaker gate.
     with tempfile.TemporaryDirectory() as td:
-        _fixture(td, _DEFECT, _FEATURE)
+        _fixture(td, _DEFECT, _FEATURE, _cargo(_FIXTURE_VERSION))
         code, _ = run(td, injected=_INJ)
     results.append(("control after the vacuity arms (still green)",
                     False, code != 0, code == 0))
