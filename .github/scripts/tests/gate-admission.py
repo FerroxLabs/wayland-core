@@ -391,4 +391,74 @@ emit(_script_steps >= 3,
      "repo-script steps seen: %d" % _script_steps)
 info("repo-script steps graded for checkout ordering: %d" % _script_steps)
 
+# -- RECONCILIATION with core#412 c2 / scripts/check-ci-step-suppression.py ---
+#
+# core#414 c2. Two gates now hold rules about the SAME fact -- which `if:` on a
+# step keeps that step alive after an EARLIER step in the same job has failed --
+# and they do not agree. Neither named the other, so the first person to satisfy
+# one found out about the other by reddening it. The agreement is written here,
+# and pointed back at from there, so both can be read together.
+#
+#   THIS FILE (core#414, core#405). In a job whose own `if:` normalises to
+#   `always()` or `!cancelled()` AND which invokes a script declaring
+#   `ADMISSION: unconditional`, every step up to and including the last such
+#   gate must carry a condition that normalises EXACTLY to `always()` or
+#   `!cancelled()`. Equality over a two-element set. Nothing may be ANDed on,
+#   because `always() && X` is a gate X can switch back off -- KNOWN_BAD above
+#   carries that exact mutation.
+#
+#   scripts/check-ci-step-suppression.py (core#412 c2/c3). Every step of
+#   ci.yml`s `ci-linux` job must carry a condition CONTAINING `!cancelled()` or
+#   `always()`, unless it is named in that file`s SUPPRESSIBLE map with the
+#   reason its failure makes the later steps unmeasurable. SUBSTRING, not
+#   equality -- it deliberately admits `!cancelled() && steps.ci_image.outcome
+#   == 'success'`, because a step that runs INSIDE the CI image cannot report
+#   anything once the image build has failed.
+#
+# WHICH ADMISSION FORMS SATISFY WHICH RULE:
+#
+#   `${{ !cancelled() }}` and `${{ always() }}`      -> BOTH. The only two that
+#       do, and therefore the only two safe to write in a job both rules reach.
+#   `${{ !cancelled() && steps.X.outcome == 'success' }}`
+#                                                    -> core#412 ONLY. Accepted
+#       there by substring; REJECTED here by equality.
+#   no `if:` at all; `success()`; `failure()`; `needs.X.result != '...'`;
+#   `hashFiles(...) != ' '`                        -> NEITHER.
+#   (nothing satisfies THIS file only: the set this file accepts is a strict
+#    SUBSET of the set core#412`s check accepts, so satisfying this one always
+#    satisfies that one. The stricter rule is the one to write to.)
+#
+# WHY THEY HAVE NOT COLLIDED YET -- stated so nobody relies on it. On this tree
+# the two rules grade DISJOINT jobs: this file`s prerequisite rule reaches
+# `ci.yml/report` and `e2e.yml/e2e_report` (the only jobs with an unconditional
+# job-level `if:` that also run a gate script), core#412`s reaches
+# `ci.yml/ci-linux`, which has no job-level `if:` at all. A job that is both --
+# an unconditional aggregate job that also runs steps inside an image -- must
+# use the intersection, i.e. the bare form, and so gives up the image guard.
+#
+# THE ESCAPE HATCHES DIFFER, also deliberately. core#412 has SUPPRESSIBLE: name
+# the step, give the reason. This file has NO hatch for a step at or before the
+# last gate, because a required status check that reports on behalf of its
+# dependencies has no step it may legitimately skip before it has graded.
+#
+# The marker below is split so that this assertion cannot be satisfied by its
+# own source text: deleting the block above must red it.
+_RECON_MARKER = "RECON" + "CILIATION with core#412 c2"
+_SUPPRESSION_GATE = os.path.join(ROOT, "scripts", "check-ci-step-suppression.py")
+_recon = []
+if _RECON_MARKER not in open(os.path.abspath(__file__), encoding="utf-8").read():
+    _recon.append("this file no longer carries the reconciliation block")
+if not os.path.isfile(_SUPPRESSION_GATE):
+    _recon.append("scripts/check-ci-step-suppression.py is gone; the rule it "
+                  "reconciles with cannot be read beside this one")
+elif "gate-admission.py" not in open(_SUPPRESSION_GATE, encoding="utf-8").read():
+    _recon.append("scripts/check-ci-step-suppression.py no longer points back "
+                  "at this file, so only one half of the pair can be found")
+emit(
+    not _recon,
+    "the two admission rules record their reconciliation and name each other",
+    "\n".join(_recon),
+)
+
+
 sys.exit(1 if FAILURES else 0)
