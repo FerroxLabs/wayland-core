@@ -387,7 +387,7 @@ sysinfo         = { version = "0.33", default-features = false, features = ["sys
 
 # AWS SigV4 signing (for Bedrock provider)
 # v0.7.0 1.D.2: exact-pinned (auth-boundary crypto).
-aws-sigv4            = "=1.4.3"
+aws-sigv4            = "=1.4.5"
 aws-credential-types = { version = "1", features = ["hardcoded-credentials"] }
 aws-config           = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-sts          = { version = "1", default-features = false, features = ["rt-tokio", "default-https-client", "sigv4a"] }
@@ -483,12 +483,12 @@ keyring = { version = "=3.6.3", default-features = false, features = ["apple-nat
 # v0.7.0 1.D.2: exact-pinned (vault-at-rest crypto — trust-boundary).
 argon2            = "=0.5.3"
 chacha20poly1305  = "=0.10.1"
-zeroize           = "=1.8.2"
+zeroize           = "=1.9.0"
 
 # S11: interactive passphrase prompt for the EncryptedFile credentials backend.
 # Used when WAYLAND_VAULT_PASSPHRASE is unset and a TTY is attached.
 # v0.7.0 1.D.2: exact-pinned (TTY-secret input — trust-boundary).
-rpassword         = "=7.5.2"
+rpassword         = "=7.5.4"
 
 # M5.5 swarm: humantime-readable Duration serde for SwarmBrief/SwarmResult
 # (e.g. timeout = "30s" in TOML briefs).
