@@ -228,8 +228,8 @@ struct ReservationEntry {
     output_tokens: u64,
     usd: f64,
     /// Claim held against the durable cross-session daily ledger, when one is
-    /// installed. Process-local: a reservation recovered from a snapshot has
-    /// `None` here, and its durable counterpart is reclaimed by lease expiry.
+    /// installed. Its identity survives snapshots so recovery can reconcile
+    /// the original claim without treating expiry as proof of no-send.
     daily_grant: Option<crate::daily::DailyGrant>,
 }
 
@@ -245,7 +245,7 @@ struct DailyTotals {
     usd: f64,
 }
 
-const BUDGET_TRACKER_SNAPSHOT_VERSION: u32 = 1;
+const BUDGET_TRACKER_SNAPSHOT_VERSION: u32 = 2;
 const MAX_BUDGET_EXTENSION_REQUEST_ID_BYTES: usize = 128;
 const MAX_DURABLE_BUDGET_GRANTS_PER_SESSION: usize = 1_024;
 
@@ -288,6 +288,8 @@ struct ReservationSnapshot {
     input_tokens: u64,
     output_tokens: u64,
     usd: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    daily_grant: Option<crate::daily::DailyGrant>,
 }
 
 mod reservation_snapshot_ledger {
@@ -408,8 +410,8 @@ pub struct RestoredReservationReconciliation {
     pub output_tokens_charged: u64,
     /// Conservative cost authority consumed while reconciling.
     pub cost_usd_charged: f64,
-    /// Cap receipts raised after the conservative charges were committed.
-    /// All reservations are settled even when one or more caps are exceeded.
+    /// Cap or durable-publication errors encountered while reconciling.
+    /// A failed publication retains that reservation for a later retry.
     pub cap_errors: Vec<BudgetError>,
 }
 
@@ -481,6 +483,7 @@ impl BudgetTracker {
                             input_tokens: entry.input_tokens,
                             output_tokens: entry.output_tokens,
                             usd: entry.usd,
+                            daily_grant: entry.daily_grant.clone(),
                         },
                     )
                 })
@@ -613,14 +616,13 @@ impl BudgetTracker {
     /// restart at its admitted maximum.
     ///
     /// The operation is exhaustive: a cap error blocks the affected session
-    /// but does not leave later restored reservations unsettled. Repeating the
-    /// call is safe and reports zero additional settlements.
+    /// but does not prevent reconciling later restored reservations. Failed
+    /// durable publications remain retryable; successfully consumed claims
+    /// are not charged again on repeated calls.
     pub fn reconcile_restored_reservations_conservatively(
         &mut self,
     ) -> RestoredReservationReconciliation {
-        let mut ids: Vec<_> = std::mem::take(&mut self.restored_reservations)
-            .into_iter()
-            .collect();
+        let mut ids: Vec<_> = self.restored_reservations.iter().copied().collect();
         ids.sort_unstable();
         let mut cap_errors = Vec::new();
         let mut reservations_settled = 0;
@@ -632,6 +634,13 @@ impl BudgetTracker {
             let Some(entry) = self.reservations.get(&id).cloned() else {
                 continue;
             };
+            if let Err(error) = self.settle_reservation_conservatively(BudgetReservation(id)) {
+                cap_errors.push(error);
+            }
+            if self.reservations.contains_key(&id) {
+                // Publication failed: retain both the claim and its retry identity.
+                continue;
+            }
             reservations_settled += 1;
             input_tokens_charged = input_tokens_charged.saturating_add(entry.input_tokens);
             output_tokens_charged = output_tokens_charged.saturating_add(entry.output_tokens);
@@ -641,14 +650,6 @@ impl BudgetTracker {
             } else {
                 f64::INFINITY
             };
-            if let Err(error) = self.settle_turn(
-                BudgetReservation(id),
-                entry.input_tokens,
-                entry.output_tokens,
-                entry.usd,
-            ) {
-                cap_errors.push(error);
-            }
         }
 
         RestoredReservationReconciliation {
@@ -694,11 +695,12 @@ impl BudgetTracker {
         let Some(entry) = self.reservations.get(&reservation.0).cloned() else {
             return Ok(false);
         };
-        self.settle_turn(
+        self.settle_turn_kind(
             reservation,
             entry.input_tokens,
             entry.output_tokens,
             entry.usd,
+            true,
         )?;
         Ok(true)
     }
@@ -1102,11 +1104,28 @@ impl BudgetTracker {
     pub fn settle_turn(
         &mut self,
         reservation: BudgetReservation,
+        actual_input_tokens: u64,
+        actual_output_tokens: u64,
+        actual_usd: f64,
+    ) -> Result<(), BudgetError> {
+        self.settle_turn_kind(
+            reservation,
+            actual_input_tokens,
+            actual_output_tokens,
+            actual_usd,
+            false,
+        )
+    }
+
+    fn settle_turn_kind(
+        &mut self,
+        reservation: BudgetReservation,
         mut actual_input_tokens: u64,
         mut actual_output_tokens: u64,
         mut actual_usd: f64,
+        conservative: bool,
     ) -> Result<(), BudgetError> {
-        let Some(entry) = self.take_reservation(reservation) else {
+        let Some(entry) = self.reservations.get(&reservation.0).cloned() else {
             return Ok(());
         };
         let invalid_usd =
@@ -1119,22 +1138,33 @@ impl BudgetTracker {
             actual_output_tokens = entry.output_tokens;
             actual_usd = entry.usd;
         }
-        // Convert the durable daily claim into committed daily spend. If the
-        // ledger cannot be written the claim is LEFT in place to expire on its
-        // lease: the reservation is a conservative over-estimate of what was
-        // actually billed, so the ceiling still holds meanwhile.
-        if let (Some(daily), Some(grant)) = (&self.daily, entry.daily_grant.as_ref())
-            && let Err(error) = daily.settle(grant, actual_usd, Utc::now())
-        {
-            self.emit(BudgetEvent::CapBlock {
-                session_id: entry.session_id.clone(),
-                reason: BudgetError::CapExceeded {
-                    kind: "per_user_daily_settlement_deferred".to_string(),
-                    limit: "durable daily ledger write".to_string(),
-                    observed: error.to_string(),
-                },
-            });
+        // Publish daily reconciliation before retiring the recoverable local
+        // reservation. A failed write leaves both authorities available to retry.
+        if let Some(grant) = entry.daily_grant.as_ref() {
+            let result = match &self.daily {
+                Some(daily) if conservative || invalid_usd.is_some() => {
+                    daily.settle_conservatively(grant, Utc::now())
+                }
+                Some(daily) => daily.settle(grant, actual_usd, Utc::now()),
+                None => {
+                    return Err(self.cap_block(
+                        &entry.session_id,
+                        "per_user_daily_unavailable",
+                        "daily authority".into(),
+                        "missing on restored tracker".into(),
+                    ));
+                }
+            };
+            if let Err(error) = result {
+                return Err(self.cap_block(
+                    &entry.session_id,
+                    "per_user_daily_settlement_deferred",
+                    "durable daily ledger write".into(),
+                    error.to_string(),
+                ));
+            }
         }
+        self.take_reservation(reservation);
         let totals = self
             .per_session
             .entry(entry.session_id.clone())
@@ -1222,14 +1252,26 @@ impl BudgetTracker {
 
     /// Release an admission that never reached the provider.
     pub fn release(&mut self, reservation: BudgetReservation) -> bool {
-        let Some(entry) = self.take_reservation(reservation) else {
+        let Some(entry) = self.reservations.get(&reservation.0).cloned() else {
             return false;
         };
-        // Nothing was billed, so hand the daily authority straight back. A
-        // failed release is harmless: the claim expires on its lease.
-        if let (Some(daily), Some(grant)) = (&self.daily, entry.daily_grant.as_ref()) {
-            let _ = daily.release(grant, Utc::now());
+        if let Some(grant) = entry.daily_grant.as_ref() {
+            let Some(daily) = &self.daily else {
+                return false;
+            };
+            if let Err(error) = daily.release(grant, Utc::now()) {
+                self.emit(BudgetEvent::CapBlock {
+                    session_id: entry.session_id.clone(),
+                    reason: BudgetError::CapExceeded {
+                        kind: "per_user_daily_release_deferred".into(),
+                        limit: "durable no-send refund".into(),
+                        observed: error.to_string(),
+                    },
+                });
+                return false;
+            }
         }
+        self.take_reservation(reservation);
         true
     }
 
@@ -1479,7 +1521,7 @@ impl BudgetTracker {
 fn validate_tracker_snapshot(
     snapshot: &BudgetTrackerSnapshot,
 ) -> Result<(), crate::BudgetSnapshotError> {
-    if snapshot.schema_version != BUDGET_TRACKER_SNAPSHOT_VERSION {
+    if snapshot.schema_version != 1 && snapshot.schema_version != BUDGET_TRACKER_SNAPSHOT_VERSION {
         return Err(crate::BudgetSnapshotError::UnsupportedVersion {
             found: snapshot.schema_version,
             expected: BUDGET_TRACKER_SNAPSHOT_VERSION,
@@ -1538,6 +1580,16 @@ fn validate_tracker_snapshot(
     for (id, reservation) in &snapshot.reservations {
         if *id == 0 {
             return Err(invalid_snapshot("reservation id must be non-zero"));
+        }
+        if reservation
+            .daily_grant
+            .as_ref()
+            .is_some_and(|grant| !grant.valid())
+            || (snapshot.caps.per_user_daily_usd.is_some() && reservation.daily_grant.is_none())
+        {
+            return Err(invalid_snapshot(
+                "daily-capped reservation lacks a valid durable grant binding",
+            ));
         }
         max_reservation_id = max_reservation_id.max(*id);
         validate_usd(&format!("reservations[{id}].usd"), reservation.usd)?;
@@ -1607,7 +1659,7 @@ fn build_tracker_from_snapshot(
                 input_tokens: reservation.input_tokens,
                 output_tokens: reservation.output_tokens,
                 usd: reservation.usd,
-                daily_grant: None,
+                daily_grant: reservation.daily_grant,
             },
         );
     }
@@ -2348,6 +2400,7 @@ mod tests {
     fn version_one_snapshot_without_grant_ledger_migrates_to_empty() {
         let snapshot = BudgetTracker::new(BudgetCap::default()).snapshot().unwrap();
         let mut wire = serde_json::to_value(snapshot).unwrap();
+        wire["schema_version"] = serde_json::json!(1);
         wire.as_object_mut()
             .unwrap()
             .remove("applied_budget_grants");

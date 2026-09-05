@@ -218,14 +218,10 @@ async fn dispatch_turn(
 }
 
 fn ledger_committed_usd(home: &std::path::Path) -> f64 {
-    let path = home.join("budget").join("daily-spend.json");
-    let Ok(bytes) = std::fs::read(&path) else {
-        return 0.0;
-    };
-    let value: serde_json::Value = serde_json::from_slice(&bytes).expect("ledger is valid JSON");
-    value["subjects"]["default"]["committed_usd"]
-        .as_f64()
-        .unwrap_or(0.0)
+    wcore_budget::daily::DailySpendStore::at(home.join("budget").join("daily-spend.json"))
+        .position("default", chrono::Utc::now())
+        .expect("daily authority is readable")
+        .committed_usd
 }
 
 /// KNOWN-NEGATIVE arm. With no daily ceiling configured, a gateway answering
