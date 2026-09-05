@@ -646,23 +646,21 @@ fn remove_cmd(provider_arg: &str, config_path: &std::path::Path) -> Result<()> {
             let had = store.get(&slot).unwrap_or_default().is_some();
             store
                 .delete(&slot)
-                .with_context(|| format!("removing the {label} API key from the store"))?;
-            had
+                .with_context(|| format!("removing the {label} API key from the store"))
+                .map(|()| had)
         }
-        (Err(error), _) => {
-            // Report rather than swallow: a user told "removed" while the key
-            // is still in a store we could not open has been actively misled.
-            eprintln!("warning: could not open the credentials store: {error:#}");
-            false
-        }
-        (_, None) => false,
+        (Err(error), _) => Err(error),
+        (_, None) => Ok(false),
     };
 
-    if !removed_config && !removed_store {
-        bail!("no API key configured for {label} ({slug})");
-    }
+    // The config copy is independent: remove it even if the store could not
+    // be cleaned, then return that failure rather than claiming full removal.
     if removed_config {
         save_doc(&doc, config_path)?;
+    }
+    let removed_store = removed_store?;
+    if !removed_config && !removed_store {
+        bail!("no API key configured for {label} ({slug})");
     }
     println!("Removed API key for {label} ({slug}).");
     Ok(())
