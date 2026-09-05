@@ -37,7 +37,7 @@ use crate::transport::HttpHandler;
 
 mod commands;
 mod lifecycle;
-use lifecycle::{CLOSE_DEADLINE, SessionLifecycle, wait_for_close};
+use lifecycle::{SessionLifecycle, wait_for_close};
 
 /// What an idempotency identity is bound to.
 ///
@@ -644,9 +644,10 @@ impl HttpHandler for AcpServer {
 
     async fn delete_session(&self, session_id: String) -> Result<(), AcpError> {
         let completion = self.begin_session_close(session_id).await?;
-        tokio::time::timeout(CLOSE_DEADLINE, wait_for_close(completion))
-            .await
-            .map_err(|_| AcpError::Cleanup("cleanup deadline exceeded; retry DELETE".to_string()))?
+        // The cleanup owner enforces the deadline and publishes its outcome.
+        // A second caller timer can race that publication and report failure
+        // while the owner subsequently removes the session successfully.
+        wait_for_close(completion).await
     }
 
     async fn send_message(
@@ -817,9 +818,7 @@ impl HttpHandler for AcpServer {
             wait_for_close(completion).await?;
             Ok(CommandReceipt::SessionDeleted)
         });
-        let receipt = tokio::time::timeout(CLOSE_DEADLINE, operation)
-            .await
-            .map_err(|_| AcpError::Cleanup("cleanup deadline exceeded; retry DELETE".into()))??;
+        let receipt = operation.await?;
         match receipt {
             CommandReceipt::SessionDeleted => Ok(()),
             _ => Err(AcpError::Protocol("incorrect delete receipt".into())),

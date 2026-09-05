@@ -83,8 +83,8 @@ impl SessionLifecycle {
         let (tx, rx) = watch::channel(None);
         *state = Some(rx.clone());
         let lifecycle = self.clone();
+        let deadline = tokio::time::Instant::now() + CLOSE_DEADLINE;
         tokio::spawn(async move {
-            let deadline = tokio::time::Instant::now() + CLOSE_DEADLINE;
             // A request owns admission only until its upstream is established
             // and its recorder registered. The running turn is owned by Core.
             let result = tokio::time::timeout_at(deadline, async {

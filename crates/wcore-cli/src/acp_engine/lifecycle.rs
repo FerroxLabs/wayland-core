@@ -125,10 +125,8 @@ impl EngineSession {
                 let child_deadline = tokio::time::Instant::now() + CANCEL_GRACE;
                 loop {
                     if supervisor
-                        .list()
+                        .cleanup_ready()
                         .map_err(|error| AcpError::Cleanup(error.to_string()))?
-                        .iter()
-                        .all(|child| child.status.is_terminal())
                     {
                         break;
                     }

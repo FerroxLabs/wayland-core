@@ -393,6 +393,24 @@ impl DurableChildSupervisor {
         self.authority
             .with_runtime(&self.token, |runtime| runtime.request_cancel(child_id))
     }
+
+    /// True once local executions have retired and durable outcomes are
+    /// classified. Recovery-required evidence is preserved, not rewritten as
+    /// successful cancellation. The caller must close admission first.
+    pub fn cleanup_ready(&self) -> Result<bool, DurableSpawnerError> {
+        self.authority.with_runtime(&self.token, |runtime| {
+            let _mutation = runtime.mutations.lock();
+            runtime.ensure_healthy()?;
+            if !runtime.running.lock().is_empty() {
+                return Ok(false);
+            }
+            Ok(runtime.list()?.iter().all(|child| {
+                child.status.is_terminal()
+                    || (child.status == DurableChildStatus::RecoveryRequired
+                        && matches!(child.recovery, ChildRecoveryState::Required { .. }))
+            }))
+        })
+    }
 }
 
 /// Journal-backed adapter for durable child execution and supervision.
