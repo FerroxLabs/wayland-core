@@ -1748,14 +1748,19 @@ impl CredentialsStore for LadderCredentialsStore {
 
     fn delete(&self, key: &str) -> Result<(), CredentialsError> {
         // Remove from EVERY tier, including the read-only legacy one, so a
-        // deleted key cannot resurface from below.
-        if let Some(keyring) = &self.keyring {
-            let _ = keyring.delete(key);
+        // deleted key cannot resurface from below. Attempt every removal even
+        // if one tier fails, but never report incomplete removal as success.
+        let mut first_error = None;
+        for tier in [LadderTier::Keyring, LadderTier::Vault, LadderTier::Legacy] {
+            let removed = match tier {
+                LadderTier::Legacy => self.delete_legacy(key),
+                other => self.tier(other).map_or(Ok(()), |store| store.delete(key)),
+            };
+            if let Err(error) = removed {
+                first_error.get_or_insert(error);
+            }
         }
-        if let Some(vault) = &self.vault {
-            let _ = vault.delete(key);
-        }
-        self.delete_legacy(key)
+        first_error.map_or(Ok(()), Err)
     }
 }
 
