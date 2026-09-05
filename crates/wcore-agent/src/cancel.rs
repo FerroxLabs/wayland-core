@@ -199,6 +199,20 @@ impl SessionRuntimeGuard {
         }
     }
 
+    pub(crate) fn take_cleanup_tasks(&mut self) -> Vec<JoinHandle<()>> {
+        self.control().cancel();
+        [
+            self.turn_bridge.take(),
+            self.dangerous_expiry.take(),
+            self.budget_guard
+                .as_mut()
+                .and_then(|guard| guard.handle.take()),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+
     pub(crate) fn observer(&self) -> SessionRuntimeHandle {
         self.handle.clone()
     }

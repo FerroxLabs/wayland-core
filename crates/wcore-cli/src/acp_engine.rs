@@ -1220,6 +1220,7 @@ impl EngineTurnEngine {
                                 &tools,
                                 &mcp,
                                 signal.cancel.clone(),
+                                signal.cleanup.clone(),
                             )
                             .await;
                         let outcome = match result {
@@ -1256,6 +1257,7 @@ impl EngineTurnEngine {
         requested_tools: &[String],
         mcp_selection: &[McpToolSelection],
         cancel: CancellationToken,
+        cleanup: Arc<wcore_agent::bootstrap_cleanup::BootstrapCleanup>,
     ) -> Result<Arc<EngineSession>, AcpError> {
         {
             let pool = self.sessions.lock().await;
@@ -1320,6 +1322,7 @@ impl EngineTurnEngine {
         let mut bootstrap = AgentBootstrap::new(session_config.clone(), self.cwd.clone(), output)
             .outbound_channels_only(true)
             .session_cancel_token(cancel)
+            .with_cleanup(cleanup)
             .with_execution_policy(execution_policy)
             .with_approval_manager(approval_manager.clone())
             .tool_allowlist(narrow_tool_allowlist(persona_tools, requested_tools));
@@ -1347,7 +1350,6 @@ impl EngineTurnEngine {
         );
         session.lifetime.root = Some(result.cancel_root);
         session.lifetime.children = Some(result.host_children);
-        session.lifetime.mcp = result.mcp_managers;
         #[cfg(test)]
         {
             session.lifetime.channels = Some(result.channel_manager.clone());

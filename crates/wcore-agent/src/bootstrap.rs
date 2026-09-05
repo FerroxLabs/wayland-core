@@ -409,6 +409,7 @@ pub const UNREADABLE_CHANNEL_DIR: &str = "inbound channel configuration could no
 /// - AGENTS.md is loaded from the workspace hierarchy
 /// - Skills, MCP, plan mode, spawn are enabled based on `Config` fields
 pub struct AgentBootstrap {
+    cleanup: Option<Arc<crate::bootstrap_cleanup::BootstrapCleanup>>,
     config: Config,
     workspace: String,
     output: Arc<dyn OutputSink>,
@@ -621,6 +622,7 @@ fn local_shell_notice(
 impl AgentBootstrap {
     pub fn new(config: Config, workspace: impl Into<String>, output: Arc<dyn OutputSink>) -> Self {
         Self {
+            cleanup: None,
             config,
             workspace: canonical_workspace(workspace.into()),
             output,
@@ -643,6 +645,15 @@ impl AgentBootstrap {
             approval_manager: None,
             session_egress_policy: None,
         }
+    }
+
+    /// Retain startup cleanup authority in the host even if build returns Err.
+    pub fn with_cleanup(
+        mut self,
+        cleanup: Arc<crate::bootstrap_cleanup::BootstrapCleanup>,
+    ) -> Self {
+        self.cleanup = Some(cleanup);
+        self
     }
 
     /// #111 — set the host-supplied active assistant for per-assistant MCP
@@ -838,6 +849,9 @@ impl AgentBootstrap {
     }
 
     async fn build_scoped(mut self) -> anyhow::Result<BootstrapResult> {
+        if let Some(cleanup) = &self.cleanup {
+            cleanup.begin();
+        }
         let cwd = &self.workspace;
         let cwd_path = std::path::Path::new(cwd);
         // Mint the immutable session root before any child-capable tools are
@@ -1051,6 +1065,9 @@ impl AgentBootstrap {
                         .push(crate::plugins::LoadedRuntimeHandle::Wasm(loaded));
                 }
                 crate::plugins::LoadedRuntimeHandle::Subprocess(loaded) => {
+                    if let Some(cleanup) = &self.cleanup {
+                        cleanup.sdk(loaded.clone());
+                    }
                     let synth = crate::plugins::synthesize_initialize_outcome_subprocess(
                         loaded.clone(),
                         &plugin_name,
@@ -1061,6 +1078,9 @@ impl AgentBootstrap {
                         .push(crate::plugins::LoadedRuntimeHandle::Subprocess(loaded));
                 }
                 crate::plugins::LoadedRuntimeHandle::McpBridge(loaded) => {
+                    if let Some(cleanup) = &self.cleanup {
+                        cleanup.bridge(loaded.runner());
+                    }
                     // The mcp-bridge synthesizer consumes `loaded` by value
                     // via `into_parts`; the closures inside the tools hold
                     // their own `Arc<McpBridgePluginRunner>` reference, so
@@ -1867,6 +1887,9 @@ impl AgentBootstrap {
             match dialled {
                 Ok(mgr) => {
                     let mgr = Arc::new(mgr);
+                    if let Some(cleanup) = &self.cleanup {
+                        cleanup.mcp(mgr.clone());
+                    }
                     wcore_mcp::tool_proxy::register_mcp_tools(
                         &mut registry,
                         &mgr,
@@ -1934,6 +1957,9 @@ impl AgentBootstrap {
             })
             .collect();
         if let Some(plugin_mcp_mgr) = plugin_mcp_manager {
+            if let Some(cleanup) = &self.cleanup {
+                cleanup.mcp(plugin_mcp_mgr.clone());
+            }
             mcp_managers.push(plugin_mcp_mgr);
         }
 
@@ -3554,6 +3580,7 @@ impl AgentBootstrap {
         } else {
             AgentEngine::new_with_provider(provider.clone(), self.config, registry, self.output)
         };
+        engine.set_bootstrap_cleanup(self.cleanup.clone());
         engine.install_durable_session_authority(
             durable_session_authority,
             effective_execution_policy.clone(),
@@ -3828,12 +3855,14 @@ impl AgentBootstrap {
                         // stop() which aborts the OS watcher. We keep it alive
                         // by leaking it into a Box held by the engine via a
                         // dedicated boxed-handle approach.
-                        engine.push_decay_handle(tokio::spawn(async move {
-                            // Hold skill_watcher alive for the session.
-                            let _watcher = skill_watcher;
-                            // Park here forever; aborted by engine Drop.
-                            std::future::pending::<()>().await;
-                        }));
+                        if let Some(cleanup) = &self.cleanup {
+                            cleanup.watcher(skill_watcher);
+                        } else {
+                            engine.push_decay_handle(tokio::spawn(async move {
+                                let _watcher = skill_watcher;
+                                std::future::pending::<()>().await;
+                            }));
+                        }
                         tracing::debug!(
                             target: "wcore_agent::bootstrap",
                             "F-039: SkillWatcher armed (skill hot-reload active)"

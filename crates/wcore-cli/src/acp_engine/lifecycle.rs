@@ -10,7 +10,6 @@ use tokio_util::sync::CancellationToken;
 use wcore_acp::AcpError;
 use wcore_agent::cancel::SessionControl;
 use wcore_agent::spawner::HostChildController;
-use wcore_mcp::manager::McpManager;
 
 use super::{EngineSession, EngineTurnEngine};
 
@@ -18,6 +17,8 @@ const CANCEL_GRACE: Duration = Duration::from_secs(2);
 
 pub(super) struct Initialization {
     pub(super) closing: AtomicBool,
+    pub(super) panicked: AtomicBool,
+    pub(super) cleanup: Arc<wcore_agent::bootstrap_cleanup::BootstrapCleanup>,
     pub(super) cancel: CancellationToken,
     pub(super) result: watch::Sender<Option<Result<(), String>>>,
     pub(super) task: Mutex<Option<JoinHandle<()>>>,
@@ -28,6 +29,8 @@ impl Initialization {
         let (result, _) = watch::channel(None);
         Self {
             closing: AtomicBool::new(false),
+            panicked: AtomicBool::new(false),
+            cleanup: Arc::new(wcore_agent::bootstrap_cleanup::BootstrapCleanup::default()),
             cancel: CancellationToken::new(),
             result,
             task: Mutex::new(None),
@@ -67,7 +70,6 @@ pub(super) struct SessionLifetime {
     pub(super) turns: Mutex<Vec<(CancellationToken, JoinHandle<()>)>>,
     pub(super) root: Option<SessionControl>,
     pub(super) children: Option<HostChildController>,
-    pub(super) mcp: Vec<Arc<McpManager>>,
     #[cfg(test)]
     pub(super) channels: Option<Arc<tokio::sync::RwLock<wcore_channels::ChannelManager>>>,
     #[cfg(test)]
@@ -100,7 +102,7 @@ impl EngineSession {
         }
         // The task has returned/been joined, so its finalizer or durable drop
         // path owns the truth. Unknown physical outcomes are retained as such.
-        let engine = self.engine.lock().await;
+        let mut engine = self.engine.lock().await;
         if engine.session_journal().is_some() {
             engine
                 .recovery_plan()
@@ -129,34 +131,12 @@ impl EngineSession {
                 }
             }
         }
+        let cleanup = engine.prepare_shutdown();
         drop(engine);
-        // Attempt every manager/server even if one cannot establish cleanup.
-        // Retain the managers on error so another DELETE can retry them.
-        let results =
-            futures::future::join_all(self.lifetime.mcp.iter().map(|manager| async move {
-                futures::future::join_all(
-                    manager
-                        .server_names()
-                        .into_iter()
-                        .map(|name| async move { manager.close_server(&name).await }),
-                )
-                .await
-            }))
-            .await;
-        let errors: Vec<_> = results
-            .into_iter()
-            .flatten()
-            .filter_map(Result::err)
-            .collect();
-        if !errors.is_empty() {
-            return Err(AcpError::Cleanup(
-                errors
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join("; "),
-            ));
-        }
+        cleanup
+            .close()
+            .await
+            .map_err(|error| AcpError::Cleanup(error.to_string()))?;
         *self.relay.lock().unwrap() = None;
         Ok(())
     }
@@ -179,10 +159,9 @@ impl EngineTurnEngine {
     pub(super) async fn close_owned_session(&self, session_id: &str) -> Result<(), AcpError> {
         self.signal_close(session_id).await;
         let initializer = self.initializers.lock().await.get(session_id).cloned();
-        let mut initialization_error = None;
         if let Some(initializer) = &initializer {
             initializer.closing.store(true, Ordering::Release);
-            initialization_error = initializer.wait().await.err();
+            let _initialization_outcome = initializer.wait().await;
             let mut task = initializer.task.lock().await;
             let joined = match task.as_mut() {
                 Some(handle) => Some(handle.await),
@@ -192,6 +171,7 @@ impl EngineTurnEngine {
             // before propagating failure: Tokio forbids polling it twice.
             task.take();
             if let Some(Err(error)) = joined {
+                initializer.panicked.store(true, Ordering::Release);
                 return Err(AcpError::Cleanup(format!("initializer failed: {error}")));
             }
         }
@@ -201,10 +181,20 @@ impl EngineTurnEngine {
             self.sessions.lock().await.remove(session_id);
             // Drop the final engine owner before reporting lease release.
             drop(session);
-        } else if let Some(error) = initialization_error {
-            return Err(AcpError::Cleanup(format!(
-                "bootstrap cleanup could not be established: {error}"
-            )));
+        } else if let Some(initializer) = &initializer {
+            // A normal bootstrap error still has a registered cleanup owner.
+            // A panic can interrupt registration, so it remains explicitly
+            // incomplete even after stopping the resources we do know about.
+            initializer
+                .cleanup
+                .close()
+                .await
+                .map_err(|error| AcpError::Cleanup(error.to_string()))?;
+            if initializer.panicked.load(Ordering::Acquire) {
+                return Err(AcpError::Cleanup(
+                    "bootstrap panicked before cleanup ownership could be verified".into(),
+                ));
+            }
         }
         self.initializers.lock().await.remove(session_id);
         Ok(())

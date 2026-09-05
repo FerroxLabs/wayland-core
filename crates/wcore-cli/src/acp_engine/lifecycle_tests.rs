@@ -103,7 +103,14 @@ async fn closing_held_initialization_signals_before_admission_and_retry_converge
         started.notify_one();
         gate.acquire().await.expect("gate").forget();
         let result = owner
-            .build_session(&target, None, &[], &[], signal.cancel.clone())
+            .build_session(
+                &target,
+                None,
+                &[],
+                &[],
+                signal.cancel.clone(),
+                signal.cleanup.clone(),
+            )
             .await;
         signal
             .result

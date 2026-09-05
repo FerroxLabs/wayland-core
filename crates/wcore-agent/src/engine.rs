@@ -4795,6 +4795,7 @@ pub struct AgentEngine {
     /// `decay_handles_len()` exposes stays accurate. `Drop` aborts every
     /// handle so a recycled session leaks no background task.
     background_handles: Vec<tokio::task::JoinHandle<()>>,
+    bootstrap_cleanup: Option<Arc<crate::bootstrap_cleanup::BootstrapCleanup>>,
     /// Dynamic Workflows B3 — cached `observability.workflow_detection_enabled`
     /// gate. When `false` (the default), the per-turn `WorkflowCandidate`
     /// heuristic is not even computed at the intent-telemetry seam, so a
@@ -4966,17 +4967,16 @@ pub(crate) fn default_recovery_request_protection()
 impl Drop for AgentEngine {
     fn drop(&mut self) {
         self.cancel_token.cancel();
-        // M3.2 — abort every background decay scheduler task on shutdown.
-        // `JoinHandle::abort` is safe on already-finished tasks (no-op),
-        // so we don't need to inspect state.
-        for h in self.decay_handles.drain(..) {
-            h.abort();
-        }
-        // AUDIT B-2 / D-5 — abort background reliability tasks (the
-        // approval-manager TTL reaper) so a recycled session leaks no
-        // task.
-        for h in self.background_handles.drain(..) {
-            h.abort();
+        if let Some(cleanup) = self.bootstrap_cleanup.clone() {
+            self.retain_shutdown_tasks(&cleanup);
+        } else {
+            for handle in self
+                .decay_handles
+                .drain(..)
+                .chain(self.background_handles.drain(..))
+            {
+                handle.abort();
+            }
         }
     }
 }
@@ -5356,6 +5356,7 @@ impl AgentEngine {
             // AUDIT B-2 / D-5 — reaper handle storage; populated by
             // `set_approval_manager`, aborted by `Drop`.
             background_handles: Vec::new(),
+            bootstrap_cleanup: None,
             // Dynamic Workflows B3 — cache the off-by-default detection
             // gate at construction; mirrors `skills_lifecycle` /
             // `online_evolution` above.
@@ -5666,6 +5667,7 @@ impl AgentEngine {
             // AUDIT B-2 / D-5 — reaper handle storage; populated by
             // `set_approval_manager`, aborted by `Drop`.
             background_handles: Vec::new(),
+            bootstrap_cleanup: None,
             // Dynamic Workflows B3 — cache the off-by-default detection
             // gate from the resumed session's config (mirrors
             // `new_with_provider`).
@@ -6904,6 +6906,40 @@ impl AgentEngine {
     /// used for the decay scheduler spawned by `AgentBootstrap::build`
     /// when `cfg.memory.enabled = true`). `Drop` aborts every handle on
     /// engine shutdown so no task is leaked across sessions or tests.
+    pub(crate) fn set_bootstrap_cleanup(
+        &mut self,
+        cleanup: Option<Arc<crate::bootstrap_cleanup::BootstrapCleanup>>,
+    ) {
+        self.bootstrap_cleanup = cleanup;
+    }
+
+    fn retain_shutdown_tasks(&mut self, cleanup: &crate::bootstrap_cleanup::BootstrapCleanup) {
+        cleanup.retain_tasks(
+            self.decay_handles
+                .drain(..)
+                .chain(self.background_handles.drain(..)),
+        );
+        if let Some(runtime) = self.session_runtime.as_mut() {
+            cleanup.retain_tasks(runtime.take_cleanup_tasks());
+        }
+    }
+
+    /// After admitted turns have joined, retain background handles for an
+    /// explicit, cancellation-safe cleanup wait outside the engine lock.
+    pub fn prepare_shutdown(&mut self) -> Arc<crate::bootstrap_cleanup::BootstrapCleanup> {
+        self.cancel_token.cancel();
+        let cleanup = self
+            .bootstrap_cleanup
+            .get_or_insert_with(|| {
+                let cleanup = Arc::new(crate::bootstrap_cleanup::BootstrapCleanup::default());
+                cleanup.begin();
+                cleanup
+            })
+            .clone();
+        self.retain_shutdown_tasks(&cleanup);
+        cleanup
+    }
+
     pub fn push_decay_handle(&mut self, h: tokio::task::JoinHandle<()>) {
         self.decay_handles.push(h);
     }
@@ -22422,6 +22458,7 @@ mod set_config_tests {
             // AUDIT B-2 / D-5 — reaper handle storage; populated by
             // `set_approval_manager`, aborted by `Drop`.
             background_handles: Vec::new(),
+            bootstrap_cleanup: None,
             // Dynamic Workflows B3 — detection gate (default off).
             workflow_detection_enabled: false,
             // Dynamic Workflows B6 — live confirm gate (default off) + a
@@ -24516,6 +24553,7 @@ mod phase6_tests {
             // AUDIT B-2 / D-5 — reaper handle storage; populated by
             // `set_approval_manager`, aborted by `Drop`.
             background_handles: Vec::new(),
+            bootstrap_cleanup: None,
             // Dynamic Workflows B3 — detection gate (default off).
             workflow_detection_enabled: false,
             // Dynamic Workflows B6 — live confirm gate (default off) + a
@@ -24848,6 +24886,7 @@ mod compact_tests {
             // AUDIT B-2 / D-5 — reaper handle storage; populated by
             // `set_approval_manager`, aborted by `Drop`.
             background_handles: Vec::new(),
+            bootstrap_cleanup: None,
             // Dynamic Workflows B3 — detection gate (default off).
             workflow_detection_enabled: false,
             // Dynamic Workflows B6 — live confirm gate (default off) + a
@@ -27529,6 +27568,7 @@ mod plan_mode_tests {
             // AUDIT B-2 / D-5 — reaper handle storage; populated by
             // `set_approval_manager`, aborted by `Drop`.
             background_handles: Vec::new(),
+            bootstrap_cleanup: None,
             // Dynamic Workflows B3 — detection gate (default off).
             workflow_detection_enabled: false,
             // Dynamic Workflows B6 — live confirm gate (default off) + a
@@ -27994,6 +28034,7 @@ mod hook_integration_tests {
             // AUDIT B-2 / D-5 — reaper handle storage; populated by
             // `set_approval_manager`, aborted by `Drop`.
             background_handles: Vec::new(),
+            bootstrap_cleanup: None,
             // Dynamic Workflows B3 — detection gate (default off).
             workflow_detection_enabled: false,
             // Dynamic Workflows B6 — live confirm gate (default off) + a
@@ -29170,6 +29211,7 @@ mod approval_bridge_engine_tests {
             // AUDIT B-2 / D-5 — reaper handle storage; populated by
             // `set_approval_manager`, aborted by `Drop`.
             background_handles: Vec::new(),
+            bootstrap_cleanup: None,
             // Dynamic Workflows B3 — detection gate (default off).
             workflow_detection_enabled: false,
             // Dynamic Workflows B6 — live confirm gate (default off) + a
@@ -30782,6 +30824,7 @@ mod user_model_writeback_tests {
             // AUDIT B-2 / D-5 — reaper handle storage; populated by
             // `set_approval_manager`, aborted by `Drop`.
             background_handles: Vec::new(),
+            bootstrap_cleanup: None,
             // Dynamic Workflows B3 — detection gate (default off).
             workflow_detection_enabled: false,
             // Dynamic Workflows B6 — live confirm gate (default off) + a

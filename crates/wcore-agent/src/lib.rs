@@ -10,6 +10,7 @@ pub mod approval;
 // runtime observation → draft → PromptStore → U1 SkillRouter seed.
 pub mod auto_skill;
 pub mod bootstrap;
+pub mod bootstrap_cleanup;
 // W8a A.2: ExecutionBudget + ExecutionBudgetView (S2 foundation).
 pub mod budget;
 pub mod budget_authority;
