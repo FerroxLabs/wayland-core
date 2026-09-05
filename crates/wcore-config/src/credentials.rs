@@ -3701,6 +3701,10 @@ pub fn warn_if_world_readable(path: &Path) {
 }
 
 #[cfg(test)]
+#[path = "credentials_delete_tests.rs"]
+mod delete_backend_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::{TempDir, tempdir};
