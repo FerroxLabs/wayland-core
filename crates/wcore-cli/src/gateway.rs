@@ -1632,14 +1632,14 @@ async fn run_gateway(scope: &ScopeArgs, detach: bool) -> Result<()> {
                                     // over the wrong permissions, which is worse
                                     // than the fail-closed defect it replaces.
                                     //
-                                    // Nothing is torn down: the subscriber and
-                                    // the webhook host hold the same registry
-                                    // Arc, so the swap is visible on the very
-                                    // next inbound event.
-                                    let policies_note = match inbound_host
-                                        .as_ref()
-                                        .map(|h| h.reload_policies())
-                                    {
+                                    // Affected sessions are cancelled and retired
+                                    // before this call acknowledges the new
+                                    // scope. Unchanged engines retain history.
+                                    let reload_result = match inbound_host.as_ref() {
+                                        Some(host) => Some(host.reload_policies().await),
+                                        None => None,
+                                    };
+                                    let policies_note = match reload_result {
                                         Some(Ok(n)) => n.to_string(),
                                         // The policy files did not parse. The
                                         // registry kept what it had rather than
@@ -1651,12 +1651,12 @@ async fn run_gateway(scope: &ScopeArgs, detach: bool) -> Result<()> {
                                         Some(Err(e)) => {
                                             registration_error = Some(format!(
                                                 "channel reload: adapters reloaded but inbound \
-                                                 policies did NOT: {e}. The previously loaded \
-                                                 policies are still in effect, so a newly added \
-                                                 channel will deny every message until this is \
-                                                 fixed and reload is run again."
+                                                 policy/cleanup did not complete: {e}. \
+                                                 Invalid policy preserves the prior snapshot; \
+                                                 incomplete cleanup quarantines affected sessions. \
+                                                 Correct the reported failure and retry reload."
                                             ));
-                                            format!("KEPT-STALE ({e})")
+                                            format!("INCOMPLETE ({e})")
                                         }
                                         // No inbound stack in this process (no
                                         // provider, or config absent). Said out

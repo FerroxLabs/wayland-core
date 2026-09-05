@@ -462,6 +462,7 @@ async fn an_inbound_config_that_admits_everyone_refuses_to_start() {
     );
     let err = host
         .reload_policies()
+        .await
         .expect_err("a reload that would install an admits-everyone policy must REFUSE");
     let msg = err.to_string();
     assert!(
@@ -506,6 +507,7 @@ async fn an_inbound_config_that_admits_everyone_refuses_to_start() {
     .expect("rewrite as bounded-but-pre-acknowledged");
     let err = host
         .reload_policies()
+        .await
         .expect_err("a reload that would install a pre-armed acknowledgement must REFUSE");
     assert!(
         err.to_string()
@@ -519,6 +521,7 @@ async fn an_inbound_config_that_admits_everyone_refuses_to_start() {
     std::fs::remove_file(channels.join("opened-later.toml")).expect("remove the open channel");
     let n = host
         .reload_policies()
+        .await
         .expect("once the open channel is withdrawn the reload must succeed");
     assert_eq!(n, 1);
     assert_eq!(host.policies.generation(), 1);

@@ -96,7 +96,7 @@ pub struct InboundHost {
     /// to. Retained so [`reload_policies`](InboundHost::reload_policies)
     /// resolves postures exactly as `spawn` did — re-deriving it at the call
     /// site is how the two lifecycles drift apart.
-    workspace: String,
+    dispatcher: Arc<crate::channel_dispatch::ChannelTurnDispatcher>,
 }
 
 impl InboundHost {
@@ -136,11 +136,12 @@ impl InboundHost {
     /// startup check. The derivation refuses before a snapshot exists, so
     /// nothing is swapped and the bounded policies already in effect stay in
     /// effect.
-    pub fn reload_policies(&self) -> Result<usize, wcore_channels::ChannelError> {
+    pub async fn reload_policies(&self) -> Result<usize, wcore_channels::ChannelError> {
         let configs = crate::bootstrap::load_channel_policy_configs()?;
-        self.policies
-            .replace_from_configs(configs, std::path::Path::new(&self.workspace))
-            .map_err(|refusal| wcore_channels::ChannelError::Config(refusal.to_string()))
+        self.dispatcher
+            .reload_from_configs(configs)
+            .await
+            .map_err(|error| wcore_channels::ChannelError::Config(error.to_string()))
     }
 
     /// Stop the webhook host and abort the subscriber.
@@ -277,18 +278,17 @@ pub async fn spawn(
         )))
     };
 
-    let dispatcher: Arc<dyn crate::channel_inbound::TurnDispatcher> =
-        Arc::new(crate::channel_dispatch::ChannelTurnDispatcher::new(
-            config.clone(),
-            workspace.clone(),
-            provider,
-            Arc::clone(&policies),
-            media_enricher,
-        ));
+    let dispatcher = Arc::new(crate::channel_dispatch::ChannelTurnDispatcher::new(
+        config.clone(),
+        workspace.clone(),
+        provider,
+        Arc::clone(&policies),
+        media_enricher,
+    ));
 
     let subscriber = crate::channel_inbound::InboundSubscriber::new(
         Arc::clone(&manager),
-        dispatcher,
+        dispatcher.clone(),
         Arc::clone(&policies),
         DEDUPE_TTL_MS,
         DEDUPE_MAX,
@@ -307,7 +307,7 @@ pub async fn spawn(
         webhook_bind,
         policies_loaded,
         policies,
-        workspace,
+        dispatcher,
     })
 }
 

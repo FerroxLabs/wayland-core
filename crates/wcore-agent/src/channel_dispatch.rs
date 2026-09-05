@@ -48,7 +48,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
+#[cfg(test)]
 use wcore_channels::ChannelToolPosture;
 use wcore_config::config::Config;
 use wcore_providers::LlmProvider;
@@ -62,6 +63,9 @@ use crate::channel_tools::ChannelToolScope;
 use crate::engine::AgentEngine;
 use crate::output::OutputSink;
 use crate::session::SessionManager;
+
+mod lifecycle;
+use lifecycle::{ChannelSession, SessionState};
 
 /// Engine-backed dispatcher: one [`AgentEngine`] per channel session,
 /// pooled by the hashed session id, all sharing a single provider.
@@ -84,9 +88,11 @@ pub struct ChannelTurnDispatcher {
     policies: Arc<ChannelPolicyRegistry>,
     /// Pool keyed by the HASHED session id (not the raw kernel session key,
     /// which contains colons the `SessionManager` rejects). Each value is an
-    /// `Arc<Mutex<AgentEngine>>` so concurrent turns for the SAME session
-    /// serialise on the inner mutex while different sessions run freely.
-    engines: Arc<Mutex<HashMap<String, Arc<Mutex<AgentEngine>>>>>,
+    /// retained owner so initialization, turns and cleanup for the SAME
+    /// session serialize while different sessions run freely.
+    engines: Arc<Mutex<HashMap<String, Arc<ChannelSession>>>>,
+    admission: RwLock<()>,
+    reload: Mutex<()>,
     /// Optional inbound-media enricher. `Some` only when the host wired a
     /// vision and/or transcription backend; otherwise inbound attachments
     /// stay bare-URL summaries. Resolves image/audio attachments to derived
@@ -104,7 +110,7 @@ impl ChannelTurnDispatcher {
     /// Build a dispatcher over a resolved [`Config`], the working directory
     /// new sessions run in, the shared provider, and the per-channel tool
     /// postures. Tool auto-approval is always forced OFF for the per-session
-    /// engines (see [`Self::engine_for`]); the posture additionally
+    /// engines (see [`Self::initialize`]); the posture additionally
     /// reduces/jails the toolset itself.
     pub fn new(
         config: Config,
@@ -119,6 +125,8 @@ impl ChannelTurnDispatcher {
             provider,
             policies,
             engines: Arc::new(Mutex::new(HashMap::new())),
+            admission: RwLock::new(()),
+            reload: Mutex::new(()),
             media,
         }
     }
@@ -144,6 +152,7 @@ impl ChannelTurnDispatcher {
 
     /// Resolve the tool scope for `channel_name`, defaulting to the safe
     /// `Conversational` posture rooted at `cwd` for an unconfigured channel.
+    #[cfg(test)]
     fn scope_for(&self, channel_name: &str) -> ChannelToolScope {
         self.policies
             .scope_for(channel_name)
@@ -179,18 +188,12 @@ impl ChannelTurnDispatcher {
 
     /// Fetch (or build + cache) the engine for `hashed_id`. One engine per
     /// session preserves conversation history across turns.
-    async fn engine_for(
+    async fn initialize(
         &self,
         hashed_id: &str,
-        scope: &ChannelToolScope,
-    ) -> anyhow::Result<Arc<Mutex<AgentEngine>>> {
-        {
-            let pool = self.engines.lock().await;
-            if let Some(existing) = pool.get(hashed_id) {
-                return Ok(existing.clone());
-            }
-        }
-
+        session: &ChannelSession,
+        state: &mut SessionState,
+    ) -> anyhow::Result<()> {
         // Silent sink: channel turns must not stream to the CLI/host UI. The
         // reply text is the `run()` return value, sent back by the subscriber.
         let output: Arc<dyn OutputSink> = Arc::new(crate::output::null_sink::NullSink);
@@ -233,17 +236,22 @@ impl ChannelTurnDispatcher {
         let mut bootstrap = AgentBootstrap::new(config, self.cwd.clone(), output)
             .with_execution_policy(execution_policy)
             .provider(self.provider.clone())
+            .session_cancel_token(session.cancel.clone())
+            .with_cleanup(session.cleanup.clone())
             // MANDATORY: stop the per-session engine from re-registering
             // channels / spawning pollers / spawning another subscriber.
             .without_channels(true)
             // SECURITY — reduce/jail the toolset for this REMOTE sender so
             // a channel turn cannot reach host filesystem/shell tools.
-            .channel_tool_posture(scope.clone());
+            .channel_tool_posture(session.scope.clone());
         if let Some(session) = existing {
             bootstrap = bootstrap.resume(session);
         }
+        state.attempted = true;
         let result = bootstrap.build().await?;
-        let mut engine = result.engine;
+        state.children = Some(result.host_children);
+        state.engine = Some(result.engine);
+        let engine = state.engine.as_mut().expect("engine just installed");
 
         if is_new {
             engine.init_session(&self.config.provider_label, &self.cwd, Some(hashed_id))?;
@@ -254,15 +262,8 @@ impl ChannelTurnDispatcher {
         // note above. The engine keeps `approval_manager = None` and uses the
         // non-auto-approve `ToolConfirmer`.
 
-        let session = Arc::new(Mutex::new(engine));
-
-        let mut pool = self.engines.lock().await;
-        // Another turn may have built the engine concurrently; keep the first
-        // to preserve a single conversation history.
-        let entry = pool
-            .entry(hashed_id.to_string())
-            .or_insert_with(|| session.clone());
-        Ok(entry.clone())
+        state.ready = true;
+        Ok(())
     }
 }
 
@@ -328,28 +329,20 @@ impl TurnDispatcher for ChannelTurnDispatcher {
         channel_name: &str,
         msg: &wcore_channels::IncomingMessage,
     ) -> anyhow::Result<Option<String>> {
-        let hashed = Self::hashed_session_id(session_key);
-        let scope = self.scope_for(channel_name);
-        tracing::debug!(
-            channel = %channel_name,
-            posture = ?scope.posture,
-            "channel turn dispatch"
-        );
-        let engine = self.engine_for(&hashed, &scope).await?;
-        // The inbound message id doubles as the turn's msg_id (stable per
-        // inbound event); the dedupe cache upstream already guarantees one
-        // dispatch per id.
-        let msg_id = msg.id.clone();
-        let prompt = self.prompt_for(channel_name, msg).await;
-        let result = {
-            let mut guard = engine.lock().await;
-            guard.run(&prompt, &msg_id).await?
-        };
-        if result.text.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(result.text))
-        }
+        let policy = self.policies.policy_for(channel_name);
+        self.dispatch_admitted(session_key, channel_name, msg, &policy)
+            .await
+    }
+
+    async fn dispatch_admitted(
+        &self,
+        session_key: &str,
+        channel_name: &str,
+        msg: &wcore_channels::IncomingMessage,
+        policy: &wcore_channels::InboundPolicy,
+    ) -> anyhow::Result<Option<String>> {
+        self.run_admitted(session_key, channel_name, msg, policy)
+            .await
     }
 }
 
@@ -790,5 +783,77 @@ mod tests {
 
         assert!(!remote.tools.auto_approve);
         assert_eq!(remote.tools.allow_list, vec!["Read", "Grep"]);
+    }
+
+    fn reload_fixture() -> (
+        ChannelTurnDispatcher,
+        wcore_channels::config::ChannelConfig,
+        Arc<ChannelSession>,
+    ) {
+        let config = wcore_channels::config::ChannelConfig {
+            name: "fixture".into(),
+            platform: "slack".into(),
+            enabled: true,
+            options: toml::Table::new(),
+            inbound: wcore_channels::InboundPolicy {
+                dm_allowlist: vec!["alice".into()],
+                ..Default::default()
+            },
+        };
+        let root = std::path::Path::new("/fallback-cwd");
+        let registry =
+            Arc::new(ChannelPolicyRegistry::from_configs(vec![config.clone()], root).unwrap());
+        let session = Arc::new(ChannelSession {
+            channel: config.name.clone(),
+            policy: config.inbound.clone(),
+            scope: registry.scope_for("fixture").unwrap(),
+            cancel: tokio_util::sync::CancellationToken::new(),
+            cleanup: Arc::default(),
+            state: Mutex::default(),
+        });
+        (dispatcher_over(registry), config, session)
+    }
+
+    #[tokio::test]
+    async fn unchanged_reload_retains_the_exact_session_owner() {
+        let (dispatcher, config, session) = reload_fixture();
+        dispatcher
+            .engines
+            .lock()
+            .await
+            .insert("id".into(), session.clone());
+        dispatcher.reload_from_configs(vec![config]).await.unwrap();
+        assert!(Arc::ptr_eq(
+            dispatcher.engines.lock().await.get("id").unwrap(),
+            &session
+        ));
+        assert!(!session.cancel.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn incomplete_reload_quarantines_ownership_and_explicit_retry_converges() {
+        let (dispatcher, mut config, session) = reload_fixture();
+        dispatcher
+            .engines
+            .lock()
+            .await
+            .insert("id".into(), session.clone());
+        // Hold the same mutex that serializes initialization and execution.
+        let held_initializer = session.state.lock().await;
+        config.inbound.dm_allowlist = vec!["bob".into()];
+        let result = dispatcher.reload_from_configs(vec![config.clone()]).await;
+        assert!(result.is_err());
+        assert!(session.cancel.is_cancelled());
+        assert!(Arc::ptr_eq(
+            dispatcher.engines.lock().await.get("id").unwrap(),
+            &session
+        ));
+        assert_eq!(
+            dispatcher.policies.policy_for("fixture").dm_allowlist,
+            vec!["bob"]
+        );
+        drop(held_initializer);
+        dispatcher.reload_from_configs(vec![config]).await.unwrap();
+        assert!(dispatcher.engines.lock().await.is_empty());
     }
 }

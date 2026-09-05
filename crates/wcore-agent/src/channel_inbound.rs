@@ -124,6 +124,18 @@ pub trait TurnDispatcher: Send + Sync {
         channel_name: &str,
         msg: &IncomingMessage,
     ) -> anyhow::Result<Option<String>>;
+
+    /// Carry the admission snapshot through a queued delivery. Stateful
+    /// dispatchers recheck it immediately before using execution authority.
+    async fn dispatch_admitted(
+        &self,
+        session_key: &str,
+        channel_name: &str,
+        msg: &IncomingMessage,
+        _policy: &wcore_channels::InboundPolicy,
+    ) -> anyhow::Result<Option<String>> {
+        self.dispatch(session_key, channel_name, msg).await
+    }
 }
 
 /// Subscribes to the channel broadcast, runs the dispatch kernel per
@@ -341,6 +353,7 @@ impl InboundSubscriber {
                                     channel_name: tagged.channel_name.clone(),
                                     msg,
                                     ack: policy.ack,
+                                    policy,
                                 };
                                 enqueue_to_worker(
                                     &mut workers,
@@ -421,6 +434,7 @@ struct AdmittedEvent {
     channel_name: String,
     msg: IncomingMessage,
     ack: AckMode,
+    policy: wcore_channels::InboundPolicy,
 }
 
 /// A per-session worker: a bounded FIFO `tx` feeding a spawned task that
@@ -558,6 +572,7 @@ async fn run_turn(
         channel_name,
         msg,
         ack,
+        policy,
     } = ev;
     let ack = *ack;
 
@@ -586,7 +601,9 @@ async fn run_turn(
         ))
     });
 
-    let dispatch_result = dispatcher.dispatch(session_key, channel_name, msg).await;
+    let dispatch_result = dispatcher
+        .dispatch_admitted(session_key, channel_name, msg, policy)
+        .await;
 
     drop(_typing_guard);
     if ack.reactions() {
