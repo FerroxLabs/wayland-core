@@ -172,7 +172,7 @@ async fn mcp_bridge_shutdown_joins_reader_before_acknowledging_cleanup() {
     );
     let late = tokio::time::timeout(
         Duration::from_millis(100),
-        runner.call_tool("unused", serde_json::json!({})),
+        runner.call_mcp_tool("unused", serde_json::json!({})),
     )
     .await
     .expect("closed MCP calls must fail promptly")
