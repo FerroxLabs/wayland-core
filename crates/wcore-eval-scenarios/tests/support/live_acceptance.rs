@@ -15,16 +15,22 @@ pub fn observed_read(
     sentinel: &str,
 ) -> bool {
     use wcore_types::message::ContentBlock;
+    let requested_file = std::fs::canonicalize(path).ok();
     let calls: Vec<_> = messages
         .iter()
         .flat_map(|message| &message.content)
         .filter_map(|block| match block {
             ContentBlock::ToolUse {
                 id, name, input, ..
-            } if name == "Read"
-                && input.get("file_path").and_then(serde_json::Value::as_str) == Some(path) =>
-            {
-                Some(id)
+            } if name == "Read" => {
+                let candidate = input.get("file_path")?.as_str()?;
+                // The file stays alive throughout the provider test. Compare
+                // its identity across platform/alias spellings, not just text.
+                let same_file = candidate == path
+                    || requested_file.as_ref().is_some_and(|expected| {
+                        std::fs::canonicalize(candidate).is_ok_and(|actual| actual == *expected)
+                    });
+                same_file.then_some(id)
             }
             _ => None,
         })
