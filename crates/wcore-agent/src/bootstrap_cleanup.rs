@@ -158,3 +158,68 @@ impl wcore_plugin_subprocess::RuntimeCleanupOwner for BootstrapCleanup {
         self.bridge(runner);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    struct HeldDrop {
+        entered: Arc<AtomicBool>,
+        finished: Arc<AtomicBool>,
+        release: std::sync::mpsc::Receiver<()>,
+    }
+    impl Drop for HeldDrop {
+        fn drop(&mut self) {
+            self.entered.store(true, Ordering::Release);
+            let _ = self.release.recv_timeout(Duration::from_secs(5));
+            self.finished.store(true, Ordering::Release);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cleanup_retry_waits_for_owned_task_resource_drop() {
+        let cleanup = BootstrapCleanup::default();
+        cleanup.begin();
+        let entered = Arc::new(AtomicBool::new(false));
+        let finished = Arc::new(AtomicBool::new(false));
+        let (release, gate) = std::sync::mpsc::channel();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let held = HeldDrop {
+            entered: entered.clone(),
+            finished: finished.clone(),
+            release: gate,
+        };
+        let task = tokio::spawn(async move {
+            let _resource = held;
+            let _ = started.send(());
+            std::future::pending::<()>().await;
+        });
+        ready.await.unwrap();
+        cleanup.retain_tasks([task]);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !entered.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("resource drop must start");
+        let first = tokio::time::timeout(Duration::from_millis(20), cleanup.close()).await;
+        let finished_before_release = finished.load(Ordering::Acquire);
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), cleanup.close())
+            .await
+            .expect("bounded cleanup retry")
+            .expect("joined cleanup");
+        assert!(
+            first.is_err(),
+            "cleanup acknowledged before its resource was released"
+        );
+        assert!(
+            !finished_before_release,
+            "positive control did not hold the resource"
+        );
+        assert!(finished.load(Ordering::Acquire));
+        assert!(cleanup.tasks.lock().unwrap().is_empty());
+    }
+}
