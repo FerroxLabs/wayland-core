@@ -570,6 +570,68 @@ mod tests {
         );
     }
 
+    #[test]
+    fn delete_reports_orphan_failure_and_retry_removes_retained_material() {
+        let tmp = TempDir::new().unwrap();
+        let (store, secure) = store_at(tmp.path().join("oauth"));
+        store.store("chatgpt", &make_tokens()).unwrap();
+        let orphan = store.path_for("chatgpt").with_extension("json.tmp");
+        // A filesystem object that cannot be removed as a file, even under root.
+        std::fs::create_dir(&orphan).unwrap();
+        std::fs::write(orphan.join("retained"), "fixture-refresh-token").unwrap();
+        let result = store.delete("chatgpt");
+        assert!(
+            result.is_err(),
+            "orphan removal failure must not report logout success"
+        );
+        assert!(secure.get(&oauth_tokens_key("chatgpt")).unwrap().is_none());
+        assert!(
+            !store.login_record_path("chatgpt").exists(),
+            "independent marker cleanup still runs"
+        );
+        assert!(orphan.join("retained").exists());
+        std::fs::remove_dir_all(&orphan).unwrap();
+        std::fs::write(&orphan, "fixture-refresh-token").unwrap();
+        assert!(
+            store.delete("chatgpt").unwrap(),
+            "retry must report the orphan it removed"
+        );
+        assert!(!orphan.exists());
+        assert!(
+            !store.delete("chatgpt").unwrap(),
+            "fully absent logout is idempotent"
+        );
+    }
+
+    #[test]
+    fn delete_attempts_orphan_and_marker_after_main_legacy_failure() {
+        let tmp = TempDir::new().unwrap();
+        let (store, secure) = store_at(tmp.path().join("oauth"));
+        store.store("chatgpt", &make_tokens()).unwrap();
+        let legacy = store.path_for("chatgpt");
+        std::fs::create_dir(&legacy).unwrap();
+        std::fs::write(legacy.join("retained"), "fixture-refresh-token").unwrap();
+        let orphan = legacy.with_extension("json.tmp");
+        std::fs::write(&orphan, "fixture-refresh-token").unwrap();
+        assert!(store.delete("chatgpt").is_err());
+        assert!(secure.get(&oauth_tokens_key("chatgpt")).unwrap().is_none());
+        assert!(
+            !orphan.exists(),
+            "legacy failure must not skip independent orphan deletion"
+        );
+        assert!(!store.login_record_path("chatgpt").exists());
+    }
+
+    #[test]
+    fn delete_counts_a_lone_orphan_as_removed() {
+        let tmp = TempDir::new().unwrap();
+        let (store, _) = store_at(tmp.path().join("oauth"));
+        let orphan = store.path_for("chatgpt").with_extension("json.tmp");
+        std::fs::write(&orphan, "fixture-refresh-token").unwrap();
+        assert!(store.delete("chatgpt").unwrap());
+        assert!(!orphan.exists());
+    }
+
     /// Logout must clear both tiers. A delete that missed the secure entry
     /// would leave the user signed in through it.
     #[test]
