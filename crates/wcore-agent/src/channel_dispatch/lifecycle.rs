@@ -157,11 +157,11 @@ impl ChannelTurnDispatcher {
             self.policies.policy_for(channel) == *admitted_policy,
             "channel admission changed while waiting for session"
         );
-        if !state.ready {
-            if let Err(error) = self.initialize(&id, &session, &mut state).await {
-                session.cancel.cancel();
-                return Err(error);
-            }
+        if !state.ready
+            && let Err(error) = self.initialize(&id, &session, &mut state).await
+        {
+            session.cancel.cancel();
+            return Err(error);
         }
         anyhow::ensure!(
             !session.cancel.is_cancelled(),
