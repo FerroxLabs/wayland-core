@@ -708,7 +708,11 @@ impl SubprocessPluginRunner {
         // Tear down the dead transport: kill old child + drain pending
         // senders so any racing in-flight requests get WorkerTerminated
         // instead of hanging.
-        self.tear_down_transport().await;
+        if let Err(error) = self.tear_down_transport().await {
+            self.closing.store(true, Ordering::Release);
+            warn!(plugin = %self.plugin_name, error = %error, "old subprocess cleanup incomplete; refusing replacement");
+            return Err(original_err);
+        }
 
         // Spawn a fresh transport. A respawn failure does NOT increment a
         // second strike (the strike was already taken for the underlying
@@ -758,24 +762,17 @@ impl SubprocessPluginRunner {
     /// Kill the current child + drain pending senders. Safe to call when
     /// the transport is already dead. Used by the restart path *before*
     /// swapping in a new transport.
-    async fn tear_down_transport(&self) {
-        {
-            let mut child_guard = self.child.lock().await;
-            if let Some(mut child) = child_guard.take() {
-                let _ = child.start_kill();
-                let _ = child.wait().await;
-            }
+    async fn tear_down_transport(&self) -> Result<()> {
+        let child = crate::shutdown::reap_child(&self.child, tokio::time::Instant::now()).await;
+        self.pending.lock().await.clear();
+        let reader = crate::shutdown::join_reader(&self.reader_task).await;
+        child?;
+        // A reader panic is an expected transport-crash cause here. It has
+        // already joined; the original call still returns its ambiguous error.
+        match reader {
+            Err(SubprocessPluginError::WorkerTerminated) => Ok(()),
+            other => other,
         }
-        // Drain any in-flight pending senders so racing requests fail with
-        // WorkerTerminated instead of hanging on a closed reader.
-        {
-            let mut pending = self.pending.lock().await;
-            pending.clear();
-        }
-        // The old reader task will exit naturally on stdout EOF; we don't
-        // need to await it here (would deadlock if it's already taken).
-        let mut reader_guard = self.reader_task.lock().await;
-        let _old = reader_guard.take();
     }
 
     /// v0.6.5 Task 3.3 — current consecutive-crash count. Exposed for
