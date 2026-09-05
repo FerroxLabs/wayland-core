@@ -293,3 +293,39 @@ async fn outbound_channel_transport_survives_while_acp_avoids_inbound_ownership(
     assert_eq!(starts.load(Ordering::SeqCst), 0);
     server.delete_session(second).await.expect("close second");
 }
+
+#[tokio::test]
+async fn failed_initializer_retires_join_handle_before_cleanup_retry() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let engine = engine(workspace.path(), false);
+    let server = AcpServer::new().with_turn_engine(engine.clone());
+    let id = create(&server).await;
+    let initializer = Arc::new(Initialization::new());
+    let signal = initializer.clone();
+    let handle = tokio::spawn(async move {
+        let _completion = InitializationCompletion(signal);
+        panic!("fixture initializer failure");
+    });
+    *initializer.task.lock().await = Some(handle);
+    engine
+        .initializers
+        .lock()
+        .await
+        .insert(id.clone(), initializer.clone());
+    assert!(
+        server.delete_session(id.clone()).await.is_err(),
+        "unknown failed bootstrap cleanup cannot claim success"
+    );
+    assert!(
+        initializer.task.lock().await.is_none(),
+        "a completed failing JoinHandle must be retired before retry"
+    );
+    let retry = tokio::time::timeout(Duration::from_secs(2), server.delete_session(id))
+        .await
+        .expect("retry must complete")
+        .expect_err("bootstrap cleanup remains unproven");
+    assert!(
+        !retry.to_string().contains("did not publish completion"),
+        "retry task panicked: {retry}"
+    );
+}
