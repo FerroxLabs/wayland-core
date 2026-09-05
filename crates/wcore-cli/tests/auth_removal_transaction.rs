@@ -124,6 +124,15 @@ async fn malformed_config_does_not_echo_its_secret_bearing_line() {
 }
 
 #[tokio::test]
+async fn invalid_credential_setting_does_not_echo_its_value() {
+    let home = tempfile::tempdir().unwrap();
+    config(home.path(), CONFIG_VALUE);
+
+    let output = remove(home.path()).await;
+    assert_incomplete(&output);
+}
+
+#[tokio::test]
 async fn successful_removal_clears_both_locations_through_the_real_cli() {
     let home = tempfile::tempdir().unwrap();
     config(home.path(), "plaintext");
