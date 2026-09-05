@@ -1,6 +1,6 @@
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use serde_json::json;
@@ -384,7 +384,7 @@ impl McpManager {
         } else {
             (None, None)
         };
-        let result = if config.transport == TransportType::Stdio {
+        let mut result = if config.transport == TransportType::Stdio {
             Self::connect_server(
                 name,
                 config,
@@ -415,6 +415,25 @@ impl McpManager {
             .and_then(|result| result)
             .map(Some)
         };
+        // The outer HTTP connect deadline can interrupt handshake cleanup.
+        // The registry retains any constructed transport across that cut.
+        if config.transport != TransportType::Stdio
+            && let Err(McpError::ConnectTimedOut {
+                cleanup: detail, ..
+            }) = &mut result
+        {
+            let transport = cleanup
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .get(name)
+                .cloned();
+            if let Some(transport) = transport {
+                *detail = close_transport_bounded(transport.as_ref())
+                    .await
+                    .map(|error| format!("; cleanup failed: {error}"))
+                    .unwrap_or_default();
+            }
+        }
         match result {
             Ok(Some(server)) => ConnectOutcome::Ok {
                 server: Box::new(server),
@@ -459,6 +478,8 @@ impl McpManager {
                 .collect());
         }
 
+        // A new generation must not overwrite an earlier failed cleanup owner.
+        self.close_server(&name).await?;
         match Self::connect_server_outcome(
             &name,
             config,
@@ -601,8 +622,12 @@ impl McpManager {
         name: &str,
         transport: Arc<dyn McpTransport>,
         connect_timeout: Duration,
-        _cleanup: CleanupTransports,
+        cleanup: CleanupTransports,
     ) -> Result<McpServer, McpError> {
+        cleanup
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(name.to_string(), transport.clone());
         let handshake = async {
             // 2. Initialize handshake
             let init_params = InitializeParams {
@@ -1013,13 +1038,49 @@ impl McpManager {
     /// server reports `is_alive() == false`, so `all_tools()` stops
     /// advertising it and `call_tool` fast-fails.
     pub async fn close_server(&self, server_name: &str) -> Result<bool, McpError> {
-        let Some(server) = self.servers.get(server_name) else {
+        let retained = self
+            .cleanup_transports
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(server_name)
+            .cloned();
+        let Some(transport) = retained.or_else(|| {
+            self.servers
+                .get(server_name)
+                .map(|server| server.transport.clone())
+        }) else {
             return Ok(false);
         };
-        if let Some(error) = close_transport_bounded(server.transport.as_ref()).await {
+        if let Some(error) = close_transport_bounded(transport.as_ref()).await {
             return Err(error);
         }
+        let mut retained = self
+            .cleanup_transports
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if retained
+            .get(server_name)
+            .is_some_and(|saved| Arc::ptr_eq(saved, &transport))
+        {
+            retained.remove(server_name);
+        }
         Ok(true)
+    }
+
+    /// Includes failed connections whose cleanup authority is still retained.
+    /// `server_names` remains the ready-server discovery surface.
+    pub fn cleanup_server_names(&self) -> Vec<String> {
+        let mut names = self.server_names();
+        names.extend(
+            self.cleanup_transports
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .keys()
+                .cloned(),
+        );
+        names.sort();
+        names.dedup();
+        names
     }
 
     /// Test-only constructor: build a manager with an explicit health map
@@ -1297,11 +1358,14 @@ mod tests {
             manager.server_names().is_empty(),
             "failed handshake must never advertise a ready server"
         );
+        assert_eq!(manager.cleanup_server_names(), vec!["failed"]);
         assert!(
             manager.close_server("failed").await.expect("retry cleanup"),
             "manager lost the failed transport owner"
         );
         assert_eq!(closes.load(Ordering::SeqCst), 2);
+        assert!(manager.cleanup_server_names().is_empty());
+        assert!(!manager.close_server("failed").await.unwrap());
     }
 
     #[tokio::test]

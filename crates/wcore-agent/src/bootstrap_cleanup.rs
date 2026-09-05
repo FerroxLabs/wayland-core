@@ -85,7 +85,7 @@ impl BootstrapCleanup {
                 match process {
                     Process::Mcp(manager) => {
                         let results = futures::future::join_all(
-                            manager.server_names().into_iter().map(|name| {
+                            manager.cleanup_server_names().into_iter().map(|name| {
                                 let manager = manager.clone();
                                 async move { manager.close_server(&name).await }
                             }),
