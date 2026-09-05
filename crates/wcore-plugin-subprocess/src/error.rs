@@ -37,6 +37,9 @@ pub enum SubprocessPluginError {
     /// subprocess (if any) has been killed and the runner is unusable.
     #[error("subprocess plugin worker terminated")]
     WorkerTerminated,
+
+    #[error("subprocess plugin cleanup incomplete: {0}")]
+    CleanupFailed(String),
 }
 
 pub type Result<T> = std::result::Result<T, SubprocessPluginError>;

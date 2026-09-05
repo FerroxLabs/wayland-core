@@ -136,6 +136,17 @@ async fn sdk_shutdown_joins_reader_before_acknowledging_cleanup() {
         dropped_at_ack,
         "shutdown acknowledged while its reader still owned stdout"
     );
+    let late = tokio::time::timeout(
+        Duration::from_millis(100),
+        loaded.runner.call_tool("unused", serde_json::json!({})),
+    )
+    .await
+    .expect("closed SDK calls must fail promptly")
+    .expect_err("closed SDK runner accepted a call");
+    assert!(matches!(
+        late,
+        wcore_plugin_subprocess::error::SubprocessPluginError::WorkerTerminated
+    ));
 }
 
 #[tokio::test]
@@ -159,6 +170,17 @@ async fn mcp_bridge_shutdown_joins_reader_before_acknowledging_cleanup() {
         dropped_at_ack,
         "shutdown acknowledged while its reader still owned stdout"
     );
+    let late = tokio::time::timeout(
+        Duration::from_millis(100),
+        runner.call_tool("unused", serde_json::json!({})),
+    )
+    .await
+    .expect("closed MCP calls must fail promptly")
+    .expect_err("closed MCP runner accepted a call");
+    assert!(matches!(
+        late,
+        wcore_plugin_subprocess::error::SubprocessPluginError::WorkerTerminated
+    ));
 }
 
 #[tokio::test]

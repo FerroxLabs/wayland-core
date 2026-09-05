@@ -6,6 +6,24 @@ use tokio::task::JoinHandle;
 
 use crate::error::{Result, SubprocessPluginError};
 
+pub(crate) async fn reap_child(
+    child: &Mutex<Option<tokio::process::Child>>,
+    deadline: tokio::time::Instant,
+) -> Result<()> {
+    let mut saved = child.lock().await;
+    let Some(handle) = saved.as_mut() else {
+        return Ok(());
+    };
+    let outcome = match tokio::time::timeout_at(deadline, handle.wait()).await {
+        Ok(result) => result.map(|_| ()),
+        Err(_) => handle.kill().await,
+    };
+    if outcome.is_ok() {
+        saved.take();
+    }
+    outcome.map_err(|error| SubprocessPluginError::CleanupFailed(error.to_string()))
+}
+
 pub(crate) async fn join_reader(task: &Mutex<Option<JoinHandle<()>>>) -> Result<()> {
     let mut saved = task.lock().await;
     let Some(handle) = saved.as_mut() else {
