@@ -639,7 +639,8 @@ fn remove_cmd(provider_arg: &str, config_path: &std::path::Path) -> Result<()> {
 
     // BOTH locations. A remove that clears only one leaves the key resolvable
     // from the other, and the one it would leave behind is the cleartext one.
-    let removed_config = providers_table_mut(&mut doc)?.remove(slug).is_some();
+    let removed_entry = providers_table_mut(&mut doc)?.remove(slug);
+    let removed_config = removed_entry.is_some();
 
     let removed_store = match (credentials_store(config_path, &doc), slot) {
         (Ok(store), Some(slot)) => {
@@ -654,7 +655,14 @@ fn remove_cmd(provider_arg: &str, config_path: &std::path::Path) -> Result<()> {
     };
 
     // The config copy is independent: remove it even if the store could not
-    // be cleaned, then return that failure rather than claiming full removal.
+    // be cleaned. Retain account identity on failure so the same command can
+    // resolve and remove its stored credential when the backend recovers.
+    if removed_store.is_err()
+        && let Some(toml::Value::Table(mut fields)) = removed_entry
+    {
+        fields.remove("api_key");
+        providers_table_mut(&mut doc)?.insert(slug.to_string(), toml::Value::Table(fields));
+    }
     if removed_config {
         save_doc(&doc, config_path)?;
     }
