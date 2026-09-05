@@ -23,7 +23,7 @@ use std::path::PathBuf;
 
 use wcore_eval_scenarios::catalog;
 use wcore_eval_scenarios::providers::{ProviderConfig, ProviderId};
-use wcore_eval_scenarios::runner::{ScenarioResult, discover_binary};
+use wcore_eval_scenarios::runner::{Failure, ScenarioResult, discover_binary};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: drives the real wayland-core binary against the real DeepSeek API (costs money, needs DEEPSEEK_API_KEY + a pre-built binary)"]
@@ -75,6 +75,15 @@ async fn overnight_personas() {
         );
         match scenario.run_with(&provider).await {
             Ok(result) => {
+                // The runner can return a completed result containing a
+                // startup/transport failure instead of returning Err itself.
+                runner_errors.extend(result.failures.iter().filter_map(|failure| {
+                    if let Failure::RunnerError(error) = failure {
+                        Some(format!("{}: {error}", result.name))
+                    } else {
+                        None
+                    }
+                }));
                 eprintln!(
                     "overnight_personas: [{}/{}] '{}' -> {} ({:.1}s, ${:.4})",
                     idx + 1,
