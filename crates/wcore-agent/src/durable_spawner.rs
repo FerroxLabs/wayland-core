@@ -768,24 +768,35 @@ impl AdmittedDurableSpawn {
     where
         F: Future<Output = SubAgentResult> + Send,
     {
-        tokio::pin!(execution);
-
-        tokio::select! {
-            biased;
-            () = parent_cancel.cancelled() => self.commit_cancelled(),
-            () = self.cancel.cancelled() => {
-                self.commit_cancelled()
+        // A terminal record is used by session close as a cleanup barrier.
+        // Retire the execution future (including its owned resources) before
+        // publishing that record, on cancellation and normal completion alike.
+        let result = {
+            tokio::pin!(execution);
+            tokio::select! {
+                biased;
+                () = parent_cancel.cancelled() => None,
+                () = self.cancel.cancelled() => None,
+                result = &mut execution => Some(result),
             }
-            result = &mut execution => {
+        };
+        match result {
+            None => self.commit_cancelled(),
+            Some(result) => {
                 let (payload, durable_result) = encode_result_payload(&result)?;
                 let _mutation = self.runtime.mutations.lock();
                 self.runtime.ensure_healthy()?;
-                self.runtime.store
+                self.runtime
+                    .store
                     .store_result_payload(&durable_result.exact_digest, &payload)?;
                 let transition = if result.is_error {
-                    DurableChildTransition::Fail { result: durable_result }
+                    DurableChildTransition::Fail {
+                        result: durable_result,
+                    }
                 } else {
-                    DurableChildTransition::Succeed { result: durable_result }
+                    DurableChildTransition::Succeed {
+                        result: durable_result,
+                    }
                 };
                 let current = self.runtime.required_child(&self.child_id)?;
                 self.runtime.transition_current(
