@@ -7,6 +7,7 @@ pub mod error;
 pub mod mcp_bridge;
 pub mod rpc;
 pub mod runner;
+mod shutdown;
 
 pub use error::{Result, SubprocessPluginError};
 pub use mcp_bridge::{LoadedMcpBridgePlugin, McpBridgePluginRunner, ToolOutput as McpToolOutput};

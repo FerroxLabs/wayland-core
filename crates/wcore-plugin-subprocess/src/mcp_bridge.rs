@@ -587,14 +587,7 @@ impl McpBridgePluginRunner {
             }
         }
 
-        let mut reader_guard = self.reader_task.lock().await;
-        if let Some(handle) = reader_guard.take() {
-            match timeout(Duration::from_secs(1), handle).await {
-                Ok(Ok(_)) => {}
-                Ok(Err(e)) => warn!(error = %e, "mcp-bridge reader join error"),
-                Err(_) => warn!("mcp-bridge reader did not finish — leaking"),
-            }
-        }
+        crate::shutdown::join_reader(&self.reader_task).await?;
         Ok(())
     }
 }

@@ -786,14 +786,7 @@ impl SubprocessPluginRunner {
         }
 
         // Join the reader task; it should exit naturally on stdout close.
-        let mut reader_guard = self.reader_task.lock().await;
-        if let Some(handle) = reader_guard.take() {
-            match timeout(Duration::from_secs(1), handle).await {
-                Ok(Ok(_)) => {}
-                Ok(Err(e)) => warn!(error = %e, "subprocess reader task join error"),
-                Err(_) => warn!("subprocess reader task did not finish — leaking"),
-            }
-        }
+        crate::shutdown::join_reader(&self.reader_task).await?;
 
         // Propagate the original shutdown error AFTER cleanup so callers
         // get diagnostic info but cleanup still happens.
