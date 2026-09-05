@@ -101,7 +101,7 @@ impl EngineSession {
         // The task has returned/been joined, so its finalizer or durable drop
         // path owns the truth. Unknown physical outcomes are retained as such.
         let engine = self.engine.lock().await;
-        if engine.has_durable_journal() {
+        if engine.session_journal().is_some() {
             engine
                 .recovery_plan()
                 .map_err(|error| AcpError::Cleanup(error.to_string()))?;
