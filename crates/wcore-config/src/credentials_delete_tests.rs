@@ -169,6 +169,31 @@ async fn vault_child() {
                     .expect_err("malformed encrypted store must fail"),
             );
         }
+        "unknown-keyring" => {
+            assert!(!vault_unlock_material_present());
+            let legacy = PlaintextCredentialsStore::new(&plaintext_path);
+            legacy.put(KEY, SENTINEL).unwrap();
+            let probes = std::cell::Cell::new(0);
+            let ladder = build_ladder_with_probe(&cfg, &plaintext_path, false, &|_| {
+                probes.set(probes.get() + 1);
+                false
+            });
+            assert_eq!(probes.get(), 1, "the fixture must reach the failed probe");
+            let error = ladder.delete(KEY).expect_err(
+                "a failed global write probe cannot establish absence of stored credentials",
+            );
+            assert!(error.to_string().contains("keyring"));
+            assert_eq!(
+                legacy.get(KEY).unwrap(),
+                None,
+                "independent cleanup must proceed"
+            );
+
+            let isolated = build_ladder_with_probe(&cfg, &plaintext_path, true, &|_| {
+                panic!("isolated profiles must not probe the global keyring")
+            });
+            isolated.delete(KEY).unwrap();
+        }
         _ => panic!("unknown fixture action"),
     }
 }
@@ -264,6 +289,12 @@ async fn locked_vault_created_after_open_is_not_cached_as_absent() {
 async fn encrypted_delete_error_redacts_the_decrypted_secret_bearing_line() {
     let home = tempfile::tempdir().unwrap();
     assert_child_passed(run_vault_child(home.path(), "malformed", false).await);
+}
+
+#[tokio::test]
+async fn failed_global_keyring_probe_is_incomplete_not_an_absent_credential() {
+    let home = tempfile::tempdir().unwrap();
+    assert_child_passed(run_vault_child(home.path(), "unknown-keyring", false).await);
 }
 
 #[derive(Default)]

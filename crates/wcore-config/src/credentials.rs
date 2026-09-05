@@ -133,13 +133,28 @@ pub enum CredentialsError {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("toml parse error: {0}")]
-    TomlParse(#[from] toml::de::Error),
+    TomlParse(toml::de::Error),
     #[error("toml serialize error: {0}")]
     TomlSerialize(#[from] toml::ser::Error),
     #[error("keyring error: {0}")]
     Keyring(String),
     #[error("backend not available: {0}")]
     BackendUnavailable(String),
+}
+
+impl From<toml::de::Error> for CredentialsError {
+    fn from(error: toml::de::Error) -> Self {
+        // TOML diagnostics retain source text and may also include values in
+        // their message. Keep only a location, never the original error chain.
+        let message = match error.span() {
+            Some(span) => format!(
+                "invalid credential TOML at bytes {}..{}",
+                span.start, span.end
+            ),
+            None => "invalid credential TOML".to_string(),
+        };
+        Self::TomlParse(<toml::de::Error as serde::de::Error>::custom(message))
+    }
 }
 
 /// Generic key/value store for credentials.
@@ -820,11 +835,22 @@ fn chunked_delete(
     // logout would report success while the refresh token's fragments stayed in
     // the OS keyring, unreferenced and undeletable by any later call.
     let previous = read_previous_manifest(raw, key)?;
-    // Manifest first: once it is gone no reader can reach the parts, so a
-    // process killed here leaves orphans rather than a torn read.
-    raw.delete(key)?;
-    purge_chunks(raw, key, previous);
-    Ok(())
+    // Retain the manifest until every part is removed: it is the recovery
+    // identity a retry needs after a partial failure or process interruption.
+    // Readers that observe a partial set retry under this lock and fail
+    // closed if deletion remains incomplete.
+    if let Some(manifest) = previous {
+        let mut first_error = None;
+        for index in 0..manifest.count {
+            if let Err(error) = raw.delete(&chunk_key(key, manifest.generation, index)) {
+                first_error.get_or_insert(error);
+            }
+        }
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+    }
+    raw.delete(key)
 }
 
 /// Best-effort removal of a superseded generation's parts. A failure here
@@ -1460,6 +1486,10 @@ struct LadderCredentialsStore {
     /// `Some` iff [`vault_unlock_material_present`] — otherwise opening it
     /// would block on an interactive passphrase prompt.
     vault: Option<Box<dyn CredentialsStore>>,
+    /// A failed global write probe cannot establish that no stored key exists.
+    unavailable_keyring: bool,
+    /// Preserve even an unopened vault's configured paths for deletion checks.
+    unopened_vault_paths: Option<(PathBuf, PathBuf)>,
     /// Legacy cleartext file. Read and delete only.
     legacy: PlaintextCredentialsStore,
 }
@@ -1473,6 +1503,8 @@ impl LadderCredentialsStore {
         Self {
             keyring,
             vault,
+            unavailable_keyring: false,
+            unopened_vault_paths: None,
             legacy: PlaintextCredentialsStore::new(plaintext_path),
         }
     }
@@ -1624,10 +1656,29 @@ impl LadderCredentialsStore {
     /// file appearing as a side effect of the code whose job is to stop
     /// cleartext credentials files existing.
     fn delete_legacy(&self, key: &str) -> Result<(), CredentialsError> {
-        if !self.legacy.path().exists() {
-            return Ok(());
+        match std::fs::symlink_metadata(self.legacy.path()) {
+            Ok(_) => self.legacy.delete(key),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
         }
-        self.legacy.delete(key)
+    }
+
+    fn check_unopened_vault_for_delete(&self) -> Result<(), CredentialsError> {
+        if let Some((cipher, params)) = &self.unopened_vault_paths {
+            for path in [cipher, params] {
+                match std::fs::symlink_metadata(path) {
+                    Ok(_) => {
+                        return Err(CredentialsError::BackendUnavailable(format!(
+                            "credential removal is incomplete: vault material exists at {}; provide vault unlock material and retry",
+                            path.display()
+                        )));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1753,6 +1804,12 @@ impl CredentialsStore for LadderCredentialsStore {
         let mut first_error = None;
         for tier in [LadderTier::Keyring, LadderTier::Vault, LadderTier::Legacy] {
             let removed = match tier {
+                LadderTier::Keyring if self.unavailable_keyring => {
+                    Err(CredentialsError::BackendUnavailable(
+                        "credential removal is incomplete: the global keyring was unavailable; restore keyring access and retry".to_string(),
+                    ))
+                }
+                LadderTier::Vault if self.vault.is_none() => self.check_unopened_vault_for_delete(),
                 LadderTier::Legacy => self.delete_legacy(key),
                 other => self.tier(other).map_or(Ok(()), |store| store.delete(key)),
             };
@@ -2871,12 +2928,24 @@ fn migrate_plaintext_into_vault(
 /// [`open_secure_ladder_store`], so the two cannot drift in which rungs they
 /// mount or in the order they try them.
 fn build_ladder(cfg: &CredentialsStorageConfig, plaintext_path: &Path) -> LadderCredentialsStore {
+    build_ladder_with_probe(
+        cfg,
+        plaintext_path,
+        std::env::var_os("WAYLAND_HOME").is_some(),
+        &keyring_available,
+    )
+}
+
+fn build_ladder_with_probe(
+    cfg: &CredentialsStorageConfig,
+    plaintext_path: &Path,
+    isolated: bool,
+    keyring_probe: &dyn Fn(&str) -> bool,
+) -> LadderCredentialsStore {
     // Isolated-profile homes (WAYLAND_HOME set) must NOT use the OS
     // keyring: the keyring service is a process-global constant
     // ("wayland-core") that bleeds secrets across every profile on the
     // host (C4 / D1). Such a profile's top rung is the in-home vault.
-    let isolated = std::env::var_os("WAYLAND_HOME").is_some();
-
     let keyring: Option<Box<dyn CredentialsStore>> = if isolated {
         None
     } else {
@@ -2884,22 +2953,22 @@ fn build_ladder(cfg: &CredentialsStorageConfig, plaintext_path: &Path) -> Ladder
             .service_name
             .clone()
             .unwrap_or_else(|| "wayland-core".to_string());
-        keyring_available(&service)
+        keyring_probe(&service)
             .then(|| Box::new(KeyringCredentialsStore::new(service)) as Box<dyn CredentialsStore>)
     };
 
+    // Retain these paths even when locked; absence must be checked at delete
+    // time rather than inferred from unavailable unlock material at startup.
+    let (cipher_path, key_params_path) = match &cfg.backend {
+        CredentialsBackend::EncryptedFile {
+            cipher_path,
+            key_params_path,
+        } => (cipher_path.clone(), key_params_path.clone()),
+        _ => default_vault_paths(plaintext_path),
+    };
     let vault: Option<Box<dyn CredentialsStore>> = if vault_unlock_material_present() {
-        // An operator who named explicit vault paths gets THOSE, so the ladder
-        // and an explicit `backend = "encrypted_file"` never open two different
-        // vaults for the same profile.
-        let (cipher_path, key_params_path) = match &cfg.backend {
-            CredentialsBackend::EncryptedFile {
-                cipher_path,
-                key_params_path,
-            } => (cipher_path.clone(), key_params_path.clone()),
-            _ => default_vault_paths(plaintext_path),
-        };
-        let store = EncryptedFileCredentialsStore::new(cipher_path, key_params_path);
+        let store =
+            EncryptedFileCredentialsStore::new(cipher_path.clone(), key_params_path.clone());
         // #183: import any pre-existing plaintext secrets into the
         // vault once. On failure the legacy tier keeps serving them, so
         // no secret is ever lost — but the vault stays mounted, because
@@ -2922,7 +2991,12 @@ fn build_ladder(cfg: &CredentialsStorageConfig, plaintext_path: &Path) -> Ladder
         warn_no_secure_credential_tier(plaintext_path);
     }
 
-    LadderCredentialsStore::new(keyring, vault, plaintext_path.to_path_buf())
+    let unavailable_keyring = !isolated && keyring.is_none();
+    let unopened_vault_paths = vault.is_none().then_some((cipher_path, key_params_path));
+    let mut ladder = LadderCredentialsStore::new(keyring, vault, plaintext_path.to_path_buf());
+    ladder.unavailable_keyring = unavailable_keyring;
+    ladder.unopened_vault_paths = unopened_vault_paths;
+    ladder
 }
 
 /// The keyring → encrypted-vault → REFUSE ladder, built regardless of
@@ -3744,8 +3818,8 @@ mod tests {
 
         // 2. What `build_ladder` actually mounts, in body order.
         let body_start = SOURCE
-            .find("fn build_ladder(")
-            .expect("known-positive control: `build_ladder` must be in this file");
+            .find("fn build_ladder_with_probe(")
+            .expect("known-positive control: the ladder builder must be in this file");
         // The first column-zero closing brace after the signature: every
         // block inside the function is indented, so this is its end.
         let body_end = SOURCE[body_start..]
