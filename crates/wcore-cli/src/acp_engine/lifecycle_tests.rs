@@ -342,6 +342,15 @@ mod child_mock_llm;
 
 #[tokio::test]
 async fn close_waits_for_canonical_host_child_cancellation_and_parent_lease_release() {
+    canonical_host_child_close(false).await;
+}
+
+#[tokio::test]
+async fn close_releases_aborted_host_child_without_erasing_recovery_evidence() {
+    canonical_host_child_close(true).await;
+}
+
+async fn canonical_host_child_close(abort_before_close: bool) {
     let workspace = tempfile::tempdir().unwrap();
     let mock = child_mock_llm::MockLlm::new()
         .text("child fixture control")
@@ -405,7 +414,7 @@ async fn close_waits_for_canonical_host_child_cancellation_and_parent_lease_rele
         .children
         .clone()
         .unwrap();
-    let task = tokio::spawn(async move {
+    let mut task = tokio::spawn(async move {
         children
             .spawn_child(wcore_types::spawner::SubAgentConfig {
                 name: "close-fixture-child".into(),
@@ -438,6 +447,10 @@ async fn close_waits_for_canonical_host_child_cancellation_and_parent_lease_rele
         let _ = server.delete_session(id).await;
         panic!("child did not reach the real controlled provider: {result:?}");
     }
+    if abort_before_close {
+        task.abort();
+        assert!((&mut task).await.unwrap_err().is_cancelled());
+    }
     let result =
         tokio::time::timeout(Duration::from_secs(10), server.delete_session(id.clone())).await;
     let joined_at_ack = task.is_finished();
@@ -448,9 +461,15 @@ async fn close_waits_for_canonical_host_child_cancellation_and_parent_lease_rele
     if !joined_at_ack {
         task.abort();
     }
-    let child_result = tokio::time::timeout(Duration::from_secs(5), task)
-        .await
-        .unwrap();
+    let child_result = if abort_before_close {
+        None
+    } else {
+        Some(
+            tokio::time::timeout(Duration::from_secs(5), task)
+                .await
+                .unwrap(),
+        )
+    };
     result
         .expect("close deadline")
         .expect("cooperative child cleanup must converge in the same close");
@@ -458,11 +477,27 @@ async fn close_waits_for_canonical_host_child_cancellation_and_parent_lease_rele
         joined_at_ack,
         "close acknowledged before child execution joined"
     );
-    assert!(
-        child_result
-            .expect("child finished without test backstop")
-            .is_error,
-        "cancelled child returned a normal completion"
-    );
-    lease.expect("parent writer lease released at close acknowledgment");
+    if let Some(child_result) = child_result {
+        assert!(
+            child_result
+                .expect("child finished without test backstop")
+                .is_error,
+            "cancelled child returned a normal completion"
+        );
+    }
+    let lease = lease.expect("parent writer lease released at close acknowledgment");
+    if abort_before_close {
+        let children = wcore_agent::durable_child::DurableChildStore::new(lease)
+            .list()
+            .unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(
+            children[0].status,
+            wcore_types::spawner::DurableChildStatus::RecoveryRequired
+        );
+        assert!(matches!(
+            children[0].recovery,
+            wcore_types::spawner::ChildRecoveryState::Required { .. }
+        ));
+    }
 }
