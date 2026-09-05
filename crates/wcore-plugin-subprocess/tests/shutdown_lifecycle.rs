@@ -160,3 +160,54 @@ async fn mcp_bridge_shutdown_joins_reader_before_acknowledging_cleanup() {
         "shutdown acknowledged while its reader still owned stdout"
     );
 }
+
+#[tokio::test]
+async fn sdk_interrupted_shutdown_can_retry_without_another_ack() {
+    let (stdin, stdout, release, fixture, dropped) = transport(false);
+    let loaded =
+        SubprocessPluginRunner::load_with_transport(stdin, stdout, Arc::new(PluginAccessGate))
+            .await
+            .unwrap();
+    let first = tokio::time::timeout(Duration::from_millis(50), loaded.runner.shutdown()).await;
+    assert!(
+        first.is_err(),
+        "fixture reader must hold the first close attempt"
+    );
+    assert!(!dropped.load(Ordering::SeqCst));
+    let retry = tokio::time::timeout(Duration::from_secs(3), loaded.runner.shutdown()).await;
+    let dropped_at_ack = dropped.load(Ordering::SeqCst);
+    release.notify_one();
+    fixture.await.unwrap();
+    retry
+        .expect("retry must not request a second shutdown ACK")
+        .expect("retry cleanup");
+    assert!(dropped_at_ack, "retry lost the reader ownership");
+    tokio::time::timeout(Duration::from_millis(100), loaded.runner.shutdown())
+        .await
+        .expect("completed shutdown is idempotent")
+        .expect("already shut down");
+}
+
+#[tokio::test]
+async fn mcp_interrupted_shutdown_retains_reader_for_retry() {
+    let (stdin, stdout, release, fixture, dropped) = transport(true);
+    let loaded =
+        McpBridgePluginRunner::load_with_transport(stdin, stdout, Arc::new(PluginAccessGate))
+            .await
+            .unwrap();
+    let runner = loaded.runner();
+    let first = tokio::time::timeout(Duration::from_millis(50), runner.shutdown()).await;
+    assert!(
+        first.is_err(),
+        "fixture reader must hold the first close attempt"
+    );
+    assert!(!dropped.load(Ordering::SeqCst));
+    let retry = tokio::time::timeout(Duration::from_secs(3), runner.shutdown()).await;
+    let dropped_at_ack = dropped.load(Ordering::SeqCst);
+    release.notify_one();
+    fixture.await.unwrap();
+    retry
+        .expect("bounded cleanup retry")
+        .expect("retry cleanup");
+    assert!(dropped_at_ack, "retry lost the reader ownership");
+}
