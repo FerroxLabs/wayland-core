@@ -34,15 +34,17 @@ impl Drop for TrackedRead {
     }
 }
 
-fn transport(
-    mcp: bool,
-) -> (
+type FixtureTransport = (
     DuplexStream,
     TrackedRead,
     Arc<Notify>,
     tokio::task::JoinHandle<()>,
     Arc<AtomicBool>,
-) {
+);
+fn transport(mcp: bool) -> FixtureTransport {
+    transport_behavior(mcp, false)
+}
+fn transport_behavior(mcp: bool, fail_call: bool) -> FixtureTransport {
     let (stdin, peer_in) = tokio::io::duplex(8192);
     let (peer_out, stdout) = tokio::io::duplex(8192);
     let release = Arc::new(Notify::new());
@@ -75,6 +77,16 @@ fn transport(
                     SubprocessVerb::ListTools => {
                         SubprocessResponseBody::ToolsList { tools: vec![] }
                     }
+                    SubprocessVerb::CallTool { .. } if fail_call => SubprocessResponseBody::Error {
+                        code: "fixture_call".into(),
+                        message: "fixture transport failure".into(),
+                        data: None,
+                    },
+                    SubprocessVerb::CallTool { .. } => SubprocessResponseBody::CallToolResult {
+                        stdout: "replacement works".into(),
+                        structured: None,
+                        is_error: false,
+                    },
                     SubprocessVerb::Shutdown => SubprocessResponseBody::Ack,
                     other => panic!("unexpected fixture request: {other:?}"),
                 };
@@ -91,12 +103,11 @@ fn transport(
             let done = if mcp {
                 serde_json::from_str::<serde_json::Value>(&line).unwrap()["method"] == "tools/list"
             } else {
-                matches!(
-                    serde_json::from_str::<SubprocessRequest>(&line)
-                        .unwrap()
-                        .verb,
-                    SubprocessVerb::Shutdown
-                )
+                let verb = serde_json::from_str::<SubprocessRequest>(&line)
+                    .unwrap()
+                    .verb;
+                matches!(verb, SubprocessVerb::Shutdown)
+                    || (fail_call && matches!(verb, SubprocessVerb::CallTool { .. }))
             };
             if done {
                 gate.notified().await;
@@ -232,4 +243,66 @@ async fn mcp_interrupted_shutdown_retains_reader_for_retry() {
         .expect("bounded cleanup retry")
         .expect("retry cleanup");
     assert!(dropped_at_ack, "retry lost the reader ownership");
+}
+
+#[tokio::test]
+async fn sdk_restart_retires_the_old_reader_before_publishing_replacement() {
+    use wcore_plugin_subprocess::runner::{TransportFactory, TransportSpawn};
+    let (first_in, first_out, first_release, first_fixture, first_dropped) =
+        transport_behavior(false, true);
+    let (next_in, next_out, next_release, next_fixture, _) = transport_behavior(false, false);
+    let generations = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from([
+        TransportSpawn {
+            stdin: Box::new(first_in),
+            stdout: Box::new(first_out),
+            child: None,
+        },
+        TransportSpawn {
+            stdin: Box::new(next_in),
+            stdout: Box::new(next_out),
+            child: None,
+        },
+    ])));
+    let factory: TransportFactory = Arc::new(move || {
+        let next = generations.lock().unwrap().pop_front();
+        Box::pin(async move {
+            next.ok_or(wcore_plugin_subprocess::error::SubprocessPluginError::WorkerTerminated)
+        })
+    });
+    let loaded = SubprocessPluginRunner::load_with_factory(
+        factory,
+        Arc::new(PluginAccessGate),
+        "restart-fixture",
+    )
+    .await
+    .unwrap();
+    assert!(!first_dropped.load(Ordering::SeqCst));
+    let failed_call = tokio::time::timeout(
+        Duration::from_secs(4),
+        loaded.runner.call_tool("echo", serde_json::json!({})),
+    )
+    .await;
+    let retired_at_restart = first_dropped.load(Ordering::SeqCst);
+    let control = tokio::time::timeout(
+        Duration::from_secs(2),
+        loaded.runner.call_tool("echo", serde_json::json!({})),
+    )
+    .await;
+    let cleanup = tokio::time::timeout(Duration::from_secs(3), loaded.runner.shutdown()).await;
+    first_release.notify_one();
+    next_release.notify_one();
+    first_fixture.await.unwrap();
+    next_fixture.await.unwrap();
+    failed_call
+        .expect("restart deadline")
+        .expect_err("ambiguous failed call must not replay");
+    assert_eq!(
+        control.expect("replacement deadline").unwrap().stdout,
+        "replacement works"
+    );
+    cleanup.expect("shutdown deadline").unwrap();
+    assert!(
+        retired_at_restart,
+        "replacement was published while old reader remained owned by a detached task"
+    );
 }
