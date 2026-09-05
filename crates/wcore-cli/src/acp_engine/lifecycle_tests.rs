@@ -202,6 +202,9 @@ impl wcore_channels::Channel for OutboundChannel {
     fn platform(&self) -> &str {
         "slack"
     }
+    fn config_schema(&self) -> &str {
+        r#"{"type":"object","properties":{}}"#
+    }
     async fn start(&mut self) -> Result<(), wcore_channels::ChannelError> {
         self.starts.fetch_add(1, Ordering::SeqCst);
         Ok(())
