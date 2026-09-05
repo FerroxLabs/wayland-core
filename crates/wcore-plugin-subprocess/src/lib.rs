@@ -12,3 +12,5 @@ mod shutdown;
 pub use error::{Result, SubprocessPluginError};
 pub use mcp_bridge::{LoadedMcpBridgePlugin, McpBridgePluginRunner, ToolOutput as McpToolOutput};
 pub use runner::{LoadedSubprocessPlugin, SubprocessPluginRunner, ToolOutput};
+
+pub use shutdown::RuntimeCleanupOwner;

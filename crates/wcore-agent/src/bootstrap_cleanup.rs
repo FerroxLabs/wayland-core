@@ -6,12 +6,12 @@ use std::sync::{
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 use wcore_mcp::manager::McpManager;
-use wcore_plugin_subprocess::{LoadedSubprocessPlugin, McpBridgePluginRunner};
+use wcore_plugin_subprocess::{McpBridgePluginRunner, SubprocessPluginRunner};
 
 #[derive(Clone)]
 enum Process {
     Mcp(Arc<McpManager>),
-    Sdk(Arc<LoadedSubprocessPlugin>),
+    Sdk(Arc<SubprocessPluginRunner>),
     Bridge(Arc<McpBridgePluginRunner>),
 }
 type Task = Arc<AsyncMutex<Option<JoinHandle<()>>>>;
@@ -35,7 +35,7 @@ impl BootstrapCleanup {
             .unwrap_or_else(|e| e.into_inner())
             .push(Process::Mcp(manager));
     }
-    pub(crate) fn sdk(&self, plugin: Arc<LoadedSubprocessPlugin>) {
+    pub(crate) fn sdk(&self, plugin: Arc<SubprocessPluginRunner>) {
         self.processes
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -99,9 +99,7 @@ impl BootstrapCleanup {
                         anyhow::ensure!(errors.is_empty(), "MCP cleanup: {}", errors.join("; "));
                         Ok(())
                     }
-                    Process::Sdk(plugin) => {
-                        plugin.runner.shutdown().await.map_err(anyhow::Error::from)
-                    }
+                    Process::Sdk(plugin) => plugin.shutdown().await.map_err(anyhow::Error::from),
                     Process::Bridge(runner) => runner.shutdown().await.map_err(anyhow::Error::from),
                 }
             }));
@@ -149,5 +147,14 @@ impl BootstrapCleanup {
             .unwrap_or_else(|e| e.into_inner())
             .clear();
         Ok(())
+    }
+}
+
+impl wcore_plugin_subprocess::RuntimeCleanupOwner for BootstrapCleanup {
+    fn sdk_started(&self, runner: Arc<SubprocessPluginRunner>) {
+        self.sdk(runner);
+    }
+    fn mcp_bridge_started(&self, runner: Arc<McpBridgePluginRunner>) {
+        self.bridge(runner);
     }
 }

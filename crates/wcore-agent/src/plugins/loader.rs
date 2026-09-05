@@ -279,6 +279,17 @@ impl<'a> PluginLoader<'a> {
         wasm_runner: Option<&wcore_plugin_wasm::WasmPluginRunner>,
         gate: Arc<PluginAccessGate>,
     ) {
+        self.discover_on_disk_with_cleanup(runner, wasm_runner, gate, None)
+            .await;
+    }
+
+    pub async fn discover_on_disk_with_cleanup(
+        &mut self,
+        runner: &super::runner::PluginRunner,
+        wasm_runner: Option<&wcore_plugin_wasm::WasmPluginRunner>,
+        gate: Arc<PluginAccessGate>,
+        cleanup: Option<&dyn wcore_plugin_subprocess::RuntimeCleanupOwner>,
+    ) {
         let roots = resolved_plugins_roots();
         if roots.is_empty() {
             tracing::debug!("on-disk plugins discovery skipped: no plugins root resolved");
@@ -364,6 +375,7 @@ impl<'a> PluginLoader<'a> {
                         runner,
                         wasm_runner,
                         gate.clone(),
+                        cleanup,
                     )
                     .await;
 
@@ -397,6 +409,7 @@ impl<'a> PluginLoader<'a> {
         runner: &super::runner::PluginRunner,
         wasm_runner: Option<&wcore_plugin_wasm::WasmPluginRunner>,
         gate: Arc<PluginAccessGate>,
+        cleanup: Option<&dyn wcore_plugin_subprocess::RuntimeCleanupOwner>,
     ) -> OnDiskDispatchRecord {
         let _ = runner; // crash-budget increment happens in the caller.
 
@@ -650,11 +663,12 @@ impl<'a> PluginLoader<'a> {
                 }
             }
             RuntimeDispatch::Subprocess => {
-                match wcore_plugin_subprocess::SubprocessPluginRunner::load(
+                match wcore_plugin_subprocess::SubprocessPluginRunner::load_with_cleanup_owner(
                     manifest_path,
                     &manifest,
                     gate.clone(),
                     entry_path.as_deref(),
+                    cleanup,
                 )
                 .await
                 {
@@ -666,11 +680,12 @@ impl<'a> PluginLoader<'a> {
                 }
             }
             RuntimeDispatch::McpBridge => {
-                match wcore_plugin_subprocess::McpBridgePluginRunner::load(
+                match wcore_plugin_subprocess::McpBridgePluginRunner::load_with_cleanup_owner(
                     manifest_path,
                     &manifest,
                     gate.clone(),
                     entry_path.as_deref(),
+                    cleanup,
                 )
                 .await
                 {

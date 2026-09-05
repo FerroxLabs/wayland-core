@@ -6,6 +6,13 @@ use tokio::task::JoinHandle;
 
 use crate::error::{Result, SubprocessPluginError};
 
+/// Host ownership of a spawned runtime, established before its handshake.
+/// This does not grant plugin capabilities; it only preserves shutdown access.
+pub trait RuntimeCleanupOwner: Send + Sync {
+    fn sdk_started(&self, runner: std::sync::Arc<crate::runner::SubprocessPluginRunner>);
+    fn mcp_bridge_started(&self, runner: std::sync::Arc<crate::mcp_bridge::McpBridgePluginRunner>);
+}
+
 pub(crate) async fn reap_child(
     child: &Mutex<Option<tokio::process::Child>>,
     deadline: tokio::time::Instant,

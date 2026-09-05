@@ -1014,10 +1014,13 @@ impl AgentBootstrap {
         };
         let plugin_gate = Arc::new(wcore_plugin_api::PluginAccessGate);
         plugin_loader
-            .discover_on_disk(
+            .discover_on_disk_with_cleanup(
                 &plugin_runner,
                 wasm_plugin_runner.as_ref(),
                 plugin_gate.clone(),
+                self.cleanup
+                    .as_deref()
+                    .map(|cleanup| cleanup as &dyn wcore_plugin_subprocess::RuntimeCleanupOwner),
             )
             .await;
         let mut plugin_runtime_keepalives: Vec<crate::plugins::LoadedRuntimeHandle> = Vec::new();
@@ -1065,9 +1068,6 @@ impl AgentBootstrap {
                         .push(crate::plugins::LoadedRuntimeHandle::Wasm(loaded));
                 }
                 crate::plugins::LoadedRuntimeHandle::Subprocess(loaded) => {
-                    if let Some(cleanup) = &self.cleanup {
-                        cleanup.sdk(loaded.clone());
-                    }
                     let synth = crate::plugins::synthesize_initialize_outcome_subprocess(
                         loaded.clone(),
                         &plugin_name,
@@ -1078,9 +1078,6 @@ impl AgentBootstrap {
                         .push(crate::plugins::LoadedRuntimeHandle::Subprocess(loaded));
                 }
                 crate::plugins::LoadedRuntimeHandle::McpBridge(loaded) => {
-                    if let Some(cleanup) = &self.cleanup {
-                        cleanup.bridge(loaded.runner());
-                    }
                     // The mcp-bridge synthesizer consumes `loaded` by value
                     // via `into_parts`; the closures inside the tools hold
                     // their own `Arc<McpBridgePluginRunner>` reference, so

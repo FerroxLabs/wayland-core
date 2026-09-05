@@ -189,6 +189,17 @@ impl McpBridgePluginRunner {
         gate: Arc<PluginAccessGate>,
         verified_binary: Option<&Path>,
     ) -> Result<LoadedMcpBridgePlugin> {
+        Self::load_with_cleanup_owner(manifest_path, manifest, gate, verified_binary, None).await
+    }
+
+    /// Register the host's cleanup ownership before initialization can fail.
+    pub async fn load_with_cleanup_owner(
+        manifest_path: &Path,
+        manifest: &PluginManifest,
+        gate: Arc<PluginAccessGate>,
+        verified_binary: Option<&Path>,
+        cleanup: Option<&dyn crate::RuntimeCleanupOwner>,
+    ) -> Result<LoadedMcpBridgePlugin> {
         let binary_rel = manifest
             .runtime
             .as_ref()
@@ -256,6 +267,7 @@ impl McpBridgePluginRunner {
             gate,
             Some(child),
             &binary.display().to_string(),
+            cleanup,
         )
         .await
     }
@@ -274,8 +286,15 @@ impl McpBridgePluginRunner {
         W: AsyncWrite + Send + Unpin + 'static,
         R: AsyncRead + Send + Unpin + 'static,
     {
-        Self::handshake_over_transport(Box::new(stdin), Box::new(stdout), gate, None, "<duplex>")
-            .await
+        Self::handshake_over_transport(
+            Box::new(stdin),
+            Box::new(stdout),
+            gate,
+            None,
+            "<duplex>",
+            None,
+        )
+        .await
     }
 
     async fn handshake_over_transport(
@@ -284,6 +303,7 @@ impl McpBridgePluginRunner {
         gate: Arc<PluginAccessGate>,
         child: Option<Child>,
         binary_for_logs: &str,
+        cleanup: Option<&dyn crate::RuntimeCleanupOwner>,
     ) -> Result<LoadedMcpBridgePlugin> {
         let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>> =
             Arc::new(Mutex::new(HashMap::new()));
@@ -384,6 +404,9 @@ impl McpBridgePluginRunner {
             closing: AtomicBool::new(false),
             shutdown_lock: Mutex::new(()),
         });
+        if let Some(cleanup) = cleanup {
+            cleanup.mcp_bridge_started(runner.clone());
+        }
 
         // 1. initialize handshake.
         let init_params = InitializeParams {

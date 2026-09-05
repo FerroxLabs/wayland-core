@@ -167,7 +167,7 @@ pub struct ToolOutput {
 /// pipeline in `wcore-agent`) registers these tools into the engine's
 /// tool registry and keeps the runner alive for the plugin's lifetime.
 pub struct LoadedSubprocessPlugin {
-    pub runner: SubprocessPluginRunner,
+    pub runner: Arc<SubprocessPluginRunner>,
     pub manifest_version: String,
     pub capabilities: Vec<String>,
     pub tools: Vec<ToolDescriptor>,
@@ -299,6 +299,17 @@ impl SubprocessPluginRunner {
         gate: Arc<PluginAccessGate>,
         verified_binary: Option<&Path>,
     ) -> Result<LoadedSubprocessPlugin> {
+        Self::load_with_cleanup_owner(manifest_path, manifest, gate, verified_binary, None).await
+    }
+
+    /// Register the host's cleanup ownership before initialization can fail.
+    pub async fn load_with_cleanup_owner(
+        manifest_path: &Path,
+        manifest: &PluginManifest,
+        gate: Arc<PluginAccessGate>,
+        verified_binary: Option<&Path>,
+        cleanup: Option<&dyn crate::RuntimeCleanupOwner>,
+    ) -> Result<LoadedSubprocessPlugin> {
         let binary_rel = manifest
             .runtime
             .as_ref()
@@ -346,6 +357,7 @@ impl SubprocessPluginRunner {
             &binary,
             Some(factory),
             manifest.plugin.name.clone(),
+            cleanup,
         )
         .await
     }
@@ -378,6 +390,7 @@ impl SubprocessPluginRunner {
             Path::new("<duplex>"),
             None,
             "<duplex>".to_string(),
+            None,
         )
         .await
     }
@@ -398,6 +411,7 @@ impl SubprocessPluginRunner {
             Path::new("<factory>"),
             Some(factory),
             plugin_name.into(),
+            None,
         )
         .await
     }
@@ -408,13 +422,14 @@ impl SubprocessPluginRunner {
         binary_for_logs: &Path,
         factory: Option<TransportFactory>,
         plugin_name: String,
+        cleanup: Option<&dyn crate::RuntimeCleanupOwner>,
     ) -> Result<LoadedSubprocessPlugin> {
         let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<SubprocessResponse>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let binary_display = binary_for_logs.display().to_string();
         let reader_task = spawn_reader(spawn.stdout, Arc::clone(&pending), binary_display);
 
-        let runner = SubprocessPluginRunner {
+        let runner = Arc::new(SubprocessPluginRunner {
             next_id: AtomicU64::new(1),
             pending,
             stdin: Mutex::new(spawn.stdin),
@@ -427,7 +442,10 @@ impl SubprocessPluginRunner {
             plugin_name,
             supports_call_tool_v2: AtomicBool::new(false),
             closing: AtomicBool::new(false),
-        };
+        });
+        if let Some(cleanup) = cleanup {
+            cleanup.sdk_started(runner.clone());
+        }
 
         let (manifest_version, capabilities, tools) = runner.handshake().await?;
 
