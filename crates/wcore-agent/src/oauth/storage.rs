@@ -229,11 +229,15 @@ impl OAuthStorage {
         let key = oauth_tokens_key(provider);
         let had_secure = matches!(self.secure.get(&key), Ok(Some(_)));
         let secure_error = self.secure.delete(&key).err();
-        let had_legacy = self.remove_legacy(provider)?;
-        let had_record = self.remove_login_record(provider)?;
+        // Each location is independent. Attempt them before propagating any
+        // failure, including the marker used to recover from an unavailable store.
+        let had_legacy = self.remove_legacy(provider);
+        let had_record = self.remove_login_record(provider);
         if let Some(error) = secure_error {
             return Err(OAuthStorageError::NoSecureBackend(error.to_string()));
         }
+        let had_legacy = had_legacy?;
+        let had_record = had_record?;
         Ok(had_secure || had_legacy || had_record)
     }
 
@@ -323,25 +327,22 @@ impl OAuthStorage {
     /// Returns whether the token file was there.
     fn remove_legacy(&self, provider: &str) -> Result<bool, OAuthStorageError> {
         let path = self.path_for(provider);
-        let removed = match std::fs::remove_file(&path) {
-            Ok(()) => true,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-            Err(e) => return Err(OAuthStorageError::Io(e)),
-        };
         // A half-written `.json.tmp` from an interrupted pre-ladder write is
-        // still a cleartext token on disk.
+        // still a cleartext token on disk. Attempt both removals and preserve
+        // failure so logout cannot certify that retained material is gone.
         let tmp = path.with_extension("json.tmp");
-        if let Err(e) = std::fs::remove_file(&tmp)
-            && e.kind() != std::io::ErrorKind::NotFound
-        {
-            tracing::warn!(
-                target: "wcore_oauth",
-                path = %tmp.display(),
-                error = %e,
-                "could not remove an orphaned cleartext OAuth temp file"
-            );
+        let mut removed = false;
+        let mut first_error = None;
+        for candidate in [&path, &tmp] {
+            match std::fs::remove_file(candidate) {
+                Ok(()) => removed = true,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
+            }
         }
-        Ok(removed)
+        first_error.map_or(Ok(removed), |error| Err(OAuthStorageError::Io(error)))
     }
 
     fn ensure_dir(root: &Path) -> Result<(), OAuthStorageError> {
