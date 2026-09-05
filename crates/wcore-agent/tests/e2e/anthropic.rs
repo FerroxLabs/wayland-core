@@ -17,8 +17,7 @@ use wcore_providers::create_provider;
 use wcore_tools::read::ReadTool;
 use wcore_tools::registry::ToolRegistry;
 
-#[path = "../../../wcore-eval-scenarios/tests/support/live_acceptance.rs"]
-mod live_acceptance;
+use super::live_acceptance;
 
 /// The provider endpoint these live tests dial.
 ///

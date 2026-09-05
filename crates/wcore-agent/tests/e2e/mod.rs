@@ -21,3 +21,7 @@ mod common;
 mod anthropic;
 mod compaction;
 mod openai;
+
+#[cfg(any(feature = "live-anthropic", feature = "live-openai"))]
+#[path = "../../../wcore-eval-scenarios/tests/support/live_acceptance.rs"]
+mod live_acceptance;
