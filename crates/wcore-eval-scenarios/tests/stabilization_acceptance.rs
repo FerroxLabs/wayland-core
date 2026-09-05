@@ -17,6 +17,23 @@ async fn invoke(
     filter: &str,
     report_is_directory: bool,
 ) -> (Output, String) {
+    invoke_binary(
+        case,
+        key,
+        filter,
+        report_is_directory,
+        env!("CARGO_BIN_EXE_wcore-eval-fixture"),
+    )
+    .await
+}
+
+async fn invoke_binary(
+    case: &str,
+    key: bool,
+    filter: &str,
+    report_is_directory: bool,
+    binary: &str,
+) -> (Output, String) {
     let home = tempfile::tempdir().unwrap();
     let report = home.path().join("report.md");
     if report_is_directory {
@@ -29,7 +46,7 @@ async fn invoke(
     child
         .env("WAYLAND_HOME", home.path())
         .env("WAYLAND_REQUIRE_IGNORED", "1")
-        .env("WCORE_EVAL_BIN", env!("CARGO_BIN_EXE_wcore-eval-fixture"))
+        .env("WCORE_EVAL_BIN", binary)
         .env("WCORE_EVAL_ONLY", filter)
         .env("WCORE_EVAL_PACING_SECS", "0")
         .env("WCORE_EVAL_REPORT_PATH", &report)
@@ -195,4 +212,24 @@ fn read_receipt_must_match_the_requested_file_and_successful_call() {
             "random fixture secret"
         ));
     }
+}
+
+#[tokio::test]
+async fn runner_start_failure_is_recorded_and_fails_acceptance() {
+    // The test executable is a valid local file, but rejects Core's protocol
+    // arguments immediately. No model or external executable is involved.
+    let binary = std::env::current_exe().unwrap();
+    let (out, report) = invoke_binary(
+        "personas::overnight_personas",
+        true,
+        "canary",
+        false,
+        binary.to_str().unwrap(),
+    )
+    .await;
+    assert!(
+        report.contains("RUNNER ERROR"),
+        "runner failure omitted from collected report: {report}"
+    );
+    assert!(!out.status.success(), "runner failure passed acceptance");
 }
