@@ -1,6 +1,6 @@
 use super::*;
 use futures::StreamExt;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::time::Duration;
 use tokio::sync::{Notify, Semaphore, mpsc};
 use wcore_acp::protocol::{MessageSendRequest, SessionCreateRequest};
