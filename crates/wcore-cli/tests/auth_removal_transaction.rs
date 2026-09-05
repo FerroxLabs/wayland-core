@@ -214,3 +214,182 @@ async fn partial_account_removal_preserves_identity_for_retry() {
         );
     }
 }
+
+fn oauth_storage(home: &Path) -> wcore_agent::oauth::OAuthStorage {
+    wcore_agent::oauth::OAuthStorage::at_root(
+        home.join("oauth"),
+        Box::new(wcore_config::credentials::InMemoryCredentialsStore::new()),
+    )
+    .unwrap()
+}
+
+fn codex_login(home: &Path, account: &str) {
+    use base64::Engine;
+    let codex = home.join("codex");
+    std::fs::create_dir_all(&codex).unwrap();
+    let claims = serde_json::json!({"https://api.openai.com/auth": {"chatgpt_account_id": account, "chatgpt_plan_type": account}, "exp": 4_000_000_000u64});
+    let jwt = format!(
+        "hdr.{}.sig",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(claims.to_string())
+    );
+    let file = codex.join("auth.json");
+    std::fs::write(
+        &file,
+        serde_json::json!({"tokens": {"access_token": jwt, "refresh_token": "fixture-refresh"}})
+            .to_string(),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
+
+fn oauth_command(home: &Path, args: &[&str]) -> tokio::process::Command {
+    let mut command = shell_command_argv(env!("CARGO_BIN_EXE_wayland-core"), args);
+    command.env_clear();
+    for key in [
+        "PATH",
+        "SystemRoot",
+        "WINDIR",
+        "COMSPEC",
+        "PATHEXT",
+        "TMP",
+        "TEMP",
+    ] {
+        if let Some(value) = std::env::var_os(key) {
+            command.env(key, value);
+        }
+    }
+    command
+        .env("WAYLAND_HOME", home)
+        .env("CODEX_HOME", home.join("codex"))
+        .env(
+            "WAYLAND_VAULT_PASSPHRASE",
+            "w07-isolated-fixture-passphrase",
+        )
+        .current_dir(home)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    command
+}
+
+async fn oauth_run(home: &Path, args: &[&str]) -> Output {
+    tokio::time::timeout(Duration::from_secs(55), oauth_command(home, args).output())
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn oauth_logout_waits_for_writer_then_removes_its_login() {
+    let home = tempfile::tempdir().unwrap();
+    let storage = oauth_storage(home.path());
+    let writer =
+        wcore_agent::oauth::refresh_lock::hold_for_writer(storage.refresh_lock_path("chatgpt"))
+            .await
+            .unwrap();
+    let mut child = oauth_command(home.path(), &["auth", "logout", "chatgpt"])
+        .spawn()
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), child.wait())
+            .await
+            .is_err(),
+        "CLI logout must contend on the provider writer lock"
+    );
+    // Simulate the earlier writer landing a credential while logout waits.
+    let token = wcore_agent::oauth::OAuthTokens {
+        access_token: "fixture-access".into(),
+        refresh_token: Some("fixture-refresh".into()),
+        expires_at_unix_secs: Some(0),
+        token_type: "Bearer".into(),
+        scope: None,
+        id_token: None,
+    };
+    std::fs::write(
+        storage.path_for("chatgpt"),
+        serde_json::to_vec(&token).unwrap(),
+    )
+    .unwrap();
+    drop(writer);
+    let output = child.wait_with_output().await.unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Signed out"));
+    assert!(!storage.path_for("chatgpt").exists());
+    let fresh = oauth_run(home.path(), &["auth", "status"]).await;
+    assert!(fresh.status.success(), "{fresh:?}");
+    assert!(String::from_utf8_lossy(&fresh.stdout).contains("not signed in"));
+}
+
+#[tokio::test]
+async fn oauth_import_and_status_reread_external_source_after_writer() {
+    for args in [
+        &["auth", "login", "chatgpt", "--import-codex"][..],
+        &["auth", "status"][..],
+    ] {
+        let home = tempfile::tempdir().unwrap();
+        codex_login(home.path(), "before");
+        let storage = oauth_storage(home.path());
+        let writer =
+            wcore_agent::oauth::refresh_lock::hold_for_writer(storage.refresh_lock_path("chatgpt"))
+                .await
+                .unwrap();
+        let mut child = oauth_command(home.path(), args).spawn().unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), child.wait())
+                .await
+                .is_err(),
+            "import must wait for writer authority"
+        );
+        codex_login(home.path(), "after");
+        drop(writer);
+        let output = child.wait_with_output().await.unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("after"),
+            "must read source under lock: {output:?}"
+        );
+        let status = oauth_run(home.path(), &["auth", "status"]).await;
+        assert!(status.status.success(), "{status:?}");
+        assert!(String::from_utf8_lossy(&status.stdout).contains("after"));
+    }
+}
+
+#[tokio::test]
+async fn oauth_logout_reports_external_codex_reauthentication_source() {
+    let home = tempfile::tempdir().unwrap();
+    codex_login(home.path(), "external");
+    let imported = oauth_run(home.path(), &["auth", "login", "chatgpt", "--import-codex"]).await;
+    assert!(imported.status.success(), "{imported:?}");
+    let logout = oauth_run(home.path(), &["auth", "logout", "chatgpt"]).await;
+    assert!(logout.status.success(), "{logout:?}");
+    assert!(String::from_utf8_lossy(&logout.stdout).contains("Codex CLI login can authenticate"));
+    let status = oauth_run(home.path(), &["auth", "status"]).await;
+    assert!(status.status.success(), "{status:?}");
+    let text = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        text.contains("imported an existing ChatGPT login from the Codex CLI"),
+        "{text}"
+    );
+    assert!(text.contains("signed in"));
+}
+
+#[tokio::test]
+async fn oauth_busy_writer_refuses_logout_without_success_text() {
+    let home = tempfile::tempdir().unwrap();
+    let storage = oauth_storage(home.path());
+    let _writer =
+        wcore_agent::oauth::refresh_lock::hold_for_writer(storage.refresh_lock_path("chatgpt"))
+            .await
+            .unwrap();
+    let output = oauth_run(home.path(), &["auth", "logout", "chatgpt"]).await;
+    assert!(!output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("Signed out"));
+    assert!(!stdout.contains("Already signed out"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Nothing was changed"));
+}

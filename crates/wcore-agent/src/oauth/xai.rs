@@ -298,135 +298,227 @@ impl XaiTokenManager {
     /// C3: a `429` keeps the still-valid current token. C4: a refresh that
     /// rotated the refresh token but failed to persist is a HARD error.
     async fn refresh(&self, current: OAuthTokens) -> Result<OAuthTokens, String> {
-        let refresh_token = current.refresh_token.clone().ok_or(
-            "no refresh_token for Grok — sign in with X (Grok) again in the Wayland app or via the Grok CLI",
-        )?;
-        let client = self.client.clone();
-        let token_url = self.flow.token_url.clone();
-        let client_id = self.flow.client_id.clone();
+        self.single_flight
+            .refresh(|| self.refresh_cross_process(&current))
+            .await
+            .map_err(|error| format!("refresh failed: {error}"))
+    }
 
-        let refreshed = self
-            .single_flight
-            .refresh(move || async move {
-                // xAI REQUIRES the scope field on refresh (unlike ChatGPT).
-                let form: Vec<(&str, String)> = vec![
-                    ("grant_type", "refresh_token".into()),
-                    ("refresh_token", refresh_token),
-                    ("client_id", client_id),
-                    ("scope", XAI_SCOPES.into()),
-                ];
-                let res = tokio::time::timeout(
-                    PER_CALL_TIMEOUT,
-                    client.post(&token_url).form(&form).send(),
-                )
-                .await
-                .map_err(|_| RefreshError::Transport("refresh timed out".into()))?
-                .map_err(|e| RefreshError::Transport(e.to_string()))?;
+    async fn refresh_cross_process(
+        &self,
+        entry: &OAuthTokens,
+    ) -> Result<OAuthTokens, RefreshError> {
+        match super::refresh_lock::acquire(
+            self.storage.refresh_lock_path(PROVIDER),
+            "Grok OAuth refresh",
+        )
+        .await
+        {
+            super::refresh_lock::Acquisition::Held(lock) => {
+                let result = self.gated_refresh(entry, true).await;
+                drop(lock);
+                result
+            }
+            super::refresh_lock::Acquisition::Busy(_) => self.gated_refresh(entry, false).await,
+        }
+    }
 
-                let status = res.status();
-                let body = res
-                    .text()
-                    .await
-                    .map_err(|e| RefreshError::Transport(e.to_string()))?;
-
-                if status.as_u16() == 429 {
-                    return Err(RefreshError::Transport(RATE_LIMIT_SENTINEL.into()));
-                }
-                if !status.is_success() {
-                    // Surface only the status, never the token-endpoint body.
-                    return Err(RefreshError::ProviderRejected(format!(
-                        "token endpoint rejected refresh: HTTP {}",
-                        status.as_u16()
-                    )));
-                }
-                let raw: serde_json::Value = serde_json::from_str(&body)
-                    .map_err(|e| RefreshError::Transport(format!("malformed token JSON: {e}")))?;
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                Ok(OAuthTokens {
-                    access_token: raw
-                        .get("access_token")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| {
-                            RefreshError::ProviderRejected("missing access_token".into())
-                        })?
-                        .to_string(),
-                    refresh_token: raw
-                        .get("refresh_token")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string),
-                    expires_at_unix_secs: raw
-                        .get("expires_in")
-                        .and_then(|v| v.as_u64())
-                        .map(|s| now + s),
-                    token_type: raw
-                        .get("token_type")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("Bearer")
-                        .to_string(),
-                    scope: raw
-                        .get("scope")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string),
-                    id_token: raw
-                        .get("id_token")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string),
-                })
-            })
-            .await;
-
-        let refreshed = match refreshed {
-            Ok(t) => t,
-            Err(RefreshError::Transport(msg)) if msg == RATE_LIMIT_SENTINEL => {
-                // C3: rate limited. Keep the current token -- but only while it
-                // has enough life left to survive a dispatch, not merely while
-                // it is technically unexpired. The bare "not hard-expired" test
-                // this replaces would hand out a token with one second left;
-                // see [`RATE_LIMITED_REUSE_FLOOR_SECS`] for why 60 s and what
-                // the floor costs.
-                return match Self::token_remaining_secs(&current) {
+    async fn gated_refresh(
+        &self,
+        entry: &OAuthTokens,
+        may_post: bool,
+    ) -> Result<OAuthTokens, RefreshError> {
+        let hold_deadline = std::time::Instant::now()
+            + PER_CALL_TIMEOUT
+            + super::refresh_lock::PERSIST_TOTAL_BUDGET;
+        let stored = wcore_config::credentials::with_oauth_lock_deadline(
+            std::time::Instant::now() + super::refresh_lock::PERSIST_TOTAL_BUDGET,
+            || self.storage.load(PROVIDER),
+        )
+        .map_err(|error| {
+            RefreshError::Retryable(format!("could not re-read the Grok token store: {error}"))
+        })?;
+        // Preserve Grok's fresher-source rule, but never substitute a cached
+        // pair for authoritative absence or a failed storage read.
+        let Some(pair) = Self::fresher(stored, read_grok_cli_tokens()) else {
+            *self.cached.lock().await = None;
+            return Err(RefreshError::ProviderRejected(
+                "not signed in to Grok — sign in with X again".into(),
+            ));
+        };
+        if entry.access_token != pair.access_token
+            || entry.refresh_token != pair.refresh_token
+            || entry.expires_at_unix_secs != pair.expires_at_unix_secs
+        {
+            *self.cached.lock().await = Some(pair.clone());
+            return Ok(pair);
+        }
+        if !may_post {
+            return Err(RefreshError::Retryable(
+                "another Wayland process is changing the Grok login; retry the request".into(),
+            ));
+        }
+        let refresh_token = pair.refresh_token.clone().ok_or_else(|| RefreshError::ProviderRejected(
+            "no refresh_token for Grok — sign in with X (Grok) again in the Wayland app or via the Grok CLI".into()
+        ))?;
+        let refreshed = match self.post_refresh(refresh_token).await {
+            Err(RefreshError::Transport(message)) if message == RATE_LIMIT_SENTINEL => {
+                return match Self::token_remaining_secs(&pair) {
                     Some(remaining) if remaining >= RATE_LIMITED_REUSE_FLOOR_SECS => {
-                        *self.cached.lock().await = Some(current.clone());
-                        Ok(current)
+                        *self.cached.lock().await = Some(pair.clone());
+                        Ok(pair)
                     }
-                    // Dead, or expiry unknown: unchanged from before the floor.
-                    Some(0) | None => Err(
-                        "Grok refresh is rate limited (429) and the access token has expired — \
-                         try again shortly."
-                            .to_string(),
-                    ),
-                    // Alive but too thin to dispatch. Name the rate limit and
-                    // the margin rather than letting the turn fail upstream
-                    // with a status the engine cannot attribute.
-                    Some(remaining) => Err(format!(
-                        "Grok refresh is rate limited (429) and the access token has only \
-                         {remaining}s left — under the {RATE_LIMITED_REUSE_FLOOR_SECS}s a \
-                         request dispatch can need, so reusing it would fail upstream \
-                         instead of here. Try again shortly."
+                    Some(0) | None => Err(RefreshError::Transport(
+                        "Grok refresh is rate limited (429) and the access token has expired — try again shortly.".into()
                     )),
+                    Some(remaining) => Err(RefreshError::Transport(format!(
+                        "Grok refresh is rate limited (429) and the access token has only {remaining}s left — under the {RATE_LIMITED_REUSE_FLOOR_SECS}s a request dispatch can need; try again shortly."
+                    ))),
                 };
             }
-            Err(e) => return Err(format!("refresh failed: {e}")),
+            other => other?,
         };
+        self.persist(refreshed, &pair, hold_deadline).await
+    }
 
-        // C4: rotation vs server-omitted refresh token.
+    async fn post_refresh(&self, refresh_token: String) -> Result<OAuthTokens, RefreshError> {
+        // xAI REQUIRES the scope field on refresh (unlike ChatGPT).
+        let form: Vec<(&str, String)> = vec![
+            ("grant_type", "refresh_token".into()),
+            ("refresh_token", refresh_token),
+            ("client_id", self.flow.client_id.clone()),
+            ("scope", XAI_SCOPES.into()),
+        ];
+        let (status, body) = tokio::time::timeout(PER_CALL_TIMEOUT, async {
+            let res = self
+                .client
+                .post(&self.flow.token_url)
+                .form(&form)
+                .send()
+                .await
+                .map_err(|e| RefreshError::Transport(e.to_string()))?;
+            let status = res.status();
+            let body = res
+                .text()
+                .await
+                .map_err(|e| RefreshError::Transport(e.to_string()))?;
+            Ok::<_, RefreshError>((status, body))
+        })
+        .await
+        .map_err(|_| RefreshError::Transport("refresh timed out".into()))??;
+
+        if status.as_u16() == 429 {
+            return Err(RefreshError::Transport(RATE_LIMIT_SENTINEL.into()));
+        }
+        if !status.is_success() {
+            // Surface only the status, never the token-endpoint body.
+            return Err(RefreshError::ProviderRejected(format!(
+                "token endpoint rejected refresh: HTTP {}",
+                status.as_u16()
+            )));
+        }
+        let raw: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|e| RefreshError::Transport(format!("malformed token JSON: {e}")))?;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        Ok(OAuthTokens {
+            access_token: raw
+                .get("access_token")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| RefreshError::ProviderRejected("missing access_token".into()))?
+                .to_string(),
+            refresh_token: raw
+                .get("refresh_token")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            expires_at_unix_secs: raw
+                .get("expires_in")
+                .and_then(|v| v.as_u64())
+                .map(|s| now + s),
+            token_type: raw
+                .get("token_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Bearer")
+                .to_string(),
+            scope: raw
+                .get("scope")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            id_token: raw
+                .get("id_token")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+        })
+    }
+
+    async fn persist(
+        &self,
+        refreshed: OAuthTokens,
+        previous: &OAuthTokens,
+        hold_deadline: std::time::Instant,
+    ) -> Result<OAuthTokens, RefreshError> {
         let rotated = refreshed.refresh_token.is_some();
         let mut to_store = refreshed;
         if to_store.refresh_token.is_none() {
-            to_store.refresh_token = current.refresh_token.clone();
+            to_store.refresh_token = previous.refresh_token.clone();
         }
-        if let Err(e) = self.storage.store(PROVIDER, &to_store) {
-            if rotated {
-                return Err(format!(
-                    "Grok refresh rotated the refresh token but persisting it failed ({e}); \
-                     sign in with X again to re-authenticate"
-                ));
+
+        // Bounded by wall clock, not just by attempt count. `storage.store`
+        // reaches `chunked_put`, which takes the credential store's own lock
+        // with a 65 s ceiling — six times the store budget this loop is
+        // supposed to fit inside. Counting attempts alone let the refresh lock
+        // be held far past `MAX_HOLD_SECS`, which undersized every ceiling
+        // derived from it. Cross-audit finding (Kimi K3).
+        //
+        // The same deadline reaches nested credential lock acquisitions as
+        // well as retries. It never detaches or cancels a store mid-write;
+        // backend I/O finishes while this provider lock remains owned.
+        let mut last_error = None;
+        let persist_deadline = hold_deadline
+            .min(std::time::Instant::now() + super::refresh_lock::PERSIST_TOTAL_BUDGET);
+        for attempt in 0..super::refresh_lock::PERSIST_ATTEMPTS {
+            match self
+                .storage
+                .store_before(PROVIDER, &to_store, persist_deadline)
+            {
+                Ok(()) => {
+                    last_error = None;
+                    break;
+                }
+                Err(error) => {
+                    last_error = Some(error.to_string());
+                    if attempt + 1 < super::refresh_lock::PERSIST_ATTEMPTS {
+                        if std::time::Instant::now() >= persist_deadline {
+                            last_error = Some(format!(
+                                "{error} (gave up after {:?}: retrying further would hold the \
+                                 refresh lock past its budget)",
+                                super::refresh_lock::PERSIST_TOTAL_BUDGET
+                            ));
+                            break;
+                        }
+                        tokio::time::sleep(super::refresh_lock::PERSIST_RETRY_DELAY.min(
+                            persist_deadline.saturating_duration_since(std::time::Instant::now()),
+                        ))
+                        .await;
+                    }
+                }
             }
-            tracing::warn!(error = %e, "failed to persist refreshed Grok access token");
         }
+
+        if let Some(error) = last_error {
+            if rotated {
+                return Err(RefreshError::ProviderRejected(format!(
+                    "Grok refresh rotated the refresh token but persisting it failed \
+                     ({error}); sign in with X again to re-authenticate"
+                )));
+            }
+            // Non-rotation: the on-disk token is unchanged and still valid;
+            // a persist failure of identical data is not fatal.
+            tracing::warn!(error = %error, "failed to persist refreshed Grok access token");
+        }
+
         *self.cached.lock().await = Some(to_store.clone());
         Ok(to_store)
     }
@@ -698,5 +790,138 @@ mod tests {
         assert_eq!(t.refresh_token.as_deref(), Some("rt-xyz"));
         assert_eq!(t.expires_at_unix_secs, Some(9_999_999_999));
         unsafe { std::env::remove_var("GROK_HOME") };
+    }
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn xai_single_flight_persists_once_and_preserves_nonrotation() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use wcore_config::credentials::{
+            CredentialsError, CredentialsStore, InMemoryCredentialsStore,
+        };
+        use wiremock::matchers::{body_string_contains, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        struct Counted {
+            inner: InMemoryCredentialsStore,
+            puts: Arc<AtomicUsize>,
+        }
+        impl CredentialsStore for Counted {
+            fn get(&self, key: &str) -> Result<Option<String>, CredentialsError> {
+                self.inner.get(key)
+            }
+            fn put(&self, key: &str, value: &str) -> Result<(), CredentialsError> {
+                self.puts.fetch_add(1, Ordering::SeqCst);
+                self.inner.put(key, value)
+            }
+            fn delete(&self, key: &str) -> Result<(), CredentialsError> {
+                self.inner.delete(key)
+            }
+        }
+        let tmp = TempDir::new().unwrap();
+        let saved = std::env::var_os("GROK_HOME");
+        unsafe {
+            std::env::set_var("GROK_HOME", tmp.path().join("empty"));
+        }
+        for rotate in [true, false] {
+            let server = MockServer::start().await;
+            let mut body =
+                serde_json::json!({"access_token": "refreshed-access", "expires_in": 3600});
+            if rotate {
+                body["refresh_token"] = "rotated-refresh".into();
+            }
+            Mock::given(method("POST"))
+                .and(body_string_contains("scope="))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_delay(Duration::from_millis(150))
+                        .set_body_json(body),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            let puts = Arc::new(AtomicUsize::new(0));
+            let storage = OAuthStorage::at_root(
+                tmp.path()
+                    .join(if rotate { "rotating" } else { "nonrotating" }),
+                Box::new(Counted {
+                    inner: InMemoryCredentialsStore::new(),
+                    puts: puts.clone(),
+                }),
+            )
+            .unwrap();
+            storage
+                .store(PROVIDER, &token("old-access", Some("old-refresh"), Some(0)))
+                .unwrap();
+            puts.store(0, Ordering::SeqCst);
+            let manager = XaiTokenManager::new_with_flow(
+                storage,
+                xai_flow_with_token_url(&format!("{}/token", server.uri())),
+            );
+            let (one, two) = tokio::join!(manager.get(), manager.get());
+            assert_eq!(one.unwrap(), "refreshed-access");
+            assert_eq!(two.unwrap(), "refreshed-access");
+            assert_eq!(
+                puts.load(Ordering::SeqCst),
+                1,
+                "single-flight subscribers must never persist again"
+            );
+            assert_eq!(
+                manager
+                    .storage
+                    .load(PROVIDER)
+                    .unwrap()
+                    .unwrap()
+                    .refresh_token
+                    .as_deref(),
+                Some(if rotate {
+                    "rotated-refresh"
+                } else {
+                    "old-refresh"
+                })
+            );
+        }
+        unsafe {
+            match saved {
+                Some(value) => std::env::set_var("GROK_HOME", value),
+                None => std::env::remove_var("GROK_HOME"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn xai_refresh_gate_adopts_fresher_external_grok_source() {
+        use base64::Engine;
+        let tmp = TempDir::new().unwrap();
+        let saved = std::env::var_os("GROK_HOME");
+        unsafe {
+            std::env::set_var("GROK_HOME", tmp.path());
+        }
+        let manager = manager_with_token_url(tmp.path().join("oauth"), "http://127.0.0.1:1/token");
+        let old = token("old-access", Some("old-refresh"), Some(0));
+        manager.storage.store(PROVIDER, &old).unwrap();
+        let external = format!(
+            "hdr.{}.sig",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(serde_json::json!({"exp": far_future()}).to_string())
+        );
+        std::fs::write(tmp.path().join("auth.json"), serde_json::json!({"https://auth.x.ai::fixture": {"key": external, "refresh_token": "external-refresh"}}).to_string()).unwrap();
+        let adopted = manager.refresh(old).await.unwrap();
+        assert_eq!(adopted.access_token, external);
+        assert_eq!(
+            manager
+                .storage
+                .load(PROVIDER)
+                .unwrap()
+                .unwrap()
+                .access_token,
+            "old-access",
+            "adopting an external pair performs no write or POST"
+        );
+        unsafe {
+            match saved {
+                Some(value) => std::env::set_var("GROK_HOME", value),
+                None => std::env::remove_var("GROK_HOME"),
+            }
+        }
     }
 }

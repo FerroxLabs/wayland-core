@@ -58,20 +58,12 @@ const POST_TIMEOUT_SECS: u64 = 20;
 /// Budget for everything the critical section does around the POST: reloading
 /// the pair, the credential-store write, and scheduling slop.
 ///
-/// **This is a real bound only because the store write is bounded.** The write
-/// goes `OAuthStorage::store` -> `CredentialsStore::put` -> `chunked_put`,
-/// which takes the store's OWN lock under [`LockPolicy::CREDENTIAL_WRITE`] —
-/// a 65 s wait ceiling, six times this budget. Nested inside the refresh
-/// critical section that made `MAX_HOLD_SECS` aspirational rather than true:
-/// the real hold could reach `POST + PERSIST_ATTEMPTS * 65 s`, and every
-/// number derived from `MAX_HOLD_SECS` (the wait ceiling, and `flow.rs`'s
-/// `SUBSCRIBER_CEILING`) was sized against a hold that could be exceeded
-/// several times over. Cross-audit finding, Kimi K3.
-///
-/// So the persist loop is bounded explicitly by [`PERSIST_TOTAL_BUDGET`], and
-/// the arithmetic below is checked at compile time. A store write that cannot
-/// land inside the budget fails the refresh RETRYABLY — it never leaves the
-/// lock held, and it never POSTs again.
+/// OAuth storage threads a deadline into nested credential lock acquisition,
+/// so a credential lock's ordinary 65-second wait cannot consume this budget.
+/// POST and response-body consumption share the separate network deadline.
+/// Backend I/O is synchronous and remains attached to the holder: it cannot
+/// safely be detached or canceled mid-write. These timings assume responsive
+/// local storage; a blocked native keyring call is not a bounded lock wait.
 const STORE_BUDGET_SECS: u64 = 10;
 
 /// Attempts for the post-POST store write, and the pause between them.
@@ -82,9 +74,9 @@ const STORE_BUDGET_SECS: u64 = 10;
 pub(crate) const PERSIST_ATTEMPTS: u32 = 3;
 pub(crate) const PERSIST_RETRY_DELAY: Duration = Duration::from_millis(200);
 
-/// Hard cap on the whole persist loop, retries and pauses included. Sits
-/// inside [`STORE_BUDGET_SECS`] so the store write cannot silently blow the
-/// hold budget by waiting on the credential store's own 65 s lock.
+/// Deadline for persistence lock acquisition, retries and pauses. Sits
+/// inside [`STORE_BUDGET_SECS`] and reaches nested store locks, whose ordinary
+/// 65-second wait would otherwise exceed the provider transaction budget.
 pub(crate) const PERSIST_TOTAL_BUDGET: Duration = Duration::from_secs(8);
 
 const _: () = assert!(
@@ -218,7 +210,7 @@ pub(crate) async fn acquire(path: PathBuf, label: &'static str) -> Acquisition {
 /// | `auth login chatgpt --import-codex` | holds it around the store |
 /// | `auth status` (auto-import of a Codex login) | holds it around the store |
 /// | `auth logout <provider>` | holds it around the delete |
-/// | `OAuthStorage::load`'s legacy cleartext promotion | cannot race: it only runs inside a caller that already holds the lock, and re-acquiring is not possible — the lockfile is not reentrant |
+/// | `OAuthStorage::promote_legacy` | acquires it before re-reading and promoting; ordinary `load` is read-only |
 /// | Google Meet's refresh (`tool_backends::google_meet`) | out of scope: a different provider key, and Google's installed-app refresh token does not rotate |
 pub async fn hold_for_writer(path: PathBuf) -> Result<ExclusiveFileLock, String> {
     match acquire(path, "oauth token write").await {

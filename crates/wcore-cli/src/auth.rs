@@ -701,7 +701,7 @@ fn resolve_oauth_provider(arg: &str) -> Result<&'static str> {
 async fn login_cmd(provider_arg: &str, import_codex: bool, device: bool) -> Result<()> {
     resolve_oauth_provider(provider_arg)?;
     if import_codex {
-        return import_codex_login();
+        return import_codex_login().await;
     }
     if device {
         return login_chatgpt_device().await;
@@ -713,8 +713,16 @@ async fn login_cmd(provider_arg: &str, import_codex: bool, device: bool) -> Resu
 /// our own OAuth store. Shared by `--import-codex` and the auto-import
 /// fallback in `status`/`login`. Returns the decoded plan for the success
 /// line.
-fn import_codex_login() -> Result<()> {
+async fn import_codex_login() -> Result<()> {
     let storage = OAuthStorage::from_home().map_err(|e| anyhow!("opening token store: {e}"))?;
+    let _writer = wcore_agent::oauth::refresh_lock::hold_for_writer(
+        storage.refresh_lock_path(chatgpt::PROVIDER),
+    )
+    .await
+    .map_err(|e| anyhow!(e))?;
+    storage
+        .load(chatgpt::PROVIDER)
+        .map_err(|e| anyhow!("reading token store: {e}"))?;
     let tokens = chatgpt::import_codex_cli_tokens()
         .map_err(|e| anyhow!("importing Codex CLI login: {e}"))?;
     storage
@@ -744,6 +752,12 @@ async fn logout_cmd(provider_arg: &str) -> Result<()> {
     let provider = resolve_oauth_provider(provider_arg)?;
     let storage = OAuthStorage::from_home().map_err(|e| anyhow!("opening token store: {e}"))?;
 
+    let _writer =
+        wcore_agent::oauth::refresh_lock::hold_for_writer(storage.refresh_lock_path(provider))
+            .await
+            .map_err(|e| anyhow!(e))?;
+    // delete re-reads and attempts every tier under this lock, even if a tier
+    // cannot be read. A preliminary failing load must not skip W06 cleanup.
     let removed = storage
         .delete(provider)
         .map_err(|e| anyhow!("removing the stored token: {e}"))?;
@@ -753,6 +767,9 @@ async fn logout_cmd(provider_arg: &str) -> Result<()> {
     } else {
         println!("Already signed out of ChatGPT (no stored token).");
     }
+    println!(
+        "This removes this profile's local login. An existing Codex CLI login can authenticate or be imported again; upstream access was not revoked."
+    );
     Ok(())
 }
 
@@ -764,6 +781,12 @@ async fn logout_cmd(provider_arg: &str) -> Result<()> {
 async fn status_cmd() -> Result<()> {
     let storage = OAuthStorage::from_home().map_err(|e| anyhow!("opening token store: {e}"))?;
 
+    // Re-read under writer authority before deciding whether to auto-import.
+    let _writer = wcore_agent::oauth::refresh_lock::hold_for_writer(
+        storage.refresh_lock_path(chatgpt::PROVIDER),
+    )
+    .await
+    .map_err(|e| anyhow!(e))?;
     let tokens = match storage
         .load(chatgpt::PROVIDER)
         .map_err(|e| anyhow!("reading token store: {e}"))?
@@ -890,12 +913,27 @@ async fn login_chatgpt() -> Result<()> {
 
     // 6. Persist the bundle to `~/.wayland/oauth/chatgpt.json`.
     let storage = OAuthStorage::from_home().map_err(|e| anyhow!("opening token store: {e}"))?;
-    storage
-        .store(chatgpt::PROVIDER, &tokens)
-        .map_err(|e| anyhow!("persisting the tokens failed: {e}"))?;
+    persist_chatgpt_login(&storage, &tokens).await?;
 
     println!("Signed in to ChatGPT. Use `--provider openai-chatgpt`.");
     Ok(())
+}
+
+/// Both network login flows finish their exchange before entering this
+/// persistence transaction. Login is an explicit replacement of current state.
+#[cfg(any(feature = "remote-registry", test))]
+async fn persist_chatgpt_login(storage: &OAuthStorage, tokens: &OAuthTokens) -> Result<()> {
+    let _writer = wcore_agent::oauth::refresh_lock::hold_for_writer(
+        storage.refresh_lock_path(chatgpt::PROVIDER),
+    )
+    .await
+    .map_err(|e| anyhow!(e))?;
+    storage
+        .load(chatgpt::PROVIDER)
+        .map_err(|e| anyhow!("reading token store: {e}"))?;
+    storage
+        .store(chatgpt::PROVIDER, tokens)
+        .map_err(|e| anyhow!("persisting the tokens failed: {e}"))
 }
 
 /// Stripped-build variant: with `remote-registry` (and `wcore-egress`)
@@ -931,9 +969,7 @@ async fn login_chatgpt_device() -> Result<()> {
 
     // Persist the bundle to `~/.wayland/oauth/chatgpt.json`.
     let storage = OAuthStorage::from_home().map_err(|e| anyhow!("opening token store: {e}"))?;
-    storage
-        .store(chatgpt::PROVIDER, &tokens)
-        .map_err(|e| anyhow!("persisting the tokens failed: {e}"))?;
+    persist_chatgpt_login(&storage, &tokens).await?;
 
     println!("Signed in to ChatGPT. Use `--provider openai-chatgpt`.");
     Ok(())
@@ -1693,5 +1729,50 @@ mod tests {
         let tokens = result.expect("import");
         assert_eq!(tokens.access_token, access);
         assert_eq!(tokens.refresh_token.as_deref(), Some("rt-c"));
+    }
+    #[tokio::test]
+    async fn network_login_persistence_waits_for_prior_writer() {
+        let root = tempdir().unwrap();
+        let secure = wcore_config::credentials::InMemoryCredentialsStore::new();
+        let storage = OAuthStorage::at_root(root.path().join("oauth"), Box::new(secure)).unwrap();
+        let tokens = OAuthTokens {
+            access_token: "new-login".into(),
+            refresh_token: Some("new-refresh".into()),
+            expires_at_unix_secs: Some(0),
+            token_type: "Bearer".into(),
+            scope: None,
+            id_token: None,
+        };
+        let writer = wcore_agent::oauth::refresh_lock::hold_for_writer(
+            storage.refresh_lock_path(chatgpt::PROVIDER),
+        )
+        .await
+        .unwrap();
+        let persist = persist_chatgpt_login(&storage, &tokens);
+        tokio::pin!(persist);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(150), &mut persist)
+                .await
+                .is_err()
+        );
+        storage.delete(chatgpt::PROVIDER).unwrap();
+        drop(writer);
+        persist.await.unwrap();
+        assert_eq!(
+            storage
+                .load(chatgpt::PROVIDER)
+                .unwrap()
+                .unwrap()
+                .access_token,
+            tokens.access_token
+        );
+        let writer = wcore_agent::oauth::refresh_lock::hold_for_writer(
+            storage.refresh_lock_path(chatgpt::PROVIDER),
+        )
+        .await
+        .unwrap();
+        storage.delete(chatgpt::PROVIDER).unwrap();
+        drop(writer);
+        assert!(storage.load(chatgpt::PROVIDER).unwrap().is_none());
     }
 }

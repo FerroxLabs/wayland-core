@@ -620,13 +620,22 @@ impl ChatGptTokenManager {
         entry: &OAuthTokens,
         may_post: bool,
     ) -> Result<OAuthTokens, RefreshError> {
-        let reloaded = self.reload_pair();
+        let hold_deadline = std::time::Instant::now()
+            + PER_CALL_TIMEOUT
+            + super::refresh_lock::PERSIST_TOTAL_BUDGET;
+        let reloaded = self.reload_pair(hold_deadline)?;
+        let Some(pair) = reloaded else {
+            *self.cached.lock().await = None;
+            return Err(RefreshError::ProviderRejected(
+                "not signed in to ChatGPT — run `wayland auth login chatgpt`".into(),
+            ));
+        };
 
-        if let Some(winner) = reloaded.as_ref().filter(|r| pairs_differ(entry, r)) {
+        if pairs_differ(entry, &pair) {
             // Another writer moved the pair while we were getting here. Adopt
             // it and perform ZERO POSTs.
-            self.adopt(winner.clone()).await;
-            return Ok(winner.clone());
+            self.adopt(pair.clone()).await;
+            return Ok(pair);
         }
 
         if !may_post {
@@ -638,7 +647,6 @@ impl ChatGptTokenManager {
         }
 
         // Only ever POST a pair we just re-read from the authoritative source.
-        let pair = reloaded.unwrap_or_else(|| entry.clone());
         let refresh_token = pair.refresh_token.clone().ok_or_else(|| {
             RefreshError::ProviderRejected(
                 "no refresh_token — run `wayland auth login chatgpt`".into(),
@@ -651,7 +659,10 @@ impl ChatGptTokenManager {
                 // The pair we POSTed was already spent. Re-read once more: a
                 // writer that landed a new pair after our gate ran makes this
                 // recoverable without any further POST.
-                if let Some(winner) = self.reload_pair().filter(|r| pairs_differ(&pair, r)) {
+                if let Some(winner) = self
+                    .reload_pair(hold_deadline)?
+                    .filter(|r| pairs_differ(&pair, r))
+                {
                     self.adopt(winner.clone()).await;
                     return Ok(winner);
                 }
@@ -666,30 +677,29 @@ impl ChatGptTokenManager {
             Err(other) => return Err(other),
         };
 
-        self.persist(refreshed, &pair).await
+        self.persist(refreshed, &pair, hold_deadline).await
     }
 
     /// Re-read the pair from its authoritative source, bypassing the in-memory
     /// cache. Same source order as [`Self::load_cached`]: the engine store
     /// first, then the Codex CLI file — which is authoritative too, and which
     /// the Codex CLI can rotate under us.
-    fn reload_pair(&self) -> Option<OAuthTokens> {
-        match self.storage.load(PROVIDER) {
-            Ok(Some(tokens)) => Some(tokens),
-            Ok(None) => import_codex_cli_tokens().ok(),
-            Err(error) => {
-                // A store that cannot be read is not evidence that the pair did
-                // not move, so this must NOT be treated as "unchanged". The
-                // caller falls back to the entry pair; a POST of a token a
-                // sibling already rotated is caught by the invalid_grant path.
-                tracing::warn!(
-                    target: "wcore_oauth",
-                    error = %error,
-                    "could not re-read the ChatGPT token pair before refreshing"
-                );
-                None
-            }
-        }
+    fn reload_pair(
+        &self,
+        hold_deadline: std::time::Instant,
+    ) -> Result<Option<OAuthTokens>, RefreshError> {
+        let stored = wcore_config::credentials::with_oauth_lock_deadline(
+            hold_deadline.min(std::time::Instant::now() + refresh_lock::PERSIST_TOTAL_BUDGET),
+            || self.storage.load(PROVIDER),
+        )
+        .map_err(|error| {
+            RefreshError::Retryable(format!(
+                "could not re-read the ChatGPT token store: {error}"
+            ))
+        })?;
+        // External Codex credentials remain an explicitly permitted source.
+        // Store failure is never absence and never authorizes this fallback.
+        Ok(stored.or_else(|| import_codex_cli_tokens().ok()))
     }
 
     /// Take a pair some other writer produced. The in-memory cache MUST move
@@ -718,6 +728,7 @@ impl ChatGptTokenManager {
         &self,
         refreshed: OAuthTokens,
         previous: &OAuthTokens,
+        hold_deadline: std::time::Instant,
     ) -> Result<OAuthTokens, RefreshError> {
         let rotated = refreshed.refresh_token.is_some();
         let mut to_store = refreshed;
@@ -732,13 +743,17 @@ impl ChatGptTokenManager {
         // be held far past `MAX_HOLD_SECS`, which undersized every ceiling
         // derived from it. Cross-audit finding (Kimi K3).
         //
-        // The deadline never cancels a store MID-WRITE: it is only consulted
-        // between attempts. A half-written credential is the one thing worse
-        // than a slow one.
+        // The same deadline reaches nested credential lock acquisitions as
+        // well as retries. It never detaches or cancels a store mid-write;
+        // backend I/O finishes while this provider lock remains owned.
         let mut last_error = None;
-        let persist_deadline = tokio::time::Instant::now() + refresh_lock::PERSIST_TOTAL_BUDGET;
+        let persist_deadline =
+            hold_deadline.min(std::time::Instant::now() + refresh_lock::PERSIST_TOTAL_BUDGET);
         for attempt in 0..refresh_lock::PERSIST_ATTEMPTS {
-            match self.storage.store(PROVIDER, &to_store) {
+            match self
+                .storage
+                .store_before(PROVIDER, &to_store, persist_deadline)
+            {
                 Ok(()) => {
                     last_error = None;
                     break;
@@ -746,7 +761,7 @@ impl ChatGptTokenManager {
                 Err(error) => {
                     last_error = Some(error.to_string());
                     if attempt + 1 < refresh_lock::PERSIST_ATTEMPTS {
-                        if tokio::time::Instant::now() >= persist_deadline {
+                        if std::time::Instant::now() >= persist_deadline {
                             last_error = Some(format!(
                                 "{error} (gave up after {:?}: retrying further would hold the \
                                  refresh lock past its budget)",
@@ -754,7 +769,10 @@ impl ChatGptTokenManager {
                             ));
                             break;
                         }
-                        tokio::time::sleep(refresh_lock::PERSIST_RETRY_DELAY).await;
+                        tokio::time::sleep(refresh_lock::PERSIST_RETRY_DELAY.min(
+                            persist_deadline.saturating_duration_since(std::time::Instant::now()),
+                        ))
+                        .await;
                     }
                 }
             }
@@ -784,19 +802,23 @@ impl ChatGptTokenManager {
             ("refresh_token", refresh_token),
             ("client_id", self.flow.client_id.clone()),
         ];
-        let res = tokio::time::timeout(
-            PER_CALL_TIMEOUT,
-            self.client.post(&self.flow.token_url).form(&form).send(),
-        )
+        let (status, body) = tokio::time::timeout(PER_CALL_TIMEOUT, async {
+            let res = self
+                .client
+                .post(&self.flow.token_url)
+                .form(&form)
+                .send()
+                .await
+                .map_err(|e| RefreshError::Transport(e.to_string()))?;
+            let status = res.status();
+            let body = res
+                .text()
+                .await
+                .map_err(|e| RefreshError::Transport(e.to_string()))?;
+            Ok::<_, RefreshError>((status, body))
+        })
         .await
-        .map_err(|_| RefreshError::Transport("refresh timed out".into()))?
-        .map_err(|e| RefreshError::Transport(e.to_string()))?;
-
-        let status = res.status();
-        let body = res
-            .text()
-            .await
-            .map_err(|e| RefreshError::Transport(e.to_string()))?;
+        .map_err(|_| RefreshError::Transport("refresh timed out".into()))??;
 
         // A 429 is a rate limit, NOT an auth failure — surface it as a
         // recognizable sentinel so the caller can keep using the still

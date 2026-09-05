@@ -18,8 +18,8 @@
 //! * **Fails closed.** A host with no keyring and a locked vault gets an error
 //!   naming the remedy, not a cleartext file.
 //! * **Migrates up once.** A token file written by an older build stays
-//!   readable; the first `load` that finds one re-stores it through the ladder
-//!   and removes the cleartext copy — but only AFTER the secure write has been
+//!   readable; explicit `promote_legacy` re-reads it under the writer lock,
+//!   re-stores it through the ladder and removes the cleartext copy — but only AFTER the secure write has been
 //!   verified by readback. A failed migration leaves the file in place and the
 //!   user signed in.
 //! * **Refuses rather than silently signing you out.** Every verified store
@@ -125,8 +125,28 @@ impl OAuthStorage {
     /// verified can lose the login outright, and a lost OAuth token is not a
     /// visible failure — it silently signs the user out mid-session.
     pub fn store(&self, provider: &str, tokens: &OAuthTokens) -> Result<(), OAuthStorageError> {
+        self.store_before(
+            provider,
+            tokens,
+            std::time::Instant::now() + super::refresh_lock::PERSIST_TOTAL_BUDGET,
+        )
+    }
+
+    pub(crate) fn store_before(
+        &self,
+        provider: &str,
+        tokens: &OAuthTokens,
+        deadline: std::time::Instant,
+    ) -> Result<(), OAuthStorageError> {
+        if std::time::Instant::now() >= deadline {
+            return Err(OAuthStorageError::NoSecureBackend(
+                "OAuth storage deadline exhausted before writing".into(),
+            ));
+        }
         let json = serde_json::to_string(tokens)?;
-        self.store_serialized(provider, &json)
+        wcore_config::credentials::with_oauth_lock_deadline(deadline, || {
+            self.store_serialized(provider, &json)
+        })
     }
 
     fn store_serialized(&self, provider: &str, json: &str) -> Result<(), OAuthStorageError> {
@@ -161,11 +181,7 @@ impl OAuthStorage {
     /// Load tokens for `provider`. Returns `Ok(None)` when the provider has no
     /// stored login in either tier.
     ///
-    /// A token found only in the legacy cleartext file is migrated up on the
-    /// spot. Migration is best-effort: a host with no secure tier keeps reading
-    /// its existing file rather than being logged out, because refusing the
-    /// READ would turn a storage-hardening change into an authentication
-    /// regression for every already-signed-in user.
+    /// Read-only, including legacy files; [`Self::promote_legacy`] migrates them.
     ///
     /// Migration is also **one-way**, and that is the case this refuses on.
     /// Run once with the vault unlocked and the token moves into the vault and
@@ -175,8 +191,17 @@ impl OAuthStorage {
     /// record says a token WAS stored here, this returns
     /// [`OAuthStorageError::SecureStoreUnavailable`] and names the remedy.
     pub fn load(&self, provider: &str) -> Result<Option<OAuthTokens>, OAuthStorageError> {
-        if let Ok(Some(json)) = self.secure.get(&oauth_tokens_key(provider)) {
-            return Ok(Some(serde_json::from_str(&json)?));
+        wcore_config::credentials::with_oauth_lock_deadline(
+            std::time::Instant::now() + super::refresh_lock::PERSIST_TOTAL_BUDGET,
+            || self.load_inner(provider),
+        )
+    }
+
+    fn load_inner(&self, provider: &str) -> Result<Option<OAuthTokens>, OAuthStorageError> {
+        match self.secure.get(&oauth_tokens_key(provider)) {
+            Ok(Some(json)) => return Ok(Some(serde_json::from_str(&json)?)),
+            Err(error) => return Err(OAuthStorageError::NoSecureBackend(error.to_string())),
+            Ok(None) => {}
         }
 
         let Some(bytes) = self.read_legacy(provider)? else {
@@ -188,28 +213,28 @@ impl OAuthStorage {
             }
             return Ok(None);
         };
-        let tokens: OAuthTokens = serde_json::from_slice(&bytes)?;
+        Ok(Some(serde_json::from_slice(&bytes)?))
+    }
 
-        // Re-serialize through the same encoder the writer uses so the stored
-        // value and its readback are byte-comparable.
-        match serde_json::to_string(&tokens) {
-            Ok(json) => {
-                if let Err(error) = self.store_serialized(provider, &json) {
-                    tracing::warn!(
-                        target: "wcore_oauth",
-                        provider,
-                        error = %error,
-                        "could not migrate a cleartext OAuth token into the secure credential \
-                         store; the existing file stays in place and readable"
-                    );
-                }
-            }
-            Err(error) => tracing::warn!(
-                target: "wcore_oauth",
-                provider,
-                error = %error,
-                "could not re-encode a cleartext OAuth token for migration"
-            ),
+    /// Promote legacy bytes after locking and re-reading: absence stays absent,
+    /// and a newer secure pair always wins over the legacy copy.
+    pub async fn promote_legacy(
+        &self,
+        provider: &str,
+    ) -> Result<Option<OAuthTokens>, OAuthStorageError> {
+        let _writer = super::refresh_lock::hold_for_writer(self.refresh_lock_path(provider))
+            .await
+            .map_err(OAuthStorageError::NoSecureBackend)?;
+        let Some(tokens) = self.load(provider)? else {
+            return Ok(None);
+        };
+        if !self.path_for(provider).try_exists()? {
+            return Ok(Some(tokens));
+        }
+
+        if let Err(error) = self.store(provider, &tokens) {
+            tracing::warn!(target: "wcore_oauth", provider, error = %error,
+                "could not promote the legacy OAuth login; its readable copy is retained");
         }
         Ok(Some(tokens))
     }
@@ -225,6 +250,13 @@ impl OAuthStorage {
     /// on a host whose secure tier cannot be opened at all, so the record is
     /// cleared regardless of what the secure tier says.
     pub fn delete(&self, provider: &str) -> Result<bool, OAuthStorageError> {
+        wcore_config::credentials::with_oauth_lock_deadline(
+            std::time::Instant::now() + super::refresh_lock::PERSIST_TOTAL_BUDGET,
+            || self.delete_inner(provider),
+        )
+    }
+
+    fn delete_inner(&self, provider: &str) -> Result<bool, OAuthStorageError> {
         let key = oauth_tokens_key(provider);
         let had_secure = matches!(self.secure.get(&key), Ok(Some(_)));
         let secure_error = self.secure.delete(&key).err();
@@ -486,8 +518,8 @@ mod tests {
 
     /// A token file written by a pre-ladder build stays readable, is promoted
     /// into the secure tier, and only then loses its cleartext copy.
-    #[test]
-    fn legacy_cleartext_token_is_readable_and_migrates_up() {
+    #[tokio::test]
+    async fn legacy_cleartext_token_is_readable_and_migrates_up() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("oauth");
         let (store, secure) = store_at(root.clone());
@@ -499,6 +531,9 @@ mod tests {
             .unwrap()
             .expect("legacy token readable");
         assert_eq!(loaded.refresh_token.as_deref(), Some("rt-456"));
+        assert!(path.exists(), "ordinary reads cannot promote legacy state");
+        assert!(secure.get(&oauth_tokens_key("chatgpt")).unwrap().is_none());
+        store.promote_legacy("chatgpt").await.unwrap();
 
         assert!(
             secure.get(&oauth_tokens_key("chatgpt")).unwrap().is_some(),
@@ -685,8 +720,8 @@ mod tests {
     /// MUTATION TARGET. Delete the `login_record_path(...).exists()` arm in
     /// `load` and this fails: `load` starts returning `Ok(None)`, which is the
     /// exact silent sign-out this closes.
-    #[test]
-    fn a_consumed_migration_refuses_instead_of_reporting_signed_out() {
+    #[tokio::test]
+    async fn a_consumed_migration_refuses_instead_of_reporting_signed_out() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("oauth");
 
@@ -696,7 +731,7 @@ mod tests {
         let signed_in = OAuthStorage::at_root(root.clone(), Box::new(unlocked)).unwrap();
         let legacy = signed_in.path_for("chatgpt");
         std::fs::write(&legacy, serde_json::to_vec_pretty(&make_tokens()).unwrap()).unwrap();
-        assert!(signed_in.load("chatgpt").unwrap().is_some());
+        assert!(signed_in.promote_legacy("chatgpt").await.unwrap().is_some());
         assert!(
             !legacy.exists(),
             "the migration must consume the cleartext copy"
@@ -837,5 +872,127 @@ mod tests {
             2,
             "the provider segment must not introduce dots: {key}"
         );
+    }
+    #[tokio::test]
+    async fn legacy_promotion_waits_for_logout_and_rereads_absence() {
+        let tmp = TempDir::new().unwrap();
+        let (store, secure) = store_at(tmp.path().join("oauth"));
+        std::fs::write(
+            store.path_for("chatgpt"),
+            serde_json::to_vec(&make_tokens()).unwrap(),
+        )
+        .unwrap();
+        let writer =
+            super::super::refresh_lock::hold_for_writer(store.refresh_lock_path("chatgpt"))
+                .await
+                .unwrap();
+        let promotion = store.promote_legacy("chatgpt");
+        tokio::pin!(promotion);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(150), &mut promotion)
+                .await
+                .is_err()
+        );
+        store.delete("chatgpt").unwrap();
+        drop(writer);
+        assert!(promotion.await.unwrap().is_none());
+        assert!(secure.get(&oauth_tokens_key("chatgpt")).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn legacy_promotion_rereads_newer_secure_pair_before_removing_legacy() {
+        let tmp = TempDir::new().unwrap();
+        let (store, secure) = store_at(tmp.path().join("oauth"));
+        std::fs::write(
+            store.path_for("chatgpt"),
+            serde_json::to_vec(&make_tokens()).unwrap(),
+        )
+        .unwrap();
+        let writer =
+            super::super::refresh_lock::hold_for_writer(store.refresh_lock_path("chatgpt"))
+                .await
+                .unwrap();
+        let promotion = store.promote_legacy("chatgpt");
+        tokio::pin!(promotion);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(150), &mut promotion)
+                .await
+                .is_err()
+        );
+        let mut newer = make_tokens();
+        newer.refresh_token = Some("newer-login".into());
+        secure
+            .put(
+                &oauth_tokens_key("chatgpt"),
+                &serde_json::to_string(&newer).unwrap(),
+            )
+            .unwrap();
+        drop(writer);
+        assert_eq!(
+            promotion.await.unwrap().unwrap().refresh_token,
+            newer.refresh_token
+        );
+        assert!(!store.path_for("chatgpt").exists());
+        let writer =
+            super::super::refresh_lock::hold_for_writer(store.refresh_lock_path("chatgpt"))
+                .await
+                .unwrap();
+        store.delete("chatgpt").unwrap();
+        drop(writer);
+        assert!(store.load("chatgpt").unwrap().is_none());
+    }
+    #[test]
+    fn oauth_store_deadline_refuses_busy_credential_lock_without_detached_write() {
+        use wcore_config::credentials::{ExclusiveFileLock, LockPolicy};
+        struct LockedStore {
+            inner: InMemoryCredentialsStore,
+            path: PathBuf,
+        }
+        impl CredentialsStore for LockedStore {
+            fn get(&self, key: &str) -> Result<Option<String>, CredentialsError> {
+                self.inner.get(key)
+            }
+            fn put(&self, key: &str, value: &str) -> Result<(), CredentialsError> {
+                let _lock = ExclusiveFileLock::acquire(
+                    self.path.clone(),
+                    LockPolicy::CREDENTIAL_WRITE,
+                    "fixture",
+                )?;
+                self.inner.put(key, value)
+            }
+            fn delete(&self, key: &str) -> Result<(), CredentialsError> {
+                self.inner.delete(key)
+            }
+        }
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("credential.lock");
+        let inner = InMemoryCredentialsStore::new();
+        let storage = OAuthStorage::at_root(
+            tmp.path().join("oauth"),
+            Box::new(LockedStore {
+                inner: inner.clone(),
+                path: path.clone(),
+            }),
+        )
+        .unwrap();
+        storage.store("chatgpt", &make_tokens()).unwrap();
+        let before = inner.get(&oauth_tokens_key("chatgpt")).unwrap();
+        let held =
+            ExclusiveFileLock::acquire(path, LockPolicy::CREDENTIAL_WRITE, "fixture").unwrap();
+        let mut changed = make_tokens();
+        changed.refresh_token = Some("rotated-fixture".into());
+        let start = std::time::Instant::now();
+        assert!(
+            storage
+                .store_before(
+                    "chatgpt",
+                    &changed,
+                    start + std::time::Duration::from_millis(100)
+                )
+                .is_err()
+        );
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+        drop(held);
+        assert_eq!(inner.get(&oauth_tokens_key("chatgpt")).unwrap(), before);
     }
 }

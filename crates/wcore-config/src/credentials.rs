@@ -2564,6 +2564,30 @@ fn take_forced_delete_pending_denial() -> Option<std::io::Error> {
     })
 }
 
+thread_local! {
+    static OAUTH_LOCK_DEADLINE: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// Bound lock acquisition during a synchronous OAuth storage transaction.
+/// Nested calls inherit the earlier deadline. This never cancels a write or
+/// moves it to a detached task; backend I/O already in progress finishes while
+/// the caller still owns its provider lock. Other callers retain their policy.
+pub fn with_oauth_lock_deadline<T>(
+    deadline: std::time::Instant,
+    operation: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Option<std::time::Instant>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            OAUTH_LOCK_DEADLINE.set(self.0);
+        }
+    }
+    let previous = OAUTH_LOCK_DEADLINE.get();
+    let _restore = Restore(previous);
+    OAUTH_LOCK_DEADLINE.set(Some(previous.map_or(deadline, |prior| prior.min(deadline))));
+    operation()
+}
+
 impl ExclusiveFileLock {
     /// `label` names the lock in the busy error, so a caller can tell a wedged
     /// migration from a wedged refresh.
@@ -2612,12 +2636,19 @@ impl ExclusiveFileLock {
             std::process::id(),
             SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         );
-        let deadline = std::time::Instant::now() + policy.wait_ceiling;
+        let policy_deadline = std::time::Instant::now() + policy.wait_ceiling;
+        let oauth_deadline = OAUTH_LOCK_DEADLINE.get();
+        let deadline = oauth_deadline.map_or(policy_deadline, |limit| limit.min(policy_deadline));
         // Start of the current UNBROKEN run of denied creates. Any other answer
         // resets it, because the grace measures how long one refusal has
         // persisted and not how long the whole acquisition has taken.
         let mut denied_since: Option<std::time::Instant> = None;
         loop {
+            if oauth_deadline.is_some() && std::time::Instant::now() >= deadline {
+                return Err(CredentialsError::BackendUnavailable(format!(
+                    "the {label} lock acquisition exceeded the OAuth storage deadline"
+                )));
+            }
             match create_new(&path) {
                 Ok(mut f) => {
                     use std::io::Write;
@@ -2669,7 +2700,10 @@ impl ExclusiveFileLock {
                             policy.wait_ceiling
                         )));
                     }
-                    std::thread::sleep(LockPolicy::POLL);
+                    std::thread::sleep(
+                        LockPolicy::POLL
+                            .min(deadline.saturating_duration_since(std::time::Instant::now())),
+                    );
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
                     // WINDOWS, gh#1303. `DeleteFile` on a lockfile whose last
@@ -2704,7 +2738,10 @@ impl ExclusiveFileLock {
                     if verdict == CreateDenial::Denied || std::time::Instant::now() >= deadline {
                         return Err(CredentialsError::Io(e));
                     }
-                    std::thread::sleep(LockPolicy::POLL);
+                    std::thread::sleep(
+                        LockPolicy::POLL
+                            .min(deadline.saturating_duration_since(std::time::Instant::now())),
+                    );
                 }
                 Err(e) => return Err(CredentialsError::Io(e)),
             }
@@ -7502,5 +7539,61 @@ mod chunk_crash_injection {
             "entry count is still growing after 40 rotations ({first_half} -> {second_half}); \
              orphans leak without bound"
         );
+    }
+}
+
+#[cfg(test)]
+mod oauth_lock_deadline_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn oauth_deadline_bounds_a_nested_credential_lock_and_restores_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credential.lock");
+        let held =
+            ExclusiveFileLock::acquire(path.clone(), LockPolicy::CREDENTIAL_WRITE, "fixture")
+                .unwrap();
+        let start = Instant::now();
+        let result = with_oauth_lock_deadline(start + Duration::from_millis(100), || {
+            ExclusiveFileLock::acquire(path.clone(), LockPolicy::CREDENTIAL_WRITE, "fixture")
+        });
+        assert!(result.is_err());
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "must not wait the default 65 seconds"
+        );
+        assert!(OAUTH_LOCK_DEADLINE.get().is_none());
+        drop(held);
+        let _recovered =
+            ExclusiveFileLock::acquire(path, LockPolicy::CREDENTIAL_WRITE, "fixture").unwrap();
+    }
+
+    #[test]
+    fn nested_oauth_deadline_cannot_extend_or_leak_authority_after_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credential.lock");
+        let expired = Instant::now();
+        with_oauth_lock_deadline(expired, || {
+            with_oauth_lock_deadline(Instant::now() + Duration::from_secs(65), || {
+                assert!(
+                    ExclusiveFileLock::acquire(
+                        path.clone(),
+                        LockPolicy::CREDENTIAL_WRITE,
+                        "fixture"
+                    )
+                    .is_err()
+                );
+                assert!(
+                    !path.exists(),
+                    "expired work cannot acquire even an uncontended lock"
+                );
+            });
+        });
+        let _ =
+            std::panic::catch_unwind(|| with_oauth_lock_deadline(expired, || panic!("fixture")));
+        assert!(OAUTH_LOCK_DEADLINE.get().is_none());
+        let _held =
+            ExclusiveFileLock::acquire(path, LockPolicy::CREDENTIAL_WRITE, "fixture").unwrap();
     }
 }
