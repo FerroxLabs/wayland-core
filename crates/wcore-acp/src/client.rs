@@ -435,6 +435,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl TurnEngine for DoneTurnEngine {
+        async fn close_session(&self, _session_id: &str) -> Result<(), AcpError> {
+            // This stateless fixture owns no tasks, processes or session data.
+            Ok(())
+        }
+
         async fn run_turn(
             &self,
             _req: TurnRequest,
