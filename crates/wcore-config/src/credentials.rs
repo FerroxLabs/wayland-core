@@ -5376,6 +5376,7 @@ mod tests {
         entries: Mutex<HashMap<String, String>>,
         log: Mutex<Vec<String>>,
         fail_put: std::sync::atomic::AtomicBool,
+        fail_delete: std::sync::atomic::AtomicBool,
     }
 
     impl FakeTier {
@@ -5434,6 +5435,9 @@ mod tests {
 
         fn delete(&self, key: &str) -> Result<(), CredentialsError> {
             self.record(&format!("delete:{key}"));
+            if self.fail_delete.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(CredentialsError::Keyring("injected delete failure".into()));
+            }
             self.entries.lock().unwrap().remove(key);
             Ok(())
         }
@@ -5445,6 +5449,88 @@ mod tests {
 
     fn boxed(tier: &std::sync::Arc<FakeTier>) -> Box<dyn CredentialsStore> {
         Box::new(std::sync::Arc::clone(tier))
+    }
+
+    #[test]
+    fn ladder_delete_reports_secure_failure_and_attempts_every_tier() {
+        for (keyring_fails, vault_fails) in [(true, false), (false, true), (true, true)] {
+            let keyring = tier(&[("k", "keyring-sentinel")]);
+            let vault = tier(&[("k", "vault-sentinel")]);
+            keyring
+                .fail_delete
+                .store(keyring_fails, std::sync::atomic::Ordering::SeqCst);
+            vault
+                .fail_delete
+                .store(vault_fails, std::sync::atomic::Ordering::SeqCst);
+            let dir = tempdir().unwrap();
+            let legacy = PlaintextCredentialsStore::new(dir.path().join("credentials.toml"));
+            legacy.put("k", "legacy-sentinel").unwrap();
+            let ladder = LadderCredentialsStore::new(
+                Some(boxed(&keyring)),
+                Some(boxed(&vault)),
+                legacy.path().to_path_buf(),
+            );
+
+            let error = ladder.delete("k").expect_err(
+                "a retained secure credential must not be reported as successfully deleted",
+            );
+            assert!(error.to_string().contains("injected delete failure"));
+            assert!(!error.to_string().contains("sentinel"));
+            assert_eq!(keyring.ops(), ["delete:k"]);
+            assert_eq!(vault.ops(), ["delete:k"]);
+            assert_eq!(keyring.snapshot().is_empty(), !keyring_fails);
+            assert_eq!(vault.snapshot().is_empty(), !vault_fails);
+            assert_eq!(legacy.get("k").unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn ladder_delete_retries_partial_removal_without_creating_plaintext() {
+        let keyring = tier(&[("k", "keyring-sentinel")]);
+        let vault = tier(&[("k", "vault-sentinel")]);
+        vault
+            .fail_delete
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let dir = tempdir().unwrap();
+        let legacy_path = dir.path().join("credentials.toml");
+        let ladder = LadderCredentialsStore::new(
+            Some(boxed(&keyring)),
+            Some(boxed(&vault)),
+            legacy_path.clone(),
+        );
+
+        assert!(ladder.delete("k").is_err());
+        assert!(keyring.snapshot().is_empty());
+        assert_eq!(
+            vault.snapshot(),
+            vec![("k".to_string(), "vault-sentinel".to_string())]
+        );
+        assert!(!legacy_path.exists());
+
+        vault
+            .fail_delete
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        ladder.delete("k").unwrap();
+        ladder.delete("k").unwrap();
+        assert!(keyring.snapshot().is_empty());
+        assert!(vault.snapshot().is_empty());
+        assert_eq!(ladder.get("k").unwrap(), None);
+        assert!(!legacy_path.exists());
+    }
+
+    #[test]
+    fn ladder_delete_reports_legacy_failure_after_removing_secure_copies() {
+        let keyring = tier(&[("k", "keyring-sentinel")]);
+        let vault = tier(&[("k", "vault-sentinel")]);
+        let dir = tempdir().unwrap();
+        let legacy_path = dir.path().join("credentials.toml");
+        std::fs::write(&legacy_path, "[invalid").unwrap();
+        let ladder =
+            LadderCredentialsStore::new(Some(boxed(&keyring)), Some(boxed(&vault)), legacy_path);
+
+        assert!(ladder.delete("k").is_err());
+        assert!(keyring.snapshot().is_empty());
+        assert!(vault.snapshot().is_empty());
     }
 
     // -----------------------------------------------------------------------
