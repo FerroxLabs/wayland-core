@@ -554,10 +554,13 @@ impl ProtocolToMessageStream {
                 self.stash_turn_id(&msg_id);
                 Some(MessageEvent::Thinking { text })
             }
-            ProtocolEvent::ToolRequest { call_id, tool, .. } => {
+            ProtocolEvent::ToolRequest { call_id, tool, .. }
+            | ProtocolEvent::CallAnnounced { call_id, tool, .. } => {
                 // D012: remember the call so the matching `ApprovalRequired`
                 // (synthesized by the relay's `ChannelEmitter`) can project a
                 // faithful `ToolCall` identity to the host.
+                // Already-approved calls use CallAnnounced and owe the same
+                // identity before their result, without an approval gate.
                 self.pending_calls
                     .insert(call_id.clone(), (tool.name.clone(), tool.args.clone()));
                 Some(MessageEvent::ToolCall {
