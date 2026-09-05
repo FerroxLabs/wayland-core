@@ -184,12 +184,16 @@ impl EngineTurnEngine {
             initializer.closing.store(true, Ordering::Release);
             initialization_error = initializer.wait().await.err();
             let mut task = initializer.task.lock().await;
-            if let Some(handle) = task.as_mut() {
-                handle
-                    .await
-                    .map_err(|error| AcpError::Cleanup(format!("initializer failed: {error}")))?;
-            }
+            let joined = match task.as_mut() {
+                Some(handle) => Some(handle.await),
+                None => None,
+            };
+            // Retain ownership while pending, but retire any completed handle
+            // before propagating failure: Tokio forbids polling it twice.
             task.take();
+            if let Some(Err(error)) = joined {
+                return Err(AcpError::Cleanup(format!("initializer failed: {error}")));
+            }
         }
         let session = self.sessions.lock().await.get(session_id).cloned();
         if let Some(session) = session {
