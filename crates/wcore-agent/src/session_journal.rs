@@ -1479,6 +1479,14 @@ impl JournalWriter {
         if self.faulted {
             return Err(JournalError::WriterFaulted);
         }
+        #[cfg(feature = "test-utils")]
+        if stabilization_crash_cut(&event, &self.state, "before") {
+            self.faulted = true;
+            return Err(JournalError::Io {
+                path: self.path.clone(),
+                source: std::io::Error::other("W04 injected cleanup journal failure"),
+            });
+        }
         let envelope = JournalEnvelope::create(
             self.session_id.clone(),
             self.next_seq,
@@ -1515,6 +1523,8 @@ impl JournalWriter {
         self.previous_checksum.clone_from(&envelope.checksum);
         self.state = candidate_state;
         self.last_envelope = Some(envelope.clone());
+        #[cfg(feature = "test-utils")]
+        stabilization_crash_cut(&envelope.event, &self.state, "after");
         Ok(envelope)
     }
 
@@ -2828,6 +2838,57 @@ fn valid_sha256_hex(value: &str) -> bool {
 
 fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
+}
+
+/// Deterministic process-cut rendezvous for the instrumented W04 test host.
+/// This symbol and its environment switch do not exist in release builds.
+#[cfg(feature = "test-utils")]
+pub fn stabilization_test_barrier(cut: &str) -> bool {
+    use std::io::{Read, Write};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static HIT: AtomicBool = AtomicBool::new(false);
+    if std::env::var("WAYLAND_W04_CUT").as_deref() != Ok(cut) {
+        return false;
+    }
+    let Ok(address) = std::env::var("WAYLAND_W04_BARRIER") else {
+        return false;
+    };
+    if HIT.swap(true, Ordering::SeqCst) {
+        return false;
+    }
+    let address: std::net::SocketAddr = address.parse().expect("W04 barrier address");
+    assert!(address.ip().is_loopback(), "W04 barrier must be loopback");
+    let mut socket =
+        std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_secs(20))
+            .expect("connect W04 barrier");
+    socket
+        .set_read_timeout(Some(std::time::Duration::from_secs(60)))
+        .expect("bound W04 barrier wait");
+    writeln!(socket, "{cut}").expect("signal W04 cut");
+    let mut action = [0];
+    socket
+        .read_exact(&mut action)
+        .expect("release W04 barrier or kill child");
+    action[0] == b'F'
+}
+
+#[cfg(feature = "test-utils")]
+fn stabilization_crash_cut(event: &SessionEvent, state: &ReducedSessionState, phase: &str) -> bool {
+    let label = match (phase, event) {
+        ("before", SessionEvent::ToolIntentRecordedV2 { .. }) => "before_intent",
+        ("after", SessionEvent::ToolIntentRecordedV2 { .. }) => "intent_before_dispatch",
+        ("before", SessionEvent::ToolExecutionFinished { .. }) => "physical_before_receipt",
+        ("after", SessionEvent::ToolExecutionFinished { .. }) => "receipt_before_settlement",
+        ("after", SessionEvent::BudgetAuthorityCommitted { authority })
+            if authority.active_turn.is_none()
+                && state.turns.values().any(|turn| turn.completion.is_some()) =>
+        {
+            "settlement_before_terminal"
+        }
+        ("before", SessionEvent::TurnCancelled { .. }) => "delete_finalizer",
+        _ => return false,
+    };
+    stabilization_test_barrier(label)
 }
 
 #[cfg(test)]
