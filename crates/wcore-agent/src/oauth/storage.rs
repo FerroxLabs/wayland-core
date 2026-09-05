@@ -148,14 +148,13 @@ impl OAuthStorage {
             });
         }
 
-        // 3. remove-cleartext. Only now is the legacy copy redundant.
-        self.remove_legacy(provider)?;
-
-        // 4. record that this provider HAS a secure login. Written last, so a
-        //    record can only exist for a write that fully landed. This is what
-        //    makes a later "the store cannot produce it" distinguishable from
-        //    "you were never signed in" — see `Self::load`.
+        // 3. The secure write has landed and read back. Record it before
+        //    cleanup, whose failure must not make a subsequently locked store
+        //    indistinguishable from "you were never signed in" — see `load`.
         self.write_login_record(provider);
+
+        // 4. remove-cleartext. Only now is the legacy copy redundant.
+        self.remove_legacy(provider)?;
         Ok(())
     }
 
