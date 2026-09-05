@@ -17,6 +17,9 @@ use wcore_providers::create_provider;
 use wcore_tools::read::ReadTool;
 use wcore_tools::registry::ToolRegistry;
 
+#[path = "../../../wcore-eval-scenarios/tests/support/live_acceptance.rs"]
+mod live_acceptance;
+
 /// The provider endpoint these live tests dial.
 ///
 /// Env-overridable for the same reason the MODEL ids already are
@@ -138,7 +141,12 @@ async fn test_anthropic_tool_use() {
     assert!(!result.text.is_empty(), "response text should not be empty");
     // The model should have called Read and seen our content
     assert!(
-        result.text.contains("e2e-test-content-42") || result.turns > 1,
+        live_acceptance::successful_read_answer(
+            &result.text,
+            "e2e-test-content-42",
+            result.turns as usize,
+            false,
+        ),
         "model should either echo the content or have used multiple turns (tool call): {}",
         result.text
     );

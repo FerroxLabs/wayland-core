@@ -17,6 +17,9 @@ use wcore_providers::create_provider;
 use wcore_tools::read::ReadTool;
 use wcore_tools::registry::ToolRegistry;
 
+#[path = "../../../wcore-eval-scenarios/tests/support/live_acceptance.rs"]
+mod live_acceptance;
+
 /// The provider endpoint these live tests dial.
 ///
 /// Env-overridable for the same reason the MODEL ids already are
@@ -134,7 +137,12 @@ async fn test_openai_tool_use() {
 
     assert!(!result.text.is_empty());
     assert!(
-        result.text.contains("e2e-openai-content-99") || result.turns > 1,
+        live_acceptance::successful_read_answer(
+            &result.text,
+            "e2e-openai-content-99",
+            result.turns as usize,
+            false,
+        ),
         "model should echo the content or use multiple turns: {}",
         result.text
     );

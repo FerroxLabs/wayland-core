@@ -171,6 +171,10 @@ async fn overnight_personas() {
 
 /// `target/persona-report.md`, resolved against the workspace target dir.
 fn report_output_path() -> PathBuf {
+    // Keep fixture runs and parallel live runs from overwriting one report.
+    if let Some(path) = std::env::var_os("WCORE_EVAL_REPORT_PATH") {
+        return PathBuf::from(path);
+    }
     // CARGO_MANIFEST_DIR = crates/wcore-eval-scenarios; workspace root is two
     // levels up. Mirrors discover_binary()'s target-dir resolution.
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
