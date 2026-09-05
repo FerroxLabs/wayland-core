@@ -23,9 +23,13 @@ fn config(home: &Path, backend: &str) {
 }
 
 async fn remove(home: &Path) -> Output {
+    remove_provider(home, "openai").await
+}
+
+async fn remove_provider(home: &Path, provider: &str) -> Output {
     let mut command = shell_command_argv(
         env!("CARGO_BIN_EXE_wayland-core"),
-        &["auth", "remove", "openai"],
+        &["auth", "remove", provider],
     );
     command.env_clear();
     for key in [
@@ -118,4 +122,73 @@ async fn successful_removal_clears_both_locations_through_the_real_cli() {
     assert!(String::from_utf8_lossy(&output.stdout).contains("Removed API key"));
     assert_config_copy_removed(home.path());
     assert_eq!(store.get(SLOT).unwrap(), None);
+}
+
+#[tokio::test]
+async fn partial_account_removal_preserves_identity_for_retry() {
+    for broken_backend in [true, false] {
+        let home = tempfile::tempdir().unwrap();
+        let backend = if broken_backend {
+            "invalid-backend-fixture"
+        } else {
+            "plaintext"
+        };
+        std::fs::write(
+            home.path().join("config.toml"),
+            format!(
+                "[storage.credentials]\nbackend = {backend:?}\n\
+                 [providers.work-openai]\nprovider = \"openai\"\n\
+                 base_url = \"https://tenant.example.invalid/v1\"\n\
+                 model = \"fixture-model\"\napi_key = {CONFIG_VALUE:?}\n"
+            ),
+        )
+        .unwrap();
+        let slot = "providers.work-openai.api_key";
+        let store_path = home.path().join("credentials.toml");
+        let store = PlaintextCredentialsStore::new(&store_path);
+        if broken_backend {
+            store.put(slot, STORE_VALUE).unwrap();
+        } else {
+            std::fs::write(&store_path, "[invalid").unwrap();
+        }
+
+        let output = remove_provider(home.path(), "work-openai").await;
+        assert_incomplete(&output);
+        assert_config_copy_removed(home.path());
+        let config_path = home.path().join("config.toml");
+        let text = std::fs::read_to_string(&config_path).unwrap();
+        let document: toml::Table = toml::from_str(&text).unwrap();
+        let account = document
+            .get("providers")
+            .and_then(|providers| providers.get("work-openai"))
+            .expect("partial removal must retain the account identity needed for retry");
+        assert_eq!(account["provider"].as_str(), Some("openai"));
+        assert_eq!(account["model"].as_str(), Some("fixture-model"));
+        assert_eq!(
+            account["base_url"].as_str(),
+            Some("https://tenant.example.invalid/v1")
+        );
+        assert!(account.get("api_key").is_none());
+
+        std::fs::write(
+            &config_path,
+            text.replace("invalid-backend-fixture", "plaintext"),
+        )
+        .unwrap();
+        if !broken_backend {
+            std::fs::write(&store_path, "[secrets]\n").unwrap();
+            store.put(slot, STORE_VALUE).unwrap();
+        }
+        let retry = remove_provider(home.path(), "work-openai").await;
+        assert!(retry.status.success(), "{:?}", retry);
+        assert_eq!(store.get(slot).unwrap(), None);
+        let document: toml::Table =
+            toml::from_str(&std::fs::read_to_string(config_path).unwrap()).unwrap();
+        assert!(
+            document
+                .get("providers")
+                .and_then(|providers| providers.get("work-openai"))
+                .is_none()
+        );
+    }
 }
