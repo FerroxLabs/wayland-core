@@ -6902,10 +6902,7 @@ impl AgentEngine {
         &self.memory_api
     }
 
-    /// M3.2 — install a background-task handle on the engine (currently
-    /// used for the decay scheduler spawned by `AgentBootstrap::build`
-    /// when `cfg.memory.enabled = true`). `Drop` aborts every handle on
-    /// engine shutdown so no task is leaked across sessions or tests.
+    /// Bind the host-owned cleanup context before later fallible setup steps.
     pub(crate) fn set_bootstrap_cleanup(
         &mut self,
         cleanup: Option<Arc<crate::bootstrap_cleanup::BootstrapCleanup>>,
@@ -6940,6 +6937,8 @@ impl AgentEngine {
         cleanup
     }
 
+    /// Register a session-owned scheduler. Explicit close retains and joins
+    /// it; engine Drop requests cancellation as the fallback.
     pub fn push_decay_handle(&mut self, h: tokio::task::JoinHandle<()>) {
         self.decay_handles.push(h);
     }
