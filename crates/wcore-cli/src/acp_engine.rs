@@ -60,6 +60,13 @@ use wcore_types::reasoning_filter::ReasoningFilter;
 
 use crate::tui::{ChannelEmitter, ChannelSink};
 
+mod lifecycle;
+#[cfg(test)]
+#[path = "acp_engine/lifecycle_tests.rs"]
+mod lifecycle_tests;
+use lifecycle::{Initialization, InitializationCompletion, SessionLifetime};
+use std::sync::atomic::Ordering;
+
 // ─────────────────────────────────────────────────────────────────────────
 // Relay sink/emitter — forward to the current turn's channel
 // ─────────────────────────────────────────────────────────────────────────
@@ -719,6 +726,7 @@ impl Stream for ProtocolToMessageStream {
 /// async mutex because `run()` takes `&mut self` and a session may receive
 /// serialized turns.
 pub struct EngineSession {
+    lifetime: SessionLifetime,
     engine: Arc<AsyncMutex<AgentEngine>>,
     approval_manager: Arc<ToolApprovalManager>,
     /// GHSA-8r7g M2 (#568) — the engine's `ApprovalBridge`, captured at build
@@ -758,6 +766,7 @@ impl EngineSession {
         let tool_names = engine.tools().tool_names();
         let approval_bridge = engine.approval_bridge().clone();
         Self {
+            lifetime: SessionLifetime::default(),
             engine: Arc::new(AsyncMutex::new(engine)),
             approval_manager,
             approval_bridge,
@@ -839,14 +848,27 @@ impl EngineSession {
     ) -> Pin<Box<dyn Stream<Item = MessageEvent> + Send>> {
         let (tx, rx) = unbounded_channel::<ProtocolEvent>();
 
+        let mut turns = self.lifetime.turns.lock().await;
+        // Reap completed handles rather than retaining one per historical turn.
+        turns.retain(|(_, handle)| !handle.is_finished());
+        if self.lifetime.closing.load(Ordering::Acquire) {
+            drop(TerminalGuard::new(tx, msg_id));
+            return Box::pin(ProtocolToMessageStream::new(rx));
+        }
+
         let engine = self.engine.clone();
         let relay = self.relay.clone();
         let turn_cancel = CancellationToken::new();
+        let owned_cancel = turn_cancel.clone();
+        let closing = self.lifetime.closing.clone();
 
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             // Guarantee a terminal event even on panic/abort.
             let mut term = TerminalGuard::new(tx.clone(), msg_id.clone());
             let mut guard = engine.lock().await;
+            if closing.load(Ordering::Acquire) {
+                return;
+            }
             // Point the engine's relay sink/emitter at THIS turn's channel
             // only after acquiring the engine lock, so a second `run_turn`
             // queued behind us cannot redirect our turn's events: the swap
@@ -900,6 +922,7 @@ impl EngineSession {
                 }
             }
         });
+        turns.push((owned_cancel, task));
 
         Box::pin(ProtocolToMessageStream::new(rx))
     }
@@ -1023,10 +1046,12 @@ pub fn narrow_mcp_tool_selection(config: &mut Config, selection: &[McpToolSelect
 /// The `TurnEngine` the ACP server is wired with. Holds the engine-session
 /// pool keyed by ACP `session_id` plus the inputs to build a fresh
 /// `EngineSession` on first use of a session id.
+#[derive(Clone)]
 pub struct EngineTurnEngine {
     config: Config,
     cwd: String,
     sessions: Arc<AsyncMutex<HashMap<String, Arc<EngineSession>>>>,
+    initializers: Arc<AsyncMutex<HashMap<String, Arc<Initialization>>>>,
     /// Optional pre-built provider injected for hermetic tests. When `Some`,
     /// `session_for` hands it to `AgentBootstrap::provider` instead of
     /// resolving one from config (which would require network). `None` in
@@ -1060,6 +1085,7 @@ impl EngineTurnEngine {
             cwd,
             sessions: Arc::new(AsyncMutex::new(HashMap::new())),
             provider: None,
+            initializers: Arc::new(AsyncMutex::new(HashMap::new())),
             force_tools: false,
             roster: None,
         }
@@ -1140,6 +1166,7 @@ impl EngineTurnEngine {
             cwd,
             sessions: Arc::new(AsyncMutex::new(HashMap::new())),
             provider: Some(provider),
+            initializers: Arc::new(AsyncMutex::new(HashMap::new())),
             // No persona roster on the embedding/test seam: personas are an
             // operator-enabled ACP-serve feature, so a hermetic engine resolves
             // no persona (fail closed).
@@ -1168,6 +1195,64 @@ impl EngineTurnEngine {
         agent: Option<&str>,
         requested_tools: &[String],
         mcp_selection: &[McpToolSelection],
+    ) -> Result<Arc<EngineSession>, AcpError> {
+        let initializer = {
+            let mut initializers = self.initializers.lock().await;
+            match initializers.entry(session_id.to_string()) {
+                std::collections::hash_map::Entry::Occupied(entry) => entry.get().clone(),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    let initializer = Arc::new(Initialization::new());
+                    let owner = self.clone();
+                    let session_id = session_id.to_string();
+                    let agent = agent.map(str::to_string);
+                    let tools = requested_tools.to_vec();
+                    let mcp = mcp_selection.to_vec();
+                    let signal = initializer.clone();
+                    let task = tokio::spawn(async move {
+                        let _completion = InitializationCompletion(signal.clone());
+                        let result = owner
+                            .build_session(
+                                &session_id,
+                                agent.as_deref(),
+                                &tools,
+                                &mcp,
+                                signal.cancel.clone(),
+                            )
+                            .await;
+                        let outcome = match result {
+                            Ok(session) => {
+                                owner.sessions.lock().await.insert(session_id, session);
+                                Ok(())
+                            }
+                            Err(error) => Err(error.to_string()),
+                        };
+                        signal.result.send_replace(Some(outcome));
+                    });
+                    *initializer.task.lock().await = Some(task);
+                    entry.insert(initializer.clone());
+                    initializer
+                }
+            }
+        };
+        initializer.wait().await?;
+        if initializer.closing.load(Ordering::Acquire) {
+            return Err(AcpError::Cleanup("session is closing".to_string()));
+        }
+        self.sessions
+            .lock()
+            .await
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| AcpError::Cleanup("session closed during initialization".to_string()))
+    }
+
+    async fn build_session(
+        &self,
+        session_id: &str,
+        agent: Option<&str>,
+        requested_tools: &[String],
+        mcp_selection: &[McpToolSelection],
+        cancel: CancellationToken,
     ) -> Result<Arc<EngineSession>, AcpError> {
         {
             let pool = self.sessions.lock().await;
@@ -1230,6 +1315,8 @@ impl EngineTurnEngine {
 
         let output: Arc<dyn OutputSink> = Arc::new(RelaySink::new(relay.clone()));
         let mut bootstrap = AgentBootstrap::new(session_config.clone(), self.cwd.clone(), output)
+            .outbound_channels_only(true)
+            .session_cancel_token(cancel)
             .with_execution_policy(execution_policy)
             .with_approval_manager(approval_manager.clone())
             .tool_allowlist(narrow_tool_allowlist(persona_tools, requested_tools));
@@ -1242,38 +1329,59 @@ impl EngineTurnEngine {
             .map_err(|e| AcpError::Protocol(format!("engine bootstrap failed: {e}")))?;
         let mut engine = result.engine;
 
-        let provider_name = session_config.provider_label.clone();
-        engine
-            .init_session(&provider_name, &self.cwd, Some(session_id))
-            .map_err(|e| AcpError::Protocol(format!("engine init_session failed: {e}")))?;
-        engine.rebind_memory_session().await;
-        engine.run_session_start_hooks().await;
         // GHSA-8r7g M1 (wayland#497): bind the engine's ApprovalBridge so
         // bridge-backed gate frames on the ACP relay carry the secret
         // resume_token (parity with the stdin/TUI transports).
         let bridge = engine.approval_bridge().clone();
         engine.set_protocol_writer(Arc::new(RelayEmitter::new(relay.clone(), Some(bridge))));
 
-        let session = Arc::new(EngineSession::new(
+        let mut session = EngineSession::new(
             engine,
             approval_manager,
             relay,
             requested_tools.to_vec(),
             mcp_selection.to_vec(),
-        ));
-
-        let mut pool = self.sessions.lock().await;
-        // Another turn may have built the session concurrently; keep the
-        // first to preserve a single history.
-        let entry = pool
-            .entry(session_id.to_string())
-            .or_insert_with(|| session.clone());
-        Ok(entry.clone())
+        );
+        session.lifetime.root = Some(result.cancel_root);
+        session.lifetime.children = Some(result.host_children);
+        session.lifetime.mcp = result.mcp_managers;
+        #[cfg(test)]
+        {
+            session.lifetime.channels = Some(result.channel_manager.clone());
+            session.lifetime.inbound_started = result.inbound_subscriber.is_some()
+                || result.inbound_webhook.is_some()
+                || result.channel_poll_lease.is_some();
+        }
+        let session = Arc::new(session);
+        // Retain cleanup authority even if journal initialization/hooks fail.
+        self.sessions
+            .lock()
+            .await
+            .insert(session_id.to_string(), session.clone());
+        {
+            let mut engine = session.engine.lock().await;
+            engine
+                .init_session(&session_config.provider_label, &self.cwd, Some(session_id))
+                .map_err(|error| {
+                    AcpError::Protocol(format!("engine init_session failed: {error}"))
+                })?;
+            engine.rebind_memory_session().await;
+            engine.run_session_start_hooks().await;
+        }
+        Ok(session)
     }
 }
 
 #[async_trait]
 impl TurnEngine for EngineTurnEngine {
+    async fn request_close(&self, session_id: &str) -> Result<(), AcpError> {
+        self.signal_close(session_id).await;
+        Ok(())
+    }
+
+    async fn close_session(&self, session_id: &str) -> Result<(), AcpError> {
+        self.close_owned_session(session_id).await
+    }
     async fn run_turn(
         &self,
         req: TurnRequest,
@@ -1324,6 +1432,10 @@ impl TurnEngine for EngineTurnEngine {
                 "session not found: {session_id}"
             )));
         };
+
+        if session.lifetime.closing.load(Ordering::Acquire) {
+            return Err(AcpError::Cleanup("session is closing".to_string()));
+        }
 
         // Map the transport-neutral wire scope onto the real protocol scope.
         // This is the only place the two vocabularies meet (wcore-acp has no

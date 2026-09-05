@@ -31,6 +31,7 @@ struct HeldProvider {
     release: Semaphore,
     active: AtomicBool,
     completions: AtomicUsize,
+    entries: AtomicUsize,
 }
 
 impl HeldProvider {
@@ -40,6 +41,7 @@ impl HeldProvider {
             release: Semaphore::new(0),
             active: AtomicBool::new(false),
             completions: AtomicUsize::new(0),
+            entries: AtomicUsize::new(0),
         }
     }
 }
@@ -60,6 +62,7 @@ impl LlmProvider for HeldProvider {
         _request: &LlmRequest,
     ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
         self.active.store(true, Ordering::SeqCst);
+        self.entries.fetch_add(1, Ordering::SeqCst);
         let _active = ActiveCall(&self.active);
         self.entered.notify_one();
         let permit = self.release.acquire().await.expect("fixture stays open");
@@ -213,4 +216,57 @@ async fn open_session_control_completes_the_same_held_provider() {
         frames.last(),
         Some(MessageEvent::Done { stop_reason, .. }) if stop_reason == "end_turn"
     ));
+}
+
+#[tokio::test]
+async fn delete_cancels_a_queued_turn_before_it_reaches_the_provider() {
+    let workspace = tempfile::tempdir().expect("isolated workspace");
+    let provider = Arc::new(HeldProvider::new());
+    let server = server(provider.clone(), workspace.path());
+    let session_id = create_session(&server).await;
+    let first = server
+        .send_message(MessageSendRequest {
+            session_id: session_id.clone(),
+            text: "first".into(),
+            tools: Vec::new(),
+        })
+        .await
+        .expect("first turn");
+    timeout(TEST_DEADLINE, provider.entered.notified())
+        .await
+        .expect("first entered");
+    let queued = server
+        .send_message(MessageSendRequest {
+            session_id: session_id.clone(),
+            text: "queued".into(),
+            tools: Vec::new(),
+        })
+        .await
+        .expect("queued turn");
+    let deleted = timeout(CLOSE_DEADLINE, server.delete_session(session_id.clone())).await;
+    provider.release.add_permits(2);
+    let (first, queued): (Vec<_>, Vec<_>) = timeout(TEST_DEADLINE, async {
+        tokio::join!(first.collect(), queued.collect())
+    })
+    .await
+    .expect("both streams terminate");
+    deleted.expect("delete deadline").expect("delete");
+    assert_one_terminal(&first);
+    assert_one_terminal(&queued);
+    assert_eq!(
+        provider.entries.load(Ordering::SeqCst),
+        1,
+        "queued turn dispatched"
+    );
+    assert_eq!(provider.completions.load(Ordering::SeqCst), 0);
+    assert!(
+        server
+            .send_message(MessageSendRequest {
+                session_id,
+                text: "late".into(),
+                tools: Vec::new(),
+            })
+            .await
+            .is_err()
+    );
 }

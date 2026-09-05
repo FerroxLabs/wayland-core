@@ -49,7 +49,7 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// (or worse) for a server that has already been given up on. The transports
 /// bound their own internals too; this is the outer guarantee that no single
 /// misbehaving server can hold the connect phase past its own budget.
-const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+pub const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// `transport.close()` under [`CLOSE_TIMEOUT`], flattened to the same
 /// `Option<McpError>` shape the callers already handle. Elapsing is reported
@@ -983,7 +983,9 @@ impl McpManager {
         let Some(server) = self.servers.get(server_name) else {
             return Ok(false);
         };
-        server.transport.close().await?;
+        if let Some(error) = close_transport_bounded(server.transport.as_ref()).await {
+            return Err(error);
+        }
         Ok(true)
     }
 
@@ -1150,6 +1152,49 @@ mod tests {
     }
 
     struct CloseErrorTransport;
+
+    struct HungOnceClose(std::sync::atomic::AtomicBool);
+
+    #[async_trait]
+    impl McpTransport for HungOnceClose {
+        async fn request(&self, _: &JsonRpcRequest) -> Result<JsonRpcResponse, McpError> {
+            Err(McpError::Transport("unused request".into()))
+        }
+
+        async fn notify(&self, _: &JsonRpcRequest) -> Result<(), McpError> {
+            Ok(())
+        }
+
+        async fn close(&self) -> Result<(), McpError> {
+            if self.0.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                std::future::pending().await
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn close_server_timeout_retains_authority_for_retry() {
+        let manager = make_manager_with_servers(vec![(
+            "hung",
+            false,
+            Box::new(HungOnceClose(std::sync::atomic::AtomicBool::new(true))),
+        )]);
+        let error = manager
+            .close_server("hung")
+            .await
+            .expect_err("hung close must time out");
+        assert!(error.to_string().contains("transport close did not finish"));
+        assert!(manager.hosts_server("hung"));
+        assert!(manager.close_server("hung").await.expect("retry closes"));
+        assert!(
+            !manager
+                .close_server("missing")
+                .await
+                .expect("absent server")
+        );
+    }
 
     #[async_trait]
     impl McpTransport for CloseErrorTransport {

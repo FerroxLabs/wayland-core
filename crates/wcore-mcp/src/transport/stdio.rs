@@ -80,6 +80,8 @@ pub struct StdioTransport {
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>>,
     /// Background task draining the child's stdout.
     reader_task: Mutex<Option<JoinHandle<()>>>,
+    #[cfg(test)]
+    reader_join_started: Option<Arc<tokio::sync::Notify>>,
     /// Background task draining the child's stderr into the log.
     stderr_task: Mutex<Option<JoinHandle<()>>>,
     /// Cleared when the child is known dead (EOF, read error, or kill).
@@ -641,6 +643,8 @@ impl StdioTransport {
             next_id: AtomicU64::new(1),
             pending,
             reader_task: Mutex::new(Some(reader_task)),
+            #[cfg(test)]
+            reader_join_started: None,
             stderr_task: Mutex::new(Some(stderr_task)),
             alive,
             tools_changed,
@@ -1017,24 +1021,32 @@ impl McpTransport for StdioTransport {
         }
 
         // Join the background tasks so they don't leak (audit C9).
-        if let Some(handle) = self.reader_task.lock().await.take() {
-            // F33 — `timeout` consumes `handle`, so capture an abort handle
-            // first; otherwise the timeout arm only DROPS the JoinHandle
-            // (which detaches, not aborts) and the reader task leaks. This
-            // mirrors how `stderr_task` below aborts its handle.
-            let abort = handle.abort_handle();
-            match timeout(Duration::from_secs(1), handle).await {
+        let mut reader = self.reader_task.lock().await;
+        if let Some(handle) = reader.as_mut() {
+            #[cfg(test)]
+            if let Some(started) = &self.reader_join_started {
+                started.notify_one();
+            }
+            // Borrow the saved handle. An outer timeout drops only this
+            // borrow; retry/Drop still owns the live task until it is joined.
+            match timeout(Duration::from_secs(1), &mut *handle).await {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => warn!(error = %e, "[mcp] stdio reader join error"),
                 Err(_) => {
                     warn!("[mcp] stdio reader did not finish within 1s — aborting");
-                    abort.abort();
+                    handle.abort();
+                    let _ = handle.await;
                 }
             }
         }
-        if let Some(handle) = self.stderr_task.lock().await.take() {
+        reader.take();
+        drop(reader);
+        let mut stderr = self.stderr_task.lock().await;
+        if let Some(handle) = stderr.as_mut() {
             handle.abort();
+            let _ = handle.await;
         }
+        stderr.take();
         match deferred_error {
             Some(error) => Err(error),
             None => Ok(()),
@@ -1463,6 +1475,79 @@ mod tests {
         assert!(
             start.elapsed() < Duration::from_secs(2),
             "close must not hang"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_real_stdio_close_retains_reader_until_retry_joins_it() {
+        struct ReaderExit(Arc<AtomicBool>);
+        impl Drop for ReaderExit {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let mut transport =
+            StdioTransport::spawn("sh", &["-c".into(), "cat >/dev/null".into()], &no_env())
+                .await
+                .expect("real stdio child");
+        let join_started = Arc::new(tokio::sync::Notify::new());
+        transport.reader_join_started = Some(join_started.clone());
+        let transport = Arc::new(transport);
+        let exited = Arc::new(AtomicBool::new(false));
+        let original = transport
+            .reader_task
+            .lock()
+            .await
+            .take()
+            .expect("real reader");
+        let marker = exited.clone();
+        let reader_eof = Arc::new(tokio::sync::Notify::new());
+        let eof = reader_eof.clone();
+        // Preserve the real reader and child path, then hold its task open
+        // after EOF so the outer timeout cancels during the reader join.
+        let held = tokio::spawn(async move {
+            let _exit = ReaderExit(marker);
+            original.await.expect("real reader exits");
+            eof.notify_one();
+            std::future::pending::<()>().await;
+        });
+        let emergency_abort = held.abort_handle();
+        *transport.reader_task.lock().await = Some(held);
+        let owned_transport = transport.clone();
+        let closer = tokio::spawn(async move { owned_transport.close().await });
+        timeout(Duration::from_secs(3), join_started.notified())
+            .await
+            .expect("close claimed reader");
+        timeout(Duration::from_secs(3), reader_eof.notified())
+            .await
+            .expect("real pipe reader reached EOF before the held wrapper");
+        closer.abort();
+        assert!(
+            closer
+                .await
+                .expect_err("outer close cancelled")
+                .is_cancelled()
+        );
+        let retained = transport.reader_task.lock().await.is_some();
+        let live_before_retry = !exited.load(Ordering::SeqCst);
+        let retry = timeout(Duration::from_secs(3), transport.close()).await;
+        let joined_before_success = exited.load(Ordering::SeqCst);
+        let child_reaped = transport
+            .child
+            .lock()
+            .await
+            .try_wait()
+            .expect("child status")
+            .is_some();
+        emergency_abort.abort(); // Also contain the intentionally broken mutant.
+        assert!(
+            retained && live_before_retry,
+            "timeout must retain the live reader owner"
+        );
+        retry.expect("retry deadline").expect("retry cleanup");
+        assert!(
+            joined_before_success && child_reaped,
+            "success preceded reader join/child reap"
         );
     }
 

@@ -32,7 +32,7 @@ pub struct SseTransport {
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>>,
     next_id: AtomicU64,
     /// Handle to the background SSE listener task
-    _listener: tokio::task::JoinHandle<()>,
+    _listener: super::task::RetainedTask,
     /// Per-request timeout for the response `oneshot` (audit C6).
     request_timeout: std::time::Duration,
     /// Set by `close()` so a new `request()` fast-fails instead of parking
@@ -348,7 +348,7 @@ impl SseTransport {
             headers: header_map,
             pending,
             next_id: AtomicU64::new(1),
-            _listener: listener,
+            _listener: listener.into(),
             request_timeout,
             closed: AtomicBool::new(false),
             tools_changed,
@@ -471,6 +471,7 @@ impl McpTransport for SseTransport {
         // parking on a oneshot the aborted listener can never resolve (F26).
         self.closed.store(true, Ordering::SeqCst);
         self._listener.abort();
+        let _ = self._listener.join().await;
         // Drain the pending map and drop every parked sender so concurrently
         // parked `request()` futures wake immediately via their
         // `Ok(Err(_))` ("Response channel closed unexpectedly") arm, rather
@@ -613,7 +614,7 @@ mod tests {
             headers: reqwest::header::HeaderMap::new(),
             pending: Arc::new(Mutex::new(HashMap::new())),
             next_id: AtomicU64::new(1),
-            _listener: listener,
+            _listener: listener.into(),
             request_timeout: std::time::Duration::from_secs(1),
             closed: AtomicBool::new(false),
             tools_changed: Arc::new(AtomicBool::new(false)),
@@ -632,6 +633,32 @@ mod tests {
         assert!(listener.is_finished(), "listener fixture must have exited");
         let transport = transport_with_listener(listener);
         assert!(!transport.is_alive());
+    }
+
+    #[tokio::test]
+    async fn close_joins_sse_listener_before_reporting_success() {
+        struct Exited(Arc<AtomicBool>);
+        impl Drop for Exited {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let exited = Arc::new(AtomicBool::new(false));
+        let started = Arc::new(tokio::sync::Notify::new());
+        let marker = exited.clone();
+        let signal = started.clone();
+        let transport = transport_with_listener(tokio::spawn(async move {
+            let _exited = Exited(marker);
+            signal.notify_one();
+            std::future::pending::<()>().await;
+        }));
+        started.notified().await;
+        assert!(!exited.load(Ordering::SeqCst));
+        transport.close().await.expect("close");
+        assert!(
+            exited.load(Ordering::SeqCst),
+            "success must follow listener join"
+        );
     }
 
     /// Audit C6 — `SseTransport::request` must bound its wait on the response
@@ -687,7 +714,7 @@ mod tests {
             next_id: AtomicU64::new(1),
             // No-op listener: never delivers a `message`, so the response
             // oneshot for this request can only be resolved by the timeout.
-            _listener: tokio::spawn(async {}),
+            _listener: tokio::spawn(async {}).into(),
             request_timeout: Duration::from_millis(500),
             closed: std::sync::atomic::AtomicBool::new(false),
             tools_changed: Arc::new(AtomicBool::new(false)),
@@ -765,7 +792,7 @@ mod tests {
             headers: HeaderMap::new(),
             pending: Arc::new(Mutex::new(HashMap::new())),
             next_id: AtomicU64::new(1),
-            _listener: tokio::spawn(async {}),
+            _listener: tokio::spawn(async {}).into(),
             request_timeout: Duration::from_millis(500),
             closed: std::sync::atomic::AtomicBool::new(false),
             tools_changed: Arc::new(AtomicBool::new(false)),
@@ -858,7 +885,7 @@ mod tests {
             headers: HeaderMap::new(),
             pending,
             next_id: AtomicU64::new(1),
-            _listener: listener_task,
+            _listener: listener_task.into(),
             // A long request timeout: if the drain did NOT fail the request
             // fast, this test would hang for ~30s and the elapsed assert would
             // catch the regression.

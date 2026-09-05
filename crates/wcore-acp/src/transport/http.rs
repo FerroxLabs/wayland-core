@@ -359,6 +359,7 @@ impl<H: HttpHandler> AuthorizesMethods for H {
 
 fn status_for(err: &AcpError) -> StatusCode {
     match err {
+        AcpError::Cleanup(_) => StatusCode::SERVICE_UNAVAILABLE,
         AcpError::Auth(_) => StatusCode::UNAUTHORIZED,
         // 403, never 401. A 401 tells the client its credential was not
         // accepted and invites it to re-authenticate, which for a role refusal
@@ -378,6 +379,7 @@ fn status_for(err: &AcpError) -> StatusCode {
 
 fn code_for(err: &AcpError) -> ErrorCode {
     match err {
+        AcpError::Cleanup(_) => ErrorCode::InternalError,
         AcpError::Auth(_) => ErrorCode::AuthRequired,
         AcpError::Forbidden(_) => ErrorCode::Forbidden,
         AcpError::Agent(_) => ErrorCode::AgentNotFound,
@@ -395,7 +397,9 @@ impl IntoResponse for AcpHttpError {
         let body = JsonRpcError {
             code: code_for(&self.0).code(),
             message: self.0.to_string(),
-            data: None,
+            data: matches!(self.0, AcpError::Cleanup(_)).then(
+                || serde_json::json!({"kind": "session_cleanup_incomplete", "retryable": true}),
+            ),
         };
         (status, Json(body)).into_response()
     }

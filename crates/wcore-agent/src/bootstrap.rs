@@ -437,6 +437,8 @@ pub struct AgentBootstrap {
     /// built by `ChannelTurnDispatcher` so they don't re-register channels
     /// or recurse. Default `false`.
     without_channels: bool,
+    outbound_channels_only: bool,
+    session_cancel_token: Option<CancellationToken>,
     /// Phase 1B-2 — primary session entry points opt in to spawn the
     /// `InboundSubscriber` that turns inbound channel messages into agent
     /// turns. Off by default so per-session / sub-agent / ACP builds never
@@ -628,6 +630,8 @@ impl AgentBootstrap {
             plugin_provider_router: None,
             span_sink: None,
             without_channels: false,
+            outbound_channels_only: false,
+            session_cancel_token: None,
             enable_inbound_dispatch: false,
             channel_tool_posture: None,
             persona_tool_allowlist: None,
@@ -742,6 +746,20 @@ impl AgentBootstrap {
         self
     }
 
+    /// Keep configured outbound channels without starting a per-session
+    /// inbound poller, webhook listener or subscriber.
+    pub fn outbound_channels_only(mut self, enabled: bool) -> Self {
+        self.outbound_channels_only = enabled;
+        self
+    }
+
+    /// Use the host's cancellation token as the canonical session root from
+    /// the start of bootstrap. The existing runtime guard still owns it.
+    pub fn session_cancel_token(mut self, token: CancellationToken) -> Self {
+        self.session_cancel_token = Some(token);
+        self
+    }
+
     /// Waive the slow-MCP-dial notice for a surface that already covers this
     /// window itself. See [`AgentBootstrap::quiet_mcp_dial`] — there is one
     /// legitimate caller and a test that says so.
@@ -825,7 +843,7 @@ impl AgentBootstrap {
         // Mint the immutable session root before any child-capable tools are
         // built. The budget watcher is attached later, after engine creation,
         // but the spawner and engine then share this exact token lineage.
-        let session_cancel_root = CancellationToken::new();
+        let session_cancel_root = self.session_cancel_token.take().unwrap_or_default();
         let mut session_guard = SessionRuntimeGuard::new(session_cancel_root);
         let session_runtime = session_guard.observer();
         let cancel_root = session_guard.control();
@@ -3957,7 +3975,7 @@ impl AgentBootstrap {
             // Phase 1B-2 — spawn the inbound subscriber BEFORE start_all so no
             // early inbound event is dropped by the broadcast. Only when the
             // caller opted in via `enable_inbound_dispatch`.
-            inbound_subscriber = if self.enable_inbound_dispatch {
+            inbound_subscriber = if self.enable_inbound_dispatch && !self.outbound_channels_only {
                 // Load each channel's config ONCE, then derive two maps from
                 // it: the per-channel access policy (for the subscriber) and
                 // the per-channel tool posture (for the dispatcher's
@@ -4092,76 +4110,83 @@ impl AgentBootstrap {
             //
             // An observer still gets a fully working session and can still SEND;
             // it just does not poll. It says so loudly — see `channel_lease`.
-            let poll_lease = crate::channel_lease::attempt(
-                &wcore_config::config::wayland_config_dir(),
-                "session",
-            );
+            if self.outbound_channels_only {
+                channel_poll_lease = None;
+                inbound_webhook = None;
+            } else {
+                let poll_lease = crate::channel_lease::attempt(
+                    &wcore_config::config::wayland_config_dir(),
+                    "session",
+                );
 
-            if poll_lease.is_owner() {
-                // Call start_all to arm inbound poll tasks (now that the
-                // subscriber is listening). Best-effort: if start_all returns an
-                // error we warn and continue (session still works, channels just
-                // won't deliver inbound messages).
-                if let Err(e) = lifted.write().await.start_all().await {
-                    tracing::warn!(
-                        target: "wcore_agent::bootstrap",
-                        error = %e,
-                        "F-014: channel_manager.start_all() failed; inbound polling may be partial"
-                    );
+                if poll_lease.is_owner() {
+                    // Call start_all to arm inbound poll tasks (now that the
+                    // subscriber is listening). Best-effort: if start_all returns an
+                    // error we warn and continue (session still works, channels just
+                    // won't deliver inbound messages).
+                    if let Err(e) = lifted.write().await.start_all().await {
+                        tracing::warn!(
+                            target: "wcore_agent::bootstrap",
+                            error = %e,
+                            "F-014: channel_manager.start_all() failed; inbound polling may be partial"
+                        );
+                    } else {
+                        tracing::info!(
+                            target: "wcore_agent::bootstrap",
+                            "F-014: channel_manager.start_all() complete — inbound polling active"
+                        );
+                    }
                 } else {
                     tracing::info!(
                         target: "wcore_agent::bootstrap",
-                        "F-014: channel_manager.start_all() complete — inbound polling active"
+                        owner_pid = ?poll_lease.owner_pid(),
+                        "F24-CL: another process owns inbound polling; start_all NOT called"
                     );
                 }
-            } else {
-                tracing::info!(
-                    target: "wcore_agent::bootstrap",
-                    owner_pid = ?poll_lease.owner_pid(),
-                    "F24-CL: another process owns inbound polling; start_all NOT called"
-                );
-            }
-            // F24-CS. Supervise the role for the session's lifetime rather than
-            // deciding it once here.
-            //
-            // Deciding once was first-come, and first-come made the INSTALLED
-            // SERVICE the observer whenever a session happened to start first —
-            // for as long as that session lived. A session is transient and the
-            // service is the always-on role the user installed, so the session
-            // stands down when the service claims, and takes over again if the
-            // service goes away. `session` is the lowest rank, so this process
-            // preempts nobody.
-            channel_poll_lease = Some(crate::channel_lease::ChannelPollSupervisor::spawn(
-                &wcore_config::config::wayland_config_dir(),
-                "session",
-                poll_lease,
-                crate::channel_lease::ChannelManagerPollControl::new(std::sync::Arc::clone(
-                    &lifted,
-                )),
-            ));
+                // F24-CS. Supervise the role for the session's lifetime rather than
+                // deciding it once here.
+                //
+                // Deciding once was first-come, and first-come made the INSTALLED
+                // SERVICE the observer whenever a session happened to start first —
+                // for as long as that session lived. A session is transient and the
+                // service is the always-on role the user installed, so the session
+                // stands down when the service claims, and takes over again if the
+                // service goes away. `session` is the lowest rank, so this process
+                // preempts nobody.
+                channel_poll_lease = Some(crate::channel_lease::ChannelPollSupervisor::spawn(
+                    &wcore_config::config::wayland_config_dir(),
+                    "session",
+                    poll_lease,
+                    crate::channel_lease::ChannelManagerPollControl::new(std::sync::Arc::clone(
+                        &lifted,
+                    )),
+                ));
 
-            // Inbound webhook host — when enabled, bind an HTTP listener that
-            // routes platform webhook POSTs (Slack / WhatsApp / Twilio SMS /
-            // MS Teams) to each channel's authenticating `ingest_webhook`. Off
-            // by default. The host holds no per-platform allow-list: it routes
-            // `/webhooks/:channel` by name, and safety comes from the trait
-            // default, which returns `Rejected` so a connector that has NOT
-            // implemented an authenticated ingest is never exposed.
-            //
-            // msteams DOES implement one (Bot Framework JWT: signature,
-            // issuer, audience, expiry, plus a serviceUrl claim/Activity
-            // binding), so it is exposed and authenticated. This comment
-            // previously said the opposite; the regression test that pins it is
-            // `manager_dispatch_reaches_msteams_authenticated_ingest_not_the_default_impl`
-            // in `wcore-channel-msteams`.
-            inbound_webhook =
-                crate::inbound_webhook::spawn(std::sync::Arc::clone(&lifted), &inbound_webhook_cfg);
-            if inbound_webhook.is_some() {
-                tracing::info!(
-                    target: "wcore_agent::bootstrap",
-                    bind = %inbound_webhook_cfg.bind,
-                    "inbound webhook host listening"
+                // Inbound webhook host — when enabled, bind an HTTP listener that
+                // routes platform webhook POSTs (Slack / WhatsApp / Twilio SMS /
+                // MS Teams) to each channel's authenticating `ingest_webhook`. Off
+                // by default. The host holds no per-platform allow-list: it routes
+                // `/webhooks/:channel` by name, and safety comes from the trait
+                // default, which returns `Rejected` so a connector that has NOT
+                // implemented an authenticated ingest is never exposed.
+                //
+                // msteams DOES implement one (Bot Framework JWT: signature,
+                // issuer, audience, expiry, plus a serviceUrl claim/Activity
+                // binding), so it is exposed and authenticated. This comment
+                // previously said the opposite; the regression test that pins it is
+                // `manager_dispatch_reaches_msteams_authenticated_ingest_not_the_default_impl`
+                // in `wcore-channel-msteams`.
+                inbound_webhook = crate::inbound_webhook::spawn(
+                    std::sync::Arc::clone(&lifted),
+                    &inbound_webhook_cfg,
                 );
+                if inbound_webhook.is_some() {
+                    tracing::info!(
+                        target: "wcore_agent::bootstrap",
+                        bind = %inbound_webhook_cfg.bind,
+                        "inbound webhook host listening"
+                    );
+                }
             }
 
             // FleetDispatcher-class fix (audit 2026-05-24): SendMessageTool was

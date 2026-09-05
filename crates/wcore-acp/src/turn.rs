@@ -114,6 +114,21 @@ pub struct TurnRequest {
 ///     | `refusal` | `cancelled`), OR `Error { error }`. Nothing after it.
 #[async_trait]
 pub trait TurnEngine: Send + Sync {
+    /// Signal owned initialization/turn cancellation without waiting for their
+    /// completion. The server invokes this before draining request admission.
+    async fn request_close(&self, _session_id: &str) -> Result<(), AcpError> {
+        Ok(())
+    }
+
+    /// Close admission, cancel and join owned work, preserve durable recovery,
+    /// and release this session's resources before returning success. A failed
+    /// close must remain closed to new work and permit a cleanup retry.
+    async fn close_session(&self, _session_id: &str) -> Result<(), AcpError> {
+        Err(AcpError::Cleanup(
+            "session cleanup is not supported by this engine".to_string(),
+        ))
+    }
+
     /// Run one prompt turn. The returned stream MUST end with exactly one
     /// terminal [`MessageEvent`] (`Done` or `Error`) and emit nothing after
     /// it. An `Err` here is reserved for failures that happen BEFORE the
