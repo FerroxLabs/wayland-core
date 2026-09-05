@@ -1,6 +1,6 @@
 use super::*;
 use futures::StreamExt;
-use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 use tokio::sync::{Notify, Semaphore, mpsc};
 use wcore_acp::protocol::{MessageSendRequest, SessionCreateRequest};
@@ -337,54 +337,30 @@ async fn failed_initializer_retires_join_handle_before_cleanup_retry() {
     );
 }
 
-struct HeldChildProvider {
-    calls: AtomicUsize,
-    entered: Notify,
-    release: Semaphore,
-    active: AtomicBool,
-}
-struct ChildCallGuard<'a>(&'a AtomicBool);
-impl Drop for ChildCallGuard<'_> {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::SeqCst);
-    }
-}
-#[async_trait]
-impl wcore_providers::LlmProvider for HeldChildProvider {
-    async fn stream(
-        &self,
-        _: &LlmRequest,
-    ) -> Result<mpsc::Receiver<LlmEvent>, wcore_providers::ProviderError> {
-        if self.calls.fetch_add(1, Ordering::SeqCst) > 0 {
-            self.active.store(true, Ordering::SeqCst);
-            let _active = ChildCallGuard(&self.active);
-            self.entered.notify_one();
-            self.release.acquire().await.unwrap().forget();
-        }
-        let (tx, rx) = mpsc::channel(2);
-        tx.try_send(LlmEvent::TextDelta("child fixture control".into()))
-            .unwrap();
-        tx.try_send(LlmEvent::Done {
-            stop_reason: wcore_types::message::StopReason::EndTurn,
-            finish_reason: FinishReason::Stop,
-            usage: wcore_types::message::TokenUsage::default(),
-        })
-        .unwrap();
-        Ok(rx)
-    }
-}
+#[path = "../../tests/support/mock_llm.rs"]
+mod child_mock_llm;
 
 #[tokio::test]
 async fn close_waits_for_canonical_host_child_cancellation_and_parent_lease_release() {
     let workspace = tempfile::tempdir().unwrap();
-    let provider = Arc::new(HeldChildProvider {
-        calls: AtomicUsize::new(0),
-        entered: Notify::new(),
-        release: Semaphore::new(0),
-        active: AtomicBool::new(false),
-    });
+    let mock = child_mock_llm::MockLlm::new()
+        .text("child fixture control")
+        .slow_text("child must not complete normally", 60_000)
+        .start()
+        .await;
+    let provider = Arc::new(
+        wcore_providers::anthropic::AnthropicProvider::new(
+            "fixture-not-real",
+            &mock.uri(),
+            wcore_config::compat::ProviderCompat::anthropic_defaults(),
+            wcore_config::debug::DebugConfig::default(),
+        )
+        .with_cache(false),
+    );
     let mut config = Config {
-        model: "lifecycle-fixture".into(),
+        model: "claude-mock".into(),
+        api_key: "fixture-not-real".into(),
+        base_url: mock.uri(),
         ..Default::default()
     };
     config.compat = toml::from_str("cost_is_known_free = true").unwrap();
@@ -400,20 +376,24 @@ async fn close_waits_for_canonical_host_child_cancellation_and_parent_lease_rele
     let engine = Arc::new(EngineTurnEngine::with_provider(
         config,
         workspace.path().to_string_lossy().into_owned(),
-        provider.clone(),
+        provider,
     ));
     let server = AcpServer::new().with_turn_engine(engine.clone());
     let id = create(&server).await;
-    let frames = server
-        .send_message(MessageSendRequest {
-            session_id: id.clone(),
-            text: "parent control".into(),
-            tools: vec![],
-        })
-        .await
-        .unwrap()
-        .collect::<Vec<_>>()
-        .await;
+    let frames = tokio::time::timeout(Duration::from_secs(20), async {
+        server
+            .send_message(MessageSendRequest {
+                session_id: id.clone(),
+                text: "parent control".into(),
+                tools: vec![],
+            })
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await
+    })
+    .await
+    .expect("parent control deadline");
     assert!(frames.iter().any(|event| matches!(event, MessageEvent::TextDelta { text } if text.contains("child fixture control"))), "{frames:?}");
     let children = engine
         .sessions
@@ -439,38 +419,49 @@ async fn close_waits_for_canonical_host_child_cancellation_and_parent_lease_rele
             })
             .await
     });
-    let entered = tokio::time::timeout(Duration::from_secs(20), provider.entered.notified()).await;
-    if entered.is_err() {
-        provider.release.add_permits(1);
-        let result = task.await.unwrap();
-        panic!("child did not reach controlled provider: {result:?}");
+    let entered = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if mock.received_requests().await.unwrap().len() >= 2 {
+                return true;
+            }
+            if task.is_finished() {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap_or(false);
+    if !entered {
+        task.abort();
+        let result = task.await;
+        let _ = server.delete_session(id).await;
+        panic!("child did not reach the real controlled provider: {result:?}");
     }
-    assert!(
-        provider.active.load(Ordering::SeqCst),
-        "positive child execution control"
-    );
     let result =
         tokio::time::timeout(Duration::from_secs(10), server.delete_session(id.clone())).await;
-    let active_at_ack = provider.active.load(Ordering::SeqCst);
     let joined_at_ack = task.is_finished();
     let lease = wcore_agent::session_journal::SessionJournal::open(
         session_directory.join(format!("{id}.journal")),
         id,
     );
-    provider.release.add_permits(1);
+    if !joined_at_ack {
+        task.abort();
+    }
     let child_result = tokio::time::timeout(Duration::from_secs(5), task)
         .await
-        .unwrap()
         .unwrap();
     result
         .expect("close deadline")
         .expect("cooperative child cleanup must converge in the same close");
     assert!(
-        !active_at_ack && joined_at_ack,
+        joined_at_ack,
         "close acknowledged before child execution joined"
     );
     assert!(
-        child_result.is_error,
+        child_result
+            .expect("child finished without test backstop")
+            .is_error,
         "cancelled child returned a normal completion"
     );
     lease.expect("parent writer lease released at close acknowledgment");
