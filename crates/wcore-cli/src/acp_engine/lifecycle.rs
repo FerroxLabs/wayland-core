@@ -119,15 +119,25 @@ impl EngineSession {
                         .request_cancel(&child.child_id)
                         .map_err(|error| AcpError::Cleanup(error.to_string()))?;
                 }
-                if supervisor
-                    .list()
-                    .map_err(|error| AcpError::Cleanup(error.to_string()))?
-                    .iter()
-                    .any(|child| !child.status.is_terminal())
-                {
-                    return Err(AcpError::Cleanup(
-                        "child cancellation has not completed".into(),
-                    ));
+                // Cancellation is cooperative. Give the child executor time to
+                // publish its terminal outcome before judging cleanup incomplete.
+                // Keep the session owner on timeout so DELETE can retry safely.
+                let child_deadline = tokio::time::Instant::now() + CANCEL_GRACE;
+                loop {
+                    if supervisor
+                        .list()
+                        .map_err(|error| AcpError::Cleanup(error.to_string()))?
+                        .iter()
+                        .all(|child| child.status.is_terminal())
+                    {
+                        break;
+                    }
+                    if tokio::time::Instant::now() >= child_deadline {
+                        return Err(AcpError::Cleanup(
+                            "child cancellation has not completed".into(),
+                        ));
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
                 }
             }
         }
