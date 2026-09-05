@@ -69,6 +69,11 @@ async fn w02_successful_bootstrap_delete_reaps_loaded_plugin() {
 }
 
 #[tokio::test]
+async fn w02_failed_plugin_handshake_keeps_cleanup_owner() {
+    run_child("handshake_failure").await;
+}
+
+#[tokio::test]
 async fn bootstrap_child() {
     let Ok(mode) = std::env::var("W02_BOOTSTRAP_CHILD") else {
         return;
@@ -82,6 +87,9 @@ async fn bootstrap_child() {
     std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
     // Trust is granted only inside this child process's private fixture home.
     std::fs::write(config_path, "plugin_signature_verification = false\n").unwrap();
+    if mode == "handshake_failure" {
+        std::fs::write(root.join("reject-init"), "fixture").unwrap();
+    }
     let script = plugin_dir.join("fixture");
     std::fs::write(
         &script,
@@ -93,11 +101,16 @@ for line in sys.stdin:
     request = json.loads(line)
     verb = request['verb']
     if verb == 'init':
-        body = {'kind':'init_result', 'manifest_version':'1', 'capabilities':[]}
+        if (root / 'reject-init').exists():
+            (root / 'plugin-init-refused').write_text('real handshake refusal')
+            body = {'kind':'error', 'code':'fixture_init', 'message':'fixture refusal'}
+        else:
+            body = {'kind':'init_result', 'manifest_version':'1', 'capabilities':[]}
     elif verb == 'list_tools':
         (root / 'plugin-initialized').write_text('handshake completed')
         body = {'kind':'tools_list', 'tools':[]}
     elif verb == 'shutdown':
+        (root / 'plugin-shutdown').write_text('cleanup requested')
         body = {'kind':'ack'}
     else:
         raise RuntimeError('unexpected fixture verb')
@@ -133,7 +146,7 @@ args = [{}]
     };
     config.session.enabled = false;
     config.memory.enabled = false;
-    if mode == "failure" {
+    if mode != "control" {
         // Actual fallible bootstrap step AFTER on-disk runtime initialization.
         config.provider_chain.enabled = true;
         config.provider_chain.fallback_models = vec!["unresolved-fixture-model".into()];
@@ -165,7 +178,7 @@ args = [{}]
     )
     .await
     .expect("bootstrap deadline");
-    if mode == "failure" {
+    if mode != "control" {
         let error = match send {
             Ok(_) => panic!("invalid fallback configuration was accepted"),
             Err(error) => error,
@@ -183,9 +196,14 @@ args = [{}]
                 .unwrap();
         assert!(frames.iter().any(|event| matches!(event, MessageEvent::TextDelta { text } if text == "bootstrap control")), "{frames:?}");
     }
+    let initialized = if mode == "handshake_failure" {
+        "plugin-init-refused"
+    } else {
+        "plugin-initialized"
+    };
     assert!(
-        root.join("plugin-initialized").exists(),
-        "positive control: plugin must actually initialize before the tested failure/close"
+        root.join(initialized).exists(),
+        "positive control: real plugin handshake must reach the intended outcome"
     );
     let pid: i32 = std::fs::read_to_string(root.join("plugin.pid"))
         .unwrap()
@@ -204,4 +222,10 @@ args = [{}]
         "plugin PID remains after close acknowledgment: {pid}"
     );
     assert!(server.get_session(id).await.is_err());
+    if mode == "handshake_failure" {
+        assert!(
+            root.join("plugin-shutdown").exists(),
+            "failed handshake discarded the handle before cooperative shutdown could run"
+        );
+    }
 }
