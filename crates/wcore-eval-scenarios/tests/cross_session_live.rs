@@ -52,17 +52,19 @@ async fn memory_recall_across_sessions() {
         .turn(Turn::new(format!(
             "Please remember my project code for future conversations: {fact}. Briefly confirm you have stored it."
         )).max_time(Duration::from_secs(120)));
-    let recall = Scenario::new("xsession_recall", Category::Multiturn)
-        .max_total_time(Duration::from_secs(150))
-        .turn(
-            Turn::new("What is my project code? Answer with the code only.")
-                .max_time(Duration::from_secs(120)),
-        );
+    let recall = || {
+        Scenario::new("xsession_recall", Category::Multiturn)
+            .max_total_time(Duration::from_secs(150))
+            .turn(
+                Turn::new("What is my project code? Answer with the code only.")
+                    .max_time(Duration::from_secs(120)),
+            )
+    };
     // This call owns a separate home and has never been told the fact.
-    let control = run_cross_session(&[recall.clone()], &provider)
+    let control = run_cross_session(&[recall()], &provider)
         .await
         .expect("clean-home recall control must execute");
-    let results = run_cross_session(&[store, recall], &provider)
+    let results = run_cross_session(&[store, recall()], &provider)
         .await
         .expect("cross-session run should complete (plumbing must not error)");
 
