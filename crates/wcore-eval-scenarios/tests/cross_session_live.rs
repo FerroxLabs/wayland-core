@@ -6,10 +6,9 @@
 //! sessions. If it doesn't, that FAIL is the valuable proof of the v2
 //! memory-recall gap (stored but never re-injected into the prompt).
 //!
-//! Like `live_personas`, this is `#[ignore]`'d (it costs money, needs the
-//! network, and needs a pre-built binary) and is a REPORT, not a hard gate: a
-//! recall MISS is printed as data, not asserted into a red test — the harness's
-//! job is to surface the engine's real behavior, not to pretend recall works.
+//! Like `live_personas`, this is `#[ignore]`d because it costs money and needs
+//! a pre-built binary. Explicit execution is acceptance: missing credentials,
+//! failed recall and a contaminated clean-home control fail after reporting.
 //!
 //! ```text
 //! WAYLAND_ALLOW_NO_SANDBOX=1 \
@@ -22,20 +21,17 @@
 use std::time::Duration;
 
 use wcore_eval_scenarios::providers::{ProviderConfig, ProviderId};
+use wcore_eval_scenarios::run_cross_session;
 use wcore_eval_scenarios::runner::discover_binary;
 use wcore_eval_scenarios::scenario::{Category, Scenario, Turn};
-use wcore_eval_scenarios::{Assertion, run_cross_session};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: two real wayland-core sessions vs real DeepSeek (costs money, needs DEEPSEEK_API_KEY + a pre-built binary)"]
 async fn memory_recall_across_sessions() {
-    if std::env::var("DEEPSEEK_API_KEY").is_err() {
-        eprintln!(
-            "SKIP memory_recall_across_sessions: DEEPSEEK_API_KEY is not set. \
-             Set it (and pre-build the binary) to run the cross-session keystone."
-        );
-        return;
-    }
+    assert!(
+        std::env::var("DEEPSEEK_API_KEY").is_ok_and(|key| !key.trim().is_empty()),
+        "DEEPSEEK_API_KEY is required for explicitly selected recall acceptance"
+    );
     match discover_binary() {
         Ok(p) => eprintln!(
             "memory_recall_across_sessions: using binary at {}",
@@ -49,30 +45,23 @@ async fn memory_recall_across_sessions() {
 
     let provider = ProviderConfig::new(ProviderId::DeepSeek, "deepseek-v4-pro");
 
-    // Session 1: state a memorable, unambiguous fact and ask for a plain
-    // acknowledgement. The fact must land in a CROSS-session tier (project /
-    // global), which the dream cycle consolidates at session-end (un-throttled
-    // by the D4 config).
+    // The random fact cannot be guessed from the question or an earlier run.
+    let fact = format!("wcore-{:032x}", rand::random::<u128>());
     let store = Scenario::new("xsession_store", Category::Multiturn)
         .max_total_time(Duration::from_secs(150))
-        .turn(
-            Turn::new(
-                "Please remember this about me for future conversations: my \
-                 favorite color is teal. Just briefly confirm you've noted it.",
-            )
-            .max_time(Duration::from_secs(120)),
-        );
-
-    // Session 2: a FRESH process (same home). No in-context history — the only
-    // way to answer is genuine recall from persisted memory.
+        .turn(Turn::new(format!(
+            "Please remember my project code for future conversations: {fact}. Briefly confirm you have stored it."
+        )).max_time(Duration::from_secs(120)));
     let recall = Scenario::new("xsession_recall", Category::Multiturn)
         .max_total_time(Duration::from_secs(150))
         .turn(
-            Turn::new("What is my favorite color? Answer in a single word.")
-                .max_time(Duration::from_secs(120))
-                .assert(Assertion::ContainsAny(vec!["teal", "Teal", "TEAL"])),
+            Turn::new("What is my project code? Answer with the code only.")
+                .max_time(Duration::from_secs(120)),
         );
-
+    // This call owns a separate home and has never been told the fact.
+    let control = run_cross_session(&[recall.clone()], &provider)
+        .await
+        .expect("clean-home recall control must execute");
     let results = run_cross_session(&[store, recall], &provider)
         .await
         .expect("cross-session run should complete (plumbing must not error)");
@@ -111,25 +100,28 @@ async fn memory_recall_across_sessions() {
         .iter()
         .find(|r| r.name == "xsession_recall")
         .expect("recall session must be present");
-    if recall_result.passed {
-        eprintln!(
-            "\n  ✅ RECALL WORKS: session 2 recovered 'teal' from persisted memory \
-             across a cold process boundary."
-        );
-    } else {
-        eprintln!(
-            "\n  ⚠️  RECALL MISS: session 2 did NOT recall 'teal'. This is the \
-             expected v2 memory-recall gap (facts are stored but not re-injected \
-             into a fresh session's prompt). Captured as data — see the reply + \
-             stderr above. NOT failing the test; the keystone's job is to surface \
-             the gap, not pretend recall already works."
-        );
-    }
-    eprintln!("====================================================\n");
-
-    // The test passes as long as the cross-session run COMPLETED. Recall
-    // pass/fail is the finding, reported above — not a red test.
+    let recalled = recall_result.passed && recall_result.final_text.contains(&fact);
+    eprintln!("Recall recovered stored random fact: {recalled}");
+    eprintln!("Clean-home control: {control:?}");
+    assert_eq!(
+        control.len(),
+        1,
+        "clean-home control must execute exactly once"
+    );
+    assert!(control[0].passed, "clean-home control runner failed");
+    assert!(
+        !control[0].final_text.contains(&fact),
+        "fact leaked into a clean home"
+    );
     assert_eq!(results.len(), 2, "both sessions must have run");
+    assert!(
+        results.iter().all(|result| result.passed),
+        "store/recall runner failed"
+    );
+    assert!(
+        recalled,
+        "fresh session did not recall the stored random fact"
+    );
 }
 
 /// Zero-execution guard — and it has to RUN to be one.

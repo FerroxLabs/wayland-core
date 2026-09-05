@@ -119,7 +119,8 @@ async fn test_anthropic_tool_use() {
 
     // Write a temp file to read
     let tmp = tempfile::NamedTempFile::new().expect("tempfile");
-    std::fs::write(tmp.path(), "e2e-test-content-42").expect("write tempfile");
+    let sentinel = format!("e2e-read-{}", uuid::Uuid::new_v4());
+    std::fs::write(tmp.path(), &sentinel).expect("write tempfile");
     let path = tmp.path().to_string_lossy().to_string();
 
     let config = anthropic_config(&api_key);
@@ -143,11 +144,11 @@ async fn test_anthropic_tool_use() {
     assert!(
         live_acceptance::successful_read_answer(
             &result.text,
-            "e2e-test-content-42",
+            &sentinel,
             result.turns as usize,
-            false,
+            live_acceptance::observed_read(engine.conversation_messages(), &path, &sentinel),
         ),
-        "model should either echo the content or have used multiple turns (tool call): {}",
+        "model must return the random content after a successful Read: {}",
         result.text
     );
 

@@ -116,7 +116,8 @@ async fn test_openai_tool_use() {
     );
 
     let tmp = tempfile::NamedTempFile::new().expect("tempfile");
-    std::fs::write(tmp.path(), "e2e-openai-content-99").expect("write tempfile");
+    let sentinel = format!("e2e-read-{}", uuid::Uuid::new_v4());
+    std::fs::write(tmp.path(), &sentinel).expect("write tempfile");
     let path = tmp.path().to_string_lossy().to_string();
 
     let config = openai_config(&api_key);
@@ -139,11 +140,11 @@ async fn test_openai_tool_use() {
     assert!(
         live_acceptance::successful_read_answer(
             &result.text,
-            "e2e-openai-content-99",
+            &sentinel,
             result.turns as usize,
-            false,
+            live_acceptance::observed_read(engine.conversation_messages(), &path, &sentinel),
         ),
-        "model should echo the content or use multiple turns: {}",
+        "model must return the random content after a successful Read: {}",
         result.text
     );
 

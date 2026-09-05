@@ -155,3 +155,44 @@ fn guessed_text_without_a_read_is_not_tool_success() {
         true
     ));
 }
+
+#[test]
+fn read_receipt_must_match_the_requested_file_and_successful_call() {
+    use wcore_types::message::{ContentBlock, Message, Role};
+    let call = Message::now(
+        Role::Assistant,
+        vec![ContentBlock::ToolUse {
+            id: "read-1".into(),
+            name: "Read".into(),
+            input: serde_json::json!({"file_path": "fixture.txt"}),
+            extra: None,
+        }],
+    );
+    for (id, failed, content, accepted) in [
+        ("read-1", false, "random fixture secret", true),
+        ("other-call", false, "random fixture secret", false),
+        ("read-1", true, "random fixture secret", false),
+        ("read-1", false, "unrelated output", false),
+    ] {
+        let messages = [
+            call.clone(),
+            Message::now(
+                Role::User,
+                vec![ContentBlock::ToolResult {
+                    tool_use_id: id.into(),
+                    content: content.into(),
+                    is_error: failed,
+                }],
+            ),
+        ];
+        assert_eq!(
+            live_acceptance::observed_read(&messages, "fixture.txt", "random fixture secret"),
+            accepted
+        );
+        assert!(!live_acceptance::observed_read(
+            &messages,
+            "different.txt",
+            "random fixture secret"
+        ));
+    }
+}

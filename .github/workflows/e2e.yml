@@ -71,7 +71,7 @@ jobs:
             features: live-anthropic
           - provider: openai
             secret_name: OPENAI_API_KEY
-            filter: "test(openai)"
+            filter: "test(openai) | test(compaction)"
             features: live-openai
 
     steps:
@@ -146,6 +146,37 @@ jobs:
         with:
           tool: nextest
 
+      - name: Verify selected E2E cases
+        if: steps.filter.outputs.run == 'true'
+        env:
+          E2E_PROVIDER: ${{ matrix.provider }}
+        run: |
+          vx cargo nextest list --locked -p wcore-agent --features ${{ matrix.features }} \
+            --test e2e -E '${{ matrix.filter }}' --message-format json > e2e-selection.json
+          python3 - <<'PYCODE'
+          import json, os
+          selected = json.load(open("e2e-selection.json"))
+          names = {
+              name
+              for suite in selected["rust-suites"].values()
+              for name, case in suite["testcases"].items()
+              if case["filter-match"]["status"] == "matches"
+          }
+          provider = os.environ["E2E_PROVIDER"]
+          required = {
+              f"{provider}::test_{provider}_single_turn_completion",
+              f"{provider}::test_{provider}_tool_use",
+          }
+          if provider == "openai":
+              required |= {
+                  "compaction::case_9_off_vs_safe_content",
+                  "compaction::case_10_off_vs_full_token_savings",
+                  "compaction::case_11_toon_comprehension_and_system_prompt",
+              }
+          assert required <= names, f"Required E2E cases missing: {sorted(required - names)}"
+          print("Selected E2E cases:", *sorted(names), sep="\n")
+          PYCODE
+
       - name: Run E2E tests — ${{ matrix.provider }}
         if: steps.filter.outputs.run == 'true'
         env:
@@ -175,6 +206,7 @@ jobs:
             --profile e2e \
             --test e2e \
             -E '${{ matrix.filter }}' \
+            --retries 0 --no-tests=fail \
             --no-fail-fast
 
       - name: Upload E2E JUnit report
