@@ -572,6 +572,33 @@ mod tests {
     }
 
     #[test]
+    fn store_records_secure_login_even_when_orphan_cleanup_fails() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("oauth");
+        let (store, secure) = store_at(root.clone());
+        let legacy = store.path_for("chatgpt");
+        std::fs::write(&legacy, serde_json::to_vec(&make_tokens()).unwrap()).unwrap();
+        let orphan = legacy.with_extension("json.tmp");
+        std::fs::create_dir(&orphan).unwrap();
+        std::fs::write(orphan.join("retained"), "fixture-refresh-token").unwrap();
+        assert!(store.store("chatgpt", &make_tokens()).is_err());
+        assert!(secure.get(&oauth_tokens_key("chatgpt")).unwrap().is_some());
+        assert!(!legacy.exists());
+        assert!(
+            store.login_record_path("chatgpt").exists(),
+            "verified secure login needs its marker despite cleanup failure"
+        );
+        let locked = OAuthStorage::at_root(root, Box::new(RefusesWrites)).unwrap();
+        assert!(
+            matches!(
+                locked.load("chatgpt"),
+                Err(OAuthStorageError::SecureStoreUnavailable { .. })
+            ),
+            "unavailable secure login must not become a false never-signed-in result"
+        );
+    }
+
+    #[test]
     fn delete_reports_orphan_failure_and_retry_removes_retained_material() {
         let tmp = TempDir::new().unwrap();
         let (store, secure) = store_at(tmp.path().join("oauth"));
