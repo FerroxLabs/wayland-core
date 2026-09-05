@@ -150,6 +150,7 @@ fn load_doc(config_path: &std::path::Path) -> Result<Table> {
     let body = std::fs::read_to_string(config_path)
         .with_context(|| format!("reading config at {}", config_path.display()))?;
     toml::from_str::<Table>(&body)
+        .map_err(wcore_config::credentials::CredentialsError::from)
         .with_context(|| format!("parsing config at {}", config_path.display()))
 }
 
@@ -201,6 +202,7 @@ fn credentials_store(
         .cloned()
         .map(toml::Value::try_into)
         .transpose()
+        .map_err(wcore_config::credentials::CredentialsError::from)
         .context("parsing [storage.credentials]")?
         .unwrap_or_default();
     let store_path = config_path.with_file_name("credentials.toml");
