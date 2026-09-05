@@ -341,6 +341,83 @@ async fn mismatched_execution_evidence_fails_before_write_or_execution() {
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelled_record_waits_for_execution_resource_retirement() {
+    struct HeldResource {
+        dropping: Arc<Notify>,
+        release: std::sync::mpsc::Receiver<()>,
+    }
+    impl Drop for HeldResource {
+        fn drop(&mut self) {
+            self.dropping.notify_one();
+            let _ = self
+                .release
+                .recv_timeout(std::time::Duration::from_secs(10));
+        }
+    }
+    struct HeldSpawner {
+        started: Arc<Notify>,
+        resource: std::sync::Mutex<Option<HeldResource>>,
+    }
+    #[async_trait]
+    impl Spawner for HeldSpawner {
+        async fn spawn_fork(&self, _: SubAgentConfig, _: ForkOverrides) -> SubAgentResult {
+            let _resource = self.resource.lock().unwrap().take().unwrap();
+            self.started.notify_one();
+            std::future::pending().await
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let journal = SessionJournal::open(temp.path().join("session.journal"), "session-1").unwrap();
+    let started = Arc::new(Notify::new());
+    let dropping = Arc::new(Notify::new());
+    let (release, gate) = std::sync::mpsc::channel();
+    let spawner = DurableSpawner::new(
+        DurableChildStore::new(journal),
+        Arc::new(HeldSpawner {
+            started: started.clone(),
+            resource: std::sync::Mutex::new(Some(HeldResource {
+                dropping: dropping.clone(),
+                release: gate,
+            })),
+        }),
+    )
+    .unwrap();
+    let child_id = ChildId::new("held-drop-child").unwrap();
+    let task_spawner = spawner.clone();
+    let config = config(child_id.as_str());
+    let overrides = ForkOverrides::default();
+    let record = record(
+        child_id.as_str(),
+        ChildOrigin::Delegate,
+        &config,
+        &overrides,
+    );
+    let task = tokio::spawn(async move {
+        task_spawner
+            .spawn_fork(record, config, overrides, &policy_digest())
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), started.notified())
+        .await
+        .expect("execution started");
+    spawner.request_cancel(&child_id).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), dropping.notified())
+        .await
+        .expect("execution resource retirement started");
+    let status_during_drop = spawner.inspect(&child_id).unwrap().unwrap().status;
+    release.send(()).unwrap();
+    assert!(task.await.unwrap().unwrap().is_error);
+    assert!(
+        !status_during_drop.is_terminal(),
+        "terminal child status allowed cleanup acknowledgment while execution still owned resources"
+    );
+    assert_eq!(
+        spawner.inspect(&child_id).unwrap().unwrap().status,
+        DurableChildStatus::Cancelled
+    );
+}
+
 #[tokio::test]
 async fn aborted_execution_requires_recovery_and_reopen_is_idempotent() {
     let temp = tempfile::tempdir().unwrap();
