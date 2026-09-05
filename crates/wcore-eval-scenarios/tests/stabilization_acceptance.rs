@@ -233,3 +233,35 @@ async fn runner_start_failure_is_recorded_and_fails_acceptance() {
     );
     assert!(!out.status.success(), "runner failure passed acceptance");
 }
+
+#[test]
+fn equivalent_existing_file_spelling_counts_as_the_requested_read() {
+    use wcore_types::message::{ContentBlock, Message, Role};
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("fixture.txt");
+    std::fs::write(&file, "unique file contents").unwrap();
+    let alias = root.path().join(".").join("fixture.txt");
+    let messages = [
+        Message::now(
+            Role::Assistant,
+            vec![ContentBlock::ToolUse {
+                id: "read-alias".into(),
+                name: "Read".into(),
+                input: serde_json::json!({"file_path": alias}),
+                extra: None,
+            }],
+        ),
+        Message::now(
+            Role::User,
+            vec![ContentBlock::ToolResult {
+                tool_use_id: "read-alias".into(),
+                content: "unique file contents".into(),
+                is_error: false,
+            }],
+        ),
+    ];
+    assert!(
+        live_acceptance::observed_read(&messages, file.to_str().unwrap(), "unique file contents"),
+        "equivalent spelling of the same existing file must not cause a false failure"
+    );
+}
