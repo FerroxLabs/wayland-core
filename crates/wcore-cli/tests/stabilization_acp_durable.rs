@@ -18,6 +18,7 @@ use mock_llm::MockLlm;
 use tokio::time::timeout;
 use wcore_acp::protocol::{MessageEvent, MessageSendRequest, SessionCreateRequest};
 use wcore_acp::server::AcpServer;
+use wcore_acp::transport::http::HttpHandler;
 use wcore_acp::turn::{ApprovalDecision, ApprovalScopeWire};
 use wcore_agent::session::SessionManager;
 use wcore_agent::session_journal::{JournalError, SessionJournal};
