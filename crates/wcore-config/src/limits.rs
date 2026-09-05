@@ -290,6 +290,22 @@ pub fn model_output_ceiling(provider: &str, model: &str) -> Option<(u32, u32)> {
         return Some((16_384, 128_000));
     }
 
+    // --- OpenAI GPT-6 ---
+    // models.dev vendor row `openai`, 2026-09-04: gpt-6-astra serves a
+    // 1,050,000 window with a 128,000 output cap, and the -pro / -fast
+    // siblings report the identical pair on every endpoint that carries
+    // them, so one substring covers all three at figures none of them
+    // disagree with.
+    //
+    // Matched on `gpt-6-astra`, NOT a bare `gpt-6`: the 5.x family SPLITS
+    // (-mini / -nano / -codex stay at 400k), so a family-wide claim would
+    // over-claim for siblings nobody has seen yet -- the same trap the
+    // gpt-5.4 arm below guards against. An unknown gpt-6 id keeps the
+    // CompactConfig default until models.dev shows its real figures.
+    if m.contains("gpt-6-astra") {
+        return Some((128_000, 1_050_000));
+    }
+
     // --- OpenAI GPT-5 family ---
     // Fixes #165 (customer: a gpt-5.4 run died at 178,336 tokens against a fake
     // ~177k ceiling). With no entry every gpt-5.x id fell to the 200_000
