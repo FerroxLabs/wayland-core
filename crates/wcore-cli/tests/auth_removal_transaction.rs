@@ -111,6 +111,19 @@ async fn failed_store_delete_still_removes_the_independent_config_copy() {
 }
 
 #[tokio::test]
+async fn malformed_config_does_not_echo_its_secret_bearing_line() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        home.path().join("config.toml"),
+        format!("[providers.openai]\napi_key = \"{CONFIG_VALUE}\" trailing-invalid\n"),
+    )
+    .unwrap();
+
+    let output = remove(home.path()).await;
+    assert_incomplete(&output);
+}
+
+#[tokio::test]
 async fn successful_removal_clears_both_locations_through_the_real_cli() {
     let home = tempfile::tempdir().unwrap();
     config(home.path(), "plaintext");
