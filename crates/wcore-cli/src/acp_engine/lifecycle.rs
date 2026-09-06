@@ -283,6 +283,13 @@ impl EngineTurnEngine {
             }
         }
         self.initializers.lock().await.remove(session_id);
+        let no_sessions = self.sessions.lock().await.is_empty();
+        let no_initializers = self.initializers.lock().await.is_empty();
+        // This is an idle hint, not an admission barrier: trimming is safe if
+        // a new session arrives, and no pool lock spans the allocator work.
+        if no_sessions && no_initializers {
+            wcore_config::allocator::release_idle_memory().await;
+        }
         Ok(())
     }
 }
