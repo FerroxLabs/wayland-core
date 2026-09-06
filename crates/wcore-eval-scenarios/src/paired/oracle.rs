@@ -150,8 +150,7 @@ async fn run_test(workspace: &Path, test: &str) -> anyhow::Result<()> {
         .path()
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("Python executable path is not UTF-8"))?;
-    let command = wcore_config::shell::shell_command_argv(program, &["-S", "-B", test]);
-    let mut command = tokio::process::Command::from(command);
+    let mut command = wcore_config::shell::shell_command_argv(program, &["-S", "-B", test]);
     command
         .current_dir(workspace)
         .env_clear()

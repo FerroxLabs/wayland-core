@@ -2042,14 +2042,14 @@ async fn drive_session(
                         info_events.push(m.to_string());
                     }
                 }
-                "compact_offload" if scenario.name == "w16_long_session_constraint_retention" => {
-                    if ev
-                        .get("tokens_freed")
-                        .and_then(Value::as_u64)
-                        .is_some_and(|n| n > 0)
-                    {
-                        info_events.push(format!("paired_compaction_observed:{ev}"));
-                    }
+                "compact_offload"
+                    if scenario.name == "w16_long_session_constraint_retention"
+                        && ev
+                            .get("tokens_freed")
+                            .and_then(Value::as_u64)
+                            .is_some_and(|n| n > 0) =>
+                {
+                    info_events.push(format!("paired_compaction_observed:{ev}"));
                 }
                 "config_changed" => {
                     // D2: a SetConfig/SetMode that lands DURING a turn (the

@@ -182,7 +182,7 @@ mod tests {
         let url = fixture.url.clone();
         let call = tokio::spawn(async move {
             // Evaluator-owned loopback only; this never reaches a paid provider.
-            reqwest::Client::new().post(url).json(&json!({"jsonrpc":"2.0","id":1,
+            wcore_egress::EgressClient::new().post(url).json(&json!({"jsonrpc":"2.0","id":1,
                 "method":"tools/call","params":{"name":"record_parcel_effect","arguments":{"operation":"REC-control"}}}))
                 .send().await.unwrap()
         });
@@ -211,7 +211,7 @@ mod tests {
                 .status()
                 .is_success()
         );
-        let result = reqwest::Client::new().post(&fixture.url).json(&json!({"jsonrpc":"2.0","id":2,
+        let result = wcore_egress::EgressClient::new().post(&fixture.url).json(&json!({"jsonrpc":"2.0","id":2,
             "method":"tools/call","params":{"name":"record_parcel_effect","arguments":{"operation":"REC-control"}}})).send().await.unwrap();
         assert!(result.status().is_success());
         let out = tempfile::tempdir().unwrap();
