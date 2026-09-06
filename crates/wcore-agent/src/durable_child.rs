@@ -155,13 +155,7 @@ impl DurableChildStore {
     }
 
     pub fn list(&self) -> Result<Vec<DurableChildRecord>, JournalError> {
-        Ok(self
-            .journal
-            .state()?
-            .children
-            .into_values()
-            .filter_map(|child| child.durable)
-            .collect())
+        self.journal.durable_children()
     }
 
     /// Persist a content-addressed terminal child payload before the terminal

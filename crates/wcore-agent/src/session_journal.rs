@@ -642,6 +642,20 @@ impl SessionJournal {
             .map(|writer| writer.state.clone())
     }
 
+    /// Read the same live writer state as `state`, without copying unrelated
+    /// conversation and provider payloads for child-supervision queries.
+    pub(crate) fn durable_children(
+        &self,
+    ) -> Result<Vec<wcore_types::spawner::DurableChildRecord>, JournalError> {
+        let writer = self.inner.lock().map_err(|_| JournalError::WriterPoisoned)?;
+        Ok(writer
+            .state
+            .children
+            .values()
+            .filter_map(|child| child.durable.clone())
+            .collect())
+    }
+
     /// Snapshot the reduced state and committed entries from one locked writer.
     ///
     /// Reading the already-open data file prevents a pathname replacement from
@@ -4013,6 +4027,68 @@ mod fault_tests {
             Err(JournalError::WriterFaulted)
         ));
         assert_eq!(SessionJournal::replay(&journal_path).unwrap(), vec![forged]);
+    }
+
+    #[test]
+    fn stabilization_cleanup_keeps_disk_head_and_budget_refusals() {
+        for fault in ["disk", "head", "budget"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("session.journal");
+            let journal = SessionJournal::open(&path, "session").unwrap();
+            journal
+                .append(SessionEvent::TurnStarted {
+                    turn_id: "turn".into(),
+                    user_message: "positive".into(),
+                })
+                .unwrap();
+            assert!(crate::recovery::RecoveryPlan::validate_cleanup(&journal).unwrap());
+            match fault {
+                "disk" => {
+                    let mut bytes = std::fs::read(&path).unwrap();
+                    bytes[20] ^= 1;
+                    std::fs::write(&path, bytes).unwrap();
+                }
+                "head" => {
+                    journal.inner.lock().unwrap().state.last_checksum = GENESIS_CHECKSUM.into()
+                }
+                "budget" => {
+                    let tracker = wcore_budget::BudgetTracker::new(Default::default())
+                        .snapshot()
+                        .unwrap();
+                    let mut value = serde_json::to_value(tracker).unwrap();
+                    value["schema_version"] = serde_json::json!(999);
+                    let state = journal.state().unwrap();
+                    journal.inner.lock().unwrap().state.budget_authority =
+                        Some(BudgetAuthorityState {
+                            schema_version: BUDGET_AUTHORITY_SCHEMA_VERSION,
+                            authority_epoch: 1,
+                            prior_cursor: BudgetAuthorityCursor {
+                                journal_sequence: state.last_seq,
+                                journal_checksum: state.last_checksum,
+                            },
+                            budget_session_id: "session".into(),
+                            provider_tracker: serde_json::from_value(value).unwrap(),
+                            provider_reservations: Default::default(),
+                            execution_root: wcore_budget::ExecutionBudget::default()
+                                .start_root()
+                                .snapshot()
+                                .unwrap(),
+                            active_turn: None,
+                            captured_at_unix_millis: 1,
+                            wall_clock: BudgetWallClockAuthority::ActiveRuntime,
+                            conversation_digest: state_payload_digest(&serde_json::Value::Array(
+                                state.conversation,
+                            ))
+                            .unwrap(),
+                        });
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                crate::recovery::RecoveryPlan::validate_cleanup(&journal).is_err(),
+                "{fault} must still refuse"
+            );
+        }
     }
 
     #[test]

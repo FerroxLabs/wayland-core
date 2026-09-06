@@ -11,6 +11,7 @@ pub(super) struct SessionState {
     pub children: Option<crate::spawner::HostChildController>,
     pub attempted: bool,
     pub ready: bool,
+    pub last_used: Option<std::time::Instant>,
 }
 
 pub(super) struct ChannelSession {
@@ -20,6 +21,7 @@ pub(super) struct ChannelSession {
     pub cancel: CancellationToken,
     pub cleanup: Arc<crate::bootstrap_cleanup::BootstrapCleanup>,
     pub state: Mutex<SessionState>,
+    pub turn_slots: std::sync::OnceLock<Arc<tokio::sync::Semaphore>>,
 }
 
 impl ChannelSession {
@@ -67,6 +69,48 @@ impl ChannelSession {
 }
 
 impl ChannelTurnDispatcher {
+    async fn retire_idle_channels(&self) {
+        let _admission = self.admission.write().await;
+        let candidates = self.engines.lock().await.clone();
+        for (id, session) in candidates {
+            let Ok(state) = session.state.try_lock() else {
+                continue;
+            };
+            if state
+                .last_used
+                .is_none_or(|t| t.elapsed() < Duration::from_secs(900))
+            {
+                continue;
+            }
+            let safe = state.engine.as_ref().is_some_and(|engine| {
+                engine.session_journal().is_some()
+                    && engine.recovery_plan().is_ok_and(|plan| {
+                        matches!(
+                            plan.disposition,
+                            crate::recovery::RecoveryDisposition::Ready
+                        )
+                    })
+            });
+            let children_quiet = state
+                .children
+                .as_ref()
+                .and_then(|children| children.supervisor().ok())
+                .and_then(|supervisor| supervisor.cleanup_ready().ok())
+                .unwrap_or(false);
+            if !safe || !children_quiet {
+                continue;
+            }
+            session.cancel.cancel();
+            drop(state);
+            if tokio::time::timeout(Duration::from_secs(10), session.close())
+                .await
+                .is_ok_and(|result| result.is_ok())
+            {
+                self.engines.lock().await.remove(&id);
+            }
+        }
+    }
+
     /// Validate and install policy, then retire affected local sessions before
     /// acknowledging reload. Incomplete entries remain quarantined for retry.
     pub async fn reload_from_configs(&self, configs: Vec<ChannelConfig>) -> anyhow::Result<usize> {
@@ -113,6 +157,7 @@ impl ChannelTurnDispatcher {
         msg: &wcore_channels::IncomingMessage,
         admitted_policy: &InboundPolicy,
     ) -> anyhow::Result<Option<String>> {
+        self.retire_idle_channels().await;
         let id = Self::hashed_session_id(session_key);
         let session = {
             let _admission = self.admission.read().await;
@@ -130,6 +175,10 @@ impl ChannelTurnDispatcher {
                 .get(channel)
                 .ok_or_else(|| anyhow::anyhow!("channel tool scope is missing"))?;
             let mut pool = self.engines.lock().await;
+            anyhow::ensure!(
+                pool.contains_key(&id) || pool.len() < 64,
+                "resource_limit:64 channel engines including initialization/closing"
+            );
             let session = pool
                 .entry(id.clone())
                 .or_insert_with(|| {
@@ -140,6 +189,7 @@ impl ChannelTurnDispatcher {
                         cancel: CancellationToken::new(),
                         cleanup: Arc::default(),
                         state: Mutex::default(),
+                        turn_slots: std::sync::OnceLock::new(),
                     })
                 })
                 .clone();
@@ -149,6 +199,12 @@ impl ChannelTurnDispatcher {
             );
             session
         };
+        let _slot = session
+            .turn_slots
+            .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(9)))
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| anyhow::anyhow!("resource_limit:8 pending channel turns"))?;
         let mut state = session.state.lock().await;
         anyhow::ensure!(
             !session.cancel.is_cancelled(),
@@ -189,9 +245,11 @@ impl ChannelTurnDispatcher {
                     let _ = tokio::time::timeout(Duration::from_secs(2), &mut run).await;
                     anyhow::bail!("channel turn was revoked");
                 }
-                result = &mut run => result?,
+                result = &mut run => result,
             }
         };
+        state.last_used = Some(std::time::Instant::now());
+        let result = result?;
         if result.text.is_empty() {
             Ok(None)
         } else {

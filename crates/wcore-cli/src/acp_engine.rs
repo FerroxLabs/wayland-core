@@ -38,8 +38,8 @@ use std::task::{Context, Poll};
 use async_trait::async_trait;
 use futures::stream::Stream;
 use tokio::sync::Mutex as AsyncMutex;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio_util::sync::CancellationToken;
+use wcore_acp::bounded::{Receiver as UnboundedReceiver, Sender as UnboundedSender};
 
 use wcore_acp::AcpError;
 use wcore_acp::a2a::{A2aCapabilities, A2aError, A2aHandler, A2aHandshake, A2aMessage};
@@ -76,6 +76,28 @@ use std::sync::atomic::Ordering;
 /// turn cannot redirect a running one), so the single engine — built once per
 /// session — drives a fresh channel per turn without cross-talk.
 type RelayHandle = Arc<Mutex<Option<UnboundedSender<ProtocolEvent>>>>;
+
+fn protocol_channel(
+    turn_id: &str,
+) -> Result<
+    (
+        UnboundedSender<ProtocolEvent>,
+        UnboundedReceiver<ProtocolEvent>,
+    ),
+    &'static str,
+> {
+    wcore_acp::bounded::channel(ProtocolEvent::Error {
+        msg_id: Some(turn_id.to_string()),
+        error: wcore_protocol::events::ErrorInfo {
+            code: "resource_limit".into(),
+            message:
+                "protocol relay overloaded; turn cancelled without truncating structured events"
+                    .into(),
+            retryable: true,
+            category: wcore_protocol::events::FailureCategory::ToolRuntime,
+        },
+    })
+}
 
 /// Approval TTL for DEFAULT-posture ACP/REST sessions.
 ///
@@ -117,7 +139,13 @@ impl RelaySink {
     fn with_sink<F: FnOnce(&ChannelSink)>(&self, f: F) {
         let tx = self.handle.lock().unwrap().clone();
         if let Some(tx) = tx {
-            f(&ChannelSink::new(tx));
+            // Reuse the established event mapping through a synchronous
+            // scratch channel; only bounded delivery survives this call.
+            let (scratch, mut events) = tokio::sync::mpsc::unbounded_channel();
+            f(&ChannelSink::new(scratch));
+            while let Ok(event) = events.try_recv() {
+                let _ = tx.send(event);
+            }
         }
     }
 }
@@ -322,8 +350,16 @@ impl ProtocolEmitter for RelayEmitter {
     fn emit(&self, event: &ProtocolEvent) -> std::io::Result<()> {
         let tx = self.handle.lock().unwrap().clone();
         if let Some(tx) = tx {
-            ChannelEmitter::with_dedupe(tx, self.synthesized.clone(), self.approval_bridge.clone())
-                .emit(event)?;
+            let (scratch, mut events) = tokio::sync::mpsc::unbounded_channel();
+            ChannelEmitter::with_dedupe(
+                scratch,
+                self.synthesized.clone(),
+                self.approval_bridge.clone(),
+            )
+            .emit(event)?;
+            while let Ok(event) = events.try_recv() {
+                tx.send(event).map_err(std::io::Error::other)?;
+            }
         }
         Ok(())
     }
@@ -464,7 +500,7 @@ struct ProtocolToMessageStream {
     /// call's identity to render the approval. We remember each `ToolRequest`'s
     /// `(name, input)` by `call_id` so the gate frame projects a faithful
     /// `ToolCall`. The map is bounded by the in-flight tool calls of one turn.
-    pending_calls: HashMap<String, (String, serde_json::Value)>,
+    pending_calls: HashMap<String, (String, serde_json::Value, wcore_acp::bounded::Retained)>,
     /// #787: the turn's `msg_id`, stashed from the first frame that carries it
     /// (every ACP turn opens with `StreamStart { msg_id }`). Used as the
     /// terminal frame's `turn_id` when the terminal `ProtocolEvent::Error`
@@ -561,8 +597,41 @@ impl ProtocolToMessageStream {
                 // faithful `ToolCall` identity to the host.
                 // Already-approved calls use CallAnnounced and owe the same
                 // identity before their result, without an approval gate.
-                self.pending_calls
-                    .insert(call_id.clone(), (tool.name.clone(), tool.args.clone()));
+                self.pending_calls.remove(&call_id);
+                let retained = wcore_acp::bounded::retain(&(&call_id, &tool.name, &tool.args));
+                let retained = match retained {
+                    Ok(lease)
+                        if self.pending_calls.len() < wcore_acp::bounded::LIVE_EVENTS
+                            && self
+                                .pending_calls
+                                .values()
+                                .map(|(_, _, lease)| lease.bytes())
+                                .sum::<usize>()
+                                + lease.bytes()
+                                <= wcore_acp::bounded::LIVE_BYTES =>
+                    {
+                        lease
+                    }
+                    _ => {
+                        self.pending_calls.clear();
+                        self.rx.cancel_producer();
+                        self.done = true;
+                        return Some(MessageEvent::Error {
+                            error: JsonRpcError {
+                                code: -32003,
+                                message:
+                                    "retained projection input budget exhausted; turn cancelled"
+                                        .into(),
+                                data: None,
+                            },
+                            turn_id: self.turn_id.clone(),
+                        });
+                    }
+                };
+                self.pending_calls.insert(
+                    call_id.clone(),
+                    (tool.name.clone(), tool.args.clone(), retained),
+                );
                 Some(MessageEvent::ToolCall {
                     call: ToolCall {
                         id: call_id,
@@ -576,33 +645,42 @@ impl ProtocolToMessageStream {
                 status,
                 output,
                 ..
-            } => Some(MessageEvent::ToolResult {
-                result: ToolResult {
-                    call_id,
-                    output: serde_json::Value::String(output),
-                    is_error: matches!(status, ToolStatus::Error),
-                },
-            }),
+            } => {
+                self.pending_calls.remove(&call_id);
+                Some(MessageEvent::ToolResult {
+                    result: ToolResult {
+                        call_id,
+                        output: serde_json::Value::String(output),
+                        is_error: matches!(status, ToolStatus::Error),
+                    },
+                })
+            }
             ProtocolEvent::ToolCancelled {
                 call_id, reason, ..
-            } => Some(MessageEvent::ToolResult {
-                result: ToolResult {
-                    call_id,
-                    output: serde_json::Value::String(reason),
-                    is_error: true,
-                },
-            }),
+            } => {
+                self.pending_calls.remove(&call_id);
+                Some(MessageEvent::ToolResult {
+                    result: ToolResult {
+                        call_id,
+                        output: serde_json::Value::String(reason),
+                        is_error: true,
+                    },
+                })
+            }
             ProtocolEvent::ToolPanicked {
                 call_id,
                 panic_message,
                 ..
-            } => Some(MessageEvent::ToolResult {
-                result: ToolResult {
-                    call_id,
-                    output: serde_json::Value::String(panic_message),
-                    is_error: true,
-                },
-            }),
+            } => {
+                self.pending_calls.remove(&call_id);
+                Some(MessageEvent::ToolResult {
+                    result: ToolResult {
+                        call_id,
+                        output: serde_json::Value::String(panic_message),
+                        is_error: true,
+                    },
+                })
+            }
             ProtocolEvent::StreamEnd {
                 msg_id,
                 finish_reason,
@@ -620,6 +698,7 @@ impl ProtocolToMessageStream {
                         .push_back(MessageEvent::TextDelta { text: recovered });
                 }
                 self.done = true;
+                self.pending_calls.clear();
                 self.pending.push_back(MessageEvent::Done {
                     stop_reason: stop_reason_str(finish_reason).to_string(),
                     // #787: stamp the per-turn id so the host can dedup terminals.
@@ -629,6 +708,7 @@ impl ProtocolToMessageStream {
             }
             ProtocolEvent::Error { msg_id, error, .. } => {
                 self.done = true;
+                self.pending_calls.clear();
                 Some(MessageEvent::Error {
                     error: JsonRpcError {
                         code: ErrorCode::ToolFailed.code(),
@@ -665,6 +745,7 @@ impl ProtocolToMessageStream {
                 let (name, input) = self
                     .pending_calls
                     .remove(&call_id)
+                    .map(|(name, input, _lease)| (name, input))
                     .unwrap_or_else(|| (String::new(), serde_json::Value::Null));
                 // #568 (B): carry the SECRET resume_token to the host instead of
                 // dropping it. Bridge-backed gates stamp a real `apr-` token
@@ -849,19 +930,47 @@ impl EngineSession {
         text: String,
         msg_id: String,
     ) -> Pin<Box<dyn Stream<Item = MessageEvent> + Send>> {
-        let (tx, rx) = unbounded_channel::<ProtocolEvent>();
+        let (tx, rx) = match protocol_channel(&msg_id) {
+            Ok(channel) => channel,
+            Err(message) => {
+                return Box::pin(futures::stream::iter([MessageEvent::Error {
+                    error: wcore_acp::protocol::JsonRpcError {
+                        code: -32003,
+                        message: message.into(),
+                        data: None,
+                    },
+                    turn_id: msg_id,
+                }]));
+            }
+        };
 
         let mut turns = self.lifetime.turns.lock().await;
         // Reap completed handles rather than retaining one per historical turn.
         turns.retain(|(_, handle)| !handle.is_finished());
+        if turns.len() >= 9 {
+            let _ = tx.send(ProtocolEvent::Error {
+                msg_id: Some(msg_id),
+                error: wcore_protocol::events::ErrorInfo {
+                    code: "resource_limit".into(),
+                    message: "8 pending turns per engine".into(),
+                    retryable: true,
+                    category: wcore_protocol::events::FailureCategory::ToolRuntime,
+                },
+            });
+            return Box::pin(ProtocolToMessageStream::new(rx));
+        }
         if self.lifetime.closing.load(Ordering::Acquire) {
             drop(TerminalGuard::new(tx, msg_id));
             return Box::pin(ProtocolToMessageStream::new(rx));
         }
 
+        let last_used = self.lifetime.last_used.clone();
+        *last_used.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
         let engine = self.engine.clone();
         let relay = self.relay.clone();
         let turn_cancel = CancellationToken::new();
+        let overload_cancel = turn_cancel.clone();
+        tx.set_on_overflow(move || overload_cancel.cancel());
         let owned_cancel = turn_cancel.clone();
         let closing = self.lifetime.closing.clone();
 
@@ -924,6 +1033,7 @@ impl EngineSession {
                     term.disarm();
                 }
             }
+            *last_used.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
         });
         turns.push((owned_cancel, task));
 
@@ -1199,8 +1309,14 @@ impl EngineTurnEngine {
         requested_tools: &[String],
         mcp_selection: &[McpToolSelection],
     ) -> Result<Arc<EngineSession>, AcpError> {
+        self.retire_idle_engines().await;
         let initializer = {
             let mut initializers = self.initializers.lock().await;
+            if !initializers.contains_key(session_id) && initializers.len() >= 64 {
+                return Err(AcpError::Protocol(
+                    "resource_limit:64 resident engines including initializers/closing".into(),
+                ));
+            }
             match initializers.entry(session_id.to_string()) {
                 std::collections::hash_map::Entry::Occupied(entry) => entry.get().clone(),
                 std::collections::hash_map::Entry::Vacant(entry) => {
@@ -1318,6 +1434,17 @@ impl EngineTurnEngine {
             .execution_policy
             .with_requested_approvals(smart_policy, PolicySource::Acp);
 
+        let existing = if session_config.session.enabled {
+            wcore_agent::session::SessionManager::new(
+                std::path::PathBuf::from(&session_config.session.directory),
+                session_config.session.max_sessions,
+            )
+            .load_for_run_if_exists(session_id)
+            .map_err(|e| AcpError::Protocol(format!("durable session load failed: {e}")))?
+        } else {
+            None
+        };
+        let is_new = existing.is_none();
         let output: Arc<dyn OutputSink> = Arc::new(RelaySink::new(relay.clone()));
         let mut bootstrap = AgentBootstrap::new(session_config.clone(), self.cwd.clone(), output)
             .outbound_channels_only(true)
@@ -1326,6 +1453,9 @@ impl EngineTurnEngine {
             .with_execution_policy(execution_policy)
             .with_approval_manager(approval_manager.clone())
             .tool_allowlist(narrow_tool_allowlist(persona_tools, requested_tools));
+        if let Some(existing) = existing {
+            bootstrap = bootstrap.resume(existing);
+        }
         if let Some(provider) = &self.provider {
             bootstrap = bootstrap.provider(provider.clone());
         }
@@ -1365,11 +1495,13 @@ impl EngineTurnEngine {
             .insert(session_id.to_string(), session.clone());
         {
             let mut engine = session.engine.lock().await;
-            engine
-                .init_session(&session_config.provider_label, &self.cwd, Some(session_id))
-                .map_err(|error| {
-                    AcpError::Protocol(format!("engine init_session failed: {error}"))
-                })?;
+            if is_new {
+                engine
+                    .init_session(&session_config.provider_label, &self.cwd, Some(session_id))
+                    .map_err(|error| {
+                        AcpError::Protocol(format!("engine init_session failed: {error}"))
+                    })?;
+            }
             engine.rebind_memory_session().await;
             engine.run_session_start_hooks().await;
         }
@@ -1390,6 +1522,15 @@ impl TurnEngine for EngineTurnEngine {
     async fn run_turn(
         &self,
         req: TurnRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = MessageEvent> + Send>>, AcpError> {
+        self.run_turn_with_id(req, uuid::Uuid::new_v4().to_string())
+            .await
+    }
+
+    async fn run_turn_with_id(
+        &self,
+        req: TurnRequest,
+        msg_id: String,
     ) -> Result<Pin<Box<dyn Stream<Item = MessageEvent> + Send>>, AcpError> {
         // #998 - the request's tool selection is a REAL constraint. The ACP
         // server already resolves it (per-call `tools` when present, else the
@@ -1414,7 +1555,6 @@ impl TurnEngine for EngineTurnEngine {
         session.check_tool_selection(&requested_tools)?;
         // #998 c6 — same one-way door for the MCP switches.
         session.check_mcp_selection(&req.mcp_servers)?;
-        let msg_id = uuid::Uuid::new_v4().to_string();
         Ok(session.run_turn(req.text, msg_id).await)
     }
 
@@ -1669,12 +1809,88 @@ mod tests {
     /// Drive a `ProtocolToMessageStream` over a synthetic event sequence and
     /// collect the projected frames.
     async fn project_all(events: Vec<ProtocolEvent>) -> Vec<MessageEvent> {
-        let (tx, rx) = unbounded_channel::<ProtocolEvent>();
+        let (tx, rx) = protocol_channel("fixture-turn").expect("fixture channel budget");
         for ev in events {
             tx.send(ev).unwrap();
         }
         drop(tx);
         ProtocolToMessageStream::new(rx).collect().await
+    }
+
+    #[tokio::test]
+    async fn stabilization_overflow_before_stream_start_keeps_distinct_turn_ids() {
+        for id in ["w05-first-owned-turn", "w05-second-owned-turn"] {
+            let (tx, rx) = protocol_channel(id).unwrap();
+            tx.send(ProtocolEvent::StreamStart { msg_id: id.into() })
+                .unwrap();
+            assert!(
+                tx.send(ProtocolEvent::TextDelta {
+                    text: "x".repeat(wcore_acp::bounded::EVENT_BYTES),
+                    msg_id: id.into()
+                })
+                .is_err()
+            );
+            let frames: Vec<_> = ProtocolToMessageStream::new(rx).collect().await;
+            assert_eq!(frames.len(), 1);
+            assert!(matches!(&frames[0],MessageEvent::Error{turn_id,..} if turn_id==id));
+        }
+    }
+
+    #[test]
+    fn stabilization_projection_retires_completed_inputs_and_refuses_actual_shared_exhaustion() {
+        let (_tx, rx) = protocol_channel("owned-input-turn").unwrap();
+        let mut projection = ProtocolToMessageStream::new(rx);
+        projection.project(ProtocolEvent::StreamStart {
+            msg_id: "owned-input-turn".into(),
+        });
+        for i in 0..100 {
+            let mut tool = tool_info("Read");
+            tool.args = serde_json::json!({"body":"x".repeat(400_000)});
+            let id = format!("call-{i}");
+            assert!(matches!(
+                projection.project(ProtocolEvent::ToolRequest {
+                    msg_id: "owned-input-turn".into(),
+                    call_id: id.clone(),
+                    tool
+                }),
+                Some(MessageEvent::ToolCall { .. })
+            ));
+            projection.project(ProtocolEvent::ToolResult {
+                msg_id: "owned-input-turn".into(),
+                call_id: id,
+                tool_name: "Read".into(),
+                status: ToolStatus::Success,
+                output: "ok".into(),
+                output_type: wcore_protocol::events::OutputType::Text,
+                metadata: None,
+            });
+            assert!(projection.pending_calls.is_empty());
+        }
+        let mut leases = Vec::new();
+        let payload = "x".repeat(256 * 1024);
+        while let Ok(lease) = wcore_acp::bounded::retain(&payload) {
+            leases.push(lease);
+        }
+        assert!(
+            leases.len() > 100,
+            "positive control must hold real shared budget before refusal"
+        );
+        let mut tool = tool_info("Read");
+        tool.args = serde_json::json!({"body":"x".repeat(400_000)});
+        let refused = projection.project(ProtocolEvent::ToolRequest {
+            msg_id: "owned-input-turn".into(),
+            call_id: "exhausted".into(),
+            tool,
+        });
+        assert!(
+            matches!(refused,Some(MessageEvent::Error{turn_id,..}) if turn_id=="owned-input-turn")
+        );
+        assert!(projection.pending_calls.is_empty());
+        drop(leases);
+        assert!(
+            wcore_acp::bounded::retain(&payload).is_ok(),
+            "drop must return shared capacity"
+        );
     }
 
     fn tool_info(name: &str) -> wcore_protocol::events::ToolInfo {
@@ -1879,7 +2095,7 @@ mod tests {
     /// render and answer it.
     #[tokio::test]
     async fn relay_emitter_dedupes_workflow_double_gate_to_single_approval() {
-        let (tx, rx) = unbounded_channel::<ProtocolEvent>();
+        let (tx, rx) = protocol_channel("fixture-turn").expect("fixture channel budget");
         // The relay's emitter forwards onto the per-turn channel and owns the
         // persistent dedupe set (mirrors `EngineSession`'s wiring).
         let relay: RelayHandle = Arc::new(Mutex::new(Some(tx)));
@@ -1970,7 +2186,7 @@ mod tests {
             )
             .await;
 
-        let (tx, mut rx) = unbounded_channel::<ProtocolEvent>();
+        let (tx, mut rx) = protocol_channel("fixture-turn").expect("fixture channel budget");
         let relay: RelayHandle = Arc::new(Mutex::new(Some(tx)));
         let emitter = RelayEmitter::new(relay, Some(bridge));
 
@@ -2019,7 +2235,7 @@ mod tests {
     #[tokio::test]
     async fn relay_emitter_emits_empty_token_for_non_bridge_call() {
         let bridge = Arc::new(wcore_agent::approval::ApprovalBridge::new());
-        let (tx, mut rx) = unbounded_channel::<ProtocolEvent>();
+        let (tx, mut rx) = protocol_channel("fixture-turn").expect("fixture channel budget");
         let relay: RelayHandle = Arc::new(Mutex::new(Some(tx)));
         let emitter = RelayEmitter::new(relay, Some(bridge));
 
@@ -2144,7 +2360,7 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_guard_fires_when_sender_dropped_without_terminal() {
-        let (tx, rx) = unbounded_channel::<ProtocolEvent>();
+        let (tx, rx) = protocol_channel("fixture-turn").expect("fixture channel budget");
         // Simulate a turn task that drops its sender (panic/abort) without a
         // terminal frame: the guard's Drop must emit Error + StreamEnd because
         // it was never disarmed.

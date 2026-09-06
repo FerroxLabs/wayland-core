@@ -812,6 +812,7 @@ mod tests {
             cancel: tokio_util::sync::CancellationToken::new(),
             cleanup: Arc::default(),
             state: Mutex::default(),
+            turn_slots: std::sync::OnceLock::new(),
         });
         (dispatcher_over(registry), config, session)
     }

@@ -120,6 +120,17 @@ pub trait TurnEngine: Send + Sync {
         Ok(())
     }
 
+    /// Host-assigned identity for one admitted turn. Existing implementations
+    /// retain their execution/approval identities; only the host terminal
+    /// envelope is normalized by this default adapter.
+    async fn run_turn_with_id(
+        &self,
+        req: TurnRequest,
+        turn_id: String,
+    ) -> Result<Pin<Box<dyn Stream<Item = MessageEvent> + Send>>, AcpError> {
+        Ok(bind_turn_id(self.run_turn(req).await?, turn_id))
+    }
+
     /// Close admission, cancel and join owned work, preserve durable recovery,
     /// and release this session's resources before returning success. A failed
     /// close must remain closed to new work and permit a cleanup retry.
@@ -164,6 +175,23 @@ pub trait TurnEngine: Send + Sync {
             "approval resolution not supported by this engine".to_string(),
         ))
     }
+}
+
+/// Normalize terminal delivery identity without changing tool/approval IDs or history.
+pub fn bind_turn_id(
+    upstream: Pin<Box<dyn Stream<Item = MessageEvent> + Send>>,
+    turn_id: String,
+) -> Pin<Box<dyn Stream<Item = MessageEvent> + Send>> {
+    use futures::StreamExt;
+    Box::pin(upstream.map(move |mut event| {
+        match &mut event {
+            MessageEvent::Done { turn_id: id, .. } | MessageEvent::Error { turn_id: id, .. } => {
+                *id = turn_id.clone()
+            }
+            _ => {}
+        }
+        event
+    }))
 }
 
 #[cfg(test)]

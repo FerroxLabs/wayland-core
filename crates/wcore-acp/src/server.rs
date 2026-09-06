@@ -222,7 +222,7 @@ impl AcpServer {
     /// the window gets [`crate::cursor::CursorError::TooOld`] naming the oldest
     /// position still servable, so the client resynchronises deliberately.
     pub fn with_event_retention(mut self, events: usize) -> Self {
-        self.event_retention = events.max(1);
+        self.event_retention = events.clamp(1, crate::cursor::DEFAULT_RETENTION);
         self
     }
 
@@ -426,31 +426,184 @@ impl AcpServer {
         session_id: &str,
         upstream: Pin<Box<dyn Stream<Item = MessageEvent> + Send>>,
         lifecycle: &Arc<SessionLifecycle>,
+        turn_slot: tokio::sync::OwnedSemaphorePermit,
+        turn_id: String,
     ) -> Pin<Box<dyn Stream<Item = MessageEvent> + Send>> {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<MessageEvent>();
+        let overflow = MessageEvent::Error {
+            error: crate::protocol::JsonRpcError {
+                code: -32003,
+                message: "live delivery overloaded; resume from retained event cursor".into(),
+                data: None,
+            },
+            turn_id: turn_id.clone(),
+        };
+        #[derive(serde::Serialize)]
+        enum DeliveryPosition {
+            Event(Cursor),
+            Overload,
+        }
+        let channels = crate::bounded::channel(overflow.clone())
+            .ok()
+            .and_then(|live| {
+                crate::bounded::channel(DeliveryPosition::Overload)
+                    .ok()
+                    .map(|positions| (live, positions))
+            });
+        let (mut positions_tx, rx) = match channels {
+            Some(((tx, rx), (positions_tx, mut positions_rx))) => {
+                let events = Arc::clone(&self.events);
+                let session_id = session_id.to_string();
+                let delivery = lifecycle.stream();
+                let delivery_lifecycle = Arc::clone(lifecycle);
+                tokio::spawn(async move {
+                    let _delivery = delivery;
+                    let mut wait_budget = std::time::Duration::from_secs(1);
+                    loop {
+                        let position = tokio::select! {
+                            biased;
+                            _ = delivery_lifecycle.closed() => { tx.overload(); break; }
+                            position = positions_rx.recv() => position,
+                        };
+                        let Some(position) = position else {
+                            break;
+                        };
+                        let DeliveryPosition::Event(cursor) = position else {
+                            tx.overload();
+                            break;
+                        };
+                        let Ok(position_charge) = crate::bounded::retain(&cursor) else {
+                            tx.overload();
+                            break;
+                        };
+                        let event = {
+                            let logs = events.read().await;
+                            logs.get(&session_id)
+                                .and_then(|log| log.next_after(&cursor).ok().flatten())
+                                .and_then(|event| {
+                                    crate::bounded::retain(&event.event)
+                                        .ok()
+                                        .map(|charge| (event.event.clone(), charge))
+                                })
+                        };
+                        drop(cursor);
+                        drop(position_charge);
+                        let Some((event, charge)) = event else {
+                            tx.overload();
+                            break;
+                        };
+                        let terminal = matches!(
+                            &event,
+                            MessageEvent::Done { .. } | MessageEvent::Error { .. }
+                        );
+                        if tx
+                            .send_retained(
+                                event,
+                                charge,
+                                &mut wait_budget,
+                                delivery_lifecycle.closed(),
+                            )
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                        if terminal {
+                            break;
+                        }
+                    }
+                });
+                (Some(positions_tx), Some(rx))
+            }
+            None => (None, None),
+        };
         let events = Arc::clone(&self.events);
         let session_id = session_id.to_string();
         let recording = lifecycle.stream();
         tokio::spawn(async move {
             let _recording = recording;
+            let _turn_slot = turn_slot;
             let mut upstream = upstream;
+            let mut oversized = false;
             while let Some(ev) = upstream.next().await {
+                if oversized {
+                    continue;
+                }
+                let ev = if serde_json::to_vec(&ev)
+                    .map(|v| v.len())
+                    .unwrap_or(usize::MAX)
+                    > crate::bounded::EVENT_BYTES
                 {
+                    oversized = true;
+                    MessageEvent::Error {
+                        error: crate::protocol::JsonRpcError {
+                            code: -32003,
+                            message: "encoded event exceeds1MiB; structured payload refused".into(),
+                            data: None,
+                        },
+                        turn_id: turn_id.clone(),
+                    }
+                } else {
+                    ev
+                };
+                let cursor = {
                     let mut guard = events.write().await;
-                    if let Some(log) = guard.get_mut(&session_id) {
-                        log.append(ev.clone());
+                    let cursor = if let Some(log) = guard.get_mut(&session_id) {
+                        let size = serde_json::to_vec(&ev)
+                            .map(|v| v.len())
+                            .unwrap_or(usize::MAX);
+                        let position = log.append_encoded(ev, size);
+                        Some(Cursor {
+                            stream_id: log.stream_id().to_string(),
+                            position: position - 1,
+                        })
+                    } else {
+                        None
+                    };
+                    while guard
+                        .values()
+                        .map(|log| log.retained_bytes())
+                        .sum::<usize>()
+                        > 64 * 1024 * 1024
+                    {
+                        let victim = guard
+                            .iter()
+                            .filter(|(_, log)| log.retained_len() > 0)
+                            .min_by_key(|(_, log)| log.oldest_available())
+                            .map(|(id, _)| id.clone());
+                        let Some(victim) = victim else {
+                            break;
+                        };
+                        guard
+                            .get_mut(&victim)
+                            .expect("selected log exists")
+                            .evict_oldest();
+                    }
+                    cursor
+                };
+                // Only tiny bounded positions cross this handoff. Never wait
+                // for live delivery while draining the real protocol relay.
+                if let Some(sender) = &positions_tx {
+                    let position =
+                        cursor.map_or(DeliveryPosition::Overload, DeliveryPosition::Event);
+                    if sender.send(position).is_err() {
+                        positions_tx = None;
+                    } else {
+                        // Ready upstream/log futures need not yield. Give the
+                        // independent delivery and HTTP tasks a scheduling turn
+                        // before this producer fills their retained cursor window.
+                        // This never waits for reader capacity; detached replay
+                        // recording continues without this cooperation point.
+                        tokio::task::yield_now().await;
                     }
                 }
-                // A send error means the client is gone. That is not a reason
-                // to stop draining: the events after the disconnection are the
-                // ones the resume exists to deliver. The channel drops what it
-                // is holding when the receiver goes, so nothing accumulates.
-                let _ = tx.send(ev);
             }
         });
-        Box::pin(futures::stream::unfold(rx, |mut rx| async move {
-            rx.recv().await.map(|ev| (ev, rx))
-        }))
+        match rx {
+            Some(rx) => Box::pin(futures::stream::unfold(rx, |mut rx| async move {
+                rx.recv().await.map(|ev| (ev, rx))
+            })),
+            None => Box::pin(futures::stream::iter([overflow])),
+        }
     }
 
     /// The tip cursor for a session's stream — what a live subscriber holds.
@@ -551,7 +704,15 @@ impl HttpHandler for AcpServer {
             agent: req.agent.clone(),
             mcp_servers: req.mcp_servers.clone(),
         };
-        self.sessions.write().await.insert(id.clone(), record);
+        {
+            let mut sessions = self.sessions.write().await;
+            if sessions.len() >= 256 {
+                return Err(AcpError::Protocol(
+                    "resource_limit:256 session metadata records".into(),
+                ));
+            }
+            sessions.insert(id.clone(), record);
+        }
         // Open the session's event stream at create, not lazily at first send.
         // Lazily would mean a resume issued between create and the first
         // message could not tell "no events yet" from "no such session".
@@ -668,7 +829,7 @@ impl HttpHandler for AcpServer {
             record.metadata.message_count = record.metadata.message_count.saturating_add(1);
             record.clone()
         };
-        let _admission = record.lifecycle.admit().await?;
+        let (_admission, turn_slot) = record.lifecycle.admit_turn().await?;
 
         // Per-call tools override the session allowlist; an empty body falls
         // back to the tools stored at create-time.
@@ -700,18 +861,20 @@ impl HttpHandler for AcpServer {
         // path whose events are unresumable, and it would look identical from
         // the outside until somebody disconnected and counted.
         let session_id = req.session_id.clone();
+        let turn_id = uuid::Uuid::new_v4().to_string();
         let establish = async {
             let upstream: Pin<Box<dyn Stream<Item = MessageEvent> + Send>> =
                 if Self::is_profile_agent(agent.as_deref()) {
                     match &self.router {
                         Some(router) => {
-                            router
+                            let stream = router
                                 .send(MessageSendRequest {
                                     session_id: req.session_id,
                                     text: req.text,
                                     tools,
                                 })
-                                .await?
+                                .await?;
+                            crate::turn::bind_turn_id(stream, turn_id.clone())
                         }
                         None => {
                             return Err(AcpError::Session(format!(
@@ -725,13 +888,16 @@ impl HttpHandler for AcpServer {
                     match &self.turn_engine {
                         Some(engine) => {
                             engine
-                                .run_turn(crate::turn::TurnRequest {
-                                    session_id: req.session_id,
-                                    text: req.text,
-                                    tools,
-                                    agent,
-                                    mcp_servers,
-                                })
+                                .run_turn_with_id(
+                                    crate::turn::TurnRequest {
+                                        session_id: req.session_id,
+                                        text: req.text,
+                                        tools,
+                                        agent,
+                                        mcp_servers,
+                                    },
+                                    turn_id.clone(),
+                                )
                                 .await?
                         }
                         None => {
@@ -759,7 +925,7 @@ impl HttpHandler for AcpServer {
             _ = record.lifecycle.closed() => return Err(AcpError::Cleanup("session is closing".into())),
             result = establish => result?,
         };
-        Ok(self.tee_into_log(&session_id, upstream, &record.lifecycle))
+        Ok(self.tee_into_log(&session_id, upstream, &record.lifecycle, turn_slot, turn_id))
     }
 
     /// The server's authorization decision, taken from the principal the
