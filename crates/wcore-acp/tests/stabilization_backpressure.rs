@@ -10,7 +10,10 @@ use wcore_acp::{
     transport::http::HttpHandler,
     turn::{TurnEngine, TurnRequest},
 };
-struct Burst;
+struct Burst {
+    chunks: usize,
+    chunk_bytes: usize,
+}
 #[async_trait]
 impl TurnEngine for Burst {
     async fn close_session(&self, _: &str) -> Result<(), AcpError> {
@@ -21,9 +24,10 @@ impl TurnEngine for Burst {
         &self,
         _: TurnRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = MessageEvent> + Send>>, AcpError> {
-        let events = (0..64)
-            .map(|_| MessageEvent::TextDelta {
-                text: "x".repeat(256 * 1024),
+        let bytes = self.chunk_bytes;
+        let events = (0..self.chunks)
+            .map(move |_| MessageEvent::TextDelta {
+                text: "x".repeat(bytes),
             })
             .chain(std::iter::once(MessageEvent::Done {
                 stop_reason: "end_turn".into(),
@@ -34,7 +38,10 @@ impl TurnEngine for Burst {
 }
 #[tokio::test]
 async fn slow_reader_has_explicit_overload_while_replay_retains_bounded_tail() {
-    let server = AcpServer::new().with_turn_engine(Arc::new(Burst));
+    let server = AcpServer::new().with_turn_engine(Arc::new(Burst {
+        chunks: 64,
+        chunk_bytes: 256 * 1024,
+    }));
     let id = server
         .create_session(SessionCreateRequest {
             model: None,
@@ -135,4 +142,74 @@ async fn byte_overload_keeps_one_terminal_and_releases_owned_capacity() {
         rx.recv().await,
         Some(MessageEvent::TextDelta { .. })
     ));
+}
+
+#[tokio::test]
+async fn fast_rest_reader_receives_complete_sixteen_mib_burst() {
+    use wcore_acp::transport::rest::RestTransport;
+    let server = AcpServer::new().with_turn_engine(Arc::new(Burst {
+        chunks: 512,
+        chunk_bytes: 32 * 1024,
+    }));
+    let app = RestTransport::new(Arc::new(server.clone())).router();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let http = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let _ = stopped.await;
+            })
+            .await
+            .unwrap();
+    });
+    #[allow(clippy::disallowed_methods)] // Numeric loopback test; no external provider.
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .unwrap();
+    let created: serde_json::Value = client
+        .post(format!("{base}/v1/sessions"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["session_id"].as_str().unwrap();
+    let response = client
+        .post(format!("{base}/v1/sessions/{id}/prompt"))
+        .json(&serde_json::json!({"text":"large fast burst"}))
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    let body = response.text().await.unwrap();
+    let mut bytes = 0;
+    let mut terminals = 0;
+    for line in body.lines().filter_map(|line| line.strip_prefix("data: ")) {
+        let event: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_ne!(event["kind"], "error", "{event}");
+        if event["kind"] == "text_delta" {
+            bytes += event["text"].as_str().unwrap().len();
+        }
+        if event["kind"] == "done" {
+            terminals += 1;
+        }
+    }
+    assert_eq!(bytes, 16 * 1024 * 1024);
+    assert_eq!(terminals, 1);
+    assert_eq!(
+        client
+            .delete(format!("{base}/v1/sessions/{id}"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        204
+    );
+    let _ = stop.send(());
+    http.await.unwrap();
 }

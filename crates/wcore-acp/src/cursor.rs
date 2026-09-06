@@ -285,12 +285,7 @@ impl<E: Clone> EventLog<E> {
         true
     }
 
-    /// Everything strictly after `cursor`, in order, exactly once.
-    ///
-    /// Refuses rather than guessing in all three of the cases in the module
-    /// docs. A caller that receives `Ok` may rely on the result being the
-    /// COMPLETE set of events the cursor had not seen.
-    pub fn since(&self, cursor: &Cursor) -> Result<Vec<Positioned<E>>, CursorError> {
+    fn validate_cursor(&self, cursor: &Cursor) -> Result<(), CursorError> {
         if cursor.stream_id != self.stream_id {
             return Err(CursorError::StreamMismatch {
                 requested: cursor.stream_id.clone(),
@@ -316,6 +311,29 @@ impl<E: Clone> EventLog<E> {
                 oldest_available: oldest,
             });
         }
+        Ok(())
+    }
+
+    /// Borrow one event without cloning a replay tail into live delivery.
+    pub(crate) fn next_after(
+        &self,
+        cursor: &Cursor,
+    ) -> Result<Option<&Positioned<E>>, CursorError> {
+        self.validate_cursor(cursor)?;
+        Ok(self
+            .retained
+            .iter()
+            .find(|event| event.position > cursor.position))
+    }
+
+    /// Everything strictly after `cursor`, in order, exactly once.
+    ///
+    /// Refuses rather than guessing in all three of the cases in the module
+    /// docs. A caller that receives `Ok` may rely on the result being the
+    /// COMPLETE set of events the cursor had not seen.
+    pub fn since(&self, cursor: &Cursor) -> Result<Vec<Positioned<E>>, CursorError> {
+        self.validate_cursor(cursor)?;
+        let wanted_from = cursor.position + 1;
         Ok(self
             .retained
             .iter()
@@ -348,6 +366,38 @@ mod tests {
             log.append(format!("e{i}"));
         }
         log
+    }
+
+    #[test]
+    fn borrowed_next_event_preserves_cursor_refusals() {
+        let log = log_with(6);
+        let retained = Cursor {
+            stream_id: "stream-A".into(),
+            position: 2,
+        };
+        assert_eq!(log.next_after(&retained).unwrap().unwrap().position, 3);
+        assert!(log.next_after(&log.tip()).unwrap().is_none());
+        assert!(matches!(
+            log.next_after(&Cursor {
+                position: 1,
+                ..retained.clone()
+            }),
+            Err(CursorError::TooOld { .. })
+        ));
+        assert!(matches!(
+            log.next_after(&Cursor {
+                position: 7,
+                ..retained.clone()
+            }),
+            Err(CursorError::Ahead { .. })
+        ));
+        assert!(matches!(
+            log.next_after(&Cursor {
+                stream_id: "other".into(),
+                ..retained
+            }),
+            Err(CursorError::StreamMismatch { .. })
+        ));
     }
 
     #[test]

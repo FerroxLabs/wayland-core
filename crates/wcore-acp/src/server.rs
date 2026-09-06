@@ -437,9 +437,83 @@ impl AcpServer {
             },
             turn_id: turn_id.clone(),
         };
-        let channel = crate::bounded::channel(overflow.clone()).ok();
-        let (tx, rx) = match channel {
-            Some((tx, rx)) => (Some(tx), Some(rx)),
+        #[derive(serde::Serialize)]
+        enum DeliveryPosition {
+            Event(Cursor),
+            Overload,
+        }
+        let channels = crate::bounded::channel(overflow.clone())
+            .ok()
+            .and_then(|live| {
+                crate::bounded::channel(DeliveryPosition::Overload)
+                    .ok()
+                    .map(|positions| (live, positions))
+            });
+        let (mut positions_tx, rx) = match channels {
+            Some(((tx, rx), (positions_tx, mut positions_rx))) => {
+                let events = Arc::clone(&self.events);
+                let session_id = session_id.to_string();
+                let delivery = lifecycle.stream();
+                let delivery_lifecycle = Arc::clone(lifecycle);
+                tokio::spawn(async move {
+                    let _delivery = delivery;
+                    let mut wait_budget = std::time::Duration::from_secs(1);
+                    loop {
+                        let position = tokio::select! {
+                            biased;
+                            _ = delivery_lifecycle.closed() => { tx.overload(); break; }
+                            position = positions_rx.recv() => position,
+                        };
+                        let Some(position) = position else {
+                            break;
+                        };
+                        let DeliveryPosition::Event(cursor) = position else {
+                            tx.overload();
+                            break;
+                        };
+                        let Ok(position_charge) = crate::bounded::retain(&cursor) else {
+                            tx.overload();
+                            break;
+                        };
+                        let event = {
+                            let logs = events.read().await;
+                            logs.get(&session_id)
+                                .and_then(|log| log.next_after(&cursor).ok().flatten())
+                                .and_then(|event| {
+                                    crate::bounded::retain(&event.event)
+                                        .ok()
+                                        .map(|charge| (event.event.clone(), charge))
+                                })
+                        };
+                        drop(cursor);
+                        drop(position_charge);
+                        let Some((event, charge)) = event else {
+                            tx.overload();
+                            break;
+                        };
+                        let terminal = matches!(
+                            &event,
+                            MessageEvent::Done { .. } | MessageEvent::Error { .. }
+                        );
+                        if tx
+                            .send_retained(
+                                event,
+                                charge,
+                                &mut wait_budget,
+                                delivery_lifecycle.closed(),
+                            )
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                        if terminal {
+                            break;
+                        }
+                    }
+                });
+                (Some(positions_tx), Some(rx))
+            }
             None => (None, None),
         };
         let events = Arc::clone(&self.events);
@@ -471,14 +545,20 @@ impl AcpServer {
                 } else {
                     ev
                 };
-                {
+                let cursor = {
                     let mut guard = events.write().await;
-                    if let Some(log) = guard.get_mut(&session_id) {
+                    let cursor = if let Some(log) = guard.get_mut(&session_id) {
                         let size = serde_json::to_vec(&ev)
                             .map(|v| v.len())
                             .unwrap_or(usize::MAX);
-                        log.append_encoded(ev.clone(), size);
-                    }
+                        let position = log.append_encoded(ev, size);
+                        Some(Cursor {
+                            stream_id: log.stream_id().to_string(),
+                            position: position - 1,
+                        })
+                    } else {
+                        None
+                    };
                     while guard
                         .values()
                         .map(|log| log.retained_bytes())
@@ -498,13 +578,16 @@ impl AcpServer {
                             .expect("selected log exists")
                             .evict_oldest();
                     }
-                }
-                // A send error means the client is gone. That is not a reason
-                // to stop draining: the events after the disconnection are the
-                // ones the resume exists to deliver. The channel drops what it
-                // is holding when the receiver goes, so nothing accumulates.
-                if let Some(tx) = &tx {
-                    let _ = tx.send(ev);
+                    cursor
+                };
+                // Only tiny bounded positions cross this handoff. Never wait
+                // for live delivery while draining the real protocol relay.
+                if let Some(sender) = &positions_tx {
+                    let position =
+                        cursor.map_or(DeliveryPosition::Overload, DeliveryPosition::Event);
+                    if sender.send(position).is_err() {
+                        positions_tx = None;
+                    }
                 }
             }
         });
