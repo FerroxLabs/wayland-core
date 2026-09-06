@@ -112,7 +112,10 @@ mod tests {
         assert!(block.len() <= MAX_RECALL_BYTES);
         assert_eq!(items[0].id, "global");
         assert!(items.len() <= 6);
-        assert!(!block.contains("irrelevant"));
+        for i in 0..5 {
+            assert!(!items.iter().any(|item| item.id == format!("p{i}")));
+            assert!(!block.contains(&format!("- irrelevant {i}\n")));
+        }
         for item in &items {
             assert!(block.contains(&format!("- {}\n", item.preview)));
             assert!(item.preview.len() <= MAX_FACT_BYTES);

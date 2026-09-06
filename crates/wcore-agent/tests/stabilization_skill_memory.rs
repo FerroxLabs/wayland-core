@@ -173,7 +173,7 @@ async fn cached_skill_edit_add_remove_applies_on_next_turn() {
         .unwrap();
     assert_eq!(catalog.invocation_failed("w11-beta"), Some(false));
     std::fs::write(root.path().join(".wayland-core/skills/w11-beta/SKILL.md"),
-        "---\nname: w11-beta\ndescription: zorbulate telemetry\ndisable-model-invocation: true\n---\nREVOKED-BODY").unwrap();
+        "---\nname: w11-beta\ndescription: zorbulate telemetry\nhide-from-slash-command-tool: true\n---\nREVOKED-BODY").unwrap();
     built
         .engine
         .run("zorbulate telemetry", "w11-revoked")

@@ -21,7 +21,6 @@ pub struct BootstrapCleanup {
     started: AtomicBool,
     processes: Mutex<Vec<Process>>,
     tasks: Mutex<Vec<Task>>,
-    watchers: Mutex<Vec<Arc<AsyncMutex<wcore_skills::watcher::SkillWatcher>>>>,
     closing: AsyncMutex<()>,
 }
 
@@ -47,12 +46,6 @@ impl BootstrapCleanup {
             .unwrap_or_else(|e| e.into_inner())
             .push(Process::Bridge(runner));
     }
-    pub(crate) fn watcher(&self, watcher: wcore_skills::watcher::SkillWatcher) {
-        self.watchers
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(Arc::new(AsyncMutex::new(watcher)));
-    }
     pub(crate) fn retain_tasks(&self, tasks: impl IntoIterator<Item = JoinHandle<()>>) {
         let mut saved = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
         for task in tasks {
@@ -75,11 +68,6 @@ impl BootstrapCleanup {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         let tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        let watchers = self
-            .watchers
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
         let processes =
             futures::future::join_all(processes.into_iter().map(|process| async move {
                 match process {
@@ -116,19 +104,10 @@ impl BootstrapCleanup {
                 Err(error) => Err(anyhow::Error::from(error)),
             }
         }));
-        let watchers = futures::future::join_all(watchers.into_iter().map(|watcher| async move {
-            watcher
-                .lock()
-                .await
-                .stop_and_join()
-                .await
-                .map_err(anyhow::Error::from)
-        }));
-        let (processes, tasks, watchers) = tokio::join!(processes, tasks, watchers);
+        let (processes, tasks) = tokio::join!(processes, tasks);
         let errors: Vec<_> = processes
             .into_iter()
             .chain(tasks)
-            .chain(watchers)
             .filter_map(Result::err)
             .map(|error| error.to_string())
             .collect();
@@ -142,10 +121,6 @@ impl BootstrapCleanup {
             .unwrap_or_else(|e| e.into_inner())
             .clear();
         self.tasks.lock().unwrap_or_else(|e| e.into_inner()).clear();
-        self.watchers
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clear();
         Ok(())
     }
 }

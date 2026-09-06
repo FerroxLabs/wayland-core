@@ -31538,7 +31538,7 @@ mod user_model_writeback_tests {
             "hint must name the picked skill: {hint}"
         );
         assert!(
-            hint.starts_with("Skill hint:"),
+            hint.starts_with("Experimental skill hint:"),
             "hint must use the agreed non-binding prefix: {hint}"
         );
         assert!(
