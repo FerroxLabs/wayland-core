@@ -19,6 +19,8 @@ use wcore_types::execution_policy::{
 // E-H2: `CircuitReporter` / `NoOpCircuitReporter` are referenced by
 // fully-qualified path in the resilience wiring below.
 
+use anyhow::Context;
+
 use crate::budget::{ExecutionBudget, ExecutionBudgetView};
 use crate::cancel::{CancellationToken, SessionControl, SessionRuntimeGuard};
 use crate::engine::AgentEngine;
@@ -849,6 +851,8 @@ impl AgentBootstrap {
     }
 
     async fn build_scoped(mut self) -> anyhow::Result<BootstrapResult> {
+        // Validate persisted restrictions before constructing session resources.
+        let learned_policy = load_learned_policy()?;
         if let Some(cleanup) = &self.cleanup {
             cleanup.begin();
         }
@@ -2891,7 +2895,6 @@ impl AgentBootstrap {
         // source. See `load_learned_policy`: a missing file yields `None`, NOT
         // an empty policy, so the F05 capability report cannot advertise
         // `ready` on a construction that would narrow nothing.
-        let learned_policy = load_learned_policy();
         let mut spawner_builder = session_budget
             .govern_spawner(
                 crate::spawner::AgentSpawner::new(provider.clone(), self.config.clone()),
@@ -5084,42 +5087,20 @@ fn drop_revoked_auto_draft_seeds_with(
 /// advertised-but-dead shape this task exists to remove, so the readiness
 /// claim is bound to a policy that actually exists.
 ///
-/// A file that exists but does not parse is a WARN and `None`: an operator who
-/// wrote a malformed permissions file must not silently get "no restrictions".
-fn load_learned_policy() -> Option<Arc<wcore_permissions::LearnedPolicy>> {
-    let path = match wcore_permissions::LearnedPolicy::default_path() {
-        Ok(path) => path,
-        Err(error) => {
-            tracing::debug!(
-                target: "wcore_agent::permissions",
-                %error,
-                "no home directory; sub-agent learned policy not loaded"
-            );
-            return None;
-        }
-    };
-    if !path.exists() {
-        return None;
+/// Existing unreadable or malformed restrictions abort bootstrap; only an
+/// absent file leaves the optional narrowing layer unconfigured.
+fn load_learned_policy() -> anyhow::Result<Option<Arc<wcore_permissions::LearnedPolicy>>> {
+    let path = wcore_permissions::LearnedPolicy::default_path()?;
+    let policy = wcore_permissions::LearnedPolicy::load_optional_from(&path)
+        .with_context(|| format!("failed to load learned policy at {}", path.display()))?;
+    if policy.is_some() {
+        tracing::info!(
+            target: "wcore_agent::permissions",
+            path = %path.display(),
+            "sub-agent learned-policy pre-filter loaded"
+        );
     }
-    match wcore_permissions::LearnedPolicy::load_from(&path) {
-        Ok(policy) => {
-            tracing::info!(
-                target: "wcore_agent::permissions",
-                path = %path.display(),
-                "sub-agent learned-policy pre-filter loaded"
-            );
-            Some(Arc::new(policy))
-        }
-        Err(error) => {
-            tracing::warn!(
-                target: "wcore_agent::permissions",
-                path = %path.display(),
-                %error,
-                "sub-agent learned policy failed to parse; pre-filter NOT installed"
-            );
-            None
-        }
-    }
+    Ok(policy.map(Arc::new))
 }
 
 /// `F23A-C1-M1` — the auto-draft router-seed resurrection guard.
