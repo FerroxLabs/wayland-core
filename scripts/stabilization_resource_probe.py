@@ -93,6 +93,40 @@ class Provider(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
 
 
+def discover_mcp(binary, workspace, env):
+    # Source-confirmed current server methods. notifications/initialized is
+    # unsupported by this binary and is not falsely graded as a successful handshake.
+    requests = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2024-11-05", "capabilities": {},
+            "clientInfo": {"name": "w05-resource-probe", "version": "1"}}},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+    ]
+    start = time.monotonic()
+    process = subprocess.Popen([binary, "mcp-serve", "--transport", "stdio"],
+        cwd=workspace, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, start_new_session=True)
+    try:
+        output, error = process.communicate(
+            ("\n".join(json.dumps(row) for row in requests) + "\n").encode(), timeout=30)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.communicate(timeout=5)
+        raise RuntimeError("MCP discovery failed to exit naturally on EOF")
+    elapsed = (time.monotonic() - start) * 1000
+    assert process.returncode == 0, ("MCP discovery exit", process.returncode, error.decode(errors="replace"))
+    responses = [json.loads(line) for line in output.splitlines() if line.strip()]
+    assert len(responses) == 2 and all(not row.get("error") for row in responses), responses
+    by_id = {row.get("id"): row for row in responses}
+    assert by_id[1]["result"]["protocolVersion"] == "2024-11-05", by_id[1]
+    tools = by_id[2]["result"]["tools"]
+    names = sorted(tool["name"] for tool in tools)
+    assert all(name in names for name in ["Read", "Grep", "Glob"]), names
+    assert not alive_group(process.pid), "MCP discovery left owned descendants"
+    return {"elapsed_ms": elapsed, "tools": names, "exit_code": process.returncode,
+            "response_sha256": hashlib.sha256(output).hexdigest(), "natural_eof_cleanup": True}
+
+
 def rss(pid):
     fields = dict(line.split(":", 1) for line in Path(f"/proc/{pid}/status").read_text().splitlines() if ":" in line)
     return int(fields["VmRSS"].split()[0]) * 1024
@@ -178,14 +212,8 @@ key_params_path = {json.dumps(str(profile / "credentials.params.json"))}
         info = subprocess.check_output([binary, "--build-info"], env=env, text=True, timeout=15)
         assert args.source in info, "binary/source mismatch"
         receipt["build_info"] = info
-        for name, command in [("build-info", ["--build-info"]), ("config-path", ["--config-path"]), ("mcp-discovery", ["--probe-mcp"])]:
-            durations = []
-            for i in range(33):
-                start = time.monotonic()
-                subprocess.run([binary, *command], cwd=workspace, env=env, check=True, capture_output=True, timeout=30)
-                if i >= 3:
-                    durations.append((time.monotonic() - start) * 1000)
-            receipt["measurements"][name] = {"samples_ms": durations, "p95_ms": p95(durations)}
+        receipt["mcp_preflight"] = discover_mcp(binary, workspace, env)
+        receipt["mcp_protocol_limit"] = "Current server does not support notifications/initialized; measured initialize + tools/list + EOF only"
         core_log = (root / "core.log").open("wb")
         core = subprocess.Popen([binary, "acp", "serve", "--bind", f"127.0.0.1:{core_port}",
                                  "--provider", "openai", "--model", "w05-fixture", "--api-key", FIXTURE_KEY,
@@ -258,42 +286,67 @@ key_params_path = {json.dumps(str(profile / "credentials.params.json"))}
             row["rss_after_bytes"] = rss(core.pid)
             return row
 
-        # Exactly the frozen combinations. The reader count is actual concurrent sessions.
-        for concurrency in [1, 8, 32]:
-            for total, chunk in [(32768, 32768), (MIB, MIB), (16 * MIB, 32768)]:
-                for reader in ["fast", "disconnected", "slow"]:
-                    before = len(samples)
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
-                        rows = list(executor.map(lambda _: cycle(total, chunk, reader), range(concurrency)))
-                    window = samples[before:]
-                    receipt["matrix"].append({"concurrency": concurrency, "text_bytes": total, "chunk_bytes": chunk,
-                                              "reader": reader, "rows": rows, "rss_peak_bytes": max((v for _, v in window), default=rss(core.pid))})
-                    (root / "receipt.partial.json").write_text(json.dumps(receipt, indent=2))
-        for _ in range(3):
-            cycle()
-        for _ in range(args.cycles):
-            row = cycle()
-            assert row["received_text_bytes"] == 32 and row["terminal_count"] == 1 and not row["errors"], "fixture control turn failed"
-            receipt["cycles"].append(row)
-        status, sessions = request(core_port, "GET", "/v1/sessions")
-        receipt["sessions_after"] = {"status": status, "body": json.loads(sessions)}
-        values = [row["turn_ms"] for row in receipt["cycles"]]
-        receipt["measurements"]["fixture-turn"] = {"samples_ms": values, "p95_ms": p95(values)}
-        first = statistics.median(row["rss_after_bytes"] for row in receipt["cycles"][:100])
-        last = statistics.median(row["rss_after_bytes"] for row in receipt["cycles"][-100:])
-        receipt["rss_windows"] = {"first_100_median_bytes": first, "last_100_median_bytes": last,
-                                  "independent_windows": args.cycles >= 200,
-                                  "growth_bytes": last - first, "max_growth_bytes": max(first * .1, 32 * MIB)}
-        receipt["rss_bound_pass"] = last - first <= max(first * .1, 32 * MIB) if args.cycles >= 200 else None
-        if args.control:
-            control = json.loads(Path(args.control).read_text())
-            comparisons = {}
-            for name, measured in receipt["measurements"].items():
-                old = control["measurements"][name]["p95_ms"]
-                limit = max(old * 1.1, old + 20) if name == "fixture-turn" else max(old * 1.2, old + 50)
-                comparisons[name] = {"control_p95_ms": old, "candidate_p95_ms": measured["p95_ms"], "limit_ms": limit,
-                                     "pass": measured["p95_ms"] <= limit}
-            receipt["comparisons"] = comparisons
+        smoke = cycle()
+        assert smoke["received_text_bytes"] == 32 and smoke["terminal_count"] == 1 and not smoke["errors"], "ACP positive smoke failed"
+        receipt["acp_preflight"] = smoke
+        receipt["mode"] = "smoke" if args.smoke_only else "control"
+        if not args.smoke_only:
+            if args.reuse_startup_receipt:
+                previous = json.loads(Path(args.reuse_startup_receipt).read_text())
+                assert previous["source"] == args.source and previous["binary_sha256"] == receipt["binary_sha256"], "reused sample identity mismatch"
+                for name in ["build-info", "config-path"]:
+                    receipt["measurements"][name] = previous["measurements"][name]
+                receipt["reused_startup_receipt"] = args.reuse_startup_receipt
+            for name, command in [("build-info", ["--build-info"]), ("config-path", ["--config-path"]), ("mcp-discovery", None)]:
+                if name in receipt["measurements"]:
+                    continue
+                durations = []
+                for i in range(33):
+                    if command is None:
+                        elapsed = discover_mcp(binary, workspace, env)["elapsed_ms"]
+                    else:
+                        start = time.monotonic()
+                        subprocess.run([binary, *command], cwd=workspace, env=env, check=True, capture_output=True, timeout=30)
+                        elapsed = (time.monotonic() - start) * 1000
+                    if i >= 3:
+                        durations.append(elapsed)
+                receipt["measurements"][name] = {"samples_ms": durations, "p95_ms": p95(durations)}
+            # Exactly the frozen combinations. The reader count is actual concurrent sessions.
+            for concurrency in [1, 8, 32]:
+                for total, chunk in [(32768, 32768), (MIB, MIB), (16 * MIB, 32768)]:
+                    for reader in ["fast", "disconnected", "slow"]:
+                        before = len(samples)
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
+                            rows = list(executor.map(lambda _: cycle(total, chunk, reader), range(concurrency)))
+                        window = samples[before:]
+                        receipt["matrix"].append({"concurrency": concurrency, "text_bytes": total, "chunk_bytes": chunk,
+                                                  "reader": reader, "rows": rows, "rss_peak_bytes": max((v for _, v in window), default=rss(core.pid))})
+                        (root / "receipt.partial.json").write_text(json.dumps(receipt, indent=2))
+            for _ in range(3):
+                cycle()
+            for _ in range(args.cycles):
+                row = cycle()
+                assert row["received_text_bytes"] == 32 and row["terminal_count"] == 1 and not row["errors"], "fixture control turn failed"
+                receipt["cycles"].append(row)
+            status, sessions = request(core_port, "GET", "/v1/sessions")
+            receipt["sessions_after"] = {"status": status, "body": json.loads(sessions)}
+            values = [row["turn_ms"] for row in receipt["cycles"]]
+            receipt["measurements"]["fixture-turn"] = {"samples_ms": values, "p95_ms": p95(values)}
+            first = statistics.median(row["rss_after_bytes"] for row in receipt["cycles"][:100])
+            last = statistics.median(row["rss_after_bytes"] for row in receipt["cycles"][-100:])
+            receipt["rss_windows"] = {"first_100_median_bytes": first, "last_100_median_bytes": last,
+                                      "independent_windows": args.cycles >= 200,
+                                      "growth_bytes": last - first, "max_growth_bytes": max(first * .1, 32 * MIB)}
+            receipt["rss_bound_pass"] = last - first <= max(first * .1, 32 * MIB) if args.cycles >= 200 else None
+            if args.control:
+                control = json.loads(Path(args.control).read_text())
+                comparisons = {}
+                for name, measured in receipt["measurements"].items():
+                    old = control["measurements"][name]["p95_ms"]
+                    limit = max(old * 1.1, old + 20) if name == "fixture-turn" else max(old * 1.2, old + 50)
+                    comparisons[name] = {"control_p95_ms": old, "candidate_p95_ms": measured["p95_ms"], "limit_ms": limit,
+                                         "pass": measured["p95_ms"] <= limit}
+                receipt["comparisons"] = comparisons
         receipt["completed"] = True
     except Exception as error:
         receipt["error"] = repr(error)
@@ -336,6 +389,8 @@ def main():
     parser.add_argument("--root", required=True)
     parser.add_argument("--cycles", type=int, choices=[100, 1000], default=100)
     parser.add_argument("--build-profile", default="debug debuginfo=0 incremental=0 mold")
+    parser.add_argument("--smoke-only", action="store_true", help="One real MCP discovery and ACP create/turn/delete; no matrix or samples")
+    parser.add_argument("--reuse-startup-receipt", help="Preserve already captured same-binary startup/config samples")
     parser.add_argument("--control", help="Prior receipt.json for paired p95 comparisons")
     return run(parser.parse_args())
 
