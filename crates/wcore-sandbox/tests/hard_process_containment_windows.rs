@@ -542,9 +542,11 @@ async fn qualified_hard_containment_backend_preflight() {
     );
 
     // Live semantic probe: a benign command runs to a clean exit through the
-    // Job-Object-wrapped pipeline (never candidate-controlled argv).
+    // Job-Object-wrapped pipeline (never candidate-controlled argv). Do not
+    // redirect to NUL: opening that device can itself be denied by the lowbox,
+    // preventing the benign builtin from running at all.
     let out = backend
-        .execute(&manifest(15), cmd_script("ver >nul".into()))
+        .execute(&manifest(15), cmd_script("ver".into()))
         .await
         .expect("benign contained preflight command must run");
     assert_eq!(

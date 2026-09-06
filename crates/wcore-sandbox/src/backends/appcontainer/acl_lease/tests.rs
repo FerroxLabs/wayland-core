@@ -1220,3 +1220,87 @@ fn a_package_allow_on_the_users_whole_profile_is_refused() {
     })
     .expect_err("granting a drive root must be refused");
 }
+
+/// The same denied child DACL is shared by all executions. Exercise both
+/// acquisition and retirement orders; an unrelated allow must survive either.
+#[test]
+#[ignore = "requires explicit native Windows AppContainer acceptance"]
+fn concurrent_deny_reconciliation_preserves_identity_grants_in_both_orders() {
+    require_live_acceptance();
+    let baseline = lease_paths();
+    for deny_first in [false, true] {
+        for deny_exits_first in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let secret = dir.path().join("secret.txt");
+            fs::write(&secret, b"fixture").unwrap();
+            let allow = SandboxManifest {
+                fs_read_allow: vec![dir.path().into()],
+                ..Default::default()
+            };
+            let deny = SandboxManifest {
+                fs_read_deny: vec![secret.clone()],
+                ..allow.clone()
+            };
+            let (mut allowing, mut denying) = if deny_first {
+                let denying = ExecutionIdentity::start(&deny).unwrap();
+                (ExecutionIdentity::start(&allow).unwrap(), denying)
+            } else {
+                let allowing = ExecutionIdentity::start(&allow).unwrap();
+                (allowing, ExecutionIdentity::start(&deny).unwrap())
+            };
+            assert!(unsafe { contains_exact_sid_ace(&secret, allowing.sid()).unwrap() });
+            assert!(!unsafe { contains_exact_sid_ace(&secret, denying.sid()).unwrap() });
+            if deny_exits_first {
+                denying.mark_process_exited().unwrap();
+                denying.cleanup().unwrap();
+                assert!(unsafe { contains_exact_sid_ace(&secret, allowing.sid()).unwrap() });
+                allowing.mark_process_exited().unwrap();
+                allowing.cleanup().unwrap();
+            } else {
+                allowing.mark_process_exited().unwrap();
+                allowing.cleanup().unwrap();
+                assert!(!unsafe { contains_exact_sid_ace(&secret, allowing.sid()).unwrap() });
+                assert!(!unsafe { contains_exact_sid_ace(&secret, denying.sid()).unwrap() });
+                denying.mark_process_exited().unwrap();
+                denying.cleanup().unwrap();
+            }
+            assert!(!unsafe { contains_exact_sid_ace(&secret, allowing.sid()).unwrap() });
+            assert!(!unsafe { contains_exact_sid_ace(&secret, denying.sid()).unwrap() });
+        }
+    }
+    assert_eq!(lease_paths(), baseline);
+}
+
+#[test]
+#[ignore = "requires explicit native Windows AppContainer acceptance"]
+fn retiring_one_deny_keeps_the_other_denied() {
+    require_live_acceptance();
+    let baseline = lease_paths();
+    let dir = tempfile::tempdir().unwrap();
+    let secret = dir.path().join("secret.txt");
+    fs::write(&secret, b"fixture").unwrap();
+    let manifest = SandboxManifest {
+        fs_read_allow: vec![dir.path().into()],
+        fs_read_deny: vec![secret.clone()],
+        ..Default::default()
+    };
+    let mut first = ExecutionIdentity::start(&manifest).unwrap();
+    let mut second = ExecutionIdentity::start(&manifest).unwrap();
+    first.mark_process_exited().unwrap();
+    first.cleanup().unwrap();
+    assert!(!unsafe { contains_exact_sid_ace(&secret, second.sid()).unwrap() });
+    let mut allowed = ExecutionIdentity::start(&SandboxManifest {
+        fs_read_allow: vec![dir.path().into()],
+        ..Default::default()
+    })
+    .unwrap();
+    assert!(unsafe { contains_exact_sid_ace(&secret, allowed.sid()).unwrap() });
+    assert!(!unsafe { contains_exact_sid_ace(&secret, second.sid()).unwrap() });
+    second.mark_process_exited().unwrap();
+    second.cleanup().unwrap();
+    assert!(unsafe { contains_exact_sid_ace(&secret, allowed.sid()).unwrap() });
+    allowed.mark_process_exited().unwrap();
+    allowed.cleanup().unwrap();
+    assert!(!unsafe { contains_exact_sid_ace(&secret, allowed.sid()).unwrap() });
+    assert_eq!(lease_paths(), baseline);
+}
