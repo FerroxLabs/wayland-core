@@ -52,7 +52,10 @@ use crate::scorer::{DefaultScorer, LOCKED, ScoreOutcome, Scorer};
 /// Recorded verbatim in every grant this gate authorises, so a reader of the grant can tell
 /// whose judgement they are inheriting. Versioned by the scorer, not by the crate: the
 /// LOCKED constants are what the number means.
-pub const EVALUATOR: &str = "wcore-eval/DefaultScorer(W10A-LOCKED)";
+/// Structural admissibility only: this evaluator does not execute the candidate
+/// or establish held-out task efficacy. Manual governance approval is not a
+/// claim of behavioral qualification.
+pub const EVALUATOR: &str = "wcore-eval/DefaultScorer(structural-only,W10A-LOCKED)";
 
 /// The filename every skill artifact is defined by.
 const SKILL_FILE: &str = "SKILL.md";

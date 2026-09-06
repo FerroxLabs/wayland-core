@@ -347,12 +347,12 @@ pub async fn evolve(params: EvolveParams) -> Result<EvolveOutcome, EvolveError> 
             .map(|sc| sc.score.dimensions.combined)
             .fold(f64::NEG_INFINITY, f64::max);
 
-        let baseline_for_retention = best_candidate
-            .as_ref()
-            .map(|c| c.score.dimensions.combined)
-            .unwrap_or(parent_score.dimensions.combined);
-
         for sc in result.scored {
+            // Compare against the current best, including earlier siblings.
+            let baseline_for_retention = best_candidate
+                .as_ref()
+                .map(|c| c.score.dimensions.combined)
+                .unwrap_or(parent_score.dimensions.combined);
             let child_combined = sc.score.dimensions.combined;
             let retained = child_combined > baseline_for_retention
                 && child_combined > parent_score.dimensions.combined;

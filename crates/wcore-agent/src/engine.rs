@@ -5806,8 +5806,9 @@ impl AgentEngine {
             skills_lifecycle: skills_lifecycle_effective,
             // #170 — the advertised memory opt-out, cached for `fire_auto_memorize`.
             memory_enabled,
-            // F-092 (W7-N): cache online_evolution gate at construction.
-            online_evolution: config.observability.online_evolution,
+            // System-prompt evolution is unavailable until selection, persistence,
+            // cost and consumption are verified. Preserve the config as inert.
+            online_evolution: false,
             recent_turn_traces: VecDeque::new(),
             drafted_skill_signatures: HashSet::new(),
             file_watcher: Arc::new(std::sync::OnceLock::new()),
@@ -6117,8 +6118,9 @@ impl AgentEngine {
             skills_lifecycle: skills_lifecycle_effective,
             // #170 — the advertised memory opt-out, cached for `fire_auto_memorize`.
             memory_enabled,
-            // F-092 (W7-N): cache online_evolution gate at construction.
-            online_evolution: config.observability.online_evolution,
+            // System-prompt evolution is unavailable until selection, persistence,
+            // cost and consumption are verified. Preserve the config as inert.
+            online_evolution: false,
             recent_turn_traces: VecDeque::new(),
             drafted_skill_signatures: HashSet::new(),
             file_watcher: Arc::new(std::sync::OnceLock::new()),
@@ -18046,17 +18048,15 @@ impl AgentEngine {
             // to do multi-agent), run an honest single-node Direct turn. This
             // is behaviour-preserving — the net tool/answer result is already
             // Direct — but removes the fake-orchestration spans. The silent
-            // classifier heuristic is never coerced, so its (real) Sequential
-            // / Parallel shapes are untouched. ForgeFlows-Live Phase 3
+            // classifier shapes obey the same single-dispatch boundary.
+            // ForgeFlows-Live Phase 3
             // repoints these decisions at the real `WorkflowRunner` spawner
             // and retires this coercion. (See
             // `.planning/2026-06-13-FORGEFLOWS-LIVE-DESIGN.md`.)
             let graph_config = if decision_is_unwired_template(&template_decision) {
-                tracing::debug!(
-                    template = ?template_decision.template,
-                    source = ?template_decision.source,
-                    "rank5: non-Direct per-turn template is not wired to a real \
-                     multi-agent backend; executing an honest Direct turn"
+                self.output.emit_info(
+                    "Independent-agent per-turn strategies are unavailable; \
+                     executing one Direct tool batch. No independent agents were started.",
                 );
                 GraphConfig::direct("main", serde_json::json!({}))
             } else {

@@ -5337,10 +5337,9 @@ async fn run_json_stream_mode(
         || config.compat.cost_per_output_token.is_some();
     let advertised_for_sink = Arc::new(wcore_config::tools::AdvertisedCapabilitiesConfig {
         cost_attribution: pre_bootstrap_cost_attribution,
-        // F-092 (W7-N): mirror online_evolution into the sink's advertised
-        // capabilities so the Ready event reflects the flag before bootstrap
-        // runs (mirrors the cost_attribution pre-bootstrap pattern above).
-        online_evolution: config.observability.online_evolution,
+        // System-prompt evolution is unavailable, including before bootstrap.
+        // Keep the compatibility setting inert and the Ready capability false.
+        online_evolution: false,
         ..Default::default()
     });
 

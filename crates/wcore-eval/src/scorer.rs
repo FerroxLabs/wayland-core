@@ -4,7 +4,7 @@
 //! components combine into [0.0, 1.0]; a binary `Verdict` is predicted
 //! by comparing the combined score to a fixed acceptance cutoff:
 //!
-//! - **outcome correctness** (weight 0.7): 9 structural checks against
+//! - **structural conformance (not task correctness)** (weight 0.7): 9 structural checks against
 //!   the skill body and frontmatter (see `score_outcome`).
 //! - **cost penalty** (weight 0.2): normalized blend of `cost_usd` and
 //!   `output_tokens` against fixed W10A saturation constants.

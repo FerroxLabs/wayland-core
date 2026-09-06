@@ -3186,10 +3186,13 @@ impl AgentBootstrap {
             self.config.advertised_capabilities.cost_attribution = true;
         }
 
-        // F-092 (W7-N): mirror online_evolution config gate into the
-        // advertised capability surface so the host sees it on Ready.
+        // Keep the compatibility setting inert until system-prompt evolution
+        // has selection, persistence, cost and consumption evidence.
+        self.config.advertised_capabilities.online_evolution = false;
         if self.config.observability.online_evolution {
-            self.config.advertised_capabilities.online_evolution = true;
+            self.output.emit_info(
+                "Online system-prompt evolution is unavailable; the requested setting is inert.",
+            );
         }
 
         // Layer D1 (token-opt): seed ToolSearch from the same live-registry

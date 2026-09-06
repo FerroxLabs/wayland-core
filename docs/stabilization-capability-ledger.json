@@ -1,0 +1,188 @@
+{
+  "schema": 1,
+  "scope": "FINAL-PLAN W15/C10 bounded enabled critical journeys and high-risk boundaries; evidence bookkeeping is not runtime proof",
+  "source_base": "54932b140",
+  "carrier": "https://github.com/FerroxLabs/wayland/issues/1324",
+  "rows": [
+    {
+      "id": "cli-provider-tools",
+      "risk": "critical",
+      "journey": "CLI and JSON stream: provider, tool approval, cancellation, session settlement",
+      "owner": "W02/W04/W09/W16",
+      "state": "externally_blocked",
+      "reason": "Current integrated packaged receipt, all-call totals and cleanup required",
+      "carrier": "https://github.com/FerroxLabs/wayland/issues/1324",
+      "evidence": []
+    },
+    {
+      "id": "acp-http-rest",
+      "risk": "critical",
+      "journey": "ACP HTTP/REST admission, close, replay and bounded sessions",
+      "owner": "W02/W05/W16",
+      "state": "externally_blocked",
+      "reason": "Current combined ACP lifecycle and resource receipts required",
+      "carrier": "https://github.com/FerroxLabs/wayland/issues/1324",
+      "evidence": []
+    },
+    {
+      "id": "channel-ingress",
+      "risk": "critical",
+      "journey": "Enabled channel senders: revocation, workspace authority, session ownership",
+      "owner": "W03/W13",
+      "state": "externally_blocked",
+      "reason": "Current channel and remote-authority integration receipts required",
+      "carrier": "https://github.com/FerroxLabs/wayland/issues/1324",
+      "evidence": []
+    },
+    {
+      "id": "credentials",
+      "risk": "critical",
+      "journey": "API-key and OAuth load, refresh, logout and deletion",
+      "owner": "W06/W07",
+      "state": "externally_blocked",
+      "reason": "Current combined all-writer/backend transaction receipt required",
+      "carrier": "https://github.com/FerroxLabs/wayland/issues/1324",
+      "evidence": []
+    },
+    {
+      "id": "daily-auxiliary-budget",
+      "risk": "critical",
+      "journey": "Conversation, compaction, children and uncertain daily claims",
+      "owner": "W08/W09",
+      "state": "externally_blocked",
+      "reason": "Current combined durable spend and physical-call reconciliation receipt required",
+      "carrier": "https://github.com/FerroxLabs/wayland/issues/1324",
+      "evidence": []
+    },
+    {
+      "id": "mcp-remote-tools",
+      "risk": "critical",
+      "journey": "MCP stdio/HTTP tools, refresh, restriction and remote principals",
+      "owner": "W10/W13",
+      "state": "externally_blocked",
+      "reason": "Current restriction/reconnect proof and paired Desktop/Flux receipt required",
+      "carrier": "https://github.com/FerroxLabs/wayland/issues/1324",
+      "evidence": []
+    },
+    {
+      "id": "browser-boundary",
+      "risk": "high",
+      "journey": "Browser network policy, actual navigation, process cancellation and cleanup",
+      "owner": "W15/W16",
+      "state": "externally_blocked",
+      "reason": "Current backend-specific network/refusal and cleanup receipt required",
+      "carrier": "https://github.com/FerroxLabs/wayland/issues/1324",
+      "evidence": []
+    },
+    {
+      "id": "cua-boundary",
+      "risk": "high",
+      "journey": "Computer use: background invariant, native authority and cleanup",
+      "owner": "W14/W15/W16",
+      "state": "externally_blocked",
+      "reason": "Native OS/backend receipt required; source and mocks do not establish native behavior",
+      "carrier": "https://github.com/FerroxLabs/wayland/issues/1324",
+      "evidence": []
+    },
+    {
+      "id": "plugin-wasm-subprocess",
+      "risk": "high",
+      "journey": "Plugins including WASM and subprocess extensions: authority and process lifetime",
+      "owner": "W13/W15/W16",
+      "state": "externally_blocked",
+      "reason": "Current supported runtime isolation and cleanup receipts required; trusted extension is not OS sandbox proof",
+      "carrier": "https://github.com/FerroxLabs/wayland/issues/1324",
+      "evidence": []
+    },
+    {
+      "id": "fleet-swarm",
+      "risk": "high",
+      "journey": "Fleet/swarm children: identity, cumulative spend, cancellation and result provenance",
+      "owner": "W09/W15/W16",
+      "state": "externally_blocked",
+      "reason": "Current real-child and fleet transport receipt required",
+      "carrier": "https://github.com/FerroxLabs/wayland/issues/1324",
+      "evidence": []
+    },
+    {
+      "id": "remote-execution",
+      "risk": "high",
+      "journey": "Remote execution: target identity, authority, interruption and cleanup",
+      "owner": "W13/W15/W16",
+      "state": "externally_blocked",
+      "reason": "Current supported remote-executor receipt required; SSH access alone is insufficient",
+      "carrier": "https://github.com/FerroxLabs/wayland/issues/1324",
+      "evidence": []
+    },
+    {
+      "id": "workflow-runner",
+      "risk": "high",
+      "journey": "Explicit WorkflowRunner: independent children and inter-stage data",
+      "owner": "W09/W15/W16",
+      "state": "externally_blocked",
+      "reason": "Current independent-child execution, spend and cancellation receipt required",
+      "carrier": "https://github.com/FerroxLabs/wayland/issues/1324",
+      "evidence": []
+    },
+    {
+      "id": "manual-skill-governance",
+      "risk": "high",
+      "journey": "Manual structural skill admission and governance grant",
+      "owner": "W11/W15",
+      "state": "externally_blocked",
+      "reason": "Current promotion_gate and stabilization_behavioral_admission results required; efficacy remains unmeasured",
+      "carrier": "https://github.com/FerroxLabs/wayland/issues/1324",
+      "evidence": []
+    },
+    {
+      "id": "retention-events",
+      "risk": "medium",
+      "journey": "Offline evolution provisional retention and sibling ranking",
+      "owner": "W15",
+      "state": "externally_blocked",
+      "reason": "Current evolve_end_to_end receipt required; retention is not persistence or consumption",
+      "carrier": "https://github.com/FerroxLabs/wayland/issues/1324",
+      "evidence": []
+    },
+    {
+      "id": "per-turn-strategy-downgrade",
+      "risk": "medium",
+      "journey": "Per-turn independent strategy request visibly becomes one Direct tool batch",
+      "owner": "W15",
+      "state": "externally_blocked",
+      "reason": "Current stabilization_capability_contract runtime receipt required",
+      "carrier": "https://github.com/FerroxLabs/wayland/issues/1324",
+      "evidence": []
+    },
+    {
+      "id": "network-a2a",
+      "risk": "high",
+      "journey": "Network A2A federation",
+      "owner": "W15",
+      "state": "explicitly_unsupported",
+      "reason": "Explicitly unavailable: embedding handler presence does not expose a supported network route. No route added.",
+      "carrier": "https://github.com/FerroxLabs/wayland/issues/1324",
+      "evidence": []
+    },
+    {
+      "id": "online-system-prompt-evolution",
+      "risk": "high",
+      "journey": "Automatic system-prompt selection and cross-session improvement",
+      "owner": "W15",
+      "state": "explicitly_unsupported",
+      "reason": "Explicitly unavailable: compatibility opt-in is inert and Ready is false until selection, persistence, cost and consumption are qualified.",
+      "carrier": "https://github.com/FerroxLabs/wayland-core/issues/372",
+      "evidence": []
+    },
+    {
+      "id": "behavioral-skill-promotion",
+      "risk": "high",
+      "journey": "Automatic behavioral qualification of skill candidates",
+      "owner": "W15",
+      "state": "explicitly_unsupported",
+      "reason": "Explicitly unsupported: DefaultScorer is structural only; manual governance remains supported. Held-out production efficacy and observed execution cost have no current qualifying receipt.",
+      "carrier": "https://github.com/FerroxLabs/wayland/issues/1324",
+      "evidence": []
+    }
+  ]
+}
