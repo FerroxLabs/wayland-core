@@ -44,7 +44,7 @@ fn invalid_fixture_authority_budget_and_tiny_long_session_are_refused() {
         value.files.insert(path.into(), "not allowed".into());
         assert!(value.validate().is_err(), "{path}");
     }
-    for budget in [0.0, -0.1, f64::NAN] {
+    for budget in [0.0, -0.1, f64::NAN, f64::INFINITY, 0.250_001, 0.30] {
         let mut value = task();
         value.max_cost_usd = budget;
         assert!(value.validate().is_err());
@@ -96,4 +96,28 @@ async fn unmetered_paid_bridge_refuses_before_any_candidate_spawn() {
         .unwrap_err();
     assert!(error.to_string().contains("paid calls are blocked"));
     assert!(!root.path().join("output").exists());
+}
+
+#[test]
+fn paired_memory_budget_is_one_whole_task_ceiling() {
+    let mut value = task();
+    value.family = Family::RelevantMemoryRecall;
+    value.prompts = vec![
+        "Store the delivery fact.".into(),
+        "Recall the delivery fact.".into(),
+    ];
+    value.max_cost_usd = 0.25;
+    let scenario = value.scenario().unwrap();
+    assert_eq!(scenario.max_total_cost_usd, 0.25);
+    let root = tempfile::tempdir().unwrap();
+    value.prepare_peer(&root.path().join("peer")).unwrap();
+    let loaded = PairedTask::load(&root.path().join("peer/task.json")).unwrap();
+    assert_eq!(loaded.max_cost_usd, 0.25);
+    assert_eq!(loaded.prompts, value.prompts);
+    assert_eq!(loaded.family, Family::RelevantMemoryRecall);
+    value.max_cost_usd = 0.30;
+    assert!(
+        value.scenario().is_err(),
+        "three native processes do not grant three task budgets"
+    );
 }

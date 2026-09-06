@@ -92,8 +92,8 @@ impl PairedTask {
             "paired task needs substantive prompts"
         );
         anyhow::ensure!(
-            self.max_cost_usd.is_finite() && self.max_cost_usd > 0.0,
-            "invalid paired cost bound"
+            self.max_cost_usd.is_finite() && self.max_cost_usd > 0.0 && self.max_cost_usd <= 0.25,
+            "paired whole-task cost bound must be positive and at most $0.25"
         );
         anyhow::ensure!(
             self.max_time_secs > 0 && self.max_time_secs <= 7200,
