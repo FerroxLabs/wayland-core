@@ -133,37 +133,37 @@ impl EngineSession {
         // path owns the truth. Unknown physical outcomes are retained as such.
         let mut engine = self.engine.lock().await;
         let journal = engine.session_journal().cloned();
-        if journal.is_some() {
-            if let Some(children) = &self.lifetime.children {
-                let supervisor = children
-                    .supervisor()
+        if journal.is_some()
+            && let Some(children) = &self.lifetime.children
+        {
+            let supervisor = children
+                .supervisor()
+                .map_err(|error| AcpError::Cleanup(error.to_string()))?;
+            let children = supervisor
+                .list()
+                .map_err(|error| AcpError::Cleanup(error.to_string()))?;
+            for child in children.iter().filter(|child| !child.status.is_terminal()) {
+                supervisor
+                    .request_cancel(&child.child_id)
                     .map_err(|error| AcpError::Cleanup(error.to_string()))?;
-                let children = supervisor
-                    .list()
-                    .map_err(|error| AcpError::Cleanup(error.to_string()))?;
-                for child in children.iter().filter(|child| !child.status.is_terminal()) {
-                    supervisor
-                        .request_cancel(&child.child_id)
-                        .map_err(|error| AcpError::Cleanup(error.to_string()))?;
+            }
+            // Cancellation is cooperative. Give the child executor time to
+            // publish its terminal outcome before judging cleanup incomplete.
+            // Keep the session owner on timeout so DELETE can retry safely.
+            let child_deadline = tokio::time::Instant::now() + CANCEL_GRACE;
+            loop {
+                if supervisor
+                    .cleanup_ready()
+                    .map_err(|error| AcpError::Cleanup(error.to_string()))?
+                {
+                    break;
                 }
-                // Cancellation is cooperative. Give the child executor time to
-                // publish its terminal outcome before judging cleanup incomplete.
-                // Keep the session owner on timeout so DELETE can retry safely.
-                let child_deadline = tokio::time::Instant::now() + CANCEL_GRACE;
-                loop {
-                    if supervisor
-                        .cleanup_ready()
-                        .map_err(|error| AcpError::Cleanup(error.to_string()))?
-                    {
-                        break;
-                    }
-                    if tokio::time::Instant::now() >= child_deadline {
-                        return Err(AcpError::Cleanup(
-                            "child cancellation has not completed".into(),
-                        ));
-                    }
-                    tokio::time::sleep(Duration::from_millis(10)).await;
+                if tokio::time::Instant::now() >= child_deadline {
+                    return Err(AcpError::Cleanup(
+                        "child cancellation has not completed".into(),
+                    ));
                 }
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
         }
         let cleanup = engine.prepare_shutdown();
