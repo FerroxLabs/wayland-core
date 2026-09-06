@@ -84,3 +84,42 @@ async fn slow_reader_has_explicit_overload_while_replay_retains_bounded_tail() {
     assert!(matches!(tail.events[0].event, MessageEvent::Done { .. }));
     server.delete_session(id).await.unwrap();
 }
+
+#[tokio::test]
+async fn byte_overload_keeps_one_terminal_and_releases_owned_capacity() {
+    let terminal = MessageEvent::Error {
+        error: wcore_acp::protocol::JsonRpcError {
+            code: -32003,
+            message: "overload".into(),
+            data: None,
+        },
+        turn_id: "w05".into(),
+    };
+    let (tx, mut rx) = wcore_acp::bounded::channel(terminal.clone()).unwrap();
+    let mut accepted = 0;
+    while tx
+        .send(MessageEvent::TextDelta {
+            text: "x".repeat(32768),
+        })
+        .is_ok()
+    {
+        accepted += 1;
+    }
+    assert!(
+        accepted > 0 && accepted < 256,
+        "byte limit must precede count limit for large events"
+    );
+    assert!(matches!(rx.recv().await, Some(MessageEvent::Error { .. })));
+    assert!(rx.recv().await.is_none());
+    drop(rx);
+    drop(tx);
+    let (tx, mut rx) = wcore_acp::bounded::channel(terminal).unwrap();
+    tx.send(MessageEvent::TextDelta {
+        text: "positive-control".into(),
+    })
+    .unwrap();
+    assert!(matches!(
+        rx.recv().await,
+        Some(MessageEvent::TextDelta { .. })
+    ));
+}

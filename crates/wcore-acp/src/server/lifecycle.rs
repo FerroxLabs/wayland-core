@@ -18,6 +18,7 @@ pub(super) struct SessionLifecycle {
     admission: Arc<RwLock<()>>,
     close: Mutex<Option<watch::Receiver<CloseResult>>>,
     streams: AtomicUsize,
+    turn_slots: std::sync::OnceLock<Arc<tokio::sync::Semaphore>>,
     drained: Notify,
 }
 
@@ -39,6 +40,19 @@ impl SessionLifecycle {
             return Err(AcpError::Cleanup("session is closing".to_string()));
         }
         Ok(permit)
+    }
+
+    pub(super) async fn admit_turn(
+        &self,
+    ) -> Result<(OwnedRwLockReadGuard<()>, tokio::sync::OwnedSemaphorePermit), AcpError> {
+        let admission = self.admit().await?;
+        let slot = self
+            .turn_slots
+            .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(9)))
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| AcpError::Protocol("resource_limit:8 pending turns per session".into()))?;
+        Ok((admission, slot))
     }
 
     pub(super) fn stream(self: &Arc<Self>) -> RecordingGuard {

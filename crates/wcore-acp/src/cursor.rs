@@ -178,6 +178,8 @@ pub struct EventLog<E> {
     /// Position the NEXT appended event will take. Starts at 1.
     next: u64,
     capacity: usize,
+    encoded_bytes: usize,
+    sizes: VecDeque<usize>,
 }
 
 impl<E: Clone> EventLog<E> {
@@ -196,6 +198,8 @@ impl<E: Clone> EventLog<E> {
             retained: VecDeque::new(),
             next: 1,
             capacity: capacity.max(1),
+            encoded_bytes: 0,
+            sizes: VecDeque::new(),
         }
     }
 
@@ -249,10 +253,36 @@ impl<E: Clone> EventLog<E> {
         let position = self.next;
         self.next += 1;
         self.retained.push_back(Positioned { position, event });
+        self.sizes.push_back(0);
         while self.retained.len() > self.capacity {
-            self.retained.pop_front();
+            self.evict_oldest();
         }
         position
+    }
+
+    /// Byte-bounded append used by ACP, preserving monotonic positions on eviction.
+    pub fn append_encoded(&mut self, event: E, size: usize) -> u64 {
+        let position = self.next;
+        self.next += 1;
+        self.retained.push_back(Positioned { position, event });
+        self.sizes.push_back(size);
+        self.encoded_bytes += size;
+        while self.retained.len() > self.capacity || self.encoded_bytes > 8 * 1024 * 1024 {
+            self.evict_oldest();
+        }
+        position
+    }
+    pub fn retained_bytes(&self) -> usize {
+        self.encoded_bytes
+    }
+    pub fn evict_oldest(&mut self) -> bool {
+        if self.retained.pop_front().is_none() {
+            return false;
+        }
+        self.encoded_bytes = self
+            .encoded_bytes
+            .saturating_sub(self.sizes.pop_front().unwrap_or(0));
+        true
     }
 
     /// Everything strictly after `cursor`, in order, exactly once.

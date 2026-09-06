@@ -426,31 +426,93 @@ impl AcpServer {
         session_id: &str,
         upstream: Pin<Box<dyn Stream<Item = MessageEvent> + Send>>,
         lifecycle: &Arc<SessionLifecycle>,
+        turn_slot: tokio::sync::OwnedSemaphorePermit,
     ) -> Pin<Box<dyn Stream<Item = MessageEvent> + Send>> {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<MessageEvent>();
+        let overflow = MessageEvent::Error {
+            error: crate::protocol::JsonRpcError {
+                code: -32003,
+                message: "live delivery overloaded; resume from retained event cursor".into(),
+                data: None,
+            },
+            turn_id: String::new(),
+        };
+        let channel = crate::bounded::channel(overflow.clone()).ok();
+        let (tx, rx) = match channel {
+            Some((tx, rx)) => (Some(tx), Some(rx)),
+            None => (None, None),
+        };
         let events = Arc::clone(&self.events);
         let session_id = session_id.to_string();
         let recording = lifecycle.stream();
         tokio::spawn(async move {
             let _recording = recording;
+            let _turn_slot = turn_slot;
             let mut upstream = upstream;
+            let mut oversized = false;
             while let Some(ev) = upstream.next().await {
+                if oversized {
+                    continue;
+                }
+                let ev = if serde_json::to_vec(&ev)
+                    .map(|v| v.len())
+                    .unwrap_or(usize::MAX)
+                    > crate::bounded::EVENT_BYTES
+                {
+                    oversized = true;
+                    MessageEvent::Error {
+                        error: crate::protocol::JsonRpcError {
+                            code: -32003,
+                            message: "encoded event exceeds1MiB; structured payload refused".into(),
+                            data: None,
+                        },
+                        turn_id: String::new(),
+                    }
+                } else {
+                    ev
+                };
                 {
                     let mut guard = events.write().await;
                     if let Some(log) = guard.get_mut(&session_id) {
-                        log.append(ev.clone());
+                        let size = serde_json::to_vec(&ev)
+                            .map(|v| v.len())
+                            .unwrap_or(usize::MAX);
+                        log.append_encoded(ev.clone(), size);
+                    }
+                    while guard
+                        .values()
+                        .map(|log| log.retained_bytes())
+                        .sum::<usize>()
+                        > 64 * 1024 * 1024
+                    {
+                        let victim = guard
+                            .iter()
+                            .filter(|(_, log)| log.retained_len() > 0)
+                            .min_by_key(|(_, log)| log.oldest_available())
+                            .map(|(id, _)| id.clone());
+                        let Some(victim) = victim else {
+                            break;
+                        };
+                        guard
+                            .get_mut(&victim)
+                            .expect("selected log exists")
+                            .evict_oldest();
                     }
                 }
                 // A send error means the client is gone. That is not a reason
                 // to stop draining: the events after the disconnection are the
                 // ones the resume exists to deliver. The channel drops what it
                 // is holding when the receiver goes, so nothing accumulates.
-                let _ = tx.send(ev);
+                if let Some(tx) = &tx {
+                    let _ = tx.send(ev);
+                }
             }
         });
-        Box::pin(futures::stream::unfold(rx, |mut rx| async move {
-            rx.recv().await.map(|ev| (ev, rx))
-        }))
+        match rx {
+            Some(rx) => Box::pin(futures::stream::unfold(rx, |mut rx| async move {
+                rx.recv().await.map(|ev| (ev, rx))
+            })),
+            None => Box::pin(futures::stream::iter([overflow])),
+        }
     }
 
     /// The tip cursor for a session's stream — what a live subscriber holds.
@@ -551,7 +613,15 @@ impl HttpHandler for AcpServer {
             agent: req.agent.clone(),
             mcp_servers: req.mcp_servers.clone(),
         };
-        self.sessions.write().await.insert(id.clone(), record);
+        {
+            let mut sessions = self.sessions.write().await;
+            if sessions.len() >= 256 {
+                return Err(AcpError::Protocol(
+                    "resource_limit:256 session metadata records".into(),
+                ));
+            }
+            sessions.insert(id.clone(), record);
+        }
         // Open the session's event stream at create, not lazily at first send.
         // Lazily would mean a resume issued between create and the first
         // message could not tell "no events yet" from "no such session".
@@ -668,7 +738,7 @@ impl HttpHandler for AcpServer {
             record.metadata.message_count = record.metadata.message_count.saturating_add(1);
             record.clone()
         };
-        let _admission = record.lifecycle.admit().await?;
+        let (_admission, turn_slot) = record.lifecycle.admit_turn().await?;
 
         // Per-call tools override the session allowlist; an empty body falls
         // back to the tools stored at create-time.
@@ -759,7 +829,7 @@ impl HttpHandler for AcpServer {
             _ = record.lifecycle.closed() => return Err(AcpError::Cleanup("session is closing".into())),
             result = establish => result?,
         };
-        Ok(self.tee_into_log(&session_id, upstream, &record.lifecycle))
+        Ok(self.tee_into_log(&session_id, upstream, &record.lifecycle, turn_slot))
     }
 
     /// The server's authorization decision, taken from the principal the

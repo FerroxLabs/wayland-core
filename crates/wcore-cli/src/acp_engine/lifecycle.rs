@@ -66,6 +66,7 @@ impl Drop for InitializationCompletion {
 
 #[derive(Default)]
 pub(super) struct SessionLifetime {
+    pub(super) last_used: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
     pub(super) closing: Arc<AtomicBool>,
     pub(super) turns: Mutex<Vec<(CancellationToken, JoinHandle<()>)>>,
     pub(super) root: Option<SessionControl>,
@@ -151,6 +152,50 @@ impl EngineSession {
 }
 
 impl EngineTurnEngine {
+    /// Retire only durably reloadable, quiescent engines. Failed cleanup keeps
+    /// its counted owner quarantined; admission never frees uncertain capacity.
+    pub(super) async fn retire_idle_engines(&self) {
+        let mut initializers = self.initializers.lock().await;
+        let candidates = self.sessions.lock().await.clone();
+        for (id, session) in candidates {
+            let Ok(turns) = session.lifetime.turns.try_lock() else {
+                continue;
+            };
+            let old = session
+                .lifetime
+                .last_used
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some_and(|time| time.elapsed() >= Duration::from_secs(900));
+            if !old || turns.iter().any(|(_, task)| !task.is_finished()) {
+                continue;
+            }
+            let Ok(engine) = session.engine.try_lock() else {
+                continue;
+            };
+            let safe = engine.session_journal().is_some()
+                && engine.recovery_plan().is_ok_and(|plan| {
+                    matches!(
+                        plan.disposition,
+                        wcore_agent::recovery::RecoveryDisposition::Ready
+                    )
+                });
+            if !safe {
+                continue;
+            }
+            session.lifetime.closing.store(true, Ordering::Release);
+            drop(engine);
+            drop(turns);
+            if tokio::time::timeout(Duration::from_secs(10), session.close())
+                .await
+                .is_ok_and(|result| result.is_ok())
+            {
+                self.sessions.lock().await.remove(&id);
+                initializers.remove(&id);
+            }
+        }
+    }
+
     pub(super) async fn signal_close(&self, session_id: &str) {
         if let Some(initializer) = self.initializers.lock().await.get(session_id) {
             initializer.closing.store(true, Ordering::Release);
@@ -206,5 +251,47 @@ impl EngineTurnEngine {
         }
         self.initializers.lock().await.remove(session_id);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod resource_tests {
+    use super::*;
+    #[tokio::test]
+    async fn stabilization_pool_counts_initializing_and_closing_owners() {
+        let root = tempfile::tempdir().unwrap();
+        let engine = EngineTurnEngine::new(
+            wcore_config::config::Config::default(),
+            root.path().to_string_lossy().into_owned(),
+        );
+        for i in 0..64 {
+            engine
+                .initializers
+                .lock()
+                .await
+                .insert(format!("pending-{i}"), Arc::new(Initialization::new()));
+        }
+        let error = engine
+            .session_for("overflow", None, &[], &[])
+            .await
+            .err()
+            .expect("64 initializing owners consume capacity");
+        assert!(error.to_string().contains("resource_limit"));
+        assert_eq!(engine.initializers.lock().await.len(), 64);
+        engine
+            .initializers
+            .lock()
+            .await
+            .get("pending-0")
+            .unwrap()
+            .closing
+            .store(true, Ordering::Release);
+        assert!(
+            engine
+                .session_for("still-overflow", None, &[], &[])
+                .await
+                .is_err(),
+            "quarantined owner must not free capacity"
+        );
     }
 }
