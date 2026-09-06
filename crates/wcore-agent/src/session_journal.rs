@@ -647,7 +647,10 @@ impl SessionJournal {
     pub(crate) fn durable_children(
         &self,
     ) -> Result<Vec<wcore_types::spawner::DurableChildRecord>, JournalError> {
-        let writer = self.inner.lock().map_err(|_| JournalError::WriterPoisoned)?;
+        let writer = self
+            .inner
+            .lock()
+            .map_err(|_| JournalError::WriterPoisoned)?;
         Ok(writer
             .state
             .children

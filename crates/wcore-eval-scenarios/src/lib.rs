@@ -41,7 +41,6 @@ pub mod assertions;
 mod candidate_stdout;
 mod capability_honesty;
 pub mod catalog;
-pub mod paired;
 mod child_env;
 /// Phase 30 claims register, checker and renderer (F30-04): a claim carrying no resolving
 /// evidence pointer, no bounds, or a scope its evidence does not contain cannot be rendered,
@@ -86,6 +85,7 @@ pub mod hook_scenarios;
 pub mod journey;
 pub mod judge;
 pub mod mcp_scenarios;
+pub mod paired;
 pub mod personas;
 mod process_tree;
 pub mod protocol_scenarios;

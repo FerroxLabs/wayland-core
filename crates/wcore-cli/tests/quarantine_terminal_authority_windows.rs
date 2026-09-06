@@ -172,7 +172,10 @@ fn a_quarantine_child_does_not_inherit_the_users_console() {
         unsafe { windows_sys::Win32::System::Console::AllocConsole() };
     }
     let plain = probe(false);
-    assert_eq!(plain, "OPEN", "FAILED_PRECONDITION: unhardened console write failed; this run cannot qualify console authority");
+    assert_eq!(
+        plain, "OPEN",
+        "FAILED_PRECONDITION: unhardened console write failed; this run cannot qualify console authority"
+    );
 
     let hardened = probe(true);
     let live = git_still_runs();

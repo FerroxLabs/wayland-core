@@ -57,9 +57,9 @@ use std::os::windows::process::CommandExt;
 use std::process::{Command, Stdio};
 
 use windows_sys::Win32::System::Console::{
-    AllocConsole, AttachConsole, FreeConsole, GetConsoleProcessList, GetConsoleScreenBufferInfo,
-    GetConsoleWindow, ReadConsoleOutputCharacterW, ATTACH_PARENT_PROCESS,
-    CONSOLE_SCREEN_BUFFER_INFO, COORD,
+    ATTACH_PARENT_PROCESS, AllocConsole, AttachConsole, CONSOLE_SCREEN_BUFFER_INFO, COORD,
+    FreeConsole, GetConsoleProcessList, GetConsoleScreenBufferInfo, GetConsoleWindow,
+    ReadConsoleOutputCharacterW,
 };
 
 /// Set on the re-executed copy of this binary; its presence switches this
@@ -531,9 +531,11 @@ fn the_notice_reaches_the_console_the_prompt_reaches() {
             .as_nanos()
     );
     let notice = wcore_cli::plugin::quarantine::console_attribution_notice(&["--version", &nonce]);
-    assert!(!console_contents()
-        .expect("pre-delivery buffer")
-        .contains(&nonce));
+    assert!(
+        !console_contents()
+            .expect("pre-delivery buffer")
+            .contains(&nonce)
+    );
     let delivered = wcore_cli::plugin::quarantine::announce_on_every_operator_sink(&notice);
     let contents = console_contents().expect("post-delivery buffer");
     assert!(
