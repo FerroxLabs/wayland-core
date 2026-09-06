@@ -642,6 +642,20 @@ impl SessionJournal {
             .map(|writer| writer.state.clone())
     }
 
+    /// Read the same live writer state as `state`, without copying unrelated
+    /// conversation and provider payloads for child-supervision queries.
+    pub(crate) fn durable_children(
+        &self,
+    ) -> Result<Vec<wcore_types::spawner::DurableChildRecord>, JournalError> {
+        let writer = self.inner.lock().map_err(|_| JournalError::WriterPoisoned)?;
+        Ok(writer
+            .state
+            .children
+            .values()
+            .filter_map(|child| child.durable.clone())
+            .collect())
+    }
+
     /// Snapshot the reduced state and committed entries from one locked writer.
     ///
     /// Reading the already-open data file prevents a pathname replacement from
