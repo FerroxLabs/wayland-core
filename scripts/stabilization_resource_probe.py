@@ -178,7 +178,7 @@ key_params_path = {json.dumps(str(profile / "credentials.params.json"))}
         info = subprocess.check_output([binary, "--build-info"], env=env, text=True, timeout=15)
         assert args.source in info, "binary/source mismatch"
         receipt["build_info"] = info
-        for name, command in [("build-info", ["--build-info"]), ("config-path", ["config", "path"]), ("mcp-discovery", ["mcp", "list"])]:
+        for name, command in [("build-info", ["--build-info"]), ("config-path", ["--config-path"]), ("mcp-discovery", ["--probe-mcp"])]:
             durations = []
             for i in range(33):
                 start = time.monotonic()
@@ -297,6 +297,9 @@ key_params_path = {json.dumps(str(profile / "credentials.params.json"))}
         receipt["completed"] = True
     except Exception as error:
         receipt["error"] = repr(error)
+        if isinstance(error, subprocess.CalledProcessError):
+            receipt["failed_command_output"] = {"stdout": (error.stdout or b"").decode(errors="replace") if isinstance(error.stdout, bytes) else error.stdout,
+                                                 "stderr": (error.stderr or b"").decode(errors="replace") if isinstance(error.stderr, bytes) else error.stderr}
         receipt["completed"] = False
     finally:
         stop_sample.set()
