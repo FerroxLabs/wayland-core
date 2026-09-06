@@ -11,6 +11,13 @@ pub fn configure_for_launch() -> std::io::Result<()> {
         if unsafe { libc::mallopt(libc::M_ARENA_MAX, 2) } == 0 {
             return Err(std::io::Error::other("glibc arena limit was rejected"));
         }
+        // Keep large turn buffers independently releasable. Glibc otherwise
+        // raises this threshold as large allocations are freed, moving later
+        // buffers into shared arenas whose fragmented pages cannot be trimmed.
+        // SAFETY: the same single-threaded initialization boundary as above.
+        if unsafe { libc::mallopt(libc::M_MMAP_THRESHOLD, 128 * 1024) } == 0 {
+            return Err(std::io::Error::other("glibc mmap threshold was rejected"));
+        }
     }
     Ok(())
 }
