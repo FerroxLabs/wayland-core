@@ -177,6 +177,23 @@ pub trait TurnEngine: Send + Sync {
     }
 }
 
+/// Normalize terminal delivery identity without changing tool/approval IDs or history.
+pub fn bind_turn_id(
+    upstream: Pin<Box<dyn Stream<Item = MessageEvent> + Send>>,
+    turn_id: String,
+) -> Pin<Box<dyn Stream<Item = MessageEvent> + Send>> {
+    use futures::StreamExt;
+    Box::pin(upstream.map(move |mut event| {
+        match &mut event {
+            MessageEvent::Done { turn_id: id, .. } | MessageEvent::Error { turn_id: id, .. } => {
+                *id = turn_id.clone()
+            }
+            _ => {}
+        }
+        event
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,21 +305,4 @@ mod tests {
         assert_eq!(frames.len(), 1);
         assert!(matches!(frames[0], MessageEvent::Error { .. }));
     }
-}
-
-/// Normalize terminal delivery identity without changing tool/approval IDs or history.
-pub fn bind_turn_id(
-    upstream: Pin<Box<dyn Stream<Item = MessageEvent> + Send>>,
-    turn_id: String,
-) -> Pin<Box<dyn Stream<Item = MessageEvent> + Send>> {
-    use futures::StreamExt;
-    Box::pin(upstream.map(move |mut event| {
-        match &mut event {
-            MessageEvent::Done { turn_id: id, .. } | MessageEvent::Error { turn_id: id, .. } => {
-                *id = turn_id.clone()
-            }
-            _ => {}
-        }
-        event
-    }))
 }
