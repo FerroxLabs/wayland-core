@@ -378,10 +378,9 @@ async fn fleet_http_children_preserve_identity_cost_and_cancellation() {
                     parent_call_id: Some(tag),
                     ..
                 } = event
+                    && tag.starts_with("fleet:")
                 {
-                    if tag.starts_with("fleet:") {
-                        shard_tags.push(tag);
-                    }
+                    shard_tags.push(tag);
                 }
             }
             assert_eq!(
