@@ -587,6 +587,13 @@ impl AcpServer {
                         cursor.map_or(DeliveryPosition::Overload, DeliveryPosition::Event);
                     if sender.send(position).is_err() {
                         positions_tx = None;
+                    } else {
+                        // Ready upstream/log futures need not yield. Give the
+                        // independent delivery and HTTP tasks a scheduling turn
+                        // before this producer fills their retained cursor window.
+                        // This never waits for reader capacity; detached replay
+                        // recording continues without this cooperation point.
+                        tokio::task::yield_now().await;
                     }
                 }
             }
