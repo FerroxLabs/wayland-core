@@ -3412,6 +3412,16 @@ pub(crate) mod encrypted_file {
     use serde::{Deserialize, Serialize};
     use zeroize::Zeroize;
 
+    #[cfg(test)]
+    std::thread_local! {
+        static DERIVATION_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_derivation_count() -> usize {
+        DERIVATION_COUNT.get()
+    }
+
     /// Default Argon2id memory cost in KiB (64 MiB). Matches the Forge
     /// vault.ts profile.
     const DEFAULT_M_COST_KIB: u32 = 64 * 1024;
@@ -3501,6 +3511,8 @@ pub(crate) mod encrypted_file {
                 .map_err(|e| EncryptedFileError::KdfParams(e.to_string()))?,
         );
         let mut key = [0u8; KEY_LEN];
+        #[cfg(test)]
+        DERIVATION_COUNT.set(DERIVATION_COUNT.get() + 1);
         argon
             .hash_password_into(password.as_bytes(), &salt, &mut key)
             .map_err(|e| EncryptedFileError::Argon2(e.to_string()))?;
@@ -3825,6 +3837,9 @@ mod delete_backend_tests;
 
 #[cfg(test)]
 mod tests {
+    mod derived_key_tests {
+        include!("credentials_derived_key_tests.rs");
+    }
     use super::*;
     use tempfile::{TempDir, tempdir};
 
