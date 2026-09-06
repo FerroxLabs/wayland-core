@@ -174,7 +174,9 @@ def storage_checks(args, root, home, sessions, workspace, sid, uncertain, launch
     # Root cannot prove a chmod refusal. Run the same read command as an
     # unprivileged UID, with a readable positive control before denying access.
     receipt["stage"] = "permission-positive-and-refusal-control"
-    with tempfile.TemporaryDirectory(prefix="w04-permission-") as name:
+    # The host's /tmp may be root-private (0700). The uid65534 control
+    # must traverse the fixture's ancestors before journal permissions matter.
+    with tempfile.TemporaryDirectory(prefix="w04-permission-", dir="/var/tmp") as name:
         directory = Path(name)
         os.chmod(directory, 0o755)
         binary = directory / "wayland-core"
