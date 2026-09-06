@@ -297,6 +297,9 @@ pub async fn autocompact(
             replay_reasoning_content: false,
         };
 
+        // The engine supplies its budgeted compaction adapter here. Keep this
+        // dispatch INSIDE the PTL loop: each physical attempt needs a fresh
+        // admission and must settle before another attempt or summary parsing.
         match provider.stream(&request).await {
             Ok(rx) => {
                 match collect_stream_text(rx, provenance.intent.as_ref().and_then(|i| i.owner()))

@@ -487,6 +487,7 @@ struct ProviderBudgetReservation {
     conservative_input_tokens: u64,
     conservative_output_tokens: u64,
     conservative_cost_usd: f64,
+    auxiliary: Option<(AuxiliaryCharges, AuxiliaryCharge)>,
 }
 
 enum ProviderBudgetOwner {
@@ -518,6 +519,43 @@ impl ProviderBudgetReservation {
             conservative_input_tokens,
             conservative_output_tokens,
             conservative_cost_usd,
+            auxiliary: None,
+        }
+    }
+
+    fn with_auxiliary_charge(
+        mut self,
+        charges: AuxiliaryCharges,
+        provider: String,
+        model: String,
+    ) -> Self {
+        self.auxiliary = Some((
+            charges,
+            AuxiliaryCharge {
+                provider,
+                model,
+                usage: TokenUsage {
+                    input_tokens: self.conservative_input_tokens,
+                    output_tokens: self.conservative_output_tokens,
+                    ..Default::default()
+                },
+                // Admission bounds are estimates, never a provider bill.
+                cost: ResolvedTurnCost {
+                    usd: self.conservative_cost_usd,
+                    priced: false,
+                    bounded: true,
+                },
+            },
+        ));
+        self
+    }
+
+    fn record_auxiliary_charge(&mut self) {
+        if let Some((charges, charge)) = self.auxiliary.take() {
+            charges
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(charge);
         }
     }
 
@@ -531,6 +569,7 @@ impl ProviderBudgetReservation {
             .reservation
             .take()
             .expect("provider budget reservation settles exactly once");
+        self.record_auxiliary_charge();
         match &self.owner {
             ProviderBudgetOwner::Durable {
                 authority,
@@ -599,6 +638,7 @@ impl ProviderBudgetReservation {
 impl Drop for ProviderBudgetReservation {
     fn drop(&mut self) {
         if let Some(reservation) = self.reservation.take() {
+            self.record_auxiliary_charge();
             match &self.owner {
                 ProviderBudgetOwner::Durable {
                     authority,
@@ -672,6 +712,466 @@ impl ConfiguredFallbackBudgetState {
             failure: None,
         }
     }
+}
+
+/// Compaction shares the paid-call reservation with conversation dispatches.
+/// Receipts are drained by the engine even when summary validation fails.
+type AuxiliaryCharges = Arc<Mutex<Vec<AuxiliaryCharge>>>;
+
+struct AuxiliaryCharge {
+    provider: String,
+    model: String,
+    usage: TokenUsage,
+    cost: ResolvedTurnCost,
+}
+
+struct BudgetedCompactionProvider {
+    inner: Arc<dyn LlmProvider>,
+    journal: Option<(SessionJournal, String)>,
+    authority: Option<SharedBudgetAuthorityCoordinator>,
+    tracker: Option<Arc<parking_lot::Mutex<wcore_budget::BudgetTracker>>>,
+    execution: crate::budget::ExecutionBudgetView,
+    session_id: String,
+    compat: wcore_config::compat::ProviderCompat,
+    guard: Arc<crate::spend_guard::SpendGuard>,
+    strict_monetary_cap: bool,
+    charges: AuxiliaryCharges,
+    cancel: tokio_util::sync::CancellationToken,
+}
+
+fn auxiliary_budget_error(message: impl std::fmt::Display) -> ProviderError {
+    ProviderError::NotAttempted {
+        reason: format!("compaction budget authority: {message}"),
+        failure_code: Some("compaction_budget_refused".to_string()),
+    }
+}
+
+fn auxiliary_mutation_error(error: ProviderBudgetMutationError) -> ProviderError {
+    match error {
+        ProviderBudgetMutationError::Budget(error) => auxiliary_budget_error(error),
+        ProviderBudgetMutationError::Authority(error) => auxiliary_budget_error(error),
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for BudgetedCompactionProvider {
+    async fn stream(
+        &self,
+        request: &LlmRequest,
+    ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+        if self.cancel.is_cancelled() {
+            return Err(ProviderError::NotAttempted {
+                reason: "compaction cancelled before admission".into(),
+                failure_code: None,
+            });
+        }
+        let provider = self.compat.provider_type();
+        let input =
+            estimate::estimate_request_tokens(&request.messages, &request.system, &request.tools);
+        let output = u64::from(request.max_tokens);
+        let bound = resolve_conservative_reservation_cost(
+            provider,
+            &request.model,
+            input,
+            output,
+            &self.compat,
+        );
+        let monetary_cap = match self.authority.as_ref() {
+            Some(authority) => authority
+                .lock()
+                .inspect(|tracker, _| tracker.has_monetary_cap(&self.session_id))
+                .map_err(auxiliary_budget_error)?,
+            None => self
+                .tracker
+                .as_ref()
+                .is_some_and(|tracker| tracker.lock().has_monetary_cap(&self.session_id)),
+        };
+        if !bound.bounded && monetary_cap && self.strict_monetary_cap {
+            return Err(auxiliary_budget_error(format!(
+                "unpriced provider {provider}/{}",
+                request.model
+            )));
+        }
+        let dispatch_id = format!("compaction-budget-dispatch-{}", uuid::Uuid::new_v4());
+        // W09 admission: every PTL retry calls this boundary again. No provider
+        // stream is constructed until its reservation has been durably granted.
+        let reservation = if let Some(authority) = self.authority.as_ref() {
+            let reservation = authority
+                .lock()
+                .reserve_provider_dispatch(&dispatch_id, &self.session_id, input, output, bound.usd)
+                .map_err(auxiliary_budget_error)?
+                .map_err(auxiliary_budget_error)?;
+            Some(ProviderBudgetReservation::new(
+                ProviderBudgetOwner::Durable {
+                    authority: Arc::clone(authority),
+                    dispatch_id: dispatch_id.clone(),
+                },
+                self.execution.clone(),
+                reservation,
+                input,
+                output,
+                bound.usd,
+            ))
+        } else if let Some(tracker) = self.tracker.as_ref() {
+            let reservation = tracker
+                .lock()
+                .reserve_turn(&self.session_id, input, output, bound.usd)
+                .map_err(auxiliary_budget_error)?;
+            Some(ProviderBudgetReservation::new(
+                ProviderBudgetOwner::Legacy(Arc::clone(tracker)),
+                self.execution.clone(),
+                reservation,
+                input,
+                output,
+                bound.usd,
+            ))
+        } else {
+            None
+        };
+        let reservation = reservation.map(|r| {
+            r.with_auxiliary_charge(
+                Arc::clone(&self.charges),
+                provider.to_string(),
+                request.model.clone(),
+            )
+        });
+        let state = Arc::new(Mutex::new(ConfiguredFallbackBudgetState::new(
+            reservation,
+            provider.to_string(),
+            request.model.clone(),
+        )));
+        let admitter = configured_fallback_admitter(
+            &state,
+            self.tracker.clone(),
+            self.authority.clone(),
+            self.execution.clone(),
+            self.session_id.clone(),
+            dispatch_id.clone(),
+            self.compat.clone(),
+            Arc::clone(&self.guard),
+            input,
+            output,
+            monetary_cap,
+            self.strict_monetary_cap,
+            Some(Arc::clone(&self.charges)),
+        );
+        let physical: Arc<dyn LlmProvider> = match self.journal.as_ref() {
+            Some((journal, turn)) => Arc::new(
+                JournaledLlmProvider::new(
+                    Arc::clone(&self.inner),
+                    journal.clone(),
+                    turn.clone(),
+                    LifecyclePurpose::Compaction,
+                    provider,
+                    request.model.clone(),
+                )
+                .with_dispatch_id(dispatch_id),
+            ),
+            None => Arc::clone(&self.inner),
+        };
+        let result = tokio::select! {
+            biased;
+            _ = self.cancel.cancelled() => Err(ProviderError::Connection("compaction cancelled during dispatch".into())),
+            result = wcore_providers::retry::scope_configured_fallback_admitter(
+                admitter, wcore_providers::retry::scope_max_retries(0, physical.stream(request)),
+            ) => result,
+        };
+        let mut rx = match result {
+            Ok(rx) => rx,
+            Err(error) => {
+                let reservation = state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .current
+                    .take();
+                if let Some(reservation) = reservation {
+                    if error.was_not_attempted()
+                        || delivered_no_request_bytes(
+                            &wcore_providers::retry::provider_failure_code(&error),
+                        )
+                    {
+                        reservation.release().map_err(auxiliary_budget_error)?;
+                    } else {
+                        let (input, output, cost) = reservation.conservative_charge();
+                        reservation
+                            .settle(input, output, cost)
+                            .map_err(auxiliary_mutation_error)?;
+                    }
+                }
+                let failure = state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .failure
+                    .take();
+                if let Some(failure) = failure {
+                    return Err(match failure {
+                        ConfiguredFallbackAdmissionFailure::Budget(error) => {
+                            auxiliary_mutation_error(error)
+                        }
+                        ConfiguredFallbackAdmissionFailure::Unpriced { provider, model } => {
+                            auxiliary_budget_error(format!("unpriced fallback {provider}/{model}"))
+                        }
+                        ConfiguredFallbackAdmissionFailure::SpendGuard(refusal) => {
+                            auxiliary_budget_error(format!("fallback spend guard: {refusal:?}"))
+                        }
+                    });
+                }
+                return Err(error);
+            }
+        };
+        // The compactor already consumes the complete summary before using it.
+        // Buffer its events here so settlement precedes parsing, including an
+        // empty summary. A cancelled/partial stream retains the admitted bound.
+        let mut events = Vec::new();
+        let mut usage = None;
+        loop {
+            let event = tokio::select! {
+                _ = self.cancel.cancelled() => None,
+                event = rx.recv() => event,
+            };
+            let Some(event) = event else { break };
+            let terminal = matches!(event, LlmEvent::Done { .. } | LlmEvent::Error(_));
+            if let LlmEvent::Done { usage: actual, .. } = &event {
+                if actual.total_input_tokens() > 0 || actual.output_tokens > 0 {
+                    usage = Some(actual.clone());
+                }
+            }
+            events.push(event);
+            if terminal {
+                break;
+            }
+        }
+        let (reservation, provider, model) = {
+            let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+            (
+                state.current.take(),
+                state.current_provider.clone(),
+                state.current_model.clone(),
+            )
+        };
+        if let Some(mut reservation) = reservation {
+            let (input, output, cost) = match usage {
+                Some(usage) => {
+                    let cost = resolve_turn_cost(
+                        &provider,
+                        &model,
+                        usage.input_tokens,
+                        usage.output_tokens,
+                        usage.cache_read_tokens,
+                        usage.cache_creation_tokens,
+                        &self.compat,
+                    )
+                    .with_provider_reported(usage.reported_cost_usd);
+                    let input = usage.total_input_tokens();
+                    let output = usage.output_tokens;
+                    let usd = cost.usd;
+                    reservation.auxiliary = Some((
+                        Arc::clone(&self.charges),
+                        AuxiliaryCharge {
+                            provider,
+                            model,
+                            usage,
+                            cost,
+                        },
+                    ));
+                    (input, output, usd)
+                }
+                None => reservation.conservative_charge(),
+            };
+            reservation
+                .settle(input, output, cost)
+                .map_err(auxiliary_mutation_error)?;
+        } else if let Some(usage) = usage {
+            let cost = resolve_turn_cost(
+                &provider,
+                &model,
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.cache_read_tokens,
+                usage.cache_creation_tokens,
+                &self.compat,
+            )
+            .with_provider_reported(usage.reported_cost_usd);
+            self.charges
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(AuxiliaryCharge {
+                    provider,
+                    model,
+                    usage,
+                    cost,
+                });
+        }
+        let (tx, replay) = tokio::sync::mpsc::channel(events.len().max(1));
+        for event in events {
+            // The receiver is local and capacity equals the complete event set.
+            tx.try_send(event)
+                .expect("compaction replay capacity matches buffered events");
+        }
+        Ok(replay)
+    }
+}
+
+/// The configured fallback owns a replacement reservation, never a second grant.
+/// Conversation and compaction install the same admission callback.
+#[allow(clippy::too_many_arguments)]
+fn configured_fallback_admitter(
+    fallback_budget_state: &Arc<Mutex<ConfiguredFallbackBudgetState>>,
+    tracker_for_fallback: Option<Arc<parking_lot::Mutex<wcore_budget::BudgetTracker>>>,
+    authority_for_fallback: Option<SharedBudgetAuthorityCoordinator>,
+    execution_for_fallback: crate::budget::ExecutionBudgetView,
+    fallback_session_id: String,
+    fallback_dispatch_id: String,
+    fallback_compat: wcore_config::compat::ProviderCompat,
+    guard_for_fallback: Arc<crate::spend_guard::SpendGuard>,
+    reserved_input: u64,
+    reserved_output: u64,
+    monetary_cap_active: bool,
+    strict_monetary_cap: bool,
+    auxiliary_charges: Option<AuxiliaryCharges>,
+) -> wcore_providers::retry::ConfiguredFallbackAdmitter {
+    let fallback_state_for_admission = Arc::clone(fallback_budget_state);
+    Arc::new(move |_, _, next_provider, next_model, previous_attempted| {
+        let mut state = fallback_state_for_admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(reservation) = state.current.take() {
+            if previous_attempted {
+                let (input_tokens, output_tokens, cost_usd) = reservation.conservative_charge();
+                let settle_result = reservation.settle(input_tokens, output_tokens, cost_usd);
+                if let Err(error) = settle_result {
+                    state.failure = Some(ConfiguredFallbackAdmissionFailure::Budget(error));
+                    return Err(ProviderError::Api {
+                        status: 400,
+                        message: "configured fallback denied by budget".into(),
+                    });
+                }
+            } else {
+                if let Err(error) = reservation.release() {
+                    state.failure = Some(ConfiguredFallbackAdmissionFailure::Budget(
+                        ProviderBudgetMutationError::Authority(error),
+                    ));
+                    return Err(ProviderError::Api {
+                        status: 400,
+                        message: "configured fallback budget authority failed".into(),
+                    });
+                }
+            }
+        }
+
+        // #174 c3-c5 — the spend guard binds here, before any
+        // reservation is taken, because this is the one
+        // dispatch path that changes provider AND model below
+        // the guarded provider handle.
+        let next_profile =
+            crate::spend_guard::classify_model(next_provider, next_model, &fallback_compat);
+        if let Err(refusal) = guard_for_fallback.admit(&next_profile) {
+            state.failure = Some(ConfiguredFallbackAdmissionFailure::SpendGuard(refusal));
+            return Err(ProviderError::NotAttempted {
+                reason: "configured fallback refused by the spend guard".to_string(),
+                failure_code: Some("spend_guard_refused".to_string()),
+            });
+        }
+        let next_cost = resolve_conservative_reservation_cost(
+            next_provider,
+            next_model,
+            reserved_input,
+            reserved_output,
+            &fallback_compat,
+        );
+        if !next_cost.bounded && monetary_cap_active && strict_monetary_cap {
+            state.failure = Some(ConfiguredFallbackAdmissionFailure::Unpriced {
+                provider: next_provider.to_string(),
+                model: next_model.to_string(),
+            });
+            return Err(ProviderError::Api {
+                status: 400,
+                message: "configured fallback pricing is unavailable".into(),
+            });
+        }
+        let next_cost_usd = next_cost.usd;
+        let next_reservation = if let Some(authority) = authority_for_fallback.as_ref() {
+            match authority.lock().reserve_provider_dispatch(
+                &fallback_dispatch_id,
+                &fallback_session_id,
+                reserved_input,
+                reserved_output,
+                next_cost_usd,
+            ) {
+                Ok(Ok(reservation)) => Some(ProviderBudgetReservation::new(
+                    ProviderBudgetOwner::Durable {
+                        authority: Arc::clone(authority),
+                        dispatch_id: fallback_dispatch_id.clone(),
+                    },
+                    execution_for_fallback.clone(),
+                    reservation,
+                    reserved_input,
+                    reserved_output,
+                    next_cost_usd,
+                )),
+                Ok(Err(error)) => {
+                    state.failure = Some(ConfiguredFallbackAdmissionFailure::Budget(
+                        ProviderBudgetMutationError::Budget(error),
+                    ));
+                    return Err(ProviderError::Api {
+                        status: 400,
+                        message: "configured fallback denied by budget".into(),
+                    });
+                }
+                Err(error) => {
+                    state.failure = Some(ConfiguredFallbackAdmissionFailure::Budget(
+                        ProviderBudgetMutationError::Authority(error),
+                    ));
+                    return Err(ProviderError::Api {
+                        status: 400,
+                        message: "configured fallback budget authority failed".into(),
+                    });
+                }
+            }
+        } else if let Some(tracker) = tracker_for_fallback.clone() {
+            match tracker.lock().reserve_turn(
+                &fallback_session_id,
+                reserved_input,
+                reserved_output,
+                next_cost_usd,
+            ) {
+                Ok(reservation) => Some(ProviderBudgetReservation::new(
+                    ProviderBudgetOwner::Legacy(Arc::clone(&tracker)),
+                    execution_for_fallback.clone(),
+                    reservation,
+                    reserved_input,
+                    reserved_output,
+                    next_cost_usd,
+                )),
+                Err(error) => {
+                    state.failure = Some(ConfiguredFallbackAdmissionFailure::Budget(
+                        ProviderBudgetMutationError::Budget(error),
+                    ));
+                    return Err(ProviderError::Api {
+                        status: 400,
+                        message: "configured fallback denied by budget".into(),
+                    });
+                }
+            }
+        } else {
+            None
+        };
+        state.current = next_reservation.map(|reservation| match auxiliary_charges.as_ref() {
+            Some(charges) => reservation.with_auxiliary_charge(
+                Arc::clone(charges),
+                next_provider.to_string(),
+                next_model.to_string(),
+            ),
+            None => reservation,
+        });
+        state.current_provider = next_provider.to_string();
+        state.current_model = next_model.to_string();
+        Ok(wcore_providers::retry::ConfiguredFallbackAdmission {
+            estimated_microcents: next_cost.bounded.then(|| {
+                (next_cost.usd * wcore_types::crucible::MICROCENTS_PER_USD).round() as u64
+            }),
+        })
+    })
 }
 
 /// W7 (v0.6.3) — resolve the USD cost of one LLM turn from the
@@ -6394,6 +6894,16 @@ impl AgentEngine {
         // #1203 — see `install_budget_authority`.
         self.sync_spend_guard_session();
         Ok(())
+    }
+
+    /// Exercise the production child inheritance seam with real fixture engines.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[doc(hidden)]
+    pub fn inherit_test_budget_authority(
+        &mut self,
+        authority: SharedBudgetAuthorityCoordinator,
+    ) -> anyhow::Result<()> {
+        self.inherit_budget_authority(authority, None)
     }
 
     fn durable_budget_authority(
@@ -15160,165 +15670,21 @@ impl AgentEngine {
                         reservation_provider.to_string(),
                         effective_model.clone(),
                     )));
-                let fallback_state_for_admission = Arc::clone(&fallback_budget_state);
-                let tracker_for_fallback = self.budget_tracker.clone();
-                let authority_for_fallback = durable_authority.clone();
-                let execution_for_fallback = run_budget.clone();
-                let fallback_session_id = reservation_session_id.clone();
-                let fallback_dispatch_id = budget_dispatch_id.clone();
-                let fallback_compat = self.compat.clone();
-                let guard_for_fallback = Arc::clone(&self.spend_guard);
-                let fallback_admitter: wcore_providers::retry::ConfiguredFallbackAdmitter =
-                    Arc::new(move |_, _, next_provider, next_model, previous_attempted| {
-                        let mut state = fallback_state_for_admission
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        if let Some(reservation) = state.current.take() {
-                            if previous_attempted {
-                                let (input_tokens, output_tokens, cost_usd) =
-                                    reservation.conservative_charge();
-                                let settle_result =
-                                    reservation.settle(input_tokens, output_tokens, cost_usd);
-                                if let Err(error) = settle_result {
-                                    state.failure =
-                                        Some(ConfiguredFallbackAdmissionFailure::Budget(error));
-                                    return Err(ProviderError::Api {
-                                        status: 400,
-                                        message: "configured fallback denied by budget".into(),
-                                    });
-                                }
-                            } else {
-                                if let Err(error) = reservation.release() {
-                                    state.failure =
-                                        Some(ConfiguredFallbackAdmissionFailure::Budget(
-                                            ProviderBudgetMutationError::Authority(error),
-                                        ));
-                                    return Err(ProviderError::Api {
-                                        status: 400,
-                                        message: "configured fallback budget authority failed"
-                                            .into(),
-                                    });
-                                }
-                            }
-                        }
-
-                        // #174 c3-c5 — the spend guard binds here, before any
-                        // reservation is taken, because this is the one
-                        // dispatch path that changes provider AND model below
-                        // the guarded provider handle.
-                        let next_profile = crate::spend_guard::classify_model(
-                            next_provider,
-                            next_model,
-                            &fallback_compat,
-                        );
-                        if let Err(refusal) = guard_for_fallback.admit(&next_profile) {
-                            state.failure =
-                                Some(ConfiguredFallbackAdmissionFailure::SpendGuard(refusal));
-                            return Err(ProviderError::NotAttempted {
-                                reason: "configured fallback refused by the spend guard"
-                                    .to_string(),
-                                failure_code: Some("spend_guard_refused".to_string()),
-                            });
-                        }
-                        let next_cost = resolve_conservative_reservation_cost(
-                            next_provider,
-                            next_model,
-                            reserved_input,
-                            reserved_output,
-                            &fallback_compat,
-                        );
-                        if !next_cost.bounded && monetary_cap_active && strict_monetary_cap {
-                            state.failure = Some(ConfiguredFallbackAdmissionFailure::Unpriced {
-                                provider: next_provider.to_string(),
-                                model: next_model.to_string(),
-                            });
-                            return Err(ProviderError::Api {
-                                status: 400,
-                                message: "configured fallback pricing is unavailable".into(),
-                            });
-                        }
-                        let next_cost_usd = next_cost.usd;
-                        let next_reservation =
-                            if let Some(authority) = authority_for_fallback.as_ref() {
-                                match authority.lock().reserve_provider_dispatch(
-                                    &fallback_dispatch_id,
-                                    &fallback_session_id,
-                                    reserved_input,
-                                    reserved_output,
-                                    next_cost_usd,
-                                ) {
-                                    Ok(Ok(reservation)) => Some(ProviderBudgetReservation::new(
-                                        ProviderBudgetOwner::Durable {
-                                            authority: Arc::clone(authority),
-                                            dispatch_id: fallback_dispatch_id.clone(),
-                                        },
-                                        execution_for_fallback.clone(),
-                                        reservation,
-                                        reserved_input,
-                                        reserved_output,
-                                        next_cost_usd,
-                                    )),
-                                    Ok(Err(error)) => {
-                                        state.failure =
-                                            Some(ConfiguredFallbackAdmissionFailure::Budget(
-                                                ProviderBudgetMutationError::Budget(error),
-                                            ));
-                                        return Err(ProviderError::Api {
-                                            status: 400,
-                                            message: "configured fallback denied by budget".into(),
-                                        });
-                                    }
-                                    Err(error) => {
-                                        state.failure =
-                                            Some(ConfiguredFallbackAdmissionFailure::Budget(
-                                                ProviderBudgetMutationError::Authority(error),
-                                            ));
-                                        return Err(ProviderError::Api {
-                                            status: 400,
-                                            message: "configured fallback budget authority failed"
-                                                .into(),
-                                        });
-                                    }
-                                }
-                            } else if let Some(tracker) = tracker_for_fallback.clone() {
-                                match tracker.lock().reserve_turn(
-                                    &fallback_session_id,
-                                    reserved_input,
-                                    reserved_output,
-                                    next_cost_usd,
-                                ) {
-                                    Ok(reservation) => Some(ProviderBudgetReservation::new(
-                                        ProviderBudgetOwner::Legacy(Arc::clone(&tracker)),
-                                        execution_for_fallback.clone(),
-                                        reservation,
-                                        reserved_input,
-                                        reserved_output,
-                                        next_cost_usd,
-                                    )),
-                                    Err(error) => {
-                                        state.failure =
-                                            Some(ConfiguredFallbackAdmissionFailure::Budget(
-                                                ProviderBudgetMutationError::Budget(error),
-                                            ));
-                                        return Err(ProviderError::Api {
-                                            status: 400,
-                                            message: "configured fallback denied by budget".into(),
-                                        });
-                                    }
-                                }
-                            } else {
-                                None
-                            };
-                        state.current = next_reservation;
-                        state.current_provider = next_provider.to_string();
-                        state.current_model = next_model.to_string();
-                        Ok(wcore_providers::retry::ConfiguredFallbackAdmission {
-                            estimated_microcents: next_cost.bounded.then(|| {
-                                (next_cost.usd * wcore_types::crucible::MICROCENTS_PER_USD).round()
-                                    as u64
-                            }),
-                        })
-                    });
+                let fallback_admitter = configured_fallback_admitter(
+                    &fallback_budget_state,
+                    self.budget_tracker.clone(),
+                    durable_authority.clone(),
+                    run_budget.clone(),
+                    reservation_session_id.clone(),
+                    budget_dispatch_id.clone(),
+                    self.compat.clone(),
+                    Arc::clone(&self.spend_guard),
+                    reserved_input,
+                    reserved_output,
+                    monetary_cap_active,
+                    strict_monetary_cap,
+                    None,
+                );
 
                 // P1 Bug#3 — `stream()` can surface a *retryable*
                 // `ProviderError::Connection` (a connection reset/drop while
@@ -19483,24 +19849,36 @@ impl AgentEngine {
         let should_compact =
             smart_drove || self.should_autocompact_now(self.compact_state.last_real_input_tokens);
         if should_compact && !self.compact_state.is_circuit_broken(&self.compact_config) {
-            let provider: Arc<dyn LlmProvider> = match (
+            let journal = match (
                 self.session_journal.as_ref(),
                 self.active_journal_turn_id.as_ref(),
             ) {
-                (Some(journal), Some(turn_id)) => Arc::new(JournaledLlmProvider::new(
-                    Arc::clone(&self.provider),
-                    journal.clone(),
-                    turn_id.clone(),
-                    LifecyclePurpose::Compaction,
-                    self.compat.provider_type(),
-                    self.model.clone(),
-                )),
+                (Some(journal), Some(turn)) => Some((journal.clone(), turn.clone())),
                 (Some(_), None) => {
                     return Err(AgentError::SessionAuthority(
-                        "compaction has journal authority but no active durable turn".to_string(),
+                        "compaction has journal authority but no active durable turn".into(),
                     ));
                 }
-                (None, _) => Arc::clone(&self.provider),
+                (None, _) => None,
+            };
+            let charges: AuxiliaryCharges = Arc::new(Mutex::new(Vec::new()));
+            let provider = BudgetedCompactionProvider {
+                inner: Arc::clone(&self.provider),
+                journal,
+                authority: self.budget_authority.clone(),
+                tracker: self.budget_tracker.clone(),
+                execution: self.current_run_budget()?,
+                session_id: self.budget_session_id(),
+                compat: self.compat.clone(),
+                guard: Arc::clone(&self.spend_guard),
+                strict_monetary_cap: self.config.execution_policy.is_managed()
+                    || self.config.budget.max_cost_usd.is_some()
+                    || self.config.budget.max_daily_cost_usd.is_some()
+                    || self.config.session_cap.as_ref().is_some_and(|cap| {
+                        cap.max_cost_usd.is_some() || cap.max_daily_cost_usd.is_some()
+                    }),
+                charges: Arc::clone(&charges),
+                cancel: self.cancel_token.clone(),
             };
             // AUDIT A4 — `run_compaction` runs at the TOP of the turn
             // loop, AFTER `push_user_turn` appended the user's live
@@ -19551,7 +19929,7 @@ impl AgentEngine {
                 }),
             };
             let result = auto::autocompact(
-                provider.as_ref(),
+                &provider,
                 &self.messages,
                 &self.model,
                 &self.compact_config,
@@ -19559,6 +19937,47 @@ impl AgentEngine {
                 &compact_provenance,
             )
             .await;
+            // Each physical attempt is charged before summary validation. Drain
+            // once on both success and failure, using its actual provider/model.
+            let charged = std::mem::take(&mut *charges.lock().unwrap_or_else(|e| e.into_inner()));
+            for charge in charged {
+                for total in [&mut self.total_usage, &mut self.run_usage] {
+                    total.input_tokens =
+                        total.input_tokens.saturating_add(charge.usage.input_tokens);
+                    total.output_tokens = total
+                        .output_tokens
+                        .saturating_add(charge.usage.output_tokens);
+                    total.cache_read_tokens = total
+                        .cache_read_tokens
+                        .saturating_add(charge.usage.cache_read_tokens);
+                    total.cache_creation_tokens = total
+                        .cache_creation_tokens
+                        .saturating_add(charge.usage.cache_creation_tokens);
+                }
+                fold_reported_cost(
+                    &mut self.total_usage.reported_cost_usd,
+                    &mut self.total_reported_cost_complete,
+                    charge.usage.reported_cost_usd,
+                );
+                fold_reported_cost(
+                    &mut self.run_usage.reported_cost_usd,
+                    &mut self.run_reported_cost_complete,
+                    charge.usage.reported_cost_usd,
+                );
+                if let Some(state) = &self.session_state {
+                    state.add_token_usage(
+                        charge.usage.total_input_tokens(),
+                        charge.usage.output_tokens,
+                    );
+                }
+                self.per_turn_costs.push(wcore_protocol::events::TurnCost {
+                    turn: self.run_turns,
+                    model: charge.model,
+                    provider: charge.provider,
+                    cost_usd: charge.cost.reportable_usd(),
+                    priced: charge.cost.priced,
+                });
+            }
             // Restore the live turn regardless of the compaction
             // outcome — on failure the conversation must be left intact.
             match result {
@@ -19700,6 +20119,14 @@ impl AgentEngine {
                         result_messages_summarized,
                         None,
                     );
+                }
+                Err(error @ auto::CompactError::Provider(ProviderError::NotAttempted { .. }))
+                    if matches!(&error, auto::CompactError::Provider(ProviderError::NotAttempted { failure_code: Some(code), .. }) if code == "compaction_budget_refused") =>
+                {
+                    if let Some(turn) = live_user_turn {
+                        self.messages.push(turn);
+                    }
+                    return Err(AgentError::ApiError(error.to_string()));
                 }
                 Err(auto::CompactError::CircuitBroken { failures }) => {
                     // Already tripped; logged at circuit-breaker level.
