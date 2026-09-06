@@ -39,6 +39,10 @@
 //! refuse the first one's sidecar — a flake manufactured by the test layout
 //! rather than by the code.
 
+#[cfg(target_os = "linux")]
+#[path = "support/process_identity.rs"]
+mod process_identity;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -169,6 +173,26 @@ async fn live_camoufox_egress_goes_through_cores_gate() {
         "CONTROL FAILED — example.com loaded without going through the proxy; \
          the sidecar is not contained and nothing below is a measurement"
     );
+    #[cfg(target_os = "linux")]
+    let owned = {
+        let root = supervisor
+            .live_sessions()
+            .into_iter()
+            .find(|handle| handle.parent_pid == std::process::id())
+            .expect("owned sidecar")
+            .pid;
+        let owned = process_identity::snapshot_tree(root);
+        assert!(
+            owned.iter().any(|id| id.name == "Xvfb"),
+            "positive control: real virtual display must be observed"
+        );
+        assert!(
+            owned.iter().any(|id| id.name.contains("camoufox")),
+            "positive control: real browser must be observed"
+        );
+        eprintln!("owned sidecar/browser/display before cleanup: {owned:?}");
+        owned
+    };
     let control_text = read_text(&client, &tab).await;
     assert!(
         control_text.to_ascii_lowercase().contains("example domain"),
@@ -260,4 +284,7 @@ async fn live_camoufox_egress_goes_through_cores_gate() {
          supposed to have no route to it except Core's gate",
         loopback_hits.load(Ordering::Relaxed)
     );
+    drop(supervisor);
+    #[cfg(target_os = "linux")]
+    process_identity::assert_terminated(&owned).await;
 }
