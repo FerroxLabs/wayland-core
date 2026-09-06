@@ -561,7 +561,10 @@ impl AcpServer {
                         let victim = guard
                             .iter()
                             .filter(|(_, log)| log.retained_len() > 0)
-                            .min_by_key(|(_, log)| log.oldest_available())
+                            // Positions are session-local, so comparing them
+                            // starves newly started streams. Reclaim from the
+                            // largest retained history to share the byte budget.
+                            .max_by_key(|(_, log)| log.retained_bytes())
                             .map(|(id, _)| id.clone());
                         let Some(victim) = victim else {
                             break;

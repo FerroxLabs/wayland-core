@@ -213,3 +213,87 @@ async fn fast_rest_reader_receives_complete_sixteen_mib_burst() {
     let _ = stop.send(());
     http.await.unwrap();
 }
+
+#[tokio::test]
+async fn aggregate_replay_pressure_preserves_a_late_stream_first_event() {
+    let server = AcpServer::new().with_turn_engine(Arc::new(Burst {
+        chunks: 256,
+        chunk_bytes: 32768,
+    }));
+    let mut sessions = Vec::new();
+    // Nine independent near-8MiB histories exceed the 64MiB aggregate cap.
+    // Keep their sessions resident but detach delivery while recording finishes.
+    for _ in 0..9 {
+        let id = server
+            .create_session(SessionCreateRequest {
+                model: None,
+                tools: vec![],
+                system_prompt: None,
+                agent: None,
+                mcp_servers: vec![],
+            })
+            .await
+            .unwrap()
+            .session_id;
+        let response = server
+            .send_message(MessageSendRequest {
+                session_id: id.clone(),
+                text: "fill replay".into(),
+                tools: vec![],
+            })
+            .await
+            .unwrap();
+        drop(response);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while server.event_tip(&id).await.unwrap().position < 257 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached recording completed");
+        sessions.push(id);
+    }
+    // Share the same session/log ownership, changing only this fixture's output.
+    let late_server = server.clone().with_turn_engine(Arc::new(Burst {
+        chunks: 1,
+        chunk_bytes: 512 * 1024,
+    }));
+    let id = late_server
+        .create_session(SessionCreateRequest {
+            model: None,
+            tools: vec![],
+            system_prompt: None,
+            agent: None,
+            mcp_servers: vec![],
+        })
+        .await
+        .unwrap()
+        .session_id;
+    let initial = late_server.event_tip(&id).await.unwrap();
+    let response = late_server
+        .send_message(MessageSendRequest {
+            session_id: id.clone(),
+            text: "late first event".into(),
+            tools: vec![],
+        })
+        .await
+        .unwrap();
+    let frames = tokio::time::timeout(Duration::from_secs(5), response.collect::<Vec<_>>())
+        .await
+        .expect("late delivery finishes");
+    let replay = late_server.events_since(&id, &initial).await;
+    sessions.push(id);
+    for id in sessions {
+        late_server.delete_session(id).await.unwrap();
+    }
+    assert_eq!(frames.len(), 2, "{frames:?}");
+    assert!(matches!(&frames[0], MessageEvent::TextDelta { text } if text.len() == 512 * 1024));
+    assert!(matches!(&frames[1], MessageEvent::Done { turn_id, .. } if !turn_id.is_empty()));
+    assert_eq!(
+        replay
+            .expect("new stream retains its first event")
+            .events
+            .len(),
+        2
+    );
+}
