@@ -52,12 +52,14 @@
 #![cfg(windows)]
 
 use std::io::Write;
+use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
 use std::process::{Command, Stdio};
 
 use windows_sys::Win32::System::Console::{
-    ATTACH_PARENT_PROCESS, AllocConsole, AttachConsole, FreeConsole, GetConsoleProcessList,
-    GetConsoleWindow,
+    AllocConsole, AttachConsole, FreeConsole, GetConsoleProcessList, GetConsoleScreenBufferInfo,
+    GetConsoleWindow, ReadConsoleOutputCharacterW, ATTACH_PARENT_PROCESS,
+    CONSOLE_SCREEN_BUFFER_INFO, COORD,
 };
 
 /// Set on the re-executed copy of this binary; its presence switches this
@@ -147,6 +149,62 @@ fn conout() -> String {
     }
 }
 
+fn qualify_console() {
+    if !driver_has_console() {
+        // SAFETY: creates a console for this process; success is independently checked.
+        unsafe { AllocConsole() };
+    }
+    assert!(
+        driver_has_console(),
+        "FAILED_PRECONDITION: no real console object"
+    );
+    assert!(
+        console_contents().is_some(),
+        "FAILED_PRECONDITION: console buffer unreadable"
+    );
+}
+
+/// Read the actual console screen buffer through an independent Win32 API.
+fn console_contents() -> Option<String> {
+    let console = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("CONOUT$")
+        .ok()?;
+    let handle = console.as_raw_handle();
+    // SAFETY: both APIs receive live buffers sized for the counts passed.
+    unsafe {
+        let mut info: CONSOLE_SCREEN_BUFFER_INFO = std::mem::zeroed();
+        if GetConsoleScreenBufferInfo(handle, &mut info) == 0 {
+            return None;
+        }
+        let mut text = vec![0u16; info.dwSize.X as usize * info.dwSize.Y as usize];
+        let mut read = 0;
+        if ReadConsoleOutputCharacterW(
+            handle,
+            text.as_mut_ptr(),
+            text.len() as u32,
+            COORD { X: 0, Y: 0 },
+            &mut read,
+        ) == 0
+        {
+            return None;
+        }
+        Some(String::from_utf16_lossy(&text[..read as usize]))
+    }
+}
+
+fn write_probe_payload(stage: &str) {
+    if let Ok(nonce) = std::env::var("WCORE_CONSOLE_NONCE") {
+        let payload = format!("W14-{nonce}-{stage}");
+        let result = std::fs::OpenOptions::new()
+            .write(true)
+            .open("CONOUT$")
+            .and_then(|mut console| writeln!(console, "{payload}"));
+        println!("PAYLOAD_{stage}_WRITE={}", result.is_ok());
+    }
+}
+
 /// The half that runs in the spawned child.
 fn run_as_probe() {
     // #389 c2 wiring. Built and dropped, never spawned: what is under test is
@@ -157,12 +215,15 @@ fn run_as_probe() {
         &["fetch", "--depth", "1"],
         None,
     ));
+    println!("PROBE_PID={}", std::process::id());
     println!("CONSOLE_WINDOW_AT_CREATION={}", console_window());
     println!("CONOUT_BEFORE={}", conout());
     println!(
         "SHARES_USER_CONSOLE_BEFORE={}",
         shares_console_with_driver()
     );
+
+    write_probe_payload("CREATION");
 
     // SAFETY: both are argument-free kernel32 calls with no invariants beyond
     // "this process is a console client or is not"; both report failure
@@ -201,6 +262,8 @@ fn run_as_probe() {
         shares_console_with_driver()
     );
 
+    write_probe_payload("EXPLICIT");
+
     // The third documented route the child has: make a console of its own.
     // Measured here because #380 c1 asks for it by name, and because the
     // answer is what separates it from `AttachConsole`: `AllocConsole`
@@ -224,7 +287,7 @@ fn run_as_probe() {
 
 /// Spawn this binary as a probe, optionally through the production hardening,
 /// and return its report as `key=value` lines.
-fn probe(harden: bool) -> String {
+fn probe(harden: bool, nonce: &str) -> String {
     let exe = std::env::current_exe().expect("current test binary");
     let mut cmd = Command::new(exe);
     cmd.arg(TEST_NAME)
@@ -232,6 +295,7 @@ fn probe(harden: bool) -> String {
         .arg("--nocapture")
         .arg("--test-threads=1")
         .env(PROBE_ENV, "1")
+        .env("WCORE_CONSOLE_NONCE", nonce)
         .env(PARENT_PID_ENV, std::process::id().to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -245,7 +309,15 @@ fn probe(harden: bool) -> String {
         cmd.creation_flags(0);
     }
     match cmd.output() {
-        Ok(out) => String::from_utf8_lossy(&out.stdout).into_owned(),
+        Ok(out) => {
+            assert!(
+                out.status.success(),
+                "probe failed: {:?}: {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        }
         Err(e) => format!("SPAWN_FAILED={e}\n"),
     }
 }
@@ -254,7 +326,7 @@ fn probe(harden: bool) -> String {
 /// grades the wiring and not only the hardening function. An assertion against
 /// `harden_against_credential_prompt` alone still passes when `run_git` stops
 /// calling it.
-fn probe_through_production_git() -> String {
+fn probe_through_production_git(nonce: &str) -> String {
     let exe = std::env::current_exe().expect("current test binary");
     // A `!`-prefixed git alias runs the command through git's shell. Forward
     // slashes and quoting keep the path safe for that shell.
@@ -267,9 +339,18 @@ fn probe_through_production_git() -> String {
         None,
     );
     cmd.env(PROBE_ENV, "1")
+        .env("WCORE_CONSOLE_NONCE", nonce)
         .env(PARENT_PID_ENV, std::process::id().to_string());
     match cmd.output() {
-        Ok(out) => String::from_utf8_lossy(&out.stdout).into_owned(),
+        Ok(out) => {
+            assert!(
+                out.status.success(),
+                "probe failed: {:?}: {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        }
         Err(e) => format!("SPAWN_FAILED={e}\n"),
     }
 }
@@ -308,7 +389,7 @@ fn probe_stderr() -> String {
 /// single spawn site, and this arm grades it THERE.
 /// `probe_through_production_git` above cannot: it calls `Command::output`
 /// itself and never reaches the flags `run_hardened` applies.
-fn probe_through_production_spawn() -> String {
+fn probe_through_production_spawn(nonce: &str) -> String {
     let exe = std::env::current_exe().expect("current test binary");
     let alias = format!(
         "alias.consoleprobe=!\"{}\" {TEST_NAME} --exact --nocapture --test-threads=1",
@@ -319,6 +400,7 @@ fn probe_through_production_spawn() -> String {
         None,
     );
     cmd.env(PROBE_ENV, "1")
+        .env("WCORE_CONSOLE_NONCE", nonce)
         .env(PARENT_PID_ENV, std::process::id().to_string());
     wcore_cli::plugin::quarantine::run_hardened(
         cmd,
@@ -439,8 +521,26 @@ fn the_notice_reaches_the_console_the_prompt_reaches() {
         run_as_probe();
         return;
     }
-    let notice = wcore_cli::plugin::quarantine::console_attribution_notice(&["--version"]);
+    qualify_console();
+    let nonce = format!(
+        "W14-notice-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let notice = wcore_cli::plugin::quarantine::console_attribution_notice(&["--version", &nonce]);
+    assert!(!console_contents()
+        .expect("pre-delivery buffer")
+        .contains(&nonce));
     let delivered = wcore_cli::plugin::quarantine::announce_on_every_operator_sink(&notice);
+    let contents = console_contents().expect("post-delivery buffer");
+    assert!(
+        contents.contains(&nonce),
+        "notice missing from independently read console buffer"
+    );
+    println!("NOTICE_CONSOLE_READBACK={nonce}");
     assert!(
         delivered.stderr,
         "stderr is the sink a host integration reads and must never be dropped"
@@ -491,10 +591,36 @@ fn quarantine_child_has_no_console_at_creation_on_windows() {
          must not be read as a pass"
     );
 
-    let plain = probe(false);
-    let hardened = probe(true);
-    let production = probe_through_production_git();
-    let production_spawn = probe_through_production_spawn();
+    qualify_console();
+    let run = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let plain_nonce = format!("{run}-plain");
+    let plain = probe(false, &plain_nonce);
+    let plain_buffer = console_contents().expect("read plain console");
+    assert!(
+        plain_buffer.contains(&format!("W14-{plain_nonce}-CREATION")),
+        "negative control write did not reach driver buffer"
+    );
+    let nonce = format!("{run}-hardened");
+    let hardened = probe(true, &nonce);
+    let buffer = console_contents().expect("read hardened console");
+    assert!(
+        !buffer.contains(&format!("W14-{nonce}-CREATION")),
+        "hardened creation reached driver console"
+    );
+    assert!(
+        buffer.contains(&format!("W14-{nonce}-EXPLICIT")),
+        "explicit PID attach did not deliver payload to driver console"
+    );
+    println!("CONSOLE_PAYLOAD_READBACK={run}:plain-creation,hardened-explicit");
+    let production = probe_through_production_git(&format!("{run}-git"));
+    let production_spawn = probe_through_production_spawn(&format!("{run}-spawn"));
 
     // Emit the measurements, not only the verdict. #338's Windows arm is a
     // claim about what a Win32 flag delivers, and a bare `ok` from a CI job on
@@ -582,6 +708,34 @@ fn quarantine_child_has_no_console_at_creation_on_windows() {
     assert!(
         version.starts_with("git version"),
         "liveness: hardened `git` must still run, got {version:?}"
+    );
+
+    let repo = tempfile::tempdir().expect("isolated Git liveness repository");
+    let mut init = wcore_cli::plugin::quarantine::build_git_command(&["init", "--quiet"], None);
+    init.current_dir(repo.path());
+    wcore_cli::plugin::quarantine::run_hardened(
+        init,
+        "git init",
+        std::time::Duration::from_secs(30),
+    )
+    .expect("production Git init must run");
+    std::fs::write(
+        repo.path().join("useful.txt"),
+        "W14 useful Git status control",
+    )
+    .unwrap();
+    let mut status =
+        wcore_cli::plugin::quarantine::build_git_command(&["status", "--porcelain"], None);
+    status.current_dir(repo.path());
+    let status = wcore_cli::plugin::quarantine::run_hardened(
+        status,
+        "git status",
+        std::time::Duration::from_secs(30),
+    )
+    .expect("production Git status must run");
+    assert!(
+        status.contains("?? useful.txt"),
+        "Git status did not observe repository content: {status}"
     );
 
     // ---- the residual, pinned --------------------------------------------

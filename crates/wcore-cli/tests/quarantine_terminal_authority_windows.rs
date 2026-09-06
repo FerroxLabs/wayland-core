@@ -29,7 +29,7 @@
 //!
 //! * `PLAIN=OPEN` — an UNHARDENED child reaches `CONOUT$`. Negative control.
 //!   If it reports `DENIED` the host has no console, this environment cannot
-//!   exhibit the defect, and the test says UNEXERCISED instead of passing
+//!   exhibit the defect, and the test fails its precondition instead of passing
 //!   vacuously — the same vacuity trap the Unix arm re-executes into a PTY to
 //!   avoid.
 //! * `HARDENED=DENIED` — the same child through
@@ -164,23 +164,21 @@ fn git_still_runs() -> bool {
 
 #[test]
 fn a_quarantine_child_does_not_inherit_the_users_console() {
-    let plain = probe(false);
-    if plain != "OPEN" {
-        // Not a pass. This host cannot exhibit the defect at all, so the
-        // hardened arm below would be true of completely unhardened code.
-        println!(
-            "UNEXERCISED — this process has no console, so a child could not \
-             inherit one either (unhardened control said {plain:?}). Run this \
-             from a console session; a green here would prove nothing."
-        );
-        return;
+    let mut pids = [0u32; 64];
+    // SAFETY: live buffer with its exact capacity; allocation is checked below.
+    if unsafe { windows_sys::Win32::System::Console::GetConsoleProcessList(pids.as_mut_ptr(), 64) }
+        == 0
+    {
+        unsafe { windows_sys::Win32::System::Console::AllocConsole() };
     }
+    let plain = probe(false);
+    assert_eq!(plain, "OPEN", "FAILED_PRECONDITION: unhardened console write failed; this run cannot qualify console authority");
 
     let hardened = probe(true);
     let live = git_still_runs();
 
-    let tmp = std::env::temp_dir();
-    let script = pidlist_script(&tmp);
+    let tmp = tempfile::tempdir().expect("isolated console script directory");
+    let script = pidlist_script(tmp.path());
     let me = std::process::id();
     let plain_pids = pidlist(&script, false);
     let hardened_pids = pidlist(&script, true);
