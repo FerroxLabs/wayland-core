@@ -178,13 +178,17 @@ def storage_checks(args, root, home, sessions, workspace, sid, uncertain, launch
     # must traverse the fixture's ancestors before journal permissions matter.
     with tempfile.TemporaryDirectory(prefix="w04-permission-", dir="/var/tmp") as name:
         directory = Path(name)
-        os.chmod(directory, 0o755)
+        os.chown(directory, 65534, 65534)
+        os.chmod(directory, 0o700)
         binary = directory / "wayland-core"
         shutil.copy2(args.candidate, binary); os.chmod(binary, 0o755)
         copied = directory / "sessions"
         shutil.copytree(sessions, copied)
+        # Match real snapshot privacy/ownership for the positive control;
+        # world-readable snapshots are correctly refused before journal I/O.
         for path in [copied, *copied.rglob("*")]:
-            os.chmod(path, 0o777 if path.is_dir() else 0o666)
+            os.chown(path, 65534, 65534)
+            os.chmod(path, 0o700 if path.is_dir() else 0o600)
         permission_env = {"PATH": fixture_env["PATH"], "HOME": str(directory), "WAYLAND_HOME": str(directory)}
         def unprivileged():
             os.setgroups([]); os.setgid(65534); os.setuid(65534)
@@ -195,7 +199,7 @@ def storage_checks(args, root, home, sessions, workspace, sid, uncertain, launch
         os.chmod(journal, 0)
         result = reconcile(str(binary), copied, uncertain, permission_env, unprivileged)
         assert result.returncode != 0 and "permission denied" in (result.stdout + result.stderr).lower()
-        os.chmod(journal, 0o666)
+        os.chmod(journal, 0o600)
         assert digest(journal) == before
         (root / "permission-refusal.txt").write_text(result.stdout + result.stderr)
         checks["actual_permission_refusal_preserves_state"] = True
