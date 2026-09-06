@@ -4,7 +4,7 @@ mod common;
 use async_trait::async_trait;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::{mpsc, Notify};
 use wcore_agent::budget_authority::{BudgetAuthoritySeed, SharedBudgetAuthorityCoordinator};
 use wcore_agent::engine::AgentEngine;
 use wcore_agent::output::null_sink::NullSink;
@@ -254,19 +254,32 @@ async fn priced_conversation_compaction_conversation_reconciles_once() {
 /// W12 mutation target: removing compaction admission causes a second POST.
 #[tokio::test]
 async fn exhausted_compaction_cap_prevents_physical_post() {
-    let cap = BudgetCap::builder()
-        .per_session_output_tokens(2_000)
-        .build();
-    let (server, _, mut engine, tracker) =
-        fixture(vec![first(), reply("must not send", usage(1, 1))], cap).await;
+    let (server, _, mut engine, _) =
+        fixture(vec![first(), reply("must not send", usage(1, 1))], ample()).await;
+    let authority = shared_authority(2_000);
+    engine
+        .inherit_test_budget_authority(authority.clone())
+        .unwrap();
     assert!(engine.run("do work", "one").await.is_err());
     assert_eq!(
         posts(&server).await,
         1,
         "compaction cannot bypass the reserved output ceiling"
     );
-    assert_eq!(tracker.lock().session_totals(SESSION).0, 170_010);
-    assert_eq!(tracker.lock().reserved_totals(SESSION), (0, 0.0));
+    assert_eq!(
+        authority
+            .lock()
+            .inspect(|tracker, _| tracker.session_totals(SESSION).0)
+            .unwrap(),
+        170_010
+    );
+    assert_eq!(
+        authority
+            .lock()
+            .inspect(|tracker, _| tracker.reserved_totals(SESSION))
+            .unwrap(),
+        (0, 0.0)
+    );
 }
 
 #[tokio::test]
@@ -375,10 +388,10 @@ async fn cancellation_after_compaction_post_consumes_bound() {
     assert_eq!(tracker.lock().reserved_totals(SESSION), (0, 0.0));
 }
 
-fn shared_authority() -> SharedBudgetAuthorityCoordinator {
+fn shared_authority(output_limit: u64) -> SharedBudgetAuthorityCoordinator {
     BudgetAuthoritySeed {
         provider_caps: BudgetCap::builder()
-            .per_session_output_tokens(1_500)
+            .per_session_output_tokens(output_limit)
             .build(),
         preserve_committed_session_extensions: true,
         execution_policy: Default::default(),
@@ -405,7 +418,7 @@ async fn two_real_child_engines_cannot_double_reserve_shared_capacity() {
         ample(),
     )
     .await;
-    let authority = shared_authority();
+    let authority = shared_authority(1_500);
     first_child
         .inherit_test_budget_authority(authority.clone())
         .unwrap();
