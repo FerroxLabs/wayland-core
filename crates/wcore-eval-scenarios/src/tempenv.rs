@@ -60,6 +60,7 @@ pub fn build(provider: &ProviderConfig) -> anyhow::Result<TempEnv> {
 }
 
 pub fn build_with(provider: &ProviderConfig, opts: &TempEnvOptions) -> anyhow::Result<TempEnv> {
+    provider.validate_model_settings()?;
     if provider.cost_is_known_free && !provider_uses_loopback(provider) {
         anyhow::bail!("cost_is_known_free is restricted to evaluator-owned loopback providers");
     }
@@ -107,8 +108,20 @@ pub fn build_with(provider: &ProviderConfig, opts: &TempEnvOptions) -> anyhow::R
         escape_toml_basic(&provider.model)
     ));
 
-    if provider.cost_is_known_free || opts.provider_read_timeout_ms.is_some() {
+    if provider.cost_is_known_free
+        || opts.provider_read_timeout_ms.is_some()
+        || provider.responses_api
+        || provider.effort.is_some()
+    {
         toml.push_str(&format!("[providers.{provider_id}.compat]\n"));
+        if provider.responses_api {
+            toml.push_str("uses_responses_api = true\n");
+        }
+        if provider.effort.is_some() {
+            toml.push_str(
+                "supports_effort = true\neffort_levels = [\"low\", \"medium\", \"high\"]\n",
+            );
+        }
         if provider.cost_is_known_free {
             toml.push_str("cost_is_known_free = true\n");
         }
@@ -229,6 +242,41 @@ pub(crate) fn escape_toml_basic(s: &str) -> String {
 mod tests {
     use super::*;
     use crate::providers::{ProviderConfig, ProviderId};
+
+    #[test]
+    fn explicit_model_settings_use_existing_compat_without_changing_budgets() {
+        let mut provider = ProviderConfig::new(ProviderId::OpenAI, "gpt-6-astra");
+        provider.effort = Some("medium".into());
+        provider.responses_api = true;
+        let env = build_with(
+            &provider,
+            &TempEnvOptions {
+                budget_max_cost_usd: Some(0.25),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let text = fs::read_to_string(env.home().join("config.toml")).unwrap();
+        let config: toml::Value = toml::from_str(&text).unwrap();
+        assert_eq!(
+            config["provider"]["openai"]["model"].as_str(),
+            Some("gpt-6-astra")
+        );
+        assert_eq!(
+            config["providers"]["openai"]["compat"]["uses_responses_api"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            config["providers"]["openai"]["compat"]["supports_effort"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(config["budget"]["max_cost_usd"].as_float(), Some(0.25));
+        provider.id = ProviderId::Anthropic;
+        assert!(build(&provider).is_err());
+        provider.id = ProviderId::OpenAI;
+        provider.effort = Some("unsupported".into());
+        assert!(build(&provider).is_err());
+    }
 
     #[test]
     fn seeded_config_has_absolute_session_dir() {

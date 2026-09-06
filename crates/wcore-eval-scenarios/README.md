@@ -103,3 +103,29 @@ async fn s11_github_trending() {
 ## Wire-format note
 
 The plan referenced `{"type":"user_message","text":"..."}` for sending user input. That is wrong — the actual `ProtocolCommand::Message` variant is `{"type":"message","msg_id":"...","content":"..."}` (per `crates/wcore-protocol/src/commands.rs`). The runner uses the correct shape.
+
+## Explicit evaluation model settings
+
+`wayland-eval --provider openai --model gpt-6-astra --effort medium
+--responses-api --max-tokens 1024` selects the model, reasoning effort, existing
+ProviderCompat Responses route, and output-token cap. Omitted options preserve
+existing defaults. Effort uses Core's existing `set_config` protocol before each
+turn. This bounded surface supports `low`, `medium`, and `high` on OpenAI;
+unsupported combinations and conflicting scenario model/effort commands fail
+before execution. It does not import a developer profile into the isolated home.
+
+`--max-tokens` caps output; it does not enlarge the scenario's time, step, or USD
+budget. Each scenario retains its hard `max_total_cost_usd` and post-run cost
+oracle. `--budget 0.25` remains the whole-invocation admission ceiling, not a
+replacement for a scenario's declared budget. A task whose declared cost bound
+exceeds the permitted trial budget requires a scope decision before execution.
+
+For repeated trials, call the existing runner once per trial and give each call
+its own `--report-dir "$evidence_root/trial-$trial_index"` and
+`--output "$evidence_root/trial-$trial_index.status"`. Repeat `--scenario` only to
+select distinct tasks: duplicate IDs are deduplicated, not repeated trials.
+Always supply `--binary` and `--expected-source-commit` for the agreed candidate.
+The loopback-only test
+`packaged_explicit_model_effort_and_responses_reach_wire` checks the actual
+request model, effort, route, and token cap; it does not establish live-provider
+availability or benchmark readiness.

@@ -393,6 +393,9 @@ fn spawn_for_run_with_secret(
         .arg(provider.id.cli_name())
         .arg("--model")
         .arg(&provider.model);
+    if let Some(max_tokens) = provider.max_tokens {
+        cmd.arg("--max-tokens").arg(max_tokens.to_string());
+    }
     if let Some(base_url) = &provider.base_url {
         cmd.arg("--base-url").arg(base_url);
     }
@@ -741,6 +744,7 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
         stdin,
         stdout,
         scenario,
+        provider.effort.as_deref(),
         redactor.clone(),
         Arc::clone(&stdout_secret_detected),
     );
@@ -1403,6 +1407,7 @@ async fn drive_session(
     mut stdin: tokio::process::ChildStdin,
     stdout: crate::candidate_stdout::CandidateStdout,
     scenario: &crate::scenario::Scenario,
+    effort: Option<&str>,
     redactor: SecretRedactor,
     secret_detected: Arc<AtomicBool>,
 ) -> anyhow::Result<DriveOutput> {
@@ -1500,7 +1505,12 @@ async fn drive_session(
         // `info_events` so it doesn't bleed into the turn's message stream.
         // Sending pre-commands first means the model swap / mode change is in
         // effect for this turn.
-        for pre in &turn.pre_commands {
+        let effort_command = effort.map(|effort| crate::scenario::TurnCommand::SetConfig {
+            model: None,
+            thinking: None,
+            effort: Some(effort.to_owned()),
+        });
+        for pre in turn.pre_commands.iter().chain(effort_command.iter()) {
             let pre_cmd = turn_command_to_json(pre);
             let mut pline = serde_json::to_vec(&pre_cmd)?;
             pline.push(b'\n');

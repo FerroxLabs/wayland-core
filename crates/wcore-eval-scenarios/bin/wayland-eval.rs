@@ -49,6 +49,22 @@ struct Cli {
     #[arg(long, conflicts_with = "list")]
     provider: Option<String>,
 
+    /// Explicit model; requires one concrete provider. Defaults remain unchanged.
+    #[arg(long, requires = "provider", conflicts_with = "list")]
+    model: Option<String>,
+
+    /// Explicit reasoning level through Core set_config and ProviderCompat.
+    #[arg(long, requires = "model", value_parser = ["low", "medium", "high"], conflicts_with = "list")]
+    effort: Option<String>,
+
+    /// Use the Responses API through the existing ProviderCompat configuration.
+    #[arg(long, requires = "model", conflicts_with = "list")]
+    responses_api: bool,
+
+    /// Positive output-token ceiling forwarded to Core; does not change dollar budgets.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..), conflicts_with = "list")]
+    max_tokens: Option<u32>,
+
     /// Exact wayland-core binary to evaluate. Overrides WCORE_EVAL_BIN.
     #[arg(long, value_name = "PATH", conflicts_with = "list")]
     binary: Option<PathBuf>,
@@ -125,6 +141,24 @@ struct Cli {
     build_provenance: Option<PathBuf>,
 }
 
+fn validate_model_selection(cli: &Cli) -> anyhow::Result<()> {
+    if let Some(model) = &cli.model {
+        anyhow::ensure!(!model.trim().is_empty(), "--model must not be empty");
+        anyhow::ensure!(
+            matches!(
+                cli.provider.as_deref(),
+                Some("openai" | "anthropic" | "deepseek")
+            ),
+            "--model requires one concrete --provider, not matrix"
+        );
+    }
+    anyhow::ensure!(
+        !(cli.responses_api || cli.effort.is_some()) || cli.provider.as_deref() == Some("openai"),
+        "--effort and --responses-api require --provider openai"
+    );
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() {
     let code = execute(Cli::parse()).await;
@@ -177,10 +211,37 @@ async fn execute(cli: Cli) -> i32 {
             Ok(provider) => provider,
             Err(error) => return usage_error(error),
         };
+    if let Err(error) = validate_model_selection(&cli) {
+        return usage_error(error);
+    }
     let availability = ProviderAvailability::from_environment();
     let mut plans = Vec::with_capacity(scenarios.len());
     let mut runnable_count = 0usize;
     for scenario in scenarios {
+        if (cli.model.is_some() || cli.effort.is_some())
+            && scenario.turns.iter().any(|turn| {
+                turn.pre_commands.iter().any(|command| {
+                    matches!(
+                        command,
+                        wcore_eval_scenarios::scenario::TurnCommand::SetConfig {
+                            model: Some(_),
+                            ..
+                        }
+                    ) || matches!(
+                        command,
+                        wcore_eval_scenarios::scenario::TurnCommand::SetConfig {
+                            effort: Some(_),
+                            ..
+                        }
+                    )
+                })
+            })
+        {
+            return usage_error(format!(
+                "{}: explicit model/effort conflicts with scenario set_config",
+                scenario.name
+            ));
+        }
         let strict = cli.strict || scenario.strict;
         let platform = match scenario.resolve_platform(Platform::current(), strict) {
             Ok(platform) => platform,
@@ -202,6 +263,17 @@ async fn execute(cli: Cli) -> i32 {
                 Ok(resolution) => resolution,
                 Err(error) => return usage_error(format!("{}: {error}", scenario.name)),
             };
+        for provider in &mut resolution.runnable {
+            if let Some(model) = &cli.model {
+                provider.model = model.clone();
+            }
+            provider.effort = cli.effort.clone();
+            provider.responses_api = cli.responses_api;
+            provider.max_tokens = cli.max_tokens;
+            if let Err(error) = provider.validate_model_settings() {
+                return usage_error(error);
+            }
+        }
         if let Some(base_url) = &cli.base_url {
             for provider in &mut resolution.runnable {
                 provider.base_url = Some(base_url.clone());
@@ -712,4 +784,72 @@ fn safe_status_detail(detail: &str, secret: Option<&str>) -> String {
         .chars()
         .take(240)
         .collect()
+}
+
+#[cfg(test)]
+mod model_selection_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_model_settings_validate_before_any_run() {
+        for args in [
+            vec!["eval", "--provider", "matrix", "--model", "custom"],
+            vec!["eval", "--provider", "openai", "--model", " "],
+            vec![
+                "eval",
+                "--provider",
+                "anthropic",
+                "--model",
+                "custom",
+                "--effort",
+                "medium",
+            ],
+            vec![
+                "eval",
+                "--provider",
+                "deepseek",
+                "--model",
+                "custom",
+                "--responses-api",
+            ],
+        ] {
+            let cli = Cli::try_parse_from(args).expect("syntactically valid");
+            assert!(validate_model_selection(&cli).is_err());
+        }
+        for args in [
+            vec!["eval", "--effort", "medium"],
+            vec!["eval", "--max-tokens", "0"],
+            vec![
+                "eval",
+                "--provider",
+                "openai",
+                "--model",
+                "custom",
+                "--effort",
+                "unknown",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err());
+        }
+        let cli = Cli::try_parse_from([
+            "eval",
+            "--provider",
+            "openai",
+            "--model",
+            "gpt-6-astra",
+            "--effort",
+            "medium",
+            "--responses-api",
+            "--max-tokens",
+            "1024",
+        ])
+        .unwrap();
+        assert!(validate_model_selection(&cli).is_ok());
+        assert_eq!(cli.max_tokens, Some(1024));
+        let defaults = Cli::try_parse_from(["eval"]).unwrap();
+        assert!(
+            defaults.model.is_none() && defaults.effort.is_none() && defaults.max_tokens.is_none()
+        );
+        assert!(!defaults.responses_api);
+    }
 }

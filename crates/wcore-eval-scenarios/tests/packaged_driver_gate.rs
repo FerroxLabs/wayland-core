@@ -1151,3 +1151,75 @@ async fn packaged_lifecycle_memory_matrix_has_real_effects_and_quarantine() {
     let reverified = driver(&core, &source, &["--verify-binary"]).await;
     assert!(reverified.status.success(), "{}", context(&reverified));
 }
+
+/// Exercise CLI selection through the real packaged Core into a loopback request.
+/// This proves transport/model/effort plumbing, not paid provider availability.
+#[tokio::test]
+async fn packaged_explicit_model_effort_and_responses_reach_wire() {
+    use axum::{Router, body::Bytes, extract::State, http::Uri};
+    use std::sync::Mutex;
+    type Captures = Arc<Mutex<Vec<(String, serde_json::Value)>>>;
+    async fn respond(
+        State(captures): State<Captures>,
+        uri: Uri,
+        body: Bytes,
+    ) -> impl axum::response::IntoResponse {
+        captures.lock().unwrap().push((
+            uri.path().to_owned(),
+            serde_json::from_slice(&body).unwrap(),
+        ));
+        (
+            [("content-type", "text/event-stream")],
+            concat!(
+                "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"READY\"}\n\n",
+                "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_fixture\",\"status\":\"completed\",\"usage\":{\"input_tokens\":7,\"output_tokens\":2}}}\n\n"
+            ),
+        )
+    }
+    let captures: Captures = Arc::new(Mutex::new(Vec::new()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let router = Router::new().fallback(respond).with_state(captures.clone());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let source = expected_source_commit();
+    let core = packaged_core();
+    let result = driver(
+        &core,
+        &source,
+        &[
+            "--scenario",
+            "canary",
+            "--provider",
+            "openai",
+            "--model",
+            "gpt-6-astra",
+            "--effort",
+            "medium",
+            "--responses-api",
+            "--max-tokens",
+            "1024",
+            "--base-url",
+            &base_url,
+            "--fixture-cost-is-free",
+            "--budget",
+            "0.25",
+            "--strict",
+        ],
+    )
+    .await;
+    server.abort();
+    let _ = server.await;
+    assert!(result.status.success(), "{}", context(&result));
+    let requests = captures.lock().unwrap();
+    assert_eq!(
+        requests.len(),
+        1,
+        "unexpected retry or extra request: {requests:?}"
+    );
+    assert_eq!(requests[0].0, "/v1/responses");
+    assert_eq!(requests[0].1["model"], "gpt-6-astra");
+    assert_eq!(requests[0].1["reasoning"]["effort"], "medium");
+    assert_eq!(requests[0].1["max_output_tokens"], 1024);
+}

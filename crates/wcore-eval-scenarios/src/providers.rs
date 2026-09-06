@@ -89,6 +89,12 @@ pub struct ProviderConfig {
     /// Model string passed verbatim as `--model <model>` (e.g.
     /// `"deepseek-chat"`, `"claude-sonnet-4-6"`, `"gpt-4o"`).
     pub model: String,
+    /// Explicit reasoning level applied through the existing set_config protocol.
+    pub effort: Option<String>,
+    /// Explicit OpenAI wire-route override, emitted through ProviderCompat.
+    pub responses_api: bool,
+    /// Explicit output-token ceiling forwarded to Core.
+    pub max_tokens: Option<u32>,
     /// API key — the runner writes this into the seeded
     /// `<tempdir>/.wayland-core/config.toml` under
     /// `[provider.<id>] api_key = "..."`. If `None`, the runner reads
@@ -107,6 +113,9 @@ impl fmt::Debug for ProviderConfig {
         f.debug_struct("ProviderConfig")
             .field("id", &self.id)
             .field("model", &self.model)
+            .field("effort", &self.effort)
+            .field("responses_api", &self.responses_api)
+            .field("max_tokens", &self.max_tokens)
             .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
             .field("base_url", &self.base_url.as_ref().map(|_| "[CONFIGURED]"))
             .field("cost_is_known_free", &self.cost_is_known_free)
@@ -218,10 +227,30 @@ impl ProviderConfig {
         Self {
             id,
             model: model.into(),
+            effort: None,
+            responses_api: false,
+            max_tokens: None,
             api_key: None,
             base_url: None,
             cost_is_known_free: false,
         }
+    }
+
+    /// Reject unsupported explicit settings before constructing a child or calling a provider.
+    pub fn validate_model_settings(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(!self.model.trim().is_empty(), "model must not be empty");
+        anyhow::ensure!(
+            !(self.responses_api || self.effort.is_some()) || self.id == ProviderId::OpenAI,
+            "explicit effort and Responses API require the openai provider"
+        );
+        anyhow::ensure!(self.max_tokens != Some(0), "max_tokens must be positive");
+        if let Some(effort) = &self.effort {
+            anyhow::ensure!(
+                matches!(effort.as_str(), "low" | "medium" | "high"),
+                "effort must be low, medium, or high"
+            );
+        }
+        Ok(())
     }
 
     pub fn with_api_key(mut self, key: impl Into<String>) -> Self {
