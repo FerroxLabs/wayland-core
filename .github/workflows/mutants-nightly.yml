@@ -22,8 +22,8 @@ concurrency:
   cancel-in-progress: false   # Never cancel an in-flight nightly
 
 jobs:
-  # Broad survey is advisory. W09 emits the enumerated viable/caught receipts
-  # consumed by stabilization_release_gate.py; this summary cannot promote.
+  # Broad survey is advisory. The stabilization release producer consumes
+  # enumerated command evidence; this aggregate summary cannot promote.
   mutants:
     name: "mutants / ${{ matrix.crate }}"
     runs-on: macos-latest

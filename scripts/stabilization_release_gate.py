@@ -13,6 +13,26 @@ Stage is private and may run without receipts. Promote authenticates receipts
 and compares EVERY remote asset before changing visibility. Never clobbers.
 Withdrawal makes the same release private again; it cannot revoke downloaded
 copies, npm packages or notifications already delivered.
+
+Producer entrypoint:
+  --action produce --inputs RAW/index.json --artifacts PRIVATE --sha SHA
+  --tag TAG --output evidence/receipt.json
+RAW/index.json has source_sha, tests/mutants/native arrays and deferred_risks.
+Each row has id, proof and junit refs: {path: relative_path, sha256: hex}.
+Existing remote-proof rows instead have proof, status and log refs. A mutant
+also has a baseline row and patch ref. Native rows may name the standing
+Q-368 disposition; their measured command must select their named check.
+Capture existing commands before collecting their files into RAW:
+  --action capture --junit target/nextest/default/junit.xml --output proof.json
+  [--archive exact-windows-candidate.zip] -- cargo nextest run ...
+Capture records live source, diff, executor, status, fresh JUnit digest and,
+for native commands, the actual archive digest and startup output.
+CI ci-linux wraps its existing packaged_driver_gate and uploads
+stabilization-raw-SHA. Release produce-release-evidence authenticates that
+run, downloads its raw outputs and the immutable private candidate, and
+uploads stabilization-evidence-SHA/receipt.json even when admission blocks.
+The ordinary CI bundle contains no invented W09/W14 results: a final collector
+must add their actual recorded command outputs under the same raw schema.
 """
 import argparse
 import copy
@@ -22,6 +42,10 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+import platform
+import time
+import xml.etree.ElementTree as ET
+import zipfile
 
 TARGETS = (
     "aarch64-apple-darwin", "x86_64-apple-darwin",
@@ -62,6 +86,7 @@ def indexed(rows, field):
 def validate(evidence, sha, tag, assets):
     require(re.fullmatch(r"[0-9a-f]{40}", sha), "expected full source SHA")
     require(evidence.get("schema") == 1, "unsupported receipt schema")
+    require(not evidence.get("blockers"), "producer reports blocked prerequisites")
     require(evidence.get("source_sha") == sha, "stale source SHA")
     require(evidence.get("tag") == tag, "wrong release tag")
     require(evidence.get("artifacts") == assets, "accepted artifact identity mismatch")
@@ -111,6 +136,177 @@ def validate(evidence, sha, tag, assets):
                 "deferred risk lacks severity/disposition")
     return "\n".join(f"- {r['id']} ({r['severity']}): {r['disposition']}"
                      for r in risks.values())
+
+
+def digest(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def junit_counts(path):
+    """Count actual nextest testcases, never a caller-supplied pass count."""
+    cases = list(ET.parse(path).getroot().iter("testcase"))
+    skipped = sum(c.find("skipped") is not None for c in cases)
+    failed = sum(c.find("failure") is not None or c.find("error") is not None for c in cases)
+    retries = sum(len(c.findall(k)) for c in cases for k in
+                  ("rerunFailure", "rerunError", "flakyFailure", "flakyError"))
+    return dict(selected=len(cases), passed=len(cases) - skipped - failed,
+                failed=failed, skipped=skipped, retries=retries)
+
+
+def read_ref(root, ref):
+    path = root / ref["path"]
+    require(path.resolve().is_relative_to(root.resolve()) and not path.is_symlink(),
+            "evidence path escapes bundle")
+    require(path.is_file() and digest(path) == ref["sha256"], "raw evidence digest mismatch")
+    return path
+
+
+def command_result(root, entry, sha):
+    """Accept measured capture receipts or the existing remote-proof receipt."""
+    proof = json.loads(read_ref(root, entry["proof"]).read_text())
+    require(proof["source"] == sha and proof["complete"] is True, "stale/incomplete raw execution")
+    argv = proof.get("argv", proof.get("cargo_args", []))
+    require("nextest" in argv and "run" in argv and "--no-tests=fail" in argv,
+            "raw execution lacks strict test selection")
+    require(any(argv[i:i+2] == ["--retries", "0"] for i in range(len(argv))),
+            "raw execution must disable retries")
+    if proof.get("schema") == "stabilization-command-1":
+        junit = read_ref(root, entry["junit"])
+        counts = junit_counts(junit)
+        require(proof["junit_sha256"] == digest(junit), "JUnit does not belong to execution")
+        code = proof["exit_code"]
+    else:
+        # Existing remote-proof.py .status establishes process completion;
+        # JUnit must also carry an explicit digest in the imported raw bundle.
+        require(Path(entry["proof"]["path"]).stem == Path(entry["status"]["path"]).stem ==
+                Path(entry["log"]["path"]).stem, "remote proof/status/log nonce mismatch")
+        status = read_ref(root, entry["status"]).read_text()
+        require(hashlib.sha256(status.encode()).hexdigest() == proof["status_sha256"],
+                "remote status identity mismatch")
+        require(status.endswith("DONE\n") and f"SOURCE={sha}\n" in status,
+                "remote execution did not complete")
+        code = proof["remote_exit"]
+        require(f"EXIT_CODE={code}\n" in status, "remote exit mismatch")
+        log = read_ref(root, entry["log"]).read_text()
+        summaries = re.findall(r"Summary \[.*?\] (\d+) tests? run: (.*)", log)
+        require(len(summaries) == 1, "remote log needs one completed nextest summary")
+        selected, summary = summaries[0]
+        numbers = {name: int(number) for number, name in re.findall(r"(\d+) (passed|failed|skipped)", summary)}
+        require("passed" in numbers and "skipped" in numbers, "incomplete remote summary")
+        require(not re.search(r"flaky|retried|timed out|leaked", summary), "remote retry/incomplete test")
+        counts = dict(selected=int(selected), passed=numbers["passed"],
+                      failed=numbers.get("failed", 0), skipped=numbers["skipped"], retries=0)
+        require(counts["passed"] + counts["failed"] == counts["selected"], "remote counts disagree")
+    require(type(code) is int, "missing process exit status")
+    return proof, code, counts
+
+
+def produce(index_path, artifacts, sha, tag, output):
+    """Normalize actual outputs; always retain a diagnostic blocked receipt."""
+    root = Path(index_path).parent
+    data = json.loads(Path(index_path).read_text())
+    assets = inventory(artifacts)
+    result = dict(schema=1, source_sha=sha, tag=tag, artifacts=assets,
+                  tests=[], mutants=[], native=[], deferred_risks=data.get("deferred_risks", []),
+                  blockers=[])
+    blockers = result["blockers"]
+    if data.get("source_sha") != sha or data.get("tag", tag) != tag:
+        blockers.append("raw bundle source/tag mismatch")
+    for kind in ("tests", "mutants", "native"):
+        for row in data.get(kind, []):
+            try:
+                proof, code, counts = command_result(root, row, sha)
+                if kind == "tests":
+                    require(code == 0, "test command failed")
+                    require(not proof.get("diff"), "baseline contains source changes")
+                    result[kind].append(dict(id=row["id"], source_sha=sha, **counts))
+                elif kind == "mutants":
+                    require(row["id"] in MUTANTS, "unexpected mutant")
+                    baseline_proof, baseline_code, baseline = command_result(root, row["baseline"], sha)
+                    require(not baseline_proof.get("diff"), "mutant baseline contains source changes")
+                    require(baseline_code == 0 and baseline["selected"] > 0 and
+                            baseline["passed"] == baseline["selected"] and baseline["retries"] == 0,
+                            "mutant baseline is not passing")
+                    patch = read_ref(root, row["patch"]).read_text()
+                    require(patch and proof.get("diff") == patch, "tested mutation patch mismatch")
+                    require(counts["selected"] == baseline["selected"] and counts["skipped"] == 0
+                            and counts["retries"] == 0, "mutation selection changed")
+                    result[kind].append(dict(id=row["id"], source_sha=sha,
+                        selected=1 if counts["selected"] > 0 else 0,
+                        viable=counts["selected"] > 0, caught=code != 0 and counts["failed"] > 0))
+                else:
+                    require(row["id"] in NATIVE_CHECKS, "unexpected native check")
+                    require(row["id"] in proof.get("argv", []), "native command selected another check")
+                    require(counts["skipped"] == 0 and counts["retries"] == 0, "native checks skipped/retried")
+                    require(proof.get("platform") == "Windows" and
+                            proof.get("machine", "").lower() in ("amd64", "x86_64"),
+                            "missing real Windows executor")
+                    require(not proof.get("diff"), "native source differs from candidate")
+                    name = f"wayland-core-{tag}-x86_64-pc-windows-msvc.zip"
+                    require(proof.get("artifact_sha256") == assets.get(name),
+                            "native command did not use candidate archive")
+                    require(proof.get("startup_exit") == 0, "native startup failed")
+                    passed = code == 0 and counts["selected"] > 0 and counts["passed"] == counts["selected"]
+                    disposition = row.get("disposition")
+                    outcome = "passed" if passed else "failed"
+                    if (row["id"] == "live_fs_acl" and code != 0 and counts["failed"] > 0
+                            and disposition == "Q-368-disposition; core#368; core#410"):
+                        outcome = "quarantined"
+                    result[kind].append(dict(id=row["id"], source_sha=sha,
+                        target="x86_64-pc-windows-msvc", artifact=name, sha256=assets[name],
+                        native=True, selected=counts["selected"], exit_code=code,
+                        startup=proof.get("startup"), outcome=outcome, disposition=disposition))
+            except (ValueError, KeyError, TypeError, OSError, ET.ParseError) as error:
+                blockers.append(f"{kind}/{row.get('id', '?')}: {error}")
+    for kind, expected in (("mutants", MUTANTS), ("native", NATIVE_CHECKS)):
+        missing = set(expected) - {row["id"] for row in result[kind]}
+        if missing:
+            blockers.append(f"missing {kind}: {', '.join(sorted(missing))}")
+    try:
+        validate(result, sha, tag, assets)
+    except (ValueError, KeyError, TypeError) as error:
+        blockers.append(str(error))
+    result["admission"] = "blocked" if blockers else "accepted"
+    Path(output).parent.mkdir(parents=True, exist_ok=True)
+    Path(output).write_text(json.dumps(result, indent=2) + "\n")
+    return result
+
+
+def capture(junit, output, archive, argv):
+    """Wrap an existing nextest command; capture facts, not caller verdicts.
+
+    Invoke on the actual executor. A mutation is applied by the existing W09
+    procedure before capture; the exact working diff is saved with its result.
+    W14 passes --archive to execute that candidate's --version on Windows.
+    Output paths should be outside tracked source. Missing/stale JUnit is blocked.
+    """
+    require(argv and "nextest" in argv and "run" in argv, "capture requires nextest run")
+    sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    diff = subprocess.check_output(["git", "diff", "HEAD", "--"], text=True)
+    record = dict(schema="stabilization-command-1", source=sha, diff=diff, argv=argv,
+                  platform=platform.system(), machine=platform.machine(), complete=False)
+    if archive:
+        require(platform.system() == "Windows", "native archive capture requires Windows")
+        record["artifact_sha256"] = digest(archive)
+        with tempfile.TemporaryDirectory() as directory:
+            with zipfile.ZipFile(archive) as package:
+                members = [n for n in package.namelist() if Path(n).name == "wayland-core.exe"]
+                require(len(members) == 1, "archive needs exactly one executable")
+                binary = Path(directory) / "wayland-core.exe"
+                binary.write_bytes(package.read(members[0]))
+            startup = subprocess.run([str(binary), "--version"], capture_output=True, text=True)
+            record.update(startup=startup.stdout.strip(), startup_exit=startup.returncode)
+    started = time.time_ns()
+    completed = subprocess.run(argv)
+    record["exit_code"] = completed.returncode
+    record["complete"] = (Path(junit).is_file() and Path(junit).stat().st_mtime_ns >= started and
+                          subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip() == sha and
+                          subprocess.check_output(["git", "diff", "HEAD", "--"], text=True) == diff)
+    if record["complete"]:
+        record["junit_sha256"] = digest(junit)
+    Path(output).parent.mkdir(parents=True, exist_ok=True)
+    Path(output).write_text(json.dumps(record, indent=2) + "\n")
+    return completed.returncode if record["complete"] else 2
 
 
 class Github:
@@ -272,19 +468,85 @@ def self_test():
             except ValueError:
                 continue
             raise AssertionError("mismatch accepted")
+    producer_self_test()
     print("PASS: receipt refusals, private create/resume, promotion retry, withdrawal, mismatch")
+
+
+def producer_self_test():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        artifacts, raw = root / "artifacts", root / "raw"
+        artifacts.mkdir()
+        raw.mkdir()
+        sha, tag = "a" * 40, "v1.2.3"
+        for target in TARGETS:
+            ext = "zip" if "windows" in target else "tar.gz"
+            (artifacts / f"wayland-core-{tag}-{target}.{ext}").write_bytes(target.encode())
+        assets = inventory(artifacts)
+        def ref(name, text):
+            path = raw / name
+            path.write_text(text)
+            return dict(path=name, sha256=digest(path))
+        def execution(name, failed=False, patch="", native=False):
+            junit = ref(name + ".xml", '<testsuites><testsuite><testcase name="contract">' +
+                        ('<failure message="caught"/>' if failed else '') +
+                        '</testcase></testsuite></testsuites>')
+            proof = dict(schema="stabilization-command-1", source=sha, complete=True,
+                         argv=["cargo", "nextest", "run", "--no-tests=fail", "--retries", "0", name],
+                         exit_code=1 if failed else 0, diff=patch, junit_sha256=junit["sha256"])
+            if native:
+                proof.update(platform="Windows", machine="AMD64", startup="wayland-core 1.2.3",
+                             startup_exit=0, artifact_sha256=assets[f"wayland-core-{tag}-x86_64-pc-windows-msvc.zip"])
+            return dict(id=name, junit=junit, proof=ref(name + ".json", json.dumps(proof)))
+        baseline = execution("baseline")
+        data = dict(source_sha=sha, tests=[baseline], mutants=[], native=[], deferred_risks=[
+            dict(id=i, severity="high", disposition="standing external quarantine disposition")
+            for i in ("core#368", "core#410")])
+        index = raw / "index.json"
+        index.write_text(json.dumps(data))
+        out = root / "receipt.json"
+        blocked = produce(index, artifacts, sha, tag, out)
+        require(blocked["admission"] == "blocked" and out.is_file(), "missing prerequisites fabricated")
+        for mutant in MUTANTS:
+            patch = "fixture mutation " + mutant
+            row = execution(mutant, failed=True, patch=patch)
+            row.update(baseline=baseline, patch=ref(mutant + ".patch", patch))
+            data["mutants"].append(row)
+        data["native"] = [execution(check, native=True) for check in NATIVE_CHECKS]
+        index.write_text(json.dumps(data))
+        accepted = produce(index, artifacts, sha, tag, out)
+        require(accepted["admission"] == "accepted", str(accepted["blockers"]))
+        # Tampering cannot be relabelled as a passing receipt.
+        (raw / "baseline.xml").write_text("<testsuites/>")
+        blocked = produce(index, artifacts, sha, tag, out)
+        require(blocked["admission"] == "blocked", "tampered raw output admitted")
+
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--self-test", action="store_true")
-    parser.add_argument("--action", choices=("stage", "promote", "withdraw"))
+    parser.add_argument("--action", choices=("stage", "promote", "withdraw", "produce", "capture"))
     for field in ("artifacts", "evidence", "sha", "tag", "repo"):
         parser.add_argument("--" + field)
+    for field in ("inputs", "output", "junit", "archive"):
+        parser.add_argument("--" + field)
+    parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if args.self_test:
         self_test()
         return
+    if args.action == "capture":
+        require(args.junit and args.output, "capture requires JUnit and output paths")
+        argv = args.command[1:] if args.command[:1] == ["--"] else args.command
+        raise SystemExit(capture(args.junit, args.output, args.archive, argv))
+    if args.action == "produce":
+        require(all((args.inputs, args.artifacts, args.sha, args.tag, args.output)), "missing producer arguments")
+        actual = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+        require(actual == args.sha, "producer checkout SHA mismatch")
+        result = produce(args.inputs, args.artifacts, args.sha, args.tag, args.output)
+        print(json.dumps({"admission": result["admission"], "blockers": result["blockers"]}))
+        raise SystemExit(1 if result["blockers"] else 0)
     require(all((args.action, args.artifacts, args.sha, args.tag, args.repo)), "missing arguments")
     actual = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
     require(actual == args.sha, "checkout SHA mismatch")

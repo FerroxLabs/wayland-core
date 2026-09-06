@@ -2362,7 +2362,40 @@ jobs:
       # the two neighbouring steps in this job already use it.
       - name: F01 packaged wayland-eval driver gate
         if: ${{ !cancelled() && steps.ci_image.outcome == 'success' }}
-        run: $DOCKER_RUN -e WAYLAND_BUILD_SOURCE_SHA=${{ github.sha }} "$CI_IMAGE" cargo nextest run --no-tests=fail --locked -p wcore-eval-scenarios --features packaged-driver-gate --test packaged_driver_gate
+        run: |
+          python3 -B scripts/stabilization_release_gate.py --action capture \
+            --junit target/nextest/default/junit.xml --output target/stabilization/raw/proof.json \
+            -- $DOCKER_RUN -e WAYLAND_BUILD_SOURCE_SHA=${{ github.sha }} "$CI_IMAGE" \
+            cargo nextest run --no-tests=fail --retries 0 --locked \
+            -p wcore-eval-scenarios --features packaged-driver-gate --test packaged_driver_gate
+
+      - name: Collect source-bound stabilization test input
+        if: ${{ !cancelled() && steps.ci_image.outcome == 'success' }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, pathlib, shutil, subprocess
+          root = pathlib.Path("target/stabilization/raw")
+          proof = json.loads((root / "proof.json").read_text())
+          assert proof["source"] == subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          assert proof["complete"] is True and proof["exit_code"] == 0
+          shutil.copyfile("target/nextest/default/junit.xml", root / "junit.xml")
+          def ref(name):
+              return {"path": name, "sha256": hashlib.sha256((root / name).read_bytes()).hexdigest()}
+          (root / "index.json").write_text(json.dumps({"schema": 1, "source_sha": proof["source"],
+              "tests": [{"id": "packaged_driver_gate", "proof": ref("proof.json"), "junit": ref("junit.xml")}],
+              "mutants": [], "native": [], "deferred_risks": [
+                  {"id": "core#368", "severity": "high", "disposition": "Q-368-disposition: ACL defect remains quarantined; native evidence pending"},
+                  {"id": "core#410", "severity": "high", "disposition": "External Windows authority reversal/disposition remains required"}
+              ]}, indent=2) + "\n")
+          PY
+
+      - name: Upload actual stabilization test input
+        if: ${{ !cancelled() && steps.ci_image.outcome == 'success' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: stabilization-raw-${{ github.sha }}
+          path: target/stabilization/raw/
+          if-no-files-found: error
 
       - name: Security audit
         if: ${{ !cancelled() && steps.ci_image.outcome == 'success' }}
