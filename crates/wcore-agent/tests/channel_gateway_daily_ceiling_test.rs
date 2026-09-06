@@ -26,6 +26,7 @@ use wcore_agent::channel_dispatch::ChannelTurnDispatcher;
 use wcore_agent::channel_inbound::TurnDispatcher;
 use wcore_agent::channel_policy::ChannelPolicyRegistry;
 use wcore_budget::BudgetConfig;
+use wcore_channels::{ChannelToolPosture, InboundPolicy, config::ChannelConfig};
 use wcore_config::compat::ProviderCompat;
 use wcore_config::config::Config;
 use wcore_config::credentials::CredentialsBackend;
@@ -191,6 +192,27 @@ fn gateway_config(root: &std::path::Path, daily_cap_usd: Option<f64>) -> Config 
     config
 }
 
+/// Register the bounded channel required by production dispatch admission.
+fn gateway_policies(workdir: &std::path::Path) -> Arc<ChannelPolicyRegistry> {
+    Arc::new(
+        ChannelPolicyRegistry::from_configs(
+            vec![ChannelConfig {
+                name: "slack".into(),
+                platform: "slack".into(),
+                enabled: true,
+                options: toml::Table::new(),
+                inbound: InboundPolicy {
+                    dm_allowlist: vec!["remote-sender".into()],
+                    tools: ChannelToolPosture::Conversational,
+                    ..Default::default()
+                },
+            }],
+            workdir,
+        )
+        .expect("bounded gateway fixture policy"),
+    )
+}
+
 fn inbound(n: usize) -> wcore_channels::IncomingMessage {
     wcore_channels::IncomingMessage::new(
         format!("inbound-{n}"),
@@ -243,7 +265,7 @@ async fn without_a_daily_ceiling_a_gateway_bills_every_new_conversation() {
         gateway_config(home.path(), None),
         workdir.path().to_string_lossy().into_owned(),
         provider,
-        Arc::new(ChannelPolicyRegistry::default()),
+        gateway_policies(workdir.path()),
         None,
     );
 
@@ -279,7 +301,7 @@ async fn a_daily_ceiling_bounds_a_gateway_that_opens_a_new_session_per_message()
         gateway_config(home.path(), Some(cap)),
         workdir.path().to_string_lossy().into_owned(),
         provider,
-        Arc::new(ChannelPolicyRegistry::default()),
+        gateway_policies(workdir.path()),
         None,
     );
 
@@ -326,7 +348,7 @@ async fn an_emptied_session_store_silently_re_arms_the_session_but_not_the_ceili
         config.clone(),
         workdir.path().to_string_lossy().into_owned(),
         Arc::clone(&provider) as Arc<dyn LlmProvider>,
-        Arc::new(ChannelPolicyRegistry::default()),
+        gateway_policies(workdir.path()),
         None,
     );
     dispatch_turn(&dispatcher, 0).await.expect("first turn");
@@ -344,7 +366,7 @@ async fn an_emptied_session_store_silently_re_arms_the_session_but_not_the_ceili
         config,
         workdir.path().to_string_lossy().into_owned(),
         provider as Arc<dyn LlmProvider>,
-        Arc::new(ChannelPolicyRegistry::default()),
+        gateway_policies(workdir.path()),
         None,
     );
     for n in 0..5 {
