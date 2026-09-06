@@ -271,7 +271,7 @@ async fn reach(barrier: &TcpListener, cut: &str, host: &Host) -> TcpStream {
     })
 }
 
-async fn create(client: &reqwest::Client, host: &Host) -> String {
+async fn create(client: &wcore_egress::EgressClient, host: &Host) -> String {
     let response: Value = client
         .post(format!("{}/sessions", host.base))
         .json(&json!({"tools": [], "mcp_servers": []}))
@@ -347,7 +347,7 @@ async fn crash_tool_cut(cut: &str, effects: usize) {
         .await;
     let barrier = TcpListener::bind("127.0.0.1:0").await.expect("barrier");
     let host = Host::start(&env, &fixture.uri(), cut, &barrier, false).await;
-    let client = reqwest::Client::builder()
+    let client = wcore_egress::EgressClient::builder()
         .timeout(DEADLINE)
         .build()
         .expect("REST client");
@@ -499,7 +499,7 @@ async fn delete_cut(cut: &str, inject_failure: bool) {
         .await
         .expect("DELETE barrier");
     let host = Host::start(&env, &fixture.uri(), cut, &barrier, true).await;
-    let client = reqwest::Client::builder()
+    let client = wcore_egress::EgressClient::builder()
         .timeout(DEADLINE)
         .build()
         .expect("REST client");
