@@ -21,7 +21,7 @@ impl wcore_providers::LlmProvider for FixtureProvider {
         _: &LlmRequest,
     ) -> Result<mpsc::Receiver<LlmEvent>, wcore_providers::ProviderError> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
-        let tool = self.send && call % 2 == 0;
+        let tool = self.send && call.is_multiple_of(2);
         let (tx, rx) = mpsc::channel(2);
         if tool {
             tx.try_send(LlmEvent::ToolUse {
