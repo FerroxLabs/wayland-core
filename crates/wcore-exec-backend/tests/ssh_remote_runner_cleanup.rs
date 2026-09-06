@@ -178,8 +178,8 @@ fn cleanup_is_not_bought_by_deleting_a_live_orphans_evidence() {
     assert!(REMOTE_RUNNER.contains(r#"wait "$child" || status=$?"#));
 }
 
-/// Own only the private daemon and nonce-tagged task groups. Failure cleanup
-/// preserves the original assertion failure and never sweeps shared processes.
+/// The private sshd is PID 1 in a task-owned namespace. Killing its unshare
+/// supervisor kills the namespace and its descendants, including on failure.
 struct PrivateSshTarget {
     daemon: std::process::Child,
     root: tempfile::TempDir,
@@ -187,37 +187,6 @@ struct PrivateSshTarget {
 
 impl Drop for PrivateSshTarget {
     fn drop(&mut self) {
-        for entry in std::fs::read_dir(self.root.path())
-            .into_iter()
-            .flatten()
-            .flatten()
-        {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let Some(nonce) = name.strip_prefix("wayland-f25-") else {
-                continue;
-            };
-            let Ok(pid) = std::fs::read_to_string(entry.path().join(".pid")) else {
-                continue;
-            };
-            let Ok(pid) = pid.trim().parse::<u32>() else {
-                continue;
-            };
-            let Ok(env) = std::fs::read(format!("/proc/{pid}/environ")) else {
-                continue;
-            };
-            let marker = format!("WAYLAND_TASK_NONCE={nonce}");
-            if env
-                .split(|b| *b == 0)
-                .any(|value| value == marker.as_bytes())
-            {
-                let _ = wcore_config::shell::shell_command_argv(
-                    "kill",
-                    &["-KILL", "--", &format!("-{pid}")],
-                )
-                .as_std_mut()
-                .status();
-            }
-        }
         let _ = self.daemon.kill();
         let _ = self.daemon.wait();
     }
@@ -288,8 +257,19 @@ async fn ssh_transport_binds_artifact_and_cancels_observed_remote_task() {
     }
     drop(socket);
     let daemon = wcore_config::shell::shell_command_argv(
-        "/usr/sbin/sshd",
-        &["-D", "-e", "-f", &at("sshd_config")],
+        "unshare",
+        &[
+            "--mount",
+            "--pid",
+            "--fork",
+            "--kill-child=KILL",
+            "--mount-proc",
+            "/usr/sbin/sshd",
+            "-D",
+            "-e",
+            "-f",
+            &at("sshd_config"),
+        ],
     )
     .stderr(std::fs::File::create(at("sshd.log")).unwrap())
     .as_std_mut()
