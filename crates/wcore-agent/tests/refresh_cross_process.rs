@@ -288,7 +288,7 @@ async fn w07_child_entrypoint() {
     };
     let flow = flow_to(&std::env::var(URL_ENV).unwrap());
     let result = if provider == "xai" {
-        wcore_agent::oauth::XaiTokenManager::new_with_flow(storage, flow)
+        wcore_agent::oauth::xai::XaiTokenManager::new_with_flow(storage, flow)
             .get()
             .await
     } else {

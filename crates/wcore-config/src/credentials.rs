@@ -1471,7 +1471,8 @@ fn warn_explicit_plaintext_backend(path: &Path) {
 /// higher tier and the lower copy removed — so a host whose keyring comes back
 /// (a Windows service account that gains a logon session, a Linux box that
 /// starts its Secret Service) heals on the next read instead of staying
-/// downgraded forever.
+/// downgraded forever. OAuth token keys are excluded from read promotion:
+/// their writers must order promotion against logout under the provider lock.
 ///
 /// The two upper tiers are trait objects (the shape
 /// [`ConfidentialCredentialsStore`] already uses) rather than the concrete
@@ -1576,6 +1577,13 @@ impl LadderCredentialsStore {
     /// copy in place and readable. A permanent-but-correct downgrade beats a
     /// lossy heal.
     fn promote(&self, key: &str, value: &str, found_in: LadderTier) {
+        // OAuth readers also include connectivity checks and provider key
+        // resolution. None owns the provider writer lock: promoting a captured
+        // lower-tier token here could restore it after a completed logout.
+        // Explicit OAuth promotion uses the ordinary put path under that lock.
+        if key.starts_with("oauth.") && key.ends_with(".tokens") {
+            return;
+        }
         let Some(target) = self.top_tier() else {
             return;
         };
@@ -5971,6 +5979,132 @@ mod tests {
 
         // And the value is still readable afterwards, from the new tier.
         assert_eq!(ladder.get("k").unwrap().as_deref(), Some("v-from-vault"));
+    }
+
+    #[test]
+    fn oauth_ladder_read_cannot_resurrect_a_token_after_logout() {
+        use std::sync::{Arc, mpsc};
+        use std::time::Duration;
+
+        struct PausedTier {
+            inner: Arc<FakeTier>,
+            ready: Mutex<Option<mpsc::Sender<()>>>,
+            resume: Mutex<Option<mpsc::Receiver<()>>>,
+        }
+        impl CredentialsStore for PausedTier {
+            fn get(&self, key: &str) -> Result<Option<String>, CredentialsError> {
+                let captured = self.inner.get(key)?;
+                if let Some(ready) = self.ready.lock().unwrap().take() {
+                    ready.send(()).unwrap();
+                    self.resume
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(5))
+                        .unwrap();
+                }
+                Ok(captured)
+            }
+            fn put(&self, key: &str, value: &str) -> Result<(), CredentialsError> {
+                self.inner.put(key, value)
+            }
+            fn delete(&self, key: &str) -> Result<(), CredentialsError> {
+                self.inner.delete(key)
+            }
+        }
+
+        for provider in ["chatgpt", "xai", "custom-provider"] {
+            for batched in [false, true] {
+                let key = oauth_tokens_key(provider);
+                let keyring = tier(&[]);
+                let vault = tier(&[(&key, "oauth-fixture")]);
+                let (ready_tx, ready_rx) = mpsc::channel();
+                let (resume_tx, resume_rx) = mpsc::channel();
+                let dir = tempdir().unwrap();
+                let ladder = Arc::new(LadderCredentialsStore::new(
+                    Some(boxed(&keyring)),
+                    Some(Box::new(PausedTier {
+                        inner: vault.clone(),
+                        ready: Mutex::new(Some(ready_tx)),
+                        resume: Mutex::new(Some(resume_rx)),
+                    })),
+                    dir.path().join("credentials.toml"),
+                ));
+                let reader = ladder.clone();
+                let read_key = key.clone();
+                let pending = std::thread::spawn(move || {
+                    if batched {
+                        reader.get_many(&[&read_key]).unwrap().remove(0)
+                    } else {
+                        reader.get(&read_key).unwrap()
+                    }
+                });
+                ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                // The actual ladder deletes all tiers while the reader has a
+                // captured old token. Returning that snapshot is allowed;
+                // writing it back after deletion is the prohibited behavior.
+                ladder.delete(&key).unwrap();
+                assert!(keyring.snapshot().is_empty());
+                assert!(vault.snapshot().is_empty());
+                resume_tx.send(()).unwrap();
+                assert_eq!(pending.join().unwrap().as_deref(), Some("oauth-fixture"));
+                assert!(
+                    keyring.snapshot().is_empty(),
+                    "read resurrected the deleted token"
+                );
+                assert!(vault.snapshot().is_empty());
+                assert_eq!(ladder.get(&key).unwrap(), None);
+                assert!(!keyring.ops().iter().any(|op| op.starts_with("put:")));
+            }
+        }
+    }
+
+    #[test]
+    fn oauth_ladder_reads_preserve_lower_copies_but_api_keys_still_promote() {
+        for batched in [false, true] {
+            for legacy_source in [false, true] {
+                let oauth = oauth_tokens_key("chatgpt");
+                let api_key = "providers.openai.api_key";
+                let keyring = tier(&[]);
+                let vault = tier(&[]);
+                let dir = tempdir().unwrap();
+                let path = dir.path().join("credentials.toml");
+                let ladder = LadderCredentialsStore::new(
+                    Some(boxed(&keyring)),
+                    Some(boxed(&vault)),
+                    path.clone(),
+                );
+                if legacy_source {
+                    ladder.legacy.put(&oauth, "oauth-fixture").unwrap();
+                    ladder.legacy.put(api_key, "api-fixture").unwrap();
+                } else {
+                    vault.put(&oauth, "oauth-fixture").unwrap();
+                    vault.put(api_key, "api-fixture").unwrap();
+                }
+                let values = if batched {
+                    ladder.get_many(&[&oauth, api_key]).unwrap()
+                } else {
+                    vec![ladder.get(&oauth).unwrap(), ladder.get(api_key).unwrap()]
+                };
+                assert_eq!(
+                    values,
+                    vec![Some("oauth-fixture".into()), Some("api-fixture".into())]
+                );
+                assert_eq!(keyring.get(&oauth).unwrap(), None);
+                assert_eq!(
+                    keyring.get(api_key).unwrap().as_deref(),
+                    Some("api-fixture")
+                );
+                let lower: &dyn CredentialsStore = if legacy_source {
+                    &ladder.legacy
+                } else {
+                    &vault
+                };
+                assert_eq!(lower.get(&oauth).unwrap().as_deref(), Some("oauth-fixture"));
+                assert_eq!(lower.get(api_key).unwrap(), None);
+            }
+        }
     }
 
     /// The other direction of the same rule: a promotion whose destination

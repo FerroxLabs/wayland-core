@@ -832,7 +832,7 @@ mod tests {
                 .and(body_string_contains("scope="))
                 .respond_with(
                     ResponseTemplate::new(200)
-                        .set_delay(Duration::from_millis(150))
+                        .set_delay(std::time::Duration::from_millis(150))
                         .set_body_json(body),
                 )
                 .expect(1)

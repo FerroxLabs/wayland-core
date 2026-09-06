@@ -393,3 +393,18 @@ async fn oauth_busy_writer_refuses_logout_without_success_text() {
     assert!(!stdout.contains("Already signed out"));
     assert!(String::from_utf8_lossy(&output.stderr).contains("Nothing was changed"));
 }
+
+#[tokio::test]
+async fn explicit_codex_import_replaces_malformed_prior_oauth_json() {
+    let home = tempfile::tempdir().unwrap();
+    codex_login(home.path(), "replacement");
+    let storage = oauth_storage(home.path());
+    std::fs::write(storage.path_for("chatgpt"), "{malformed-old-login").unwrap();
+    let output = oauth_run(home.path(), &["auth", "login", "chatgpt", "--import-codex"]).await;
+    assert!(output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("replacement"));
+    assert!(!storage.path_for("chatgpt").exists());
+    let fresh = oauth_run(home.path(), &["auth", "status"]).await;
+    assert!(fresh.status.success(), "{fresh:?}");
+    assert!(String::from_utf8_lossy(&fresh.stdout).contains("replacement"));
+}

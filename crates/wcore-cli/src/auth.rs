@@ -720,9 +720,8 @@ async fn import_codex_login() -> Result<()> {
     )
     .await
     .map_err(|e| anyhow!(e))?;
-    storage
-        .load(chatgpt::PROVIDER)
-        .map_err(|e| anyhow!("reading token store: {e}"))?;
+    // Explicit login replaces prior state; malformed old OAuth JSON must not
+    // prevent storing a newly validated login under this writer lock.
     let tokens = chatgpt::import_codex_cli_tokens()
         .map_err(|e| anyhow!("importing Codex CLI login: {e}"))?;
     storage
@@ -928,9 +927,6 @@ async fn persist_chatgpt_login(storage: &OAuthStorage, tokens: &OAuthTokens) -> 
     )
     .await
     .map_err(|e| anyhow!(e))?;
-    storage
-        .load(chatgpt::PROVIDER)
-        .map_err(|e| anyhow!("reading token store: {e}"))?;
     storage
         .store(chatgpt::PROVIDER, tokens)
         .map_err(|e| anyhow!("persisting the tokens failed: {e}"))
@@ -1774,5 +1770,45 @@ mod tests {
         storage.delete(chatgpt::PROVIDER).unwrap();
         drop(writer);
         assert!(storage.load(chatgpt::PROVIDER).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn network_login_replaces_malformed_prior_oauth_json() {
+        use wcore_config::credentials::{
+            CredentialsStore, InMemoryCredentialsStore, oauth_tokens_key,
+        };
+        for secure_source in [false, true] {
+            let root = tempdir().unwrap();
+            let secure = InMemoryCredentialsStore::new();
+            let storage =
+                OAuthStorage::at_root(root.path().join("oauth"), Box::new(secure.clone())).unwrap();
+            if secure_source {
+                secure
+                    .put(&oauth_tokens_key(chatgpt::PROVIDER), "{malformed-old-login")
+                    .unwrap();
+            } else {
+                std::fs::write(storage.path_for(chatgpt::PROVIDER), "{malformed-old-login")
+                    .unwrap();
+            }
+            assert!(storage.load(chatgpt::PROVIDER).is_err());
+            let tokens = OAuthTokens {
+                access_token: "new-login".into(),
+                refresh_token: Some("new-refresh".into()),
+                expires_at_unix_secs: Some(0),
+                token_type: "Bearer".into(),
+                scope: None,
+                id_token: None,
+            };
+            persist_chatgpt_login(&storage, &tokens).await.unwrap();
+            assert_eq!(
+                storage
+                    .load(chatgpt::PROVIDER)
+                    .unwrap()
+                    .unwrap()
+                    .access_token,
+                "new-login"
+            );
+            assert!(!storage.path_for(chatgpt::PROVIDER).exists());
+        }
     }
 }
