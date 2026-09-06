@@ -107,6 +107,7 @@ async fn full_channel_session(root: &std::path::Path) -> BootstrapResult {
     .channel_tool_posture(ChannelToolScope {
         posture: ChannelToolPosture::Full,
         workspace_root: root.to_path_buf(),
+        ambient_mcp_full_authority_v1: false,
     })
     .build()
     .await

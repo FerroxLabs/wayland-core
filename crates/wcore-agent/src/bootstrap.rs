@@ -3234,8 +3234,8 @@ impl AgentBootstrap {
         // tools. No-op for the local CLI/TUI/json-stream engines (posture
         // `None`); for `Full` channel/remote it drops only the unconfined-search
         // tools (Grep/Glob, #667 residual) and keeps the rest. Runs after all
-        // built-in registration; MCP tools survive every posture, so
-        // post-construction MCP wiring is unaffected.
+        // built-in registration; the persistent MCP gate also governs
+        // post-construction attach, refresh and reconnect.
         if let Some(scope) = self.channel_tool_posture.as_ref() {
             // Task 8 — bootstrap UX gate. Probe whether the platform's
             // sandbox backend enforces secret-read-deny; if not, suppress
@@ -3247,6 +3247,7 @@ impl AgentBootstrap {
             tracing::info!(
                 target: "wcore_agent::bootstrap",
                 posture = ?scope.posture,
+                effective_mcp_authority = scope.effective_mcp_authority(),
                 sandbox_enforces_read_deny = enforces,
                 "channel engine tool posture applied"
             );
@@ -5469,6 +5470,7 @@ mod tests {
         let scope = crate::channel_tools::ChannelToolScope {
             posture: wcore_channels::ChannelToolPosture::Full,
             workspace_root: std::path::PathBuf::from("/tmp"),
+            ambient_mcp_full_authority_v1: false,
         };
         crate::channel_tools::apply_posture(&mut reg, &scope, false);
         assert!(

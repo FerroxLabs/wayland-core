@@ -539,3 +539,25 @@ tools = "conversational"
 This admits only you, in DMs, with no host filesystem or shell exposure.
 Widen deliberately from there. The `[inbound]` table is the security-relevant
 part and is documented in full above; the rest is what makes the file load.
+
+### Remote MCP delegation (authority contract v1)
+
+Local operator-installed MCP retains its ambient host authority. Channel
+`conversational` and `workspace` postures deny MCP unless the operator sets
+`ambient_mcp_full_authority_v1 = true` in that channel's `[inbound]` table.
+This is an explicit **Full-equivalent extension grant**: a Workspace filesystem
+jail does not confine an MCP process. The existing `tools = "full"` posture
+already grants ambient extensions. Participant messages cannot set this policy.
+The bootstrap diagnostic reports `effective_mcp_authority` separately from the
+built-in posture (`denied` or `ambient-full-equivalent`).
+
+The grant does not override MCP server `allowed_tools`: absent still selects
+all tools, an empty list selects none, and a subset selects only those tools.
+Deferred attach, catalog refresh and reconnect preserve the session gate.
+Revoking the grant through channel reload retires the affected cached session
+before reload acknowledges success; later turns use the restricted policy.
+
+Migration: existing restricted channel configurations now deny ambient MCP by
+default. Operators who intend to delegate it must explicitly add the v1 field.
+Open-admission consent tokens must be regenerated because the consent shape now
+includes this authority field; old tokens refuse rather than implicitly grant.

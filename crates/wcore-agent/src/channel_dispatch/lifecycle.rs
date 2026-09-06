@@ -27,6 +27,7 @@ impl ChannelSession {
         self.policy == *policy
             && self.scope.posture == scope.posture
             && self.scope.workspace_root == scope.workspace_root
+            && self.scope.ambient_mcp_full_authority_v1 == scope.ambient_mcp_full_authority_v1
     }
 
     async fn close(&self) -> anyhow::Result<()> {

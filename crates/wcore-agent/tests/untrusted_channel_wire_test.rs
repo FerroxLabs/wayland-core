@@ -285,6 +285,7 @@ async fn drive_turn(
         bootstrap = bootstrap.channel_tool_posture(ChannelToolScope {
             posture: ChannelToolPosture::Conversational,
             workspace_root: cwd.to_path_buf(),
+            ambient_mcp_full_authority_v1: false,
         });
     }
     let mut built = bootstrap.build().await.expect("bootstrap against the mock");

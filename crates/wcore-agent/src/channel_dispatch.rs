@@ -159,6 +159,7 @@ impl ChannelTurnDispatcher {
             .unwrap_or_else(|| ChannelToolScope {
                 posture: ChannelToolPosture::Conversational,
                 workspace_root: std::path::PathBuf::from(&self.cwd),
+                ambient_mcp_full_authority_v1: false,
             })
     }
 
@@ -382,6 +383,7 @@ mod tests {
         ChannelToolScope {
             posture,
             workspace_root: std::path::PathBuf::from(root),
+            ambient_mcp_full_authority_v1: false,
         }
     }
 

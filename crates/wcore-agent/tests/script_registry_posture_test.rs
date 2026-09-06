@@ -123,6 +123,7 @@ async fn full_channel_posture_drops_grep_from_script_dispatch_registry() {
         .channel_tool_posture(ChannelToolScope {
             posture: ChannelToolPosture::Full,
             workspace_root: tmp.path().to_path_buf(),
+            ambient_mcp_full_authority_v1: false,
         })
         .build()
         .await
@@ -153,6 +154,7 @@ async fn full_channel_posture_drops_glob_from_script_dispatch_registry() {
         .channel_tool_posture(ChannelToolScope {
             posture: ChannelToolPosture::Full,
             workspace_root: tmp.path().to_path_buf(),
+            ambient_mcp_full_authority_v1: false,
         })
         .build()
         .await
@@ -183,6 +185,7 @@ async fn full_channel_posture_keeps_read_dispatchable_inside_script() {
         .channel_tool_posture(ChannelToolScope {
             posture: ChannelToolPosture::Full,
             workspace_root: tmp.path().to_path_buf(),
+            ambient_mcp_full_authority_v1: false,
         })
         .build()
         .await
