@@ -1,5 +1,20 @@
 //! Return unused allocator pages after an owning engine pool becomes idle.
 
+/// Bound glibc arena proliferation before application threads are started.
+/// A small shared arena pool trades allocator contention for bounded retained
+/// free pages on high-core-count hosts; idle trimming returns reusable pages.
+pub fn configure_for_launch() -> std::io::Result<()> {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        // SAFETY: called at process entry before runtime/worker construction.
+        // mallopt takes an allocator parameter and does not invalidate memory.
+        if unsafe { libc::mallopt(libc::M_ARENA_MAX, 2) } == 0 {
+            return Err(std::io::Error::other("glibc arena limit was rejected"));
+        }
+    }
+    Ok(())
+}
+
 /// Coalesce concurrent idle notifications without delaying session cleanup.
 /// Linux glibc retains freed per-thread arena pages after large concurrent
 /// turns; trimming releases those pages without changing live allocations.

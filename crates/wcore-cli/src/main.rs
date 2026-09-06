@@ -1047,6 +1047,7 @@ where
 }
 
 fn main() -> anyhow::Result<ExitCode> {
+    wcore_config::allocator::configure_for_launch()?;
     // Resolve the active isolated profile ONCE, here at process entry, and
     // materialize it into WAYLAND_HOME (C2). This MUST precede
     // load_wayland_env_file() below — that reads $WAYLAND_HOME/.env, so the home
