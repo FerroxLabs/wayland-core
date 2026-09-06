@@ -8,7 +8,7 @@ pub fn configure_for_launch() -> std::io::Result<()> {
     {
         // SAFETY: called at process entry before runtime/worker construction.
         // mallopt takes an allocator parameter and does not invalidate memory.
-        if unsafe { libc::mallopt(libc::M_ARENA_MAX, 2) } == 0 {
+        if unsafe { libc::mallopt(libc::M_ARENA_MAX, 8) } == 0 {
             return Err(std::io::Error::other("glibc arena limit was rejected"));
         }
         // Keep large turn buffers independently releasable. Glibc otherwise
