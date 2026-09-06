@@ -128,6 +128,69 @@ impl SkillRouter {
         seeded
     }
 
+    /// Observed counts (priors included); protocol completion is not a task verdict.
+    pub fn stats(&self, name: &str) -> Stats {
+        self.scorer
+            .iter_stats()
+            .find(|(key, _)| key.as_str() == name)
+            .map(|(_, stats)| stats.clone())
+            .unwrap_or_default()
+    }
+
+    /// Lexical relevance admission before adaptive ranking. Explicit selection
+    /// remains possible; unrelated families never enter Thompson sampling.
+    pub fn relevant_candidates(task: &str, skills: &[crate::refs::SkillRef]) -> Vec<String> {
+        if let Some(name) = Self::parse_override(task) {
+            return skills
+                .iter()
+                .filter(|s| !s.disable_model_invocation && s.name == name)
+                .map(|s| s.name.clone())
+                .collect();
+        }
+        let tokens: std::collections::HashSet<String> = task
+            .split(|c: char| !c.is_alphanumeric())
+            .map(str::to_lowercase)
+            .filter(|t| {
+                t.len() >= 3
+                    && !matches!(
+                        t.as_str(),
+                        "the"
+                            | "this"
+                            | "that"
+                            | "with"
+                            | "for"
+                            | "and"
+                            | "please"
+                            | "help"
+                            | "use"
+                            | "can"
+                            | "you"
+                            | "need"
+                            | "want"
+                            | "from"
+                            | "into"
+                            | "how"
+                            | "when"
+                    )
+            })
+            .collect();
+        skills
+            .iter()
+            .filter(|s| !s.disable_model_invocation)
+            .filter(|s| {
+                format!(
+                    "{} {} {}",
+                    s.name,
+                    s.description,
+                    s.when_to_use.as_deref().unwrap_or("")
+                )
+                .split(|c: char| !c.is_alphanumeric())
+                .any(|t| tokens.contains(&t.to_lowercase()))
+            })
+            .map(|s| s.name.clone())
+            .collect()
+    }
+
     /// Parse `@@skill=<name>` from input. Kebab-case allowed.
     fn parse_override(input: &str) -> Option<String> {
         let lower = input.to_ascii_lowercase();

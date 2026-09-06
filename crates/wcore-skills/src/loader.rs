@@ -346,11 +346,12 @@ pub async fn load_plugin_skill_catalog(
 ) -> Vec<crate::refs::SkillRef> {
     let loaded =
         load_skills_from_dir(plugin_skills_dir, SkillSource::Project, LoadedFrom::Skills).await;
-    loaded
+    apply_governance(loaded.into_iter().map(|s| s.metadata).collect())
+        .await
         .into_iter()
-        .map(|mut s| {
-            s.metadata.name = format!("{namespace}:{}", s.metadata.name);
-            metadata_to_ref(s.metadata)
+        .map(|mut metadata| {
+            metadata.name = format!("{namespace}:{}", metadata.name);
+            metadata_to_ref(metadata)
         })
         .collect()
 }

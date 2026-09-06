@@ -8665,40 +8665,31 @@ impl AgentEngine {
             return None;
         }
         Some(format!(
-            "Skill hint: based on what has worked before, the \"{}\" skill may help with this request — use it only if genuinely relevant.",
+            "Experimental skill hint: the \"{}\" skill may help with this request — use it only if genuinely relevant.",
             skill.name
         ))
     }
 
-    /// v0.8.1 U1 — credit the turn's `SkillRouter` pick (if any) with a
-    /// success/failure observation based on the terminal `StopReason`.
-    /// `EndTurn` and `ToolUse` count as success; anything else (errors,
-    /// `MaxTurns`, refusals) counts as failure. `take()`-clears the
-    /// stashed pick so a subsequent `run()` invocation starts with a
-    /// clean slot. No-op when no router is installed OR no pick was
-    /// credited at the top of the turn.
+    /// Attribute only actual invocation failures. A normal completion has no
+    /// independent task verdict and therefore cannot earn success credit.
     fn observe_skill_router_outcome(&mut self, stop_reason: StopReason) {
         if let Some(picked) = self.current_skill_router_pick.take()
             && let Some(router) = self.skill_router.as_ref()
+            && let Some(failed) = self
+                .skill_catalog
+                .as_ref()
+                .and_then(|c| c.invocation_failed(&picked))
         {
-            let outcome = match stop_reason {
-                StopReason::EndTurn | StopReason::ToolUse => wcore_dispatch::TaskOutcome::Success,
-                _ => wcore_dispatch::TaskOutcome::Failure,
+            let outcome = if failed {
+                wcore_dispatch::TaskOutcome::Failure
+            } else {
+                wcore_dispatch::TaskOutcome::Neutral
             };
-            // `BetaScorer::record` is cheap (HashMap update); the std
-            // Mutex is uncontested between `choose` (top of run) and
-            // `observe` (end of run) on the same task, so locking here
-            // is fine.
             if let Ok(mut guard) = router.lock() {
                 use wcore_dispatch::DecisionRouter;
                 guard.observe(&picked, outcome);
-                tracing::debug!(
-                    target: "wcore_agent::engine",
-                    skill = %picked,
-                    ?stop_reason,
-                    ?outcome,
-                    "skill_router: observed turn outcome"
-                );
+                tracing::debug!(target: "wcore_agent::engine", skill = %picked, ?stop_reason, ?outcome,
+                    "skill invocation observed; task success remains unverified");
             }
         }
     }
@@ -13928,6 +13919,13 @@ impl AgentEngine {
                 det.observe(user_input);
             }
         }
+        if !resume_from_checkpoint {
+            self.current_skill_router_pick = None;
+            if let Some(catalog) = &self.skill_catalog {
+                catalog.begin_turn();
+                catalog.refresh_local().await;
+            }
+        }
         // v0.8.1 U1 — per-turn `SkillRouter` choose. Picks one skill
         // from the resolved catalog using a Thompson Beta scorer
         // seeded from GEPA winners + session-start prioritizer ranking
@@ -13941,7 +13939,8 @@ impl AgentEngine {
             && let Some(router) = self.skill_router.as_ref()
             && let Some(catalog) = self.skill_catalog.as_ref()
         {
-            let candidates: Vec<String> = catalog.visible().into_iter().map(|r| r.name).collect();
+            let candidates =
+                wcore_skills::SkillRouter::relevant_candidates(user_input, &catalog.visible());
             if !candidates.is_empty() {
                 // `choose` lives on the `DecisionRouter` trait, in the
                 // sibling `wcore-dispatch` crate. Importing it inline
@@ -14664,6 +14663,23 @@ impl AgentEngine {
                     // message it lands on must not become a prompt-cache write
                     // point — see the `mark_cache_boundaries` call below.
                     let mut transient_tail = false;
+                    if let Some(catalog) = &self.skill_catalog
+                        && catalog.inventory_changed()
+                    {
+                        let listing = crate::context::format_skills_section(
+                            &catalog.visible(),
+                            self.known_context_window(),
+                        );
+                        let update = format!(
+                            "Current skill inventory supersedes the initial listing. Removed or revoked skills are unavailable. Use Skill search for entries omitted by the listing budget.\n{listing}"
+                        );
+                        if let Some(last) =
+                            Self::transient_carrier(&mut request.messages, &self.compat)
+                        {
+                            Self::attach_transient_block(last, update);
+                            transient_tail = true;
+                        }
+                    }
                     if let Some(hint) = skill_hint
                         && let Some(last) =
                             Self::transient_carrier(&mut request.messages, &self.compat)
@@ -20490,7 +20506,7 @@ impl AgentEngine {
             return;
         }
 
-        use wcore_memory::v2_types::{AccessToken, Partition, Query, Tier};
+        use wcore_memory::v2_types::{AccessToken, Query, Tier};
         // Clone the Arc so the search awaits don't hold a borrow of `self`
         // across the `self.messages.push` below.
         let memory_api = self.memory_api.clone();
@@ -20517,19 +20533,17 @@ impl AgentEngine {
             return;
         }
 
-        let mut previews: Vec<String> = Vec::new();
-        let mut activated: Vec<wcore_memory::ActivatedItem> = Vec::new();
+        let mut recalled = Vec::new();
         let mut exclusions: Vec<wcore_memory::RecallExclusion> = Vec::new();
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         for tier in [Tier::Project, Tier::Global] {
             let q = Query {
                 text: query.to_string(),
                 tier,
                 partition: None,
                 entities: None,
-                limit_per_modality: 5,
+                limit_per_modality: 6,
                 kg_depth: 1,
-                token_budget: None,
+                token_budget: Some(1024),
             };
             // `search_with_provenance` returns the SAME hits `search` does
             // (both run the episodic fusion then append the semantic-fact
@@ -20543,20 +20557,7 @@ impl AgentEngine {
             {
                 Ok((hits, report)) => {
                     exclusions.extend(report.exclusions);
-                    for h in hits {
-                        // Only durable facts are worth pre-injecting; episodic
-                        // previews are noisier and the model can still reach
-                        // them via `session_search` on demand.
-                        if h.partition == Partition::Semantic && seen.insert(h.preview.clone()) {
-                            activated.push(wcore_memory::ActivatedItem {
-                                id: h.id.clone(),
-                                partition: h.partition,
-                                tier: h.tier,
-                                preview: h.preview.clone(),
-                            });
-                            previews.push(h.preview);
-                        }
-                    }
+                    recalled.extend(hits);
                 }
                 Err(e) => tracing::debug!(
                     target: "wcore_agent::memory",
@@ -20566,26 +20567,8 @@ impl AgentEngine {
                 ),
             }
         }
-        if previews.is_empty() {
-            // Record the empty activation before returning. "This turn
-            // injected nothing, and here is what was excluded" is a different
-            // and more useful answer than the silence this path used to give,
-            // and it is the answer a user needs when a privacy scope is why.
-            if let Some(log) = activation.as_ref() {
-                log.record(wcore_memory::RecallActivation {
-                    at: chrono::Utc::now().timestamp(),
-                    query: query.to_string(),
-                    enabled: true,
-                    injected: Vec::new(),
-                    excluded: exclusions,
-                });
-            }
-            return;
-        }
-        // Cap to keep the injection tight; top hits are first (search returns
-        // facts ranked by embedding similarity to the query).
-        previews.truncate(6);
-        activated.truncate(6);
+        let (block, activated) = crate::recall_facts::render(recalled);
+        let count = activated.len();
         if let Some(log) = activation.as_ref() {
             log.record(wcore_memory::RecallActivation {
                 at: chrono::Utc::now().timestamp(),
@@ -20595,23 +20578,12 @@ impl AgentEngine {
                 excluded: exclusions,
             });
         }
-        // HIGH-3 / F1: recalled previews are untrusted memory content. Defang any
-        // host trust-tag delimiters so a stored fact can't forge or escape this
-        // <system-reminder> block. Same helper as the plugin-hook envelope (DRY).
-        let body = previews
-            .iter()
-            .map(|p| format!("- {}", wcore_config::hooks::neutralize_trust_delimiters(p)))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let block = format!(
-            "<system-reminder>\nRecalled from your durable cross-session memory \
-             (facts you stored in earlier sessions), potentially relevant to the \
-             user's message:\n{body}\nUse these if they answer the user's question; \
-             ignore any that are irrelevant.\n</system-reminder>"
-        );
+        if block.is_empty() {
+            return;
+        }
         tracing::debug!(
             target: "wcore_agent::memory",
-            facts = previews.len(),
+            facts = count,
             "session-start recall: injected durable facts into first turn"
         );
         self.messages.push(Message::now(
@@ -31425,8 +31397,7 @@ mod user_model_writeback_tests {
     // they exercise the `observe_skill_router_outcome` helper plus
     // the choose primitive the run loop wraps.
 
-    use wcore_dispatch::DecisionRouter as _;
-    use wcore_skills::{SkillRouter, SkillRouterInput};
+    use wcore_skills::SkillRouter;
     use wcore_types::message::StopReason;
 
     /// Bare engine (no router) must short-circuit
@@ -31450,109 +31421,70 @@ mod user_model_writeback_tests {
         );
     }
 
-    /// With a router installed, a Success observation on the stashed
-    /// pick biases subsequent `choose` calls toward that arm. Proves
-    /// the helper actually called `observe(..., Success)` — without
-    /// reaching into private scorer state.
     #[test]
-    fn observe_endturn_biases_router_toward_picked_arm() {
-        let mut engine = make_engine();
-        // Use a deterministic RNG seed so the post-bias `choose`
-        // calls are reproducible.
-        engine.set_skill_router(SkillRouter::with_seed(2026));
-        engine.current_skill_router_pick = Some("alpha".into());
-
-        // Fire one Success on "alpha" via the helper. Then fire a
-        // few more directly through the trait to amplify the bias
-        // past the cold-start prior of beta (no observations).
-        engine.observe_skill_router_outcome(StopReason::EndTurn);
-        assert!(
-            engine.current_skill_router_pick.is_none(),
-            "pick must be cleared after observe"
-        );
-        {
-            let router = engine.skill_router().expect("router installed");
-            let mut guard = router.lock().unwrap();
-            for _ in 0..30 {
-                guard.observe(&"alpha".to_string(), wcore_dispatch::TaskOutcome::Success);
-                guard.observe(&"beta".to_string(), wcore_dispatch::TaskOutcome::Failure);
-            }
-        }
-
-        // Sample the posterior. After heavy success on alpha and
-        // failure on beta, alpha must dominate over many trials.
-        let candidates = vec!["alpha".to_string(), "beta".to_string()];
-        let mut alpha_picks = 0;
-        for _ in 0..200 {
-            let router = engine.skill_router().expect("router installed");
-            let mut guard = router.lock().unwrap();
-            let pick = guard
-                .choose(SkillRouterInput {
-                    task: "any task",
-                    candidates: &candidates,
-                })
-                .expect("non-empty candidates");
-            if pick == "alpha" {
-                alpha_picks += 1;
-            }
-        }
-        assert!(
-            alpha_picks > 150,
-            "alpha should dominate after 30 success / 30 failure: got {alpha_picks}/200"
-        );
-    }
-
-    /// `StopReason::MaxTurns` is a failure verdict — observe must
-    /// shift the Beta posterior AWAY from the picked arm, not toward
-    /// it. We verify by stashing a pick on a router that already has
-    /// strong success priors on a competitor, then firing MaxTurns
-    /// observations and seeing the picked arm lose.
-    #[test]
-    fn observe_max_turns_credits_failure_not_success() {
+    fn stabilization_skill_outcomes_require_actual_invocation() {
         let mut engine = make_engine();
         engine.set_skill_router(SkillRouter::with_seed(2026));
-
-        // Pre-bias: 30 successes on "beta" (the competitor) and 0 on
-        // "alpha" so alpha starts COLD. Then fire a MaxTurns observe
-        // on alpha and verify it stays cold (no spurious success).
-        {
-            let router = engine.skill_router().expect("router installed");
-            let mut guard = router.lock().unwrap();
-            for _ in 0..30 {
-                guard.observe(&"beta".to_string(), wcore_dispatch::TaskOutcome::Success);
-            }
-        }
-
-        engine.current_skill_router_pick = Some("alpha".into());
-        engine.observe_skill_router_outcome(StopReason::MaxTurns);
-        // Fire it again a few times to amplify the failure signal.
-        for _ in 0..29 {
+        let catalog = Arc::new(wcore_skills::refs::SkillCatalog::from_refs(vec![]));
+        engine.set_skill_catalog(catalog.clone());
+        for reason in [
+            StopReason::EndTurn,
+            StopReason::ToolUse,
+            StopReason::MaxTurns,
+        ] {
             engine.current_skill_router_pick = Some("alpha".into());
-            engine.observe_skill_router_outcome(StopReason::MaxTurns);
+            engine.observe_skill_router_outcome(reason);
+            assert_eq!(
+                engine
+                    .skill_router()
+                    .unwrap()
+                    .lock()
+                    .unwrap()
+                    .stats("alpha")
+                    .total(),
+                0
+            );
         }
-
-        // After 30 failures on alpha vs 30 successes on beta, beta
-        // must dominate.
-        let candidates = vec!["alpha".to_string(), "beta".to_string()];
-        let mut beta_picks = 0;
-        for _ in 0..200 {
-            let router = engine.skill_router().expect("router installed");
-            let mut guard = router.lock().unwrap();
-            let pick = guard
-                .choose(SkillRouterInput {
-                    task: "any task",
-                    candidates: &candidates,
-                })
-                .expect("non-empty candidates");
-            if pick == "beta" {
-                beta_picks += 1;
-            }
-        }
-        assert!(
-            beta_picks > 150,
-            "MaxTurns must credit failure (not success); \
-             expected beta to dominate, got beta_picks={beta_picks}/200"
+        catalog.record_invocation("alpha", false);
+        engine.current_skill_router_pick = Some("alpha".into());
+        engine.observe_skill_router_outcome(StopReason::EndTurn);
+        assert_eq!(
+            engine
+                .skill_router()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .stats("alpha")
+                .success,
+            0
         );
+        catalog.record_invocation("alpha", true);
+        engine.current_skill_router_pick = Some("alpha".into());
+        engine.observe_skill_router_outcome(StopReason::EndTurn);
+        assert_eq!(
+            engine
+                .skill_router()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .stats("alpha")
+                .failure,
+            1
+        );
+        engine.observe_skill_router_outcome(StopReason::EndTurn);
+        assert_eq!(
+            engine
+                .skill_router()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .stats("alpha")
+                .failure,
+            1,
+            "outcome consumed once"
+        );
+        catalog.begin_turn();
+        assert_eq!(catalog.invocation_failed("alpha"), None);
     }
 
     // ── v0.8.1 U1 — skill-router HINT injection tests ────────────────────

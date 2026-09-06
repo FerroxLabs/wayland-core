@@ -214,6 +214,7 @@ impl SkillTool {
         let start = Instant::now();
         let (skill_name_opt, result) = self.execute_inner(input, vfs).await;
         if let Some(name) = skill_name_opt {
+            self.catalog.record_invocation(&name, result.is_error);
             let outcome = if result.is_error {
                 SkillOutcome::Failure
             } else {

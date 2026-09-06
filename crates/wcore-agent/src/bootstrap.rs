@@ -2677,7 +2677,12 @@ impl AgentBootstrap {
         // current project's parent directory holds sibling projects; a
         // `resolve()` miss widens to their `.wayland-core/skills/` dirs.
         // Degrades to single-project behaviour when cwd has no parent.
-        let mut catalog = wcore_skills::refs::SkillCatalog::from_refs(skill_refs);
+        let mut catalog = wcore_skills::refs::SkillCatalog::from_refs(skill_refs)
+            .with_local_reload(
+                cwd_path.to_path_buf(),
+                self.extra_skill_dirs.clone(),
+                crate::plugins::loader::resolved_plugins_roots(),
+            );
         if let Some(siblings_root) = cwd_path.parent() {
             catalog = catalog.with_cross_project_root(siblings_root);
         }
@@ -3778,106 +3783,10 @@ impl AgentBootstrap {
         // timing budget; a genuinely wedged backend simply never installs
         // (the same best-effort contract this block always had).
         engine.install_file_watcher_eventually(cwd_path.to_path_buf());
-        // F-039 (HIGH, Aud-10): wire SkillWatcher hot-reload into bootstrap.
-        // Previously `wcore_skills::watcher::SkillWatcher` shipped with zero
-        // production callers — skills added mid-session were invisible until
-        // the next boot. The watcher monitors the same dirs `load_catalog`
-        // reads from (user + project + extra); on any change it reloads the
-        // catalog and installs it on the engine.
-        //
-        // Best-effort: if the watcher can't arm (FSEvents degraded, no dirs,
-        // etc.) the session continues without hot-reload — same contract as
-        // FileWatcher above. The watcher's JoinHandle is parked on the
-        // engine's decay handles so it's aborted on session shutdown.
-        {
-            let skill_dirs: Vec<std::path::PathBuf> = {
-                let mut dirs = Vec::new();
-                if let Some(d) = wcore_skills::paths::user_skills_dir()
-                    && d.is_dir()
-                {
-                    dirs.push(d);
-                }
-                for d in wcore_skills::paths::project_skills_dirs(cwd_path) {
-                    if d.is_dir() {
-                        dirs.push(d);
-                    }
-                }
-                for d in &self.extra_skill_dirs {
-                    if d.is_dir() {
-                        dirs.push(d.clone());
-                    }
-                }
-                dirs
-            };
-
-            match wcore_skills::watcher::SkillWatcher::new() {
-                Ok((mut skill_watcher, mut version_rx)) => {
-                    if let Err(e) = skill_watcher.start(skill_dirs) {
-                        tracing::warn!(
-                            error = %e,
-                            "F-039: SkillWatcher::start failed; continuing without skill hot-reload"
-                        );
-                    } else {
-                        let catalog_for_reload = Arc::clone(&catalog);
-                        let engine_catalog_setter = {
-                            // We cannot hand an `&mut AgentEngine` into the
-                            // spawn closure, but `set_skill_catalog` takes an
-                            // `Arc<SkillCatalog>` and the engine is `!Send`.
-                            // The watcher fires on a tokio task on the same
-                            // thread; we deliver the reload via a one-shot
-                            // channel that the session main-loop drains.
-                            // For now, log the version bump. Full in-session
-                            // reload requires a reload_tx channel threaded into
-                            // the orchestration loop (future W3-G coordination).
-                            // TODO(W3-B-follow-on): thread reload_tx into
-                            // engine so set_skill_catalog is called mid-session.
-                            Arc::clone(&catalog_for_reload)
-                        };
-                        let reload_handle = tokio::spawn(async move {
-                            while version_rx.changed().await.is_ok() {
-                                let version = *version_rx.borrow();
-                                tracing::info!(
-                                    target: "wcore_agent::bootstrap",
-                                    version,
-                                    "F-039: skill catalog changed (version={version}); \
-                                     reload will apply on next session start \
-                                     (in-session hot-swap: TODO W3-B-follow-on)"
-                                );
-                                let _ = &engine_catalog_setter; // keep Arc alive
-                            }
-                        });
-                        // Park watcher + reload task so Drop shuts them down.
-                        // The watcher itself is kept alive by holding it in a
-                        // Box that we park via push_decay_handle on a
-                        // synthetic task that never resolves (the watcher's
-                        // own tokio task does the real work via version_rx).
-                        engine.push_decay_handle(reload_handle);
-                        // The SkillWatcher must stay alive; its Drop calls
-                        // stop() which aborts the OS watcher. We keep it alive
-                        // by leaking it into a Box held by the engine via a
-                        // dedicated boxed-handle approach.
-                        if let Some(cleanup) = &self.cleanup {
-                            cleanup.watcher(skill_watcher);
-                        } else {
-                            engine.push_decay_handle(tokio::spawn(async move {
-                                let _watcher = skill_watcher;
-                                std::future::pending::<()>().await;
-                            }));
-                        }
-                        tracing::debug!(
-                            target: "wcore_agent::bootstrap",
-                            "F-039: SkillWatcher armed (skill hot-reload active)"
-                        );
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "F-039: SkillWatcher::new failed; continuing without skill hot-reload"
-                    );
-                }
-            }
-        }
+        // Filesystem skill refresh is owned by the admitted user-turn boundary.
+        // Scanning there observes new directories and governance revocations,
+        // without mutating a catalog while an invocation is in flight.
+        tracing::debug!(target: "wcore_agent::bootstrap", "skill catalog refresh active at user-turn boundaries");
 
         // W7.1 S4-3.2: install the same `ApprovalBridge` the ScriptTool was
         // wired with so `engine.approval_bridge()` and the registered

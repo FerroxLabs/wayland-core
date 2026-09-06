@@ -182,3 +182,5 @@ pub mod test_utils;
 // Re-export the skills crate so existing callers (wcore-cli, tests) can use
 // `wcore_agent::skills::` without changing their import paths.
 pub use wcore_skills as skills;
+
+mod recall_facts;
