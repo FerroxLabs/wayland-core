@@ -2007,7 +2007,11 @@ impl AgentBootstrap {
         // plugin hooks stay log-only (the legacy behavior).
         // wayland#562 — captured before `self.config` is moved into the engine,
         // so the late-MCP rebind applies the SAME gate this boot-time block does.
-        let hook_dispatch_enabled = self.config.hooks.dispatch_enabled;
+        // Lifecycle MCP calls bypass ToolRegistry, so bind them only under
+        // the same operator authority as ordinary MCP tools. This resolved
+        // gate is also captured by LateMcpBinder below.
+        let hook_dispatch_enabled = self.config.hooks.dispatch_enabled
+            && crate::channel_tools::allows_ambient_mcp(self.channel_tool_posture.as_ref());
         let hook_dispatcher: Option<Arc<dyn crate::hooks::HookDispatcher>> =
             if hook_dispatch_enabled && !applied.plugin_hooks.is_empty() && !mcp_managers.is_empty()
             {

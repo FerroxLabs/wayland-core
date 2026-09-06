@@ -55,12 +55,20 @@ pub struct ChannelToolScope {
 impl ChannelToolScope {
     /// Effective extension authority, separate from built-in filesystem posture.
     pub fn effective_mcp_authority(&self) -> &'static str {
-        if self.posture == ChannelToolPosture::Full || self.ambient_mcp_full_authority_v1 {
+        if allows_ambient_mcp(Some(self)) {
             "ambient-full-equivalent"
         } else {
             "denied"
         }
     }
+}
+
+/// Shared operator-authority predicate for tool and lifecycle-hook dispatch.
+/// A local session has no channel scope and keeps its installed extensions.
+pub fn allows_ambient_mcp(scope: Option<&ChannelToolScope>) -> bool {
+    scope.is_none_or(|scope| {
+        scope.posture == ChannelToolPosture::Full || scope.ambient_mcp_full_authority_v1
+    })
 }
 
 /// Built-in tools provably free of host filesystem / shell access — safe to
@@ -182,8 +190,7 @@ pub fn apply_posture(
     // drops `FULL_CHANNEL_DENY` (Grep/Glob/Git) while keeping all else. Only
     // channel/remote engines reach here, so local Full is untouched.
     let posture = scope.posture;
-    let ambient_mcp =
-        scope.posture == ChannelToolPosture::Full || scope.ambient_mcp_full_authority_v1;
+    let ambient_mcp = allows_ambient_mcp(Some(scope));
     registry.set_ambient_mcp_allowed(ambient_mcp);
     registry.retain(|t| {
         if is_mcp(t) {

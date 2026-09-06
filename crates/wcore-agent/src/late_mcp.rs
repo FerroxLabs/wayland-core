@@ -68,7 +68,7 @@ pub struct LateMcpBinder {
     /// Every manager whose tools participate in hook resolution: the
     /// boot-connected ones, plus each late one as it binds.
     managers: Vec<Arc<McpManager>>,
-    /// `config.hooks.dispatch_enabled` — the same gate bootstrap applies.
+    /// Resolved hook enablement AND operator MCP authority from bootstrap.
     dispatch_enabled: bool,
 }
 

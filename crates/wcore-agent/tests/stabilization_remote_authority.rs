@@ -206,3 +206,77 @@ fn operator_config_grant_is_opt_in_and_remote_text_cannot_change_it() {
             .ambient_mcp_full_authority_v1
     );
 }
+
+/// Lifecycle hooks call McpManager directly, so the deferred hook binder must
+/// receive the same resolved authority as the boot dispatcher and registry.
+#[tokio::test]
+async fn lifecycle_hooks_obey_remote_mcp_authority_after_late_bind() {
+    use wcore_agent::{
+        channel_tools::allows_ambient_mcp, late_mcp::LateMcpBinder, plugins::runner::PluginHook,
+    };
+    use wcore_plugin_api::registry::hooks::HookPhase;
+    use wcore_skills::refs::SkillCatalog;
+    for (posture, grant, allowed) in [
+        (None, false, true),
+        (Some(ChannelToolPosture::Full), false, true),
+        (Some(ChannelToolPosture::Conversational), false, false),
+        (Some(ChannelToolPosture::Workspace), false, false),
+        (Some(ChannelToolPosture::Conversational), true, true),
+        (Some(ChannelToolPosture::Workspace), true, true),
+    ] {
+        let scope = posture.map(|posture| scope(posture, grant));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let manager = Arc::new(McpManager::new_for_test_with_tools(vec![(
+            "operator",
+            false,
+            Box::new(Transport(calls.clone())),
+            vec![McpToolDef {
+                name: "Read".into(),
+                description: None,
+                input_schema: json!({}),
+            }],
+        )]));
+        let hooks = vec![
+            PluginHook {
+                plugin: "operator-plugin".into(),
+                phase: HookPhase::SessionStart,
+                name: "Read".into(),
+            },
+            PluginHook {
+                plugin: "operator-plugin".into(),
+                phase: HookPhase::PrePrompt,
+                name: "Read".into(),
+            },
+        ];
+        let (mut engine, _sink) = wcore_agent::bootstrap::AgentBootstrap::build_for_test(
+            wcore_config::config::Config::default(),
+            vec![],
+        );
+        engine.register_plugin_hooks(hooks.clone());
+        let catalog = Arc::new(SkillCatalog::from_refs(vec![]));
+        let mut binder =
+            LateMcpBinder::new(catalog, &hooks, vec![], allows_ambient_mcp(scope.as_ref()));
+        let report = binder.bind(&mut engine, manager.clone(), vec![]);
+        assert_eq!(report.hooks_rewired, allowed);
+        let hook_engine = engine.hook_engine().unwrap();
+        let start = hook_engine.run_session_start().await;
+        let prompt = hook_engine.run_pre_prompt().await;
+        assert_eq!(calls.load(Ordering::SeqCst), if allowed { 2 } else { 0 });
+        assert_eq!(
+            serde_json::to_string(&start.injected_messages)
+                .unwrap()
+                .contains("ambient-host-canary"),
+            allowed
+        );
+        assert_eq!(
+            serde_json::to_string(&prompt.injected_messages)
+                .unwrap()
+                .contains("ambient-host-canary"),
+            allowed
+        );
+        // Reconnect/rebind must not turn denied hooks back on.
+        binder.bind(&mut engine, manager, vec![]);
+        engine.hook_engine().unwrap().run_session_start().await;
+        assert_eq!(calls.load(Ordering::SeqCst), if allowed { 3 } else { 0 });
+    }
+}
