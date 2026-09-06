@@ -1,5 +1,9 @@
 //! W06 / wayland#1324: real CLI removal must report incomplete cleanup.
 
+#[path = "support/owned_tree.rs"]
+mod owned_tree;
+
+use owned_tree::OwnedTree;
 use std::path::Path;
 use std::process::{Output, Stdio};
 use std::time::Duration;
@@ -292,9 +296,11 @@ async fn oauth_logout_waits_for_writer_then_removes_its_login() {
         wcore_agent::oauth::refresh_lock::hold_for_writer(storage.refresh_lock_path("chatgpt"))
             .await
             .unwrap();
-    let mut child = oauth_command(home.path(), &["auth", "logout", "chatgpt"])
-        .spawn()
-        .unwrap();
+    let mut child = OwnedTree::new(
+        oauth_command(home.path(), &["auth", "logout", "chatgpt"])
+            .spawn()
+            .unwrap(),
+    );
     assert!(
         tokio::time::timeout(Duration::from_millis(500), child.wait())
             .await
@@ -338,7 +344,7 @@ async fn oauth_import_and_status_reread_external_source_after_writer() {
             wcore_agent::oauth::refresh_lock::hold_for_writer(storage.refresh_lock_path("chatgpt"))
                 .await
                 .unwrap();
-        let mut child = oauth_command(home.path(), args).spawn().unwrap();
+        let mut child = OwnedTree::new(oauth_command(home.path(), args).spawn().unwrap());
         assert!(
             tokio::time::timeout(Duration::from_millis(500), child.wait())
                 .await

@@ -12491,9 +12491,34 @@ mod tests {
              receiver test is not discriminating. Found: {associated:?}"
         );
 
+        // This private helper initializes one server, not a manager. Pin its
+        // entire signature so changing its visibility or return type cannot
+        // silently turn this exception into an uncounted factory.
+        let server_helper_signature = concat!(
+            "async fn initialize_transport( name: &str, ",
+            "transport: Arc<dyn McpTransport>, connect_timeout: Duration, ",
+            "cleanup: CleanupTransports, ) -> Result<McpServer, McpError> {"
+        );
+        let actual_helper_signature = manager_src
+            .lines()
+            .skip_while(|line| !line.contains("fn initialize_transport("))
+            .scan(false, |finished, line| {
+                if *finished {
+                    return None;
+                }
+                *finished = line.contains('{');
+                Some(line.trim())
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(actual_helper_signature, server_helper_signature);
+        assert!(associated.iter().any(|name| name == "initialize_transport"));
+
         for name in &associated {
             assert!(
-                name.starts_with(needle_suffix) || name.starts_with("new_for_test"),
+                name.starts_with(needle_suffix)
+                    || name.starts_with("new_for_test")
+                    || name == "initialize_transport",
                 "McpManager::{name} takes no self receiver, so it is a way to \
                  GET a manager, and it is not matched by the \
                  `McpManager::{needle_suffix}` needle that \
