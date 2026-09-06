@@ -5,6 +5,7 @@
 //! base URL and an environment filter alone do NOT protect a same-UID key from
 //! filesystem or /proc reads. No live key is accepted, read, or stored here.
 //! Unsupported compaction/memory/hosted-tool requests are refused, never emulated.
+mod connections;
 mod ledger;
 pub use ledger::{BudgetReport, CallReceipt, Ledger, OUTPUT_CAP};
 
@@ -33,13 +34,19 @@ pub const MAX_BODY_BYTES: usize = 1024 * 1024;
 const MODEL: &str = "gpt-6-astra";
 const UPSTREAM_FIXTURE_KEY: &str = "w16-fake-upstream-only";
 
+#[derive(Default)]
+struct Workers {
+    closing: bool,
+    handles: Vec<JoinHandle<()>>,
+}
+
 struct Shared {
     ledger: Arc<Ledger>,
     upstream: String,
     leg: String,
     peer_key: String,
     client: reqwest::Client,
-    workers: Mutex<Vec<JoinHandle<()>>>,
+    workers: Mutex<Workers>,
 }
 
 /// A separate listener binds one leg to one fake bearer; peers cannot select
@@ -49,7 +56,7 @@ pub struct FixtureBudgetProxy {
     pub peer_key: String,
     shared: Arc<Shared>,
     stop: Option<oneshot::Sender<()>>,
-    server: Option<JoinHandle<()>>,
+    server: Option<JoinHandle<std::io::Result<()>>>,
 }
 
 impl FixtureBudgetProxy {
@@ -92,7 +99,7 @@ impl FixtureBudgetProxy {
                 .pool_max_idle_per_host(0)
                 .timeout(Duration::from_secs(10))
                 .build()?,
-            workers: Mutex::new(vec![]),
+            workers: Mutex::new(Workers::default()),
         });
         let app = Router::new()
             .route("/v1/responses", post(handle))
@@ -102,13 +109,7 @@ impl FixtureBudgetProxy {
         let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
         let base_url = format!("http://{}/v1", listener.local_addr()?);
         let (stop, stopped) = oneshot::channel();
-        let server = tokio::spawn(async move {
-            let _ = axum::serve(listener, app)
-                .with_graceful_shutdown(async {
-                    let _ = stopped.await;
-                })
-                .await;
-        });
+        let server = tokio::spawn(connections::serve(listener, app, stopped));
         Ok(Self {
             base_url,
             peer_key,
@@ -119,34 +120,48 @@ impl FixtureBudgetProxy {
     }
 
     pub async fn close(mut self) -> Result<()> {
+        // This mutex also encloses spawn+registration in handle(): no request
+        // can admit a worker after this snapshot, even if its body arrived late.
+        let workers = self.close_admission();
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(());
         }
-        if let Some(mut server) = self.server.take()
-            && tokio::time::timeout(Duration::from_secs(12), &mut server)
-                .await
-                .is_err()
-        {
-            server.abort();
-            let _ = server.await;
-        }
-        let workers = std::mem::take(
-            &mut *self
-                .shared
-                .workers
-                .lock()
-                .map_err(|_| anyhow!("worker ownership poisoned"))?,
-        );
+        let server_result = if let Some(mut server) = self.server.take() {
+            match tokio::time::timeout(Duration::from_secs(12), &mut server).await {
+                Ok(result) => result
+                    .map_err(anyhow::Error::from)
+                    .and_then(|result| result.map_err(anyhow::Error::from)),
+                Err(_) => {
+                    server.abort();
+                    let _ = server.await;
+                    Err(anyhow!("proxy connection cleanup deadline exceeded"))
+                }
+            }
+        } else {
+            Ok(())
+        };
         for worker in workers {
             worker.await?;
         }
-        Ok(())
+        server_result
+    }
+
+    fn close_admission(&self) -> Vec<JoinHandle<()>> {
+        let mut workers = self
+            .shared
+            .workers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        workers.closing = true;
+        std::mem::take(&mut workers.handles)
     }
 }
+
 impl Drop for FixtureBudgetProxy {
     fn drop(&mut self) {
         // Detached bounded workers retain their claims and finish settlement;
         // dropping a client/server is never proof that the upstream did no work.
+        drop(self.close_admission());
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(());
         }
@@ -216,16 +231,18 @@ async fn handle(State(shared): State<Arc<Shared>>, headers: HeaderMap, bytes: By
         Ok(body) => body,
         Err(_) => return refusal(StatusCode::BAD_REQUEST, "request_outside_frozen_contract"),
     };
-    let (reply, receiver) = oneshot::channel();
-    let worker_shared = shared.clone();
-    let worker = tokio::spawn(async move {
-        run_request(worker_shared, body, reply).await;
-    });
-    shared
-        .workers
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .push(worker);
+    let receiver = {
+        let mut workers = shared.workers.lock().unwrap_or_else(|e| e.into_inner());
+        if workers.closing {
+            return refusal(StatusCode::SERVICE_UNAVAILABLE, "proxy_closing");
+        }
+        let (reply, receiver) = oneshot::channel();
+        let worker_shared = shared.clone();
+        workers.handles.push(tokio::spawn(async move {
+            run_request(worker_shared, body, reply).await;
+        }));
+        receiver
+    };
     receiver
         .await
         .unwrap_or_else(|_| refusal(StatusCode::BAD_GATEWAY, "owned_worker_failed"))

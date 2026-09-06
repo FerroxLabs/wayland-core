@@ -21,6 +21,7 @@ struct Upstream {
     count_status: StatusCode,
     generation_status: StatusCode,
     usage_present: bool,
+    count_calls: AtomicUsize,
     generation_calls: AtomicUsize,
     release: Semaphore,
     bodies: Mutex<Vec<Value>>,
@@ -48,6 +49,7 @@ impl Fixture {
             count_status,
             generation_status,
             usage_present,
+            count_calls: AtomicUsize::new(0),
             generation_calls: AtomicUsize::new(0),
             release: Semaphore::new(0),
             bodies: Mutex::new(vec![]),
@@ -68,6 +70,7 @@ async fn count(
     State(state): State<Arc<Upstream>>,
     Json(body): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
+    state.count_calls.fetch_add(1, Ordering::SeqCst);
     assert_eq!(body["model"], "gpt-6-astra");
     (
         state.count_status,
@@ -256,4 +259,69 @@ async fn invalid_count_routes_body_and_contract_never_dispatch_generation() {
     );
     assert!(FixtureBudgetProxy::live_admission_blocker().contains("proc"));
     proxy.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn partial_authenticated_body_cannot_dispatch_after_close() {
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let (_root, ledger, fixture, proxy) = setup(20, true, StatusCode::OK, StatusCode::OK).await;
+    let address = proxy
+        .base_url
+        .strip_prefix("http://")
+        .unwrap()
+        .strip_suffix("/v1")
+        .unwrap()
+        .to_owned();
+    let mut socket = tokio::net::TcpStream::connect(&address).await.unwrap();
+    let body = serde_json::to_vec(&request()).unwrap();
+    let headers = format!(
+        "POST /v1/responses HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nExpect: 100-continue\r\n\r\n",
+        proxy.peer_key,
+        body.len()
+    );
+    socket.write_all(headers.as_bytes()).await.unwrap();
+    // A protocol barrier proves the accepted connection is reading this body;
+    // a delay alone could pass without ever exercising the shutdown race.
+    let mut interim = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !interim.ends_with(b"\r\n\r\n") {
+            interim.push(socket.read_u8().await.unwrap());
+            assert!(interim.len() < 1024);
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        String::from_utf8(interim)
+            .unwrap()
+            .starts_with("HTTP/1.1 100")
+    );
+    socket.write_all(&body[..1]).await.unwrap();
+    assert_eq!(fixture.state.count_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.state.generation_calls.load(Ordering::SeqCst), 0);
+
+    tokio::time::timeout(Duration::from_secs(15), proxy.close())
+        .await
+        .unwrap()
+        .unwrap();
+    // If the old connection survived close, completing it can now finish a
+    // real counted generation; do not let a held upstream disguise that bug.
+    fixture.state.release.add_permits(1);
+    let _ = socket.write_all(&body[1..]).await;
+    let mut rest = Vec::new();
+    let ended = tokio::time::timeout(Duration::from_secs(5), socket.read_to_end(&mut rest))
+        .await
+        .expect("close must terminate the accepted connection");
+    if let Err(error) = ended {
+        assert!(matches!(
+            error.kind(),
+            std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe
+        ));
+    }
+    assert_eq!(fixture.state.count_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.state.generation_calls.load(Ordering::SeqCst), 0);
+    assert!(ledger.report().unwrap().calls.is_empty());
+    assert!(tokio::net::TcpStream::connect(address).await.is_err());
 }

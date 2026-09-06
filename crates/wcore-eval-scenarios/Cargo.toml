@@ -96,6 +96,9 @@ rand         = { workspace = true }
 reqwest      = { workspace = true }
 # Correct HTTP parsing for the loopback-only scripted OpenAI fixture.
 axum         = "0.7"
+# Own inbound fixture connection tasks through the existing HTTP stack.
+hyper        = { workspace = true }
+hyper-util   = { workspace = true, features = ["service"] }
 futures      = { workspace = true }
 # D8 PTY TUI capture — drive wayland-core's ratatui TUI under a pseudo-terminal
 # and read the rendered screen. Direct deps (not in [workspace.dependencies])

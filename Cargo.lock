@@ -9831,6 +9831,8 @@ dependencies = [
  "ed25519-dalek",
  "fd-lock",
  "futures",
+ "hyper",
+ "hyper-util",
  "libc",
  "portable-pty",
  "rand 0.8.6",
