@@ -64,6 +64,9 @@ mod lifecycle;
 #[cfg(test)]
 #[path = "acp_engine/lifecycle_tests.rs"]
 mod lifecycle_tests;
+#[cfg(test)]
+#[path = "acp_engine/relay_backpressure_tests.rs"]
+mod relay_backpressure_tests;
 use lifecycle::{Initialization, InitializationCompletion, SessionLifetime};
 use std::sync::atomic::Ordering;
 
@@ -75,7 +78,24 @@ use std::sync::atomic::Ordering;
 /// installs a fresh sender for each turn (under the engine lock, so a queued
 /// turn cannot redirect a running one), so the single engine — built once per
 /// session — drives a fresh channel per turn without cross-talk.
-type RelayHandle = Arc<Mutex<Option<UnboundedSender<ProtocolEvent>>>>;
+type RelayHandle = Arc<Mutex<Option<RelayTarget>>>;
+
+#[derive(Clone)]
+struct RelayTarget {
+    sender: UnboundedSender<ProtocolEvent>,
+    cancel: CancellationToken,
+    wait_budget: Arc<tokio::sync::Mutex<std::time::Duration>>,
+}
+
+impl RelayTarget {
+    fn new(sender: UnboundedSender<ProtocolEvent>, cancel: CancellationToken) -> Self {
+        Self {
+            sender,
+            cancel,
+            wait_budget: Arc::new(tokio::sync::Mutex::new(std::time::Duration::from_secs(1))),
+        }
+    }
+}
 
 fn protocol_channel(
     turn_id: &str,
@@ -144,7 +164,7 @@ impl RelaySink {
             let (scratch, mut events) = tokio::sync::mpsc::unbounded_channel();
             f(&ChannelSink::new(scratch));
             while let Ok(event) = events.try_recv() {
-                let _ = tx.send(event);
+                let _ = tx.sender.send(event);
             }
         }
     }
@@ -172,6 +192,44 @@ impl OutputSink for RelaySink {
     fn emit_text_delta(&self, text: &str, msg_id: &str) {
         self.with_sink(|s| s.emit_text_delta(text, msg_id));
     }
+    fn emit_text_delta_async<'a>(
+        &'a self,
+        text: &'a str,
+        msg_id: &'a str,
+    ) -> Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        // Capture the current turn once; a later relay swap cannot redirect
+        // this pending event or reset its cumulative pressure budget.
+        let target = self.handle.lock().unwrap().clone();
+        Box::pin(async move {
+            let Some(target) = target else { return };
+            // Charge the exact borrowed wire shape before cloning either
+            // string into ChannelSink's existing event mapping.
+            #[derive(serde::Serialize)]
+            struct BorrowedText<'a> {
+                r#type: &'static str,
+                text: &'a str,
+                msg_id: &'a str,
+            }
+            let borrowed = BorrowedText {
+                r#type: "text_delta",
+                text,
+                msg_id,
+            };
+            let Ok(charge) = wcore_acp::bounded::retain(&borrowed) else {
+                target.sender.overload();
+                return;
+            };
+            let (scratch, mut events) = tokio::sync::mpsc::unbounded_channel();
+            ChannelSink::new(scratch).emit_text_delta(text, msg_id);
+            let event = events.try_recv().expect("text mapping emits one frame");
+            let mut budget = target.wait_budget.lock().await;
+            let _ = target
+                .sender
+                .send_retained(event, charge, &mut budget, target.cancel.cancelled())
+                .await;
+        })
+    }
+
     fn emit_thinking(&self, text: &str, msg_id: &str) {
         self.with_sink(|s| s.emit_thinking(text, msg_id));
     }
@@ -358,7 +416,7 @@ impl ProtocolEmitter for RelayEmitter {
             )
             .emit(event)?;
             while let Ok(event) = events.try_recv() {
-                tx.send(event).map_err(std::io::Error::other)?;
+                tx.sender.send(event).map_err(std::io::Error::other)?;
             }
         }
         Ok(())
@@ -985,7 +1043,7 @@ impl EngineSession {
             // only after acquiring the engine lock, so a second `run_turn`
             // queued behind us cannot redirect our turn's events: the swap
             // and the `run()` it scopes are both under the same lock.
-            *relay.lock().unwrap() = Some(tx.clone());
+            *relay.lock().unwrap() = Some(RelayTarget::new(tx.clone(), turn_cancel.clone()));
             guard.set_cancel_token(turn_cancel.clone());
             match guard.run(&text, &msg_id).await {
                 Ok(result) => {
@@ -2098,7 +2156,10 @@ mod tests {
         let (tx, rx) = protocol_channel("fixture-turn").expect("fixture channel budget");
         // The relay's emitter forwards onto the per-turn channel and owns the
         // persistent dedupe set (mirrors `EngineSession`'s wiring).
-        let relay: RelayHandle = Arc::new(Mutex::new(Some(tx)));
+        let relay: RelayHandle = Arc::new(Mutex::new(Some(RelayTarget::new(
+            tx,
+            CancellationToken::new(),
+        ))));
         let emitter = RelayEmitter::new(relay, None);
 
         // Reproduce the live-workflow gate's emit sequence (engine.rs):
@@ -2187,7 +2248,10 @@ mod tests {
             .await;
 
         let (tx, mut rx) = protocol_channel("fixture-turn").expect("fixture channel budget");
-        let relay: RelayHandle = Arc::new(Mutex::new(Some(tx)));
+        let relay: RelayHandle = Arc::new(Mutex::new(Some(RelayTarget::new(
+            tx,
+            CancellationToken::new(),
+        ))));
         let emitter = RelayEmitter::new(relay, Some(bridge));
 
         emitter
@@ -2236,7 +2300,10 @@ mod tests {
     async fn relay_emitter_emits_empty_token_for_non_bridge_call() {
         let bridge = Arc::new(wcore_agent::approval::ApprovalBridge::new());
         let (tx, mut rx) = protocol_channel("fixture-turn").expect("fixture channel budget");
-        let relay: RelayHandle = Arc::new(Mutex::new(Some(tx)));
+        let relay: RelayHandle = Arc::new(Mutex::new(Some(RelayTarget::new(
+            tx,
+            CancellationToken::new(),
+        ))));
         let emitter = RelayEmitter::new(relay, Some(bridge));
 
         emitter

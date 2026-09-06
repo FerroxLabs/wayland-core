@@ -16304,7 +16304,9 @@ impl AgentEngine {
                             // does not delete reasoning, it captures it and
                             // renders a collapsed `Thought:` block. Only the
                             // durable copy is filtered (#908).
-                            self.output.emit_text_delta(&text, &self.current_msg_id);
+                            self.output
+                                .emit_text_delta_async(&text, &self.current_msg_id)
+                                .await;
                             raw_text_chars += text.chars().count();
                             assistant_text.push_str(&assistant_reasoning.process(&text));
                         }

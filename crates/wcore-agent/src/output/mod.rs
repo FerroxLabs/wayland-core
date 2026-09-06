@@ -34,6 +34,16 @@ pub trait OutputSink: Send + Sync {
 
     /// Stream text delta from LLM
     fn emit_text_delta(&self, text: &str, msg_id: &str);
+    /// Await bounded delivery when a transport needs producer backpressure.
+    /// Synchronous sinks retain their existing behavior.
+    fn emit_text_delta_async<'a>(
+        &'a self,
+        text: &'a str,
+        msg_id: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move { self.emit_text_delta(text, msg_id) })
+    }
+
     /// Stream thinking content from LLM
     fn emit_thinking(&self, text: &str, msg_id: &str);
     /// #318 — emit a per-turn thinking SUBJECT: a short opaque display label

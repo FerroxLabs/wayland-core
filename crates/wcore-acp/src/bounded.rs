@@ -163,7 +163,7 @@ impl<E: Serialize> Sender<E> {
     }
     /// Explicitly detach live delivery after a replay gap or stall. The
     /// pre-reserved terminal remains the only terminal for this receiver.
-    pub(crate) fn overload(&self) {
+    pub fn overload(&self) {
         let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.closed || state.overflow {
             return;
@@ -189,7 +189,7 @@ impl<E: Serialize> Sender<E> {
     /// Delivery-only backpressure, independent of the upstream recorder.
     /// The supplied charge was acquired before cloning the borrowed replay
     /// event and remains owned until transferred into this queue or dropped.
-    pub(crate) async fn send_retained(
+    pub async fn send_retained(
         &self,
         event: E,
         mut retained: Retained,
