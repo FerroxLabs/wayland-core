@@ -223,7 +223,7 @@
       "journey": "Explicit WorkflowRunner: independent children and inter-stage data",
       "owner": "W09/W15/W16",
       "state": "externally_blocked",
-      "reason": "Remaining: combined physical-child spend and cancellation receipt for supported WorkflowRunner execution. Mock-provider independent-stage/data/limit controls already passed.",
+      "reason": "Real HTTP child identity, shared spending and cancellation witness passed at f4d62b85 and is integrated. Remaining: reconcile this scoped receipt with the final candidate and whole-journey evidence; fleet and remote execution remain separate claims.",
       "carrier": "https://github.com/FerroxLabs/wayland/issues/1324",
       "evidence": [
         {
@@ -234,6 +234,20 @@
           "exit_code": 0,
           "scope": "Full-stack workflow 1 and limits 9 passed with mock provider; independent stages and inter-stage data only.",
           "kind": "historical_executed_behavior"
+        },
+        {
+          "source_sha": "f4d62b85e8d897c61149b806c3208d9e9b72b0d2",
+          "platform": "linux",
+          "command": "cargo nextest run --locked --retries 0 --no-tests=fail --no-fail-fast --test-threads 1 -p wcore-agent --test workflow_e2e -E 'test(workflow_http_children_share_charges_and_stop_after_observed_cancellation)'",
+          "selected": [
+            "workflow_http_children_share_charges_and_stop_after_observed_cancellation"
+          ],
+          "result": "passed",
+          "negative_control": "Cancellation after observed dispatch prevents subsequent requests and retains uncertain charges.",
+          "receipt": "evidence/proof-1788717609-80600.json",
+          "exit_code": 0,
+          "kind": "executed_behavior",
+          "scope": "Production WorkflowRunner and AgentSpawner in-process children through actual loopback HTTP/OpenAIProvider; durable child identity, parent lineage, exact shared wire charges and cancellation."
         }
       ]
     },
