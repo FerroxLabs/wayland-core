@@ -344,11 +344,30 @@ key_params_path = {json.dumps(str(home / "credentials.params.json"))}
         writer_binary = (args.candidate if receipt["history_compatibility"] ==
                          "safe-refusal-and-forward-recovery" else args.previous)
         core = launch(writer_binary, sid, True, "writer-control")
-        # A second process must fail to acquire the active writer authority.
-        contender = subprocess.run([args.candidate, "session", "--dir", str(sessions), "cancel", sid],
-                                   env=env, cwd=workspace, capture_output=True, text=True, timeout=20)
-        (root / "writer-contender.txt").write_text(contender.stdout + contender.stderr)
-        assert contender.returncode != 0 and "writer lease is already held" in (contender.stdout + contender.stderr)
+        # Idle cancel is read-only; resume must acquire real writer authority.
+        receipt["stage"] = "writer-contender"
+        assert core.process.poll() is None, "first writer exited before contention"
+        before = {str(path.relative_to(sessions)): digest(path)
+                  for path in sessions.rglob("*") if path.is_file()
+                  and not path.name.endswith(".lock")}
+        before_requests = len(requests())
+        contender = Core(args.candidate, sid, True, env, workspace, root, "writer-contender", port)
+        cores.append(contender)
+        code = contender.process.wait(timeout=20)
+        contender.reader.join(timeout=5)
+        evidence = (root / "writer-contender.stderr").read_text() + json.dumps(contender.frames)
+        (root / "writer-contender.txt").write_text(evidence)
+        assert code > 0 and "writer lease is already held" in evidence, evidence
+        assert not any(frame.get("type") == "ready" for frame in contender.frames)
+        assert core.process.poll() is None, "first writer exited during contention"
+        contender.stop()
+        after = {str(path.relative_to(sessions)): digest(path)
+                 for path in sessions.rglob("*") if path.is_file()
+                 and not path.name.endswith(".lock")}
+        assert after == before, "writer refusal changed private session/journal bytes"
+        assert len(requests()) == before_requests, "writer refusal dispatched provider work"
+        receipt["writer_refusal"] = {"exit_code": code, "preserved_sha256": before,
+                                     "provider_requests": before_requests}
         receipt["checks"]["live_writer_excluded"] = True
         core.stop()
         uncertain = uuid.uuid4().hex
