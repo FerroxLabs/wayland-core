@@ -931,10 +931,10 @@ impl LlmProvider for BudgetedCompactionProvider {
             };
             let Some(event) = event else { break };
             let terminal = matches!(event, LlmEvent::Done { .. } | LlmEvent::Error(_));
-            if let LlmEvent::Done { usage: actual, .. } = &event {
-                if actual.total_input_tokens() > 0 || actual.output_tokens > 0 {
-                    usage = Some(actual.clone());
-                }
+            if let LlmEvent::Done { usage: actual, .. } = &event
+                && (actual.total_input_tokens() > 0 || actual.output_tokens > 0)
+            {
+                usage = Some(actual.clone());
             }
             events.push(event);
             if terminal {

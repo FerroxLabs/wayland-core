@@ -343,8 +343,10 @@ async fn compaction_usage_overshoot_is_recorded_and_stops_the_next_post() {
             reply("<summary>large</summary>", usage(100, 100_000)),
             reply("must not send", usage(1, 1)),
         ],
+        // Admit the compactor's full 20,000-output bound after the first
+        // conversation's 10 output tokens; only its actual usage overshoots.
         BudgetCap::builder()
-            .per_session_output_tokens(20_000)
+            .per_session_output_tokens(20_010)
             .build(),
     )
     .await;
