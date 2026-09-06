@@ -122,14 +122,13 @@ impl FixtureBudgetProxy {
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(());
         }
-        if let Some(mut server) = self.server.take() {
-            if tokio::time::timeout(Duration::from_secs(12), &mut server)
+        if let Some(mut server) = self.server.take()
+            && tokio::time::timeout(Duration::from_secs(12), &mut server)
                 .await
                 .is_err()
-            {
-                server.abort();
-                let _ = server.await;
-            }
+        {
+            server.abort();
+            let _ = server.await;
         }
         let workers = std::mem::take(
             &mut *self
