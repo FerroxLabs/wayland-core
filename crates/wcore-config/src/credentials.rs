@@ -3542,6 +3542,18 @@ pub(crate) mod encrypted_file {
         }
     }
 
+    impl KdfParams {
+        fn validate_version(&self) -> Result<(), EncryptedFileError> {
+            if self.version != 1 {
+                return Err(EncryptedFileError::KdfParams(format!(
+                    "unsupported version {}; expected 1",
+                    self.version
+                )));
+            }
+            Ok(())
+        }
+    }
+
     fn base64_url(bytes: &[u8]) -> String {
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
     }
@@ -3573,6 +3585,7 @@ pub(crate) mod encrypted_file {
         password: &str,
         params: &KdfParams,
     ) -> Result<[u8; KEY_LEN], EncryptedFileError> {
+        params.validate_version()?;
         let salt = base64_url_decode(&params.salt_b64)?;
         let argon = Argon2::new(
             Algorithm::Argon2id,
@@ -3691,6 +3704,7 @@ pub(crate) mod encrypted_file {
     pub fn load_key_params(path: &std::path::Path) -> Result<KdfParams, EncryptedFileError> {
         let s = std::fs::read_to_string(path)?;
         let p: KdfParams = serde_json::from_str(&s)?;
+        p.validate_version()?;
         Ok(p)
     }
 

@@ -126,6 +126,11 @@ fn encrypted_derived_key_never_accepts_corrupt_cipher_or_params() {
     for bad in [b"not json".as_slice(), unsupported.as_slice()] {
         std::fs::write(&params, bad).unwrap();
         assert!(store.get("token").is_err());
+        assert!(
+            EncryptedFileCredentialsStore::new(cipher.clone(), params.clone())
+                .get("token")
+                .is_err()
+        );
         assert_eq!(std::fs::read(&cipher).unwrap(), valid_cipher);
     }
     std::fs::remove_file(&params).unwrap();
@@ -140,6 +145,16 @@ fn encrypted_derived_key_never_accepts_corrupt_cipher_or_params() {
     let wrong = EncryptedFileCredentialsStore::new(cipher.clone(), params);
     assert!(wrong.get("token").is_err());
     assert_eq!(std::fs::read(cipher).unwrap(), valid_cipher);
+}
+
+#[test]
+fn encrypted_derived_key_rejects_unknown_version_before_kdf() {
+    let mut params = encrypted_file::KdfParams::default();
+    assert_eq!(params.version, 1);
+    params.version = 2;
+    let before = encrypted_file::test_derivation_count();
+    assert!(encrypted_file::derive_key("version-fixture", &params).is_err());
+    assert_eq!(encrypted_file::test_derivation_count(), before);
 }
 
 #[test]
