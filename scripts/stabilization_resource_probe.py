@@ -129,6 +129,8 @@ def discover_mcp(binary, workspace, env):
 
 def rss(pid):
     fields = dict(line.split(":", 1) for line in Path(f"/proc/{pid}/status").read_text().splitlines() if ":" in line)
+    if "VmRSS" not in fields:
+        raise ProcessLookupError(f"RSS unavailable for exiting process {pid}")
     return int(fields["VmRSS"].split()[0]) * 1024
 
 
@@ -255,7 +257,8 @@ key_params_path = {json.dumps(str(profile / "credentials.params.json"))}
             while not stop_sample.wait(.05):
                 try:
                     samples.append([time.monotonic(), rss(core.pid)])
-                except FileNotFoundError:
+                except (FileNotFoundError, ProcessLookupError) as error:
+                    receipt.setdefault("rss_unavailable", []).append({"time": time.monotonic(), "reason": str(error)})
                     continue
         sampler = threading.Thread(target=sample, daemon=True)
         sampler.start()

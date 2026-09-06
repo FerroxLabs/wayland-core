@@ -67,6 +67,7 @@ impl Drop for InitializationCompletion {
 #[derive(Default)]
 pub(super) struct SessionLifetime {
     pub(super) last_used: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
+    validation: Mutex<Option<JoinHandle<Result<bool, String>>>>,
     pub(super) closing: Arc<AtomicBool>,
     pub(super) turns: Mutex<Vec<(CancellationToken, JoinHandle<()>)>>,
     pub(super) root: Option<SessionControl>,
@@ -75,6 +76,33 @@ pub(super) struct SessionLifetime {
     pub(super) channels: Option<Arc<tokio::sync::RwLock<wcore_channels::ChannelManager>>>,
     #[cfg(test)]
     pub(super) inbound_started: bool,
+}
+
+impl SessionLifetime {
+    async fn validate_journal(
+        &self,
+        journal: Option<wcore_agent::session_journal::SessionJournal>,
+    ) -> Result<(), AcpError> {
+        let Some(journal) = journal else {
+            return Ok::<(), AcpError>(());
+        };
+        let mut task = self.validation.lock().await;
+        if task.is_none() {
+            *task = Some(tokio::task::spawn_blocking(move || {
+                wcore_agent::recovery::RecoveryPlan::validate_cleanup(&journal)
+                    .map_err(|e| e.to_string())
+            }));
+        }
+        // Retain the handle in the session on timeout. A retry joins this
+        // same validation, and its owned journal keeps the writer lease.
+        let result = task.as_mut().expect("validation installed").await;
+        task.take();
+        let needs_recovery = result
+            .map_err(|e| AcpError::Cleanup(e.to_string()))?
+            .map_err(AcpError::Cleanup)?;
+        tracing::debug!(needs_recovery, "ACP committed cleanup authority validated");
+        Ok(())
+    }
 }
 
 impl EngineSession {
@@ -104,10 +132,8 @@ impl EngineSession {
         // The task has returned/been joined, so its finalizer or durable drop
         // path owns the truth. Unknown physical outcomes are retained as such.
         let mut engine = self.engine.lock().await;
-        if engine.session_journal().is_some() {
-            engine
-                .recovery_plan()
-                .map_err(|error| AcpError::Cleanup(error.to_string()))?;
+        let journal = engine.session_journal().cloned();
+        if journal.is_some() {
             if let Some(children) = &self.lifetime.children {
                 let supervisor = children
                     .supervisor()
@@ -142,10 +168,10 @@ impl EngineSession {
         }
         let cleanup = engine.prepare_shutdown();
         drop(engine);
-        cleanup
-            .close()
-            .await
-            .map_err(|error| AcpError::Cleanup(error.to_string()))?;
+        let validation = self.lifetime.validate_journal(journal);
+        let (validated, cleaned) = tokio::join!(validation, cleanup.close());
+        validated?;
+        cleaned.map_err(|error| AcpError::Cleanup(error.to_string()))?;
         *self.relay.lock().unwrap() = None;
         Ok(())
     }
@@ -180,7 +206,14 @@ impl EngineTurnEngine {
                         wcore_agent::recovery::RecoveryDisposition::Ready
                     )
                 });
-            if !safe {
+            let children_quiet = session
+                .lifetime
+                .children
+                .as_ref()
+                .and_then(|children| children.supervisor().ok())
+                .and_then(|supervisor| supervisor.cleanup_ready().ok())
+                .unwrap_or(false);
+            if !safe || !children_quiet {
                 continue;
             }
             session.lifetime.closing.store(true, Ordering::Release);
@@ -257,6 +290,41 @@ impl EngineTurnEngine {
 #[cfg(test)]
 mod resource_tests {
     use super::*;
+    #[tokio::test]
+    async fn stabilization_cleanup_timeout_retains_and_rejoins_same_validation() {
+        let root = tempfile::tempdir().unwrap();
+        let journal = wcore_agent::session_journal::SessionJournal::open(
+            root.path().join("session.journal"),
+            "session",
+        )
+        .unwrap();
+        let lifetime = SessionLifetime::default();
+        let owned = journal.clone();
+        let (release, wait) = tokio::sync::oneshot::channel();
+        *lifetime.validation.lock().await = Some(tokio::spawn(async move {
+            wait.await.unwrap();
+            wcore_agent::recovery::RecoveryPlan::validate_cleanup(&owned).map_err(|e| e.to_string())
+        }));
+        let first = tokio::time::timeout(
+            Duration::from_millis(10),
+            lifetime.validate_journal(Some(journal.clone())),
+        )
+        .await;
+        assert!(first.is_err());
+        assert!(
+            !lifetime
+                .validation
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .is_finished()
+        );
+        release.send(()).unwrap();
+        lifetime.validate_journal(Some(journal)).await.unwrap();
+        assert!(lifetime.validation.lock().await.is_none());
+    }
+
     #[tokio::test]
     async fn stabilization_pool_counts_initializing_and_closing_owners() {
         let root = tempfile::tempdir().unwrap();

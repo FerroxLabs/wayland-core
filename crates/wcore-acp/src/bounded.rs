@@ -14,6 +14,33 @@ fn global() -> &'static Mutex<usize> {
     static USED: OnceLock<Mutex<usize>> = OnceLock::new();
     USED.get_or_init(|| Mutex::new(0))
 }
+/// Charge projection-owned copies after they leave a queue. Dropping the
+/// owner (completion, cancellation or stream drop) returns the same budget.
+pub struct Retained {
+    bytes: usize,
+}
+impl Retained {
+    pub fn bytes(&self) -> usize {
+        self.bytes
+    }
+}
+impl Drop for Retained {
+    fn drop(&mut self) {
+        *global().lock().unwrap_or_else(|e| e.into_inner()) -= self.bytes;
+    }
+}
+pub fn retain<T: Serialize>(value: &T) -> Result<Retained, &'static str> {
+    let bytes = serde_json::to_vec(value)
+        .map_err(|_| "cannot encode retained input")?
+        .len();
+    let mut used = global().lock().unwrap_or_else(|e| e.into_inner());
+    if bytes > EVENT_BYTES || *used + bytes > AGGREGATE_BYTES {
+        return Err("retained projection input budget exhausted");
+    }
+    *used += bytes;
+    Ok(Retained { bytes })
+}
+
 struct State<E> {
     queue: VecDeque<(E, usize)>,
     bytes: usize,
@@ -133,6 +160,18 @@ impl<E: Serialize> Sender<E> {
     }
 }
 impl<E> Receiver<E> {
+    pub fn cancel_producer(&self) {
+        if let Some(callback) = self
+            .0
+            .on_overflow
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        {
+            callback();
+        }
+    }
+
     pub fn try_recv(&mut self) -> Result<E, &'static str> {
         let waker = futures::task::noop_waker();
         match self.poll_recv(&mut Context::from_waker(&waker)) {

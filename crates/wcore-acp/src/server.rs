@@ -222,7 +222,7 @@ impl AcpServer {
     /// the window gets [`crate::cursor::CursorError::TooOld`] naming the oldest
     /// position still servable, so the client resynchronises deliberately.
     pub fn with_event_retention(mut self, events: usize) -> Self {
-        self.event_retention = events.max(1);
+        self.event_retention = events.clamp(1, crate::cursor::DEFAULT_RETENTION);
         self
     }
 
@@ -427,6 +427,7 @@ impl AcpServer {
         upstream: Pin<Box<dyn Stream<Item = MessageEvent> + Send>>,
         lifecycle: &Arc<SessionLifecycle>,
         turn_slot: tokio::sync::OwnedSemaphorePermit,
+        turn_id: String,
     ) -> Pin<Box<dyn Stream<Item = MessageEvent> + Send>> {
         let overflow = MessageEvent::Error {
             error: crate::protocol::JsonRpcError {
@@ -434,7 +435,7 @@ impl AcpServer {
                 message: "live delivery overloaded; resume from retained event cursor".into(),
                 data: None,
             },
-            turn_id: String::new(),
+            turn_id: turn_id.clone(),
         };
         let channel = crate::bounded::channel(overflow.clone()).ok();
         let (tx, rx) = match channel {
@@ -465,7 +466,7 @@ impl AcpServer {
                             message: "encoded event exceeds1MiB; structured payload refused".into(),
                             data: None,
                         },
-                        turn_id: String::new(),
+                        turn_id: turn_id.clone(),
                     }
                 } else {
                     ev
@@ -770,18 +771,20 @@ impl HttpHandler for AcpServer {
         // path whose events are unresumable, and it would look identical from
         // the outside until somebody disconnected and counted.
         let session_id = req.session_id.clone();
+        let turn_id = uuid::Uuid::new_v4().to_string();
         let establish = async {
             let upstream: Pin<Box<dyn Stream<Item = MessageEvent> + Send>> =
                 if Self::is_profile_agent(agent.as_deref()) {
                     match &self.router {
                         Some(router) => {
-                            router
+                            let stream = router
                                 .send(MessageSendRequest {
                                     session_id: req.session_id,
                                     text: req.text,
                                     tools,
                                 })
-                                .await?
+                                .await?;
+                            crate::turn::bind_turn_id(stream, turn_id.clone())
                         }
                         None => {
                             return Err(AcpError::Session(format!(
@@ -795,13 +798,16 @@ impl HttpHandler for AcpServer {
                     match &self.turn_engine {
                         Some(engine) => {
                             engine
-                                .run_turn(crate::turn::TurnRequest {
-                                    session_id: req.session_id,
-                                    text: req.text,
-                                    tools,
-                                    agent,
-                                    mcp_servers,
-                                })
+                                .run_turn_with_id(
+                                    crate::turn::TurnRequest {
+                                        session_id: req.session_id,
+                                        text: req.text,
+                                        tools,
+                                        agent,
+                                        mcp_servers,
+                                    },
+                                    turn_id.clone(),
+                                )
                                 .await?
                         }
                         None => {
@@ -829,7 +835,7 @@ impl HttpHandler for AcpServer {
             _ = record.lifecycle.closed() => return Err(AcpError::Cleanup("session is closing".into())),
             result = establish => result?,
         };
-        Ok(self.tee_into_log(&session_id, upstream, &record.lifecycle, turn_slot))
+        Ok(self.tee_into_log(&session_id, upstream, &record.lifecycle, turn_slot, turn_id))
     }
 
     /// The server's authorization decision, taken from the principal the

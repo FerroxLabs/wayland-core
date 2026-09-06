@@ -1300,6 +1300,27 @@ pub(crate) fn engine_redispatchable_under_durable_key(
 }
 
 impl RecoveryPlan {
+    /// Validate the same committed disk authority for close, without building
+    /// a replay action or hashing a UI state payload nobody will consume.
+    /// `true` means an unfinished turn remains explicitly recoverable/unknown;
+    /// close does not execute, refund, or erase that durable state.
+    pub fn validate_cleanup(journal: &SessionJournal) -> Result<bool, JournalError> {
+        let authority = journal.committed_authority()?;
+        let active = authority
+            .state
+            .turns
+            .values()
+            .filter(|turn| turn.completion.is_none())
+            .count();
+        if active > 1 {
+            return Err(JournalError::InvalidTransition(
+                "multiple active turns in cleanup state".into(),
+            ));
+        }
+        recovery_budget_snapshot(&authority.state)?;
+        Ok(active != 0)
+    }
+
     pub fn from_journal(journal: &SessionJournal) -> Result<Self, JournalError> {
         let authority = journal.committed_authority()?;
         Self::from_reduced_state(authority.state, authority.entries, journal.session_id()?)
@@ -1932,6 +1953,28 @@ mod tests {
         journal
             .append(SessionEvent::BudgetAuthorityCommitted { authority })
             .unwrap()
+    }
+
+    #[test]
+    fn stabilization_cleanup_classifies_large_complete_and_unfinished_journals() {
+        let (_dir, journal) = journal();
+        journal
+            .append(SessionEvent::TurnStarted {
+                turn_id: "large".into(),
+                user_message: "x".repeat(8 * 1024 * 1024),
+            })
+            .unwrap();
+        assert!(
+            RecoveryPlan::validate_cleanup(&journal).unwrap(),
+            "unfinished work stays explicitly recovery-required"
+        );
+        journal
+            .append(SessionEvent::TurnCommitted {
+                turn_id: "large".into(),
+                assistant_message: "y".repeat(16 * 1024 * 1024),
+            })
+            .unwrap();
+        assert!(!RecoveryPlan::validate_cleanup(&journal).unwrap());
     }
 
     #[test]

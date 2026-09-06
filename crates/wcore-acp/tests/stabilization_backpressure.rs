@@ -13,6 +13,10 @@ use wcore_acp::{
 struct Burst;
 #[async_trait]
 impl TurnEngine for Burst {
+    async fn close_session(&self, _: &str) -> Result<(), AcpError> {
+        Ok(())
+    }
+
     async fn run_turn(
         &self,
         _: TurnRequest,
@@ -82,6 +86,15 @@ async fn slow_reader_has_explicit_overload_while_replay_retains_bounded_tail() {
         .unwrap();
     assert_eq!(tail.events.len(), 1);
     assert!(matches!(tail.events[0].event, MessageEvent::Done { .. }));
+    let overflow_id = live
+        .iter()
+        .find_map(|event| match event {
+            MessageEvent::Error { turn_id, .. } => Some(turn_id),
+            _ => None,
+        })
+        .unwrap();
+    assert!(!overflow_id.is_empty());
+    assert!(matches!(&tail.events[0].event,MessageEvent::Done{turn_id,..} if turn_id==overflow_id));
     server.delete_session(id).await.unwrap();
 }
 

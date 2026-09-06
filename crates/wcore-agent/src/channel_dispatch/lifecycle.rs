@@ -75,9 +75,9 @@ impl ChannelTurnDispatcher {
             let Ok(state) = session.state.try_lock() else {
                 continue;
             };
-            if !state
+            if state
                 .last_used
-                .is_some_and(|t| t.elapsed() >= Duration::from_secs(900))
+                .is_none_or(|t| t.elapsed() < Duration::from_secs(900))
             {
                 continue;
             }
@@ -90,7 +90,13 @@ impl ChannelTurnDispatcher {
                         )
                     })
             });
-            if !safe {
+            let children_quiet = state
+                .children
+                .as_ref()
+                .and_then(|children| children.supervisor().ok())
+                .and_then(|supervisor| supervisor.cleanup_ready().ok())
+                .unwrap_or(false);
+            if !safe || !children_quiet {
                 continue;
             }
             session.cancel.cancel();
