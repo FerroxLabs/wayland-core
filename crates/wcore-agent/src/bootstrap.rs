@@ -851,11 +851,12 @@ impl AgentBootstrap {
     }
 
     async fn build_scoped(mut self) -> anyhow::Result<BootstrapResult> {
-        // Validate persisted restrictions before constructing session resources.
-        let learned_policy = load_learned_policy()?;
+        // Establish cleanup ownership even when policy validation rejects startup.
         if let Some(cleanup) = &self.cleanup {
             cleanup.begin();
         }
+        // Validate persisted restrictions before constructing session resources.
+        let learned_policy = load_learned_policy()?;
         let cwd = &self.workspace;
         let cwd_path = std::path::Path::new(cwd);
         // Mint the immutable session root before any child-capable tools are

@@ -2,7 +2,9 @@
 use std::{path::Path, sync::Arc, time::Duration};
 
 use serde_json::{Value, json};
-use wcore_agent::{bootstrap::AgentBootstrap, output::null_sink::NullSink};
+use wcore_agent::{
+    bootstrap::AgentBootstrap, bootstrap_cleanup::BootstrapCleanup, output::null_sink::NullSink,
+};
 use wcore_config::{config::Config, credentials::CredentialsBackend};
 use wcore_permissions::{CallActor, LearnedDecision, LearnedPolicy};
 
@@ -98,7 +100,9 @@ async fn probe(root: &Path, case: &str, startup_error: bool, denied: bool) {
     };
     config.session.enabled = true;
     config.session.directory = root.join(case).to_string_lossy().into_owned();
+    let cleanup = Arc::new(BootstrapCleanup::default());
     let mut result = match AgentBootstrap::new(config, root.to_string_lossy(), Arc::new(NullSink))
+        .with_cleanup(cleanup.clone())
         .without_channels(true)
         .defer_config_mcp(true)
         .build()
@@ -118,6 +122,9 @@ async fn probe(root: &Path, case: &str, startup_error: bool, denied: bool) {
                 "{error:#}"
             );
             assert!(mock.received_requests().await.unwrap().is_empty());
+            cleanup.close().await.unwrap_or_else(|error| {
+                panic!("{case}: failed startup could not retire: {error:#}")
+            });
             return;
         }
     };
