@@ -323,6 +323,7 @@ pub fn spawn_for_run(
         ChildInputs {
             secret: secret.as_deref(),
             stream_retry_budget: None,
+            session: &crate::scenario::SessionIdentity::Fresh,
         },
         SpawnInstrumentation::default(),
     )
@@ -343,6 +344,7 @@ struct SpawnInstrumentation<'a> {
 struct ChildInputs<'a> {
     secret: Option<&'a str>,
     stream_retry_budget: Option<u32>,
+    session: &'a crate::scenario::SessionIdentity,
 }
 
 fn spawn_for_run_with_secret(
@@ -398,6 +400,15 @@ fn spawn_for_run_with_secret(
     }
     if let Some(base_url) = &provider.base_url {
         cmd.arg("--base-url").arg(base_url);
+    }
+    match child_inputs.session {
+        crate::scenario::SessionIdentity::Fresh => {}
+        crate::scenario::SessionIdentity::Create(id) => {
+            cmd.arg("--session-id").arg(id);
+        }
+        crate::scenario::SessionIdentity::Resume(id) => {
+            cmd.arg("--resume").arg(id);
+        }
     }
     cmd.current_dir(cwd)
         .stdin(Stdio::piped())
@@ -662,6 +673,28 @@ struct SessionRun<'a> {
     evidence_roots: &'a EvidenceRoots,
 }
 
+async fn wait_for_effect_cut(
+    barrier: Option<&crate::scenario::EffectBarrier>,
+) -> anyhow::Result<()> {
+    let Some(barrier) = barrier else {
+        return std::future::pending().await;
+    };
+    loop {
+        match tokio::fs::read(&barrier.path).await {
+            Ok(bytes) => {
+                anyhow::ensure!(
+                    bytes == barrier.expected,
+                    "effect barrier evidence mismatch"
+                );
+                return Ok(());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResult> {
     let SessionRun {
         scenario,
@@ -674,6 +707,27 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
         config_sha256,
         evidence_roots: _,
     } = input;
+    if let Some(barrier) = &scenario.cut_after_effect {
+        let parent = barrier
+            .path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("effect barrier has no parent"))?
+            .canonicalize()?;
+        anyhow::ensure!(
+            !barrier.path.exists() && !barrier.expected.is_empty(),
+            "effect barrier must start absent and have exact evidence"
+        );
+        anyhow::ensure!(
+            !parent.starts_with(cwd.canonicalize()?),
+            "effect barrier cannot be candidate workspace evidence"
+        );
+        if let Some(home) = wayland_home {
+            anyhow::ensure!(
+                !parent.starts_with(home.canonicalize()?),
+                "effect barrier cannot be candidate home evidence"
+            );
+        }
+    }
     let authority_evidence_required = authority_evidence_required();
     let egress_capture = authority_evidence_required
         .then(|| crate::egress_evidence::Capture::create(cwd))
@@ -702,6 +756,7 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
         ChildInputs {
             secret,
             stream_retry_budget: scenario.stream_retry_budget,
+            session: &scenario.session,
         },
         SpawnInstrumentation {
             process_tree: Some(&process_tree),
@@ -748,7 +803,16 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
         redactor.clone(),
         Arc::clone(&stdout_secret_detected),
     );
-    let result = tokio::time::timeout(scenario.max_total_time, drive).await;
+    let result = tokio::time::timeout(scenario.max_total_time, async {
+        tokio::select! {
+            result = drive => result,
+            evidence = wait_for_effect_cut(scenario.cut_after_effect.as_ref()) => {
+                evidence?;
+                Err(anyhow::anyhow!("fixture after-effect process cut"))
+            }
+        }
+    })
+    .await;
 
     let (
         turn_results,
@@ -815,14 +879,27 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
                 passed: false,
                 failures,
                 wall_time: start.elapsed(),
-                cost_usd: 0.0,
+                // A cut after possible dispatch has unknown usage. Preserve the
+                // full admitted bound rather than making the interrupted leg free.
+                cost_usd: if scenario.cut_after_effect.is_some() {
+                    scenario.max_total_cost_usd
+                } else {
+                    0.0
+                },
                 trace: ToolTrace::default(),
                 final_text: String::new(),
                 stderr_tail,
                 turn_results: Vec::new(),
                 workdir: cwd.to_path_buf(),
                 boot_time: Duration::ZERO,
-                info_events: Vec::new(),
+                info_events: if scenario.cut_after_effect.is_some() {
+                    vec![format!(
+                        "paired interrupted cost is the conservative admitted bound, not reported usage: {}",
+                        scenario.max_total_cost_usd
+                    )]
+                } else {
+                    Vec::new()
+                },
                 execution: ExecutionEvidence {
                     config_sha256,
                     sandbox_backend,
@@ -874,14 +951,25 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
                 passed: false,
                 failures,
                 wall_time: start.elapsed(),
-                cost_usd: 0.0,
+                cost_usd: if scenario.cut_after_effect.is_some() {
+                    scenario.max_total_cost_usd
+                } else {
+                    0.0
+                },
                 trace: ToolTrace::default(),
                 final_text: String::new(),
                 stderr_tail,
                 turn_results: Vec::new(),
                 workdir: cwd.to_path_buf(),
                 boot_time: Duration::ZERO,
-                info_events: Vec::new(),
+                info_events: if scenario.cut_after_effect.is_some() {
+                    vec![format!(
+                        "paired interrupted cost is the conservative admitted bound, not reported usage: {}",
+                        scenario.max_total_cost_usd
+                    )]
+                } else {
+                    Vec::new()
+                },
                 execution: ExecutionEvidence {
                     config_sha256,
                     sandbox_backend,
@@ -1459,6 +1547,7 @@ async fn drive_session(
     let drive_start = Instant::now();
     let mut capability_evidence = CapabilityEvidence::default();
     let mut ready_memory_enabled = false;
+    let mut ready_session_id = None;
 
     // Consume engine bootstrap output up to AND INCLUDING the `ready` event
     // before sending the first user message, so we don't race bootstrap. We
@@ -1473,6 +1562,16 @@ async fn drive_session(
                 Some(ev) => {
                     capability_evidence.capture(&ev);
                     if ev.get("type").and_then(Value::as_str) == Some("ready") {
+                        ready_session_id = ev
+                            .get("session_id")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned);
+                        if let Some(expected) = scenario.session.id() {
+                            anyhow::ensure!(
+                                ev.get("session_id").and_then(Value::as_str) == Some(expected),
+                                "ready session identity does not match requested create/resume id"
+                            );
+                        }
                         ready_memory_enabled = ev
                             .get("capabilities")
                             .and_then(|capabilities| capabilities.get("memory_enabled"))
@@ -1497,6 +1596,11 @@ async fn drive_session(
     let mut turn_results: Vec<TurnResult> = Vec::new();
     let mut runner_error: Option<String> = None;
     let mut info_events = vec![format!("ready: memory_enabled={ready_memory_enabled}")];
+    if scenario.name.starts_with("w16_") || scenario.session.id().is_some() {
+        let identity = ready_session_id
+            .ok_or_else(|| anyhow::anyhow!("paired ready has no native session id"))?;
+        info_events.push(format!("paired_session_identity:{identity}"));
+    }
     let mut prompt_dispatch_time = Duration::ZERO;
     let mut first_token_time = None;
     let mut approval_response_time = Duration::ZERO;
@@ -1936,6 +2040,15 @@ async fn drive_session(
                     // ("style updated", "mode updated: …", "conversation cleared").
                     if let Some(m) = ev.get("message").and_then(Value::as_str) {
                         info_events.push(m.to_string());
+                    }
+                }
+                "compact_offload" if scenario.name == "w16_long_session_constraint_retention" => {
+                    if ev
+                        .get("tokens_freed")
+                        .and_then(Value::as_u64)
+                        .is_some_and(|n| n > 0)
+                    {
+                        info_events.push(format!("paired_compaction_observed:{ev}"));
                     }
                 }
                 "config_changed" => {

@@ -1223,3 +1223,95 @@ async fn packaged_explicit_model_effort_and_responses_reach_wire() {
     assert_eq!(requests[0].1["reasoning"]["effort"], "medium");
     assert_eq!(requests[0].1["max_output_tokens"], 1024);
 }
+
+/// Prepared paired inputs reach the packaged engine and the artifact oracle;
+/// a wrong completion is not rescued by a successful provider/CLI exit.
+#[tokio::test]
+async fn packaged_paired_task_preserves_inputs_and_rejects_wrong_answer() {
+    let source = expected_source_commit();
+    let core = packaged_core();
+    let root = tempfile::tempdir().unwrap();
+    let task = root.path().join("task.json");
+    fs::write(&task, serde_json::to_vec(&serde_json::json!({
+        "schema":1,"family":"answer_without_action","case_id":"paired-control",
+        "seed":"a".repeat(64),"sentinel":"W16-PACKAGED",
+        "files":{"KEEP.txt":"unchanged"},"prompts":["Reply exactly W16-PACKAGED:46 without tools."],
+        "max_cost_usd":0.02,"max_time_secs":60
+    })).unwrap()).unwrap();
+    for (index, text, expected) in [(0, "W16-PACKAGED:46", true), (1, "W16-PACKAGED:47", false)] {
+        let fixture = OpenAiFixtureScript::new([OpenAiStep::text(text)])
+            .start()
+            .await
+            .unwrap();
+        let report = root.path().join(format!("reports-{index}"));
+        let output = driver(
+            &core,
+            &source,
+            &[
+                "--paired-task",
+                task.to_str().unwrap(),
+                "--provider",
+                "openai",
+                "--base-url",
+                fixture.base_url(),
+                "--fixture-cost-is-free",
+                "--budget",
+                "0.25",
+                "--report-dir",
+                report.to_str().unwrap(),
+                "--strict",
+            ],
+        )
+        .await;
+        let observed = fixture.shutdown().await.unwrap();
+        assert_eq!(output.status.success(), expected, "{}", context(&output));
+        assert_eq!(
+            observed.requests.len(),
+            1,
+            "one physical call per paired control"
+        );
+        assert_eq!(
+            fs::read_to_string(report.join("paired-paired-control/workspace/KEEP.txt")).unwrap(),
+            "unchanged"
+        );
+    }
+}
+
+#[tokio::test]
+async fn packaged_paired_session_create_and_resume_keep_identity() {
+    use wcore_eval_scenarios::{
+        providers::{ProviderConfig, ProviderId},
+        scenario::SessionIdentity,
+    };
+    let core = packaged_core();
+    let fixture =
+        OpenAiFixtureScript::new([OpenAiStep::text("FIRST"), OpenAiStep::text("RESUMED")])
+            .start()
+            .await
+            .unwrap();
+    let mut provider = ProviderConfig::new(ProviderId::OpenAI, "gpt-4o")
+        .with_api_key("paired-identity-fixture-key");
+    provider.base_url = Some(fixture.base_url().to_string());
+    provider.cost_is_known_free = true;
+    let env = wcore_eval_scenarios::tempenv::build(&provider).unwrap();
+    let identity = "b8175369bcc24fb7a0123456789abcde";
+    let mut scenario =
+        Scenario::new("paired_identity_control", Category::Coverage).turn(Turn::new("Reply FIRST"));
+    scenario.session = SessionIdentity::Create(identity.into());
+    let first = wcore_eval_scenarios::runner::run_with_binary_in_environment(
+        &scenario, &provider, &core, &env,
+    )
+    .await
+    .unwrap();
+    assert!(first.passed, "{first:?}");
+    scenario.session = SessionIdentity::Resume(identity.into());
+    scenario.turns = vec![Turn::new("Reply RESUMED")];
+    let resumed = wcore_eval_scenarios::runner::run_with_binary_in_environment(
+        &scenario, &provider, &core, &env,
+    )
+    .await
+    .unwrap();
+    assert!(resumed.passed, "{resumed:?}");
+    assert_eq!(resumed.final_text, "RESUMED");
+    assert_eq!(fixture.shutdown().await.unwrap().requests.len(), 2);
+}

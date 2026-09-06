@@ -129,3 +129,50 @@ The loopback-only test
 `packaged_explicit_model_effort_and_responses_reach_wire` checks the actual
 request model, effort, route, and token cap; it does not establish live-provider
 availability or benchmark readiness.
+
+## Prepared paired task bridges (W16)
+
+`--paired-task task.json` selects one of the eight `w16_*` family IDs from
+the prepared task, preserving its prompts, seed, fixture files, whole-task cost
+bound and deadline. It is exclusive with ordinary catalogue selectors. The
+existing 36-scenario catalogue and default process-spawn behavior are unchanged.
+
+```text
+wayland-eval --paired-task task.json --list
+wayland-eval --paired-task task.json --prepare-paired-peer peer
+wayland-eval --paired-task task.json --verify-paired-artifacts peer/workspace --peer-final peer/final.txt
+wayland-eval --paired-task task.json --serve-paired-effects effect-service
+```
+
+Preparation makes identical content-addressed inputs and prompt files for the
+reference CLI. Artifact verification executes the same protected-file checks
+and independent Python regression tests under evaluator containment. It is
+explicitly an artifact result, not proof of complete peer execution or cost.
+The effect service is needed only for skill discovery and interrupted recovery;
+its `ready.json` gives the native MCP URL and supervisor-only durable-effect
+barrier. Stop it with SIGINT after reaping the peer; its journal counts repeated
+effects instead of hiding them behind idempotency.
+
+Core execution uses the normal binary/source pin, provider, model, effort,
+Responses, output cap, budget and report options with `--paired-task`. The task
+itself is the receipt's fixture digest. Output retains each session result,
+the task, final workspace and authoritative effect journal. Paid paired calls
+remain refused until the separate shared spend-admission prerequisite is
+verified; explicit known-free loopback fixture controls can run now.
+
+Memory drives a clean-home negative, store, and cold recall in three actual
+processes. Their native session IDs must differ. Recovery creates a fixed
+session ID, cuts its owned process tree only after the external effect journal
+is synced, and passes that same ID to native `--resume`. A quarantine/refusal
+is recorded as a failed/incomplete task, never automatically a success. Unknown
+interrupted usage is charged conservatively at its admitted bound and labeled
+as such, rather than quietly treating the cut as free.
+
+Long-session tasks retain at least eight substantive prompts and a substantial
+repository corpus within the existing 4-MiB fixture limit. Completion additionally
+requires an actual `compact_offload` event with measured reclaimed tokens;
+a small canary or a conversation without compaction cannot satisfy that family.
+The configured model window and compaction thresholds are not reduced to force
+an inexpensive pass. A declared task bound above the available trial budget is
+refused by normal admission; the memory control's three-session bound must not
+be evaded by dropping its negative control.

@@ -74,6 +74,33 @@ pub struct Scenario {
     /// env var) so one such scenario can never change the budget another test
     /// in the same binary runs under; see `child_env::ChildEnvironment::build`.
     pub stream_retry_budget: Option<u32>,
+    /// Explicit identity for paired interrupted-run controls; ordinary runs stay fresh.
+    pub session: SessionIdentity,
+    /// Supervisor-owned evidence written by a real effect fixture, never by the candidate.
+    pub cut_after_effect: Option<EffectBarrier>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub enum SessionIdentity {
+    #[default]
+    Fresh,
+    Create(String),
+    Resume(String),
+}
+
+impl SessionIdentity {
+    pub fn id(&self) -> Option<&str> {
+        match self {
+            Self::Fresh => None,
+            Self::Create(id) | Self::Resume(id) => Some(id),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EffectBarrier {
+    pub path: std::path::PathBuf,
+    pub expected: Vec<u8>,
 }
 
 /// Exact capability truth a scenario requires from the packaged engine.
@@ -244,6 +271,8 @@ impl Scenario {
             approval: ApprovalPolicy::Yolo,
             capability_expectations: Vec::new(),
             stream_retry_budget: None,
+            session: SessionIdentity::Fresh,
+            cut_after_effect: None,
         }
     }
 

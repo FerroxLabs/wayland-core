@@ -11,6 +11,7 @@ use wcore_eval_scenarios::artifact::{
 };
 use wcore_eval_scenarios::catalog::{select_scenarios, standard_scenarios};
 use wcore_eval_scenarios::fixtures::manifest::BoundCompositeFixtureManifest;
+use wcore_eval_scenarios::paired::PairedTask;
 use wcore_eval_scenarios::providers::{
     ProviderAvailability, ProviderConfig, ProviderResolution, provider_override, resolve,
 };
@@ -29,6 +30,25 @@ use wcore_eval_scenarios::scenario::{Platform, PlatformDisposition};
     about = "scenario eval harness for wayland-core"
 )]
 struct Cli {
+    /// Load one prepared W16 task (identical inputs for both products).
+    #[arg(long, conflicts_with_all = ["scenario", "filter", "verify_binary", "fixture_manifest"])]
+    paired_task: Option<PathBuf>,
+
+    /// Materialize a paired task for a reference product without any model call.
+    #[arg(long, requires = "paired_task", conflicts_with_all = ["verify_paired_artifacts", "serve_paired_effects", "list", "dry"])]
+    prepare_paired_peer: Option<PathBuf>,
+
+    /// Check actual peer workspace artifacts; this alone is not a full trial verdict.
+    #[arg(long, requires_all = ["paired_task", "peer_final"], conflicts_with_all = ["serve_paired_effects", "list", "dry"])]
+    verify_paired_artifacts: Option<PathBuf>,
+
+    #[arg(long, requires = "verify_paired_artifacts")]
+    peer_final: Option<PathBuf>,
+
+    /// Serve the task-owned MCP effect witness for an external peer controller.
+    #[arg(long, requires = "paired_task", conflicts_with_all = ["list", "dry"])]
+    serve_paired_effects: Option<PathBuf>,
+
     /// Print the selected scenario IDs, one per line, without executing them.
     #[arg(long)]
     list: bool,
@@ -169,11 +189,57 @@ async fn main() {
 
 async fn execute(cli: Cli) -> i32 {
     let mut status = StatusOutput::default();
-    let scenarios = match standard_scenarios()
-        .and_then(|catalog| select_scenarios(catalog, &cli.scenario, cli.filter.as_deref()))
-    {
-        Ok(scenarios) => scenarios,
+    let paired = match cli.paired_task.as_deref().map(PairedTask::load).transpose() {
+        Ok(task) => task,
         Err(error) => return usage_error(error),
+    };
+    if let Some(task) = &paired {
+        if let Some(root) = &cli.prepare_paired_peer {
+            return match task.prepare_peer(root) {
+                Ok(()) => {
+                    status.line(format!("PAIRED_PREPARED {}", task.family.scenario_id()));
+                    finish_output(&cli, &status, 0)
+                }
+                Err(error) => usage_error(error),
+            };
+        }
+        if let Some(root) = &cli.serve_paired_effects {
+            return match task.serve_effects(root).await {
+                Ok(()) => 0,
+                Err(error) => usage_error(error),
+            };
+        }
+        if let Some(workspace) = &cli.verify_paired_artifacts {
+            let text = match std::fs::read_to_string(
+                cli.peer_final.as_ref().expect("clap requires peer final"),
+            ) {
+                Ok(text) => text,
+                Err(error) => return usage_error(error),
+            };
+            return match task.check_artifacts(workspace, &text).await {
+                Ok(()) => {
+                    status.line(format!(
+                        "PAIRED_ARTIFACTS_VERIFIED {} (not a full execution verdict)",
+                        task.family.scenario_id()
+                    ));
+                    finish_output(&cli, &status, 0)
+                }
+                Err(error) => usage_error(error),
+            };
+        }
+    }
+    let scenarios = if let Some(task) = &paired {
+        match task.scenario() {
+            Ok(scenario) => vec![scenario],
+            Err(error) => return usage_error(error),
+        }
+    } else {
+        match standard_scenarios()
+            .and_then(|catalog| select_scenarios(catalog, &cli.scenario, cli.filter.as_deref()))
+        {
+            Ok(scenarios) => scenarios,
+            Err(error) => return usage_error(error),
+        }
     };
 
     if cli.list {
@@ -359,7 +425,23 @@ async fn execute(cli: Cli) -> i32 {
                 scenario.name, provider.id
             ));
         } else {
-            let run_result = run_with_binary(scenario, provider, &artifact.path).await;
+            let run_result = if let Some(task) = &paired {
+                match cli.report_dir.as_ref() {
+                    Some(root) => {
+                        task.run_core(
+                            provider,
+                            &artifact.path,
+                            &root.join(format!("paired-{}", task.case_id)),
+                        )
+                        .await
+                    }
+                    None => Err(anyhow::anyhow!(
+                        "--report-dir is required for paired artifact retention"
+                    )),
+                }
+            } else {
+                run_with_binary(scenario, provider, &artifact.path).await
+            };
             if let Err(error) = verify_artifact_digest(&artifact) {
                 failed += 1;
                 cell_failed = true;
@@ -388,6 +470,7 @@ async fn execute(cli: Cli) -> i32 {
                             &EvidenceInputs {
                                 fixture_manifest: fixture_manifest.as_ref(),
                                 build_provenance: build_provenance.as_ref(),
+                                paired_task: paired.as_ref(),
                             },
                         ) {
                             Ok(gate_passed) if gate_passed => {
@@ -577,6 +660,11 @@ fn build_and_persist_receipt(
 ) -> Result<bool, String> {
     let fixture_sha256 = match evidence.fixture_manifest {
         Some(manifest) => manifest.verify_sha256()?,
+        None if evidence.paired_task.is_some() => evidence
+            .paired_task
+            .expect("paired task present")
+            .digest()
+            .map_err(|error| error.to_string())?,
         None => {
             format!(
                 "{:x}",
@@ -634,6 +722,7 @@ fn build_and_persist_receipt(
 struct EvidenceInputs<'a> {
     fixture_manifest: Option<&'a LoadedFixtureManifest>,
     build_provenance: Option<&'a BuildProvenanceV1>,
+    paired_task: Option<&'a PairedTask>,
 }
 
 struct LoadedFixtureManifest {
