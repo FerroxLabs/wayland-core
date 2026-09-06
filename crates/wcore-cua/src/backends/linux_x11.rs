@@ -18,7 +18,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
-use tokio::process::Command;
 
 use crate::backend::{ComputerUseBackend, CuaSession, Platform};
 use crate::error::{CuaError, CuaResult};
@@ -45,22 +44,16 @@ impl LinuxX11Backend {
         *self.cached_frontmost.lock() = app;
     }
 
-    /// Probe via `xdotool getactivewindow getwindowclassname` — falls
-    /// back to the cached value on any failure.
-    async fn xdotool_frontmost(&self) -> CuaResult<Option<String>> {
-        let res = Command::new("xdotool")
-            .args(["getactivewindow", "getwindowclassname"])
-            .output();
-        match tokio::time::timeout(Duration::from_millis(500), res).await {
-            Ok(Ok(out)) if out.status.success() => {
-                let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if s.is_empty() {
-                    Ok(self.cached_frontmost.lock().clone())
-                } else {
-                    Ok(Some(s))
-                }
-            }
-            _ => Ok(self.cached_frontmost.lock().clone()),
+    /// Read the WM's active client and its ICCCM class without changing focus.
+    /// `xdotool getwindowclassname` is not a supported xdotool command.
+    async fn native_frontmost(&self) -> CuaResult<Option<String>> {
+        #[cfg(all(target_os = "linux", feature = "x11"))]
+        {
+            x11_impl::frontmost_app()
+        }
+        #[cfg(not(all(target_os = "linux", feature = "x11")))]
+        {
+            Ok(self.cached_frontmost.lock().clone())
         }
     }
 }
@@ -123,13 +116,13 @@ impl ComputerUseBackend for LinuxX11Backend {
                     .to_string(),
             )),
             CuaOp::FrontmostApp {} => Ok(CuaOpResult::FrontmostApp {
-                app_id: self.xdotool_frontmost().await?,
+                app_id: self.native_frontmost().await?,
             }),
         }
     }
 
     async fn frontmost_app(&self) -> CuaResult<Option<String>> {
-        self.xdotool_frontmost().await
+        self.native_frontmost().await
     }
 }
 
@@ -175,6 +168,59 @@ mod x11_impl {
             ));
         }
         RustConnection::connect(None).map_err(|e| CuaError::Backend(format!("X11 connect: {e}")))
+    }
+
+    pub fn frontmost_app() -> CuaResult<Option<String>> {
+        use x11rb::protocol::xproto::AtomEnum;
+        let (conn, screen) = connect()?;
+        let active = conn
+            .intern_atom(false, b"_NET_ACTIVE_WINDOW")
+            .map_err(|e| CuaError::Backend(format!("X11 active-window atom: {e}")))?
+            .reply()
+            .map_err(|e| CuaError::Backend(format!("X11 active-window atom reply: {e}")))?
+            .atom;
+        let property = conn
+            .get_property(
+                false,
+                conn.setup().roots[screen].root,
+                active,
+                AtomEnum::WINDOW,
+                0,
+                1,
+            )
+            .map_err(|e| CuaError::Backend(format!("X11 active-window query: {e}")))?
+            .reply()
+            .map_err(|e| CuaError::Backend(format!("X11 active-window reply: {e}")))?;
+        let Some(window) = property
+            .value32()
+            .and_then(|mut values| values.next())
+            .filter(|window| *window != x11rb::NONE)
+        else {
+            return Ok(None);
+        };
+        let property = conn
+            .get_property(false, window, AtomEnum::WM_CLASS, AtomEnum::STRING, 0, 1024)
+            .map_err(|e| CuaError::Backend(format!("X11 WM_CLASS query: {e}")))?
+            .reply()
+            .map_err(|e| CuaError::Backend(format!("X11 WM_CLASS reply: {e}")))?;
+        if property.format != 8 || property.bytes_after != 0 {
+            return Err(CuaError::Backend(
+                "X11 WM_CLASS is malformed or exceeds the read bound".into(),
+            ));
+        }
+        // ICCCM: instance name, NUL, class name, NUL. Never substitute the
+        // title or the instance name for the policy's application class.
+        let Some(class) = property
+            .value
+            .split(|byte| *byte == 0)
+            .nth(1)
+            .filter(|value| !value.is_empty())
+        else {
+            return Ok(None);
+        };
+        let class = std::str::from_utf8(class)
+            .map_err(|_| CuaError::Backend("X11 WM_CLASS is not UTF-8".into()))?;
+        Ok(Some(class.to_owned()))
     }
 
     /// Canonical x11rb sync pattern: flush the request queue, then
