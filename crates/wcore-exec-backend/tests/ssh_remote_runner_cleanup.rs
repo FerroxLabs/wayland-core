@@ -391,8 +391,16 @@ async fn ssh_transport_binds_artifact_and_cancels_observed_remote_task() {
         !owned_root.exists(),
         "private keys and daemon workspace removed"
     );
-    assert!(
-        std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).is_err(),
-        "private listener removed"
-    );
+    // The unshare supervisor exits before the kernel finishes tearing down
+    // its PID namespace. Observe listener closure within a fixed deadline.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
+            .await
+            .is_ok()
+        {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("private listener must be removed within five seconds");
 }
