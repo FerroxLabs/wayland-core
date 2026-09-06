@@ -1327,6 +1327,48 @@ fn turn_command_to_json(cmd: &crate::scenario::TurnCommand) -> serde_json::Value
     }
 }
 
+/// Validate the canonical effort receipt when the child reports one. The
+/// current CLI reports it in the config-updated notice; capability `effort`
+/// is a support boolean, not the selected value.
+fn validate_precommand_effort(
+    pre: &crate::scenario::TurnCommand,
+    ev: &Value,
+) -> anyhow::Result<()> {
+    let crate::scenario::TurnCommand::SetConfig {
+        effort: Some(expected),
+        ..
+    } = pre
+    else {
+        return Ok(());
+    };
+    for actual in [
+        ev.get("effort"),
+        ev.pointer("/config/effort"),
+        ev.pointer("/capabilities/current_effort"),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        anyhow::ensure!(
+            actual.as_str() == Some(expected.as_str()),
+            "pre-command effort mismatch: expected {expected}, received {actual}"
+        );
+    }
+    if let Some(message) = ev.get("message").and_then(Value::as_str)
+        && let Some(changes) = message.strip_prefix("config updated: ")
+        && let Some(receipt) = changes
+            .split(", ")
+            .find_map(|part| part.strip_prefix("effort: "))
+    {
+        let actual = receipt.split_once(" → ").map(|(_, value)| value);
+        anyhow::ensure!(
+            actual == Some(expected.as_str()) || (expected.is_empty() && receipt == "cleared"),
+            "pre-command effort rejected or mismatched: {receipt}; expected {expected}"
+        );
+    }
+    Ok(())
+}
+
 /// D2: fold a `config_changed` event into `info_events` as a synthetic line.
 ///
 /// `ScenarioResult` surfaces protocol notices through `info_events` (asserted
@@ -1528,6 +1570,7 @@ async fn drive_session(
             // and a no-op `info` as terminal otherwise. Bounded so neither
             // case can hang us.
             let mut response_events = 0usize;
+            let mut acknowledged = false;
             while response_events < 16 {
                 match read_turn_event(
                     &mut reader,
@@ -1546,9 +1589,15 @@ async fn drive_session(
                             continue;
                         }
                         response_events += 1;
+                        anyhow::ensure!(
+                            !matches!(ty, "error" | "set_mode_refused"),
+                            "pre-command rejected for turn {turn_idx}: {ev}"
+                        );
+                        validate_precommand_effort(pre, &ev)?;
                         if ty == "config_changed" {
                             capture_config_changed(&ev, &mut info_events);
                             // Terminal for a successful change.
+                            acknowledged = true;
                             break;
                         } else if ty == "info" {
                             let m = ev
@@ -1556,12 +1605,20 @@ async fn drive_session(
                                 .and_then(Value::as_str)
                                 .unwrap_or("")
                                 .to_string();
-                            let is_noop = m.contains("no changes");
+                            let is_noop = match pre {
+                                crate::scenario::TurnCommand::SetConfig { .. } => {
+                                    m == "set_config: no changes"
+                                }
+                                crate::scenario::TurnCommand::SetMode { .. } => {
+                                    m.starts_with("mode unchanged: ")
+                                }
+                            };
                             info_events.push(m);
                             // A no-op set_config emits no `config_changed`;
                             // stop here. Otherwise keep draining for the
                             // trailing `config_changed`.
                             if is_noop {
+                                acknowledged = true;
                                 break;
                             }
                         }
@@ -1572,6 +1629,10 @@ async fn drive_session(
                     ),
                 }
             }
+            anyhow::ensure!(
+                acknowledged,
+                "pre-command acknowledgement missing after {response_events} events for turn {turn_idx}"
+            );
         }
 
         // Wire format per crates/wcore-protocol/src/commands.rs:9
