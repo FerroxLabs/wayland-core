@@ -454,16 +454,14 @@ impl AcpServer {
                 let events = Arc::clone(&self.events);
                 let session_id = session_id.to_string();
                 let delivery = lifecycle.stream();
-                let delivery_lifecycle = Arc::clone(lifecycle);
                 tokio::spawn(async move {
                     let _delivery = delivery;
                     let mut wait_budget = std::time::Duration::from_secs(1);
                     loop {
-                        let position = tokio::select! {
-                            biased;
-                            _ = delivery_lifecycle.closed() => { tx.overload(); break; }
-                            position = positions_rx.recv() => position,
-                        };
+                        // Close cancels the engine, whose terminal must follow
+                        // already-recorded frames. Only real delivery pressure
+                        // detaches this queue; it retains the one-second bound.
+                        let position = positions_rx.recv().await;
                         let Some(position) = position else {
                             break;
                         };
@@ -496,12 +494,7 @@ impl AcpServer {
                             MessageEvent::Done { .. } | MessageEvent::Error { .. }
                         );
                         if tx
-                            .send_retained(
-                                event,
-                                charge,
-                                &mut wait_budget,
-                                delivery_lifecycle.closed(),
-                            )
+                            .send_retained(event, charge, &mut wait_budget, std::future::pending())
                             .await
                             .is_err()
                         {

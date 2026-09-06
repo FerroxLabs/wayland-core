@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::{Stream, stream};
+use futures::{Stream, StreamExt, stream};
 use tokio::sync::{Notify, Semaphore};
 use wcore_acp::server::AcpServer;
 use wcore_acp::transport::http::HttpHandler;
@@ -227,4 +227,94 @@ async fn same_key_different_delete_target_conflicts_before_second_effect() {
         server.delete_session(first).await,
         Err(AcpError::Session(_))
     ));
+}
+
+struct CancelledTool {
+    close: Arc<Semaphore>,
+    turn_id: std::sync::Mutex<Option<String>>,
+}
+
+#[async_trait]
+impl TurnEngine for CancelledTool {
+    async fn run_turn(
+        &self,
+        _: TurnRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = MessageEvent> + Send>>, AcpError> {
+        let close = self.close.clone();
+        Ok(Box::pin(
+            stream::iter([MessageEvent::ToolCall {
+                call: wcore_acp::protocol::ToolCall {
+                    id: "owned-call".into(),
+                    name: "hold_child".into(),
+                    input: serde_json::json!({}),
+                },
+            }])
+            .chain(stream::once(async move {
+                close.acquire().await.expect("close signal").forget();
+                MessageEvent::Done {
+                    stop_reason: "cancelled".into(),
+                    turn_id: String::new(),
+                }
+            })),
+        ))
+    }
+
+    async fn run_turn_with_id(
+        &self,
+        req: TurnRequest,
+        turn_id: String,
+    ) -> Result<Pin<Box<dyn Stream<Item = MessageEvent> + Send>>, AcpError> {
+        *self.turn_id.lock().unwrap() = Some(turn_id.clone());
+        Ok(wcore_acp::turn::bind_turn_id(
+            self.run_turn(req).await?,
+            turn_id,
+        ))
+    }
+
+    async fn close_session(&self, _: &str) -> Result<(), AcpError> {
+        self.close.add_permits(1);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn close_preserves_unread_tool_call_and_correlated_engine_cancel_terminal() {
+    let engine = Arc::new(CancelledTool {
+        close: Arc::new(Semaphore::new(0)),
+        turn_id: std::sync::Mutex::new(None),
+    });
+    let server = AcpServer::new().with_turn_engine(engine.clone());
+    let id = session(&server).await;
+    let response = server
+        .send_message(MessageSendRequest {
+            session_id: id.clone(),
+            text: "run tool".into(),
+            tools: vec![],
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while server.event_tip(&id).await.unwrap().position < 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("tool call recorded before close");
+    // Keep every live frame unread until cleanup has acknowledged completion.
+    tokio::time::timeout(Duration::from_secs(2), server.delete_session(id))
+        .await
+        .expect("bounded close")
+        .expect("owned cleanup");
+    let frames = tokio::time::timeout(Duration::from_secs(1), response.collect::<Vec<_>>())
+        .await
+        .expect("delivery completed");
+    assert_eq!(frames.len(), 2, "{frames:?}");
+    assert!(matches!(&frames[0], MessageEvent::ToolCall { call } if call.id == "owned-call"));
+    let expected = engine.turn_id.lock().unwrap().clone().unwrap();
+    assert!(!expected.is_empty());
+    assert!(
+        matches!(&frames[1], MessageEvent::Done { stop_reason, turn_id }
+        if stop_reason == "cancelled" && turn_id == &expected),
+        "{frames:?}"
+    );
 }
