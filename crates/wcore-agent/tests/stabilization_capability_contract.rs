@@ -73,6 +73,7 @@ async fn engine_emits_visible_downgrade_only_for_unsupported_shape() {
     for (template, downgraded) in [("consensus", true), ("direct", false)] {
         let provider = Arc::new(CountedProvider {
             inner: common::MockLlmProvider::with_tool_use("call-1", "probe", serde_json::json!({})),
+            final_response: common::MockLlmProvider::with_text_response("Probe completed."),
             calls: std::sync::atomic::AtomicUsize::new(0),
         });
         let mut registry = ToolRegistry::new();
@@ -104,6 +105,7 @@ async fn engine_emits_visible_downgrade_only_for_unsupported_shape() {
 
 struct CountedProvider {
     inner: common::MockLlmProvider,
+    final_response: common::MockLlmProvider,
     calls: std::sync::atomic::AtomicUsize,
 }
 #[async_trait::async_trait]
@@ -115,7 +117,10 @@ impl wcore_providers::LlmProvider for CountedProvider {
         tokio::sync::mpsc::Receiver<wcore_types::llm::LlmEvent>,
         wcore_providers::ProviderError,
     > {
-        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        self.inner.stream(request).await
+        match self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+            0 => self.inner.stream(request).await,
+            1 => self.final_response.stream(request).await,
+            _ => panic!("unexpected auxiliary provider call"),
+        }
     }
 }
