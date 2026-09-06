@@ -1,14 +1,12 @@
-//! Linux X11 backend — REAL XTest synthesized input via `x11rb` +
-//! `xproto::get_image` screenshot + AT-SPI for the accessibility tree.
+//! Linux X11 backend — native `xproto::get_image` screenshots.
 //!
-//! Background invariant on X11: XTest's `fake_input` posts events at the
-//! X server's "as-if-from-the-real-device" layer. Unlike `XSendEvent`
-//! (which sets the `send_event` bit and is filtered by most modern
-//! toolkits) XTest events are indistinguishable from physical input AND
-//! do NOT activate the target window. The agent never calls
-//! `xproto::set_input_focus` or `xproto::map_window` — only
-//! `xtest::fake_input`. The `focus_invariance_test` asserts the
-//! frontmost WM_CLASS cache is unchanged after a synthesized click.
+//! Input is currently refused. A native Xvfb + xfwm4 measurement showed
+//! XTest moving the global pointer, focusing the target and raising it even
+//! though this backend never called SetInputFocus itself. XTest simulates
+//! physical device input; it does not provide background targeting. Returning
+//! success would violate `ComputerUseBackend`'s pointer/focus/stack contract.
+//! Screenshot, Wait and FrontmostApp remain available; AxTree is still an
+//! explicit implementation gap. This containment does not implement safe input.
 //!
 //! Feature gating: real XTest paths require the `x11` feature (enables
 //! `x11rb`). Without it the backend falls back to typed
@@ -78,6 +76,20 @@ impl ComputerUseBackend for LinuxX11Backend {
     }
 
     async fn dispatch(&self, _session: &CuaSession, op: CuaOp) -> CuaResult<CuaOpResult> {
+        if matches!(
+            op,
+            CuaOp::LeftClick { .. }
+                | CuaOp::RightClick { .. }
+                | CuaOp::DoubleClick { .. }
+                | CuaOp::MouseMove { .. }
+                | CuaOp::Scroll { .. }
+                | CuaOp::Type { .. }
+                | CuaOp::Key { .. }
+        ) {
+            return Err(CuaError::UnsupportedPlatform(
+                "X11 background input is unavailable: XTest cannot preserve the operator's pointer, focus and window stacking; screenshot and read-only operations remain available",
+            ));
+        }
         match op {
             CuaOp::LeftClick { x, y, button, mods } => {
                 xt_mouse_click(x, y, button.into(), mods, /*double=*/ false)
@@ -565,36 +577,34 @@ mod tests {
         assert_eq!(b.platform(), Platform::LinuxX11);
     }
 
-    /// Audit F7 background invariance — synthesized input MUST NOT
-    /// change the cached frontmost WM_CLASS. On Linux without the `x11`
-    /// feature (or without `$DISPLAY`) the call must return a typed
-    /// `UnsupportedPlatform` error — NOT a silent Ok-no-op.
+    /// All input variants refuse before connecting to X11 or emitting input.
+    /// The separate native test measures real pointer/focus/stack and event
+    /// delivery; cached frontmost identity is not a native oracle.
     #[tokio::test]
     async fn focus_invariance_or_typed_blocker() {
         let b = LinuxX11Backend::new();
         b.set_frontmost_for_test(Some("xterm".into()));
         let before = b.cached_frontmost.lock().clone();
-        let r = b
-            .dispatch(
-                &CuaSession::for_test("inv"),
-                CuaOp::LeftClick {
-                    x: 5000,
-                    y: 5000,
-                    button: crate::backend::MouseButton::Left,
-                    mods: crate::backend::KeyMods::default(),
-                },
+        let mut refused = 0;
+        for op in CuaOp::all_variants_for_test().into_iter().filter(|op| {
+            matches!(
+                op,
+                CuaOp::LeftClick { .. }
+                    | CuaOp::RightClick { .. }
+                    | CuaOp::DoubleClick { .. }
+                    | CuaOp::MouseMove { .. }
+                    | CuaOp::Scroll { .. }
+                    | CuaOp::Type { .. }
+                    | CuaOp::Key { .. }
             )
-            .await;
-        match r {
-            Ok(CuaOpResult::Ok) => {
-                // Real X server present + `x11` feature — the click ran.
-            }
-            Err(CuaError::UnsupportedPlatform(_)) | Err(CuaError::Backend(_)) => {
-                // Either feature off OR no $DISPLAY — typed honest
-                // blocker, not a silent no-op.
-            }
-            other => panic!("unexpected dispatch result: {other:?}"),
+        }) {
+            let r = b.dispatch(&CuaSession::for_test("inv"), op).await;
+            assert!(
+                matches!(r, Err(CuaError::UnsupportedPlatform(reason)) if reason.contains("background input"))
+            );
+            refused += 1;
         }
+        assert_eq!(refused, 7);
         assert_eq!(before, b.cached_frontmost.lock().clone());
     }
 }
