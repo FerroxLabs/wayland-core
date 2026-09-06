@@ -9895,6 +9895,7 @@ dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
  "libc",
+ "portable-pty",
  "rand 0.8.6",
  "serde",
  "serde_json",

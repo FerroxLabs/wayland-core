@@ -37,6 +37,10 @@ libc = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 
+[target.'cfg(unix)'.dev-dependencies]
+# Shared OwnedTree fixture also implements ownership for PTY children.
+portable-pty = "0.9"
+
 [[test]]
 name = "conformance_matrix"
 path = "tests/conformance_matrix.rs"
