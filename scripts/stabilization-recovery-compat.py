@@ -24,6 +24,7 @@ def digest(path):
 
 class Core:
     def __init__(self, binary, session, resume, env, workspace, root, name, port):
+        self.name = name
         self.frames = []
         self.events = queue.Queue()
         self.log = (root / (name + ".stderr")).open("wb")
@@ -56,13 +57,16 @@ class Core:
     def wait_one_of(self, kinds, timeout=40):
         deadline = time.monotonic() + timeout
         while True:
-            frame = self.events.get(timeout=max(0.01, deadline - time.monotonic()))
+            try:
+                frame = self.events.get(timeout=max(0.01, deadline - time.monotonic()))
+            except queue.Empty as error:
+                raise RuntimeError(f"{self.name}: timed out waiting for {sorted(kinds)}") from error
             if frame is None:
-                raise RuntimeError(f"Core exited before {kinds}")
+                raise RuntimeError(f"{self.name}: Core exited before {sorted(kinds)}")
             if frame.get("type") in kinds:
                 return frame
             if time.monotonic() >= deadline:
-                raise RuntimeError(f"Core did not emit {kinds}")
+                raise RuntimeError(f"{self.name}: Core did not emit {sorted(kinds)}")
 
     def send(self, value):
         self.process.stdin.write(json.dumps(value) + "\n")
@@ -86,9 +90,10 @@ def queued_bytes(port):
                and fields[3] == "01")
 
 
-def storage_checks(args, root, home, sessions, workspace, sid, uncertain, launch, requests):
+def storage_checks(args, root, home, sessions, workspace, sid, uncertain, launch, requests, receipt):
     """Operate only on copied fixture state and a task-owned four-MiB tmpfs."""
     checks = {}
+    receipt["stage"] = "enospc-mount"
     space = root / "limited-filesystem"
     space.mkdir()
     subprocess.run(["mount", "-t", "tmpfs", "-o", "size=4M", "tmpfs", str(space)],
@@ -148,6 +153,7 @@ def storage_checks(args, root, home, sessions, workspace, sid, uncertain, launch
     fixture_env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(home),
                    "WAYLAND_HOME": str(home), "WAYLAND_VAULT_PASSPHRASE": "w04-fixture-vault"}
     for shape in ("truncated", "corrupt"):
+        receipt["stage"] = shape + "-journal-control"
         directory = root / shape
         shutil.copytree(sessions, directory)
         journal = directory / (uncertain + ".journal")
@@ -167,6 +173,7 @@ def storage_checks(args, root, home, sessions, workspace, sid, uncertain, launch
 
     # Root cannot prove a chmod refusal. Run the same read command as an
     # unprivileged UID, with a readable positive control before denying access.
+    receipt["stage"] = "permission-positive-and-refusal-control"
     with tempfile.TemporaryDirectory(prefix="w04-permission-") as name:
         directory = Path(name)
         os.chmod(directory, 0o755)
@@ -205,6 +212,7 @@ def main():
                "previous_binary_sha256": digest(args.previous), "checks": {}}
     cores = []
     provider = None
+    receipt["stage"] = "isolated-environment"
     try:
         subprocess.run(["ip", "link", "set", "lo", "up"], check=True, capture_output=True)
         routes = json.loads(subprocess.check_output(["ip", "-j", "route"], text=True))
@@ -220,6 +228,7 @@ def main():
         subprocess.run(["git", "init", "--quiet", str(workspace)], env=env, check=True)
         for label, binary, sha in (("candidate", args.candidate, args.candidate_sha),
                                    ("previous", args.previous, args.previous_sha)):
+            receipt["stage"] = label + "-build-identity"
             info = subprocess.check_output([binary, "--build-info"], env=env, text=True)
             assert sha in info, f"{label} source identity mismatch"
             receipt[label + "_build_info"] = info.strip()
@@ -251,6 +260,7 @@ key_params_path = {json.dumps(str(home / "credentials.params.json"))}
         provider = subprocess.Popen(["node", args.fixture, "--port", str(port), "--journal", str(journal),
                                      "--marker", "W04-COMPAT"], env=env, stdout=provider_log,
                                     stderr=subprocess.STDOUT, start_new_session=True)
+        receipt["stage"] = "provider-startup"
         deadline = time.monotonic() + 15
         while True:
             try:
@@ -263,6 +273,7 @@ key_params_path = {json.dumps(str(home / "credentials.params.json"))}
                 time.sleep(0.05)
 
         def launch(binary, sid, resume, name):
+            receipt["stage"] = name
             core = Core(binary, sid, resume, env, workspace, root, name, port)
             cores.append(core)
             ready = core.wait("ready")
@@ -273,12 +284,52 @@ key_params_path = {json.dumps(str(home / "credentials.params.json"))}
             return [json.loads(line) for line in journal.read_text().splitlines()
                     if line and json.loads(line).get("kind") == "chat.completions"]
 
+        def previous_or_refusal(sid, name):
+            # W08 writes tracker schema 2; the release explicitly accepts only 1.
+            # Never count an unrelated startup error or timeout as compatibility.
+            receipt["stage"] = name
+            before = {str(path.relative_to(sessions)): digest(path)
+                      for path in sessions.rglob("*") if path.is_file()
+                      and not path.name.endswith(".lock")}
+            assert any(path.endswith(".journal") for path in before), "missing private journal"
+            before_requests = len(requests())
+            core = Core(args.previous, sid, True, env, workspace, root, name, port)
+            cores.append(core)
+            try:
+                ready = core.wait("ready")
+            except RuntimeError:
+                # Require a natural unsuccessful exit, not our cleanup SIGKILL.
+                code = core.process.wait(timeout=10)
+                core.reader.join(timeout=5)
+                evidence = (root / (name + ".stderr")).read_text() + json.dumps(core.frames)
+                expected = "unsupported budget snapshot schema version 2; expected 1"
+                assert code > 0 and expected in evidence, f"{name}: not an explicit schema refusal: {evidence}"
+                assert not any(frame.get("type") == "ready" for frame in core.frames)
+                core.stop()
+                after = {str(path.relative_to(sessions)): digest(path)
+                         for path in sessions.rglob("*") if path.is_file()
+                         and not path.name.endswith(".lock")}
+                assert after == before, f"{name}: refusal changed private session/journal bytes"
+                assert len(requests()) == before_requests, f"{name}: refusal dispatched provider work"
+                receipt.setdefault("downgrade_refusals", []).append(
+                    {"stage": name, "reason": expected, "exit_code": code,
+                     "preserved_sha256": before, "provider_requests": before_requests})
+                return None
+            assert ready["session_id"] == sid and ready["session_persistence"] == "durable", ready
+            return core
+
         sid = uuid.uuid4().hex
         markers = []
         for index, binary in enumerate((args.previous, args.candidate, args.previous)):
             marker = "f24c3-control-" + uuid.uuid4().hex
             markers.append(marker)
-            core = launch(binary, sid, index > 0, f"compat-{index}")
+            core = (previous_or_refusal(sid, f"compat-{index}") if index == 2
+                    else launch(binary, sid, index > 0, f"compat-{index}"))
+            if core is None:
+                core = launch(args.candidate, sid, True, "compat-forward-after-refusal")
+                receipt["history_compatibility"] = "safe-refusal-and-forward-recovery"
+            elif index == 2:
+                receipt["history_compatibility"] = "bidirectional"
             core.send({"type": "message", "msg_id": marker, "content": "Return only " + marker,
                        "files": []})
             delta = core.wait("text_delta")
@@ -290,7 +341,9 @@ key_params_path = {json.dumps(str(home / "credentials.params.json"))}
         assert len(requests()) == 3, "normal roundtrip made unexpected provider requests"
         receipt["checks"]["release_candidate_release_history"] = True
 
-        core = launch(args.previous, sid, True, "writer-control")
+        writer_binary = (args.candidate if receipt["history_compatibility"] ==
+                         "safe-refusal-and-forward-recovery" else args.previous)
+        core = launch(writer_binary, sid, True, "writer-control")
         # A second process must fail to acquire the active writer authority.
         contender = subprocess.run([args.candidate, "session", "--dir", str(sessions), "cancel", sid],
                                    env=env, cwd=workspace, capture_output=True, text=True, timeout=20)
@@ -308,16 +361,23 @@ key_params_path = {json.dumps(str(home / "credentials.params.json"))}
             assert time.monotonic() < deadline, "physical request did not reach held provider"
             time.sleep(0.01)
         core.stop()
-        # Candidate and release both reopen real unknown-outcome state. Each
-        # writer is stopped before the next acquires authority; no new send.
+        # Reopen unknown-outcome state, or require explicit safe downgrade
+        # refusal followed by candidate recovery. Never send a new request.
         for index, binary in enumerate((args.candidate, args.previous, args.candidate)):
-            resumed = launch(binary, uncertain, True, f"uncertain-resume-{index}")
+            resumed = (previous_or_refusal(uncertain, f"uncertain-resume-{index}") if index == 1
+                       else launch(binary, uncertain, True, f"uncertain-resume-{index}"))
+            if resumed is None:
+                receipt["uncertain_compatibility"] = "safe-refusal-and-forward-recovery"
+                continue
+            if index == 1:
+                receipt["uncertain_compatibility"] = "bidirectional"
             resumed.send({"type": "session_resync", "recovery_version": 1,
                           "request_id": f"resync-{index}", "session_id": uncertain})
             snapshot = resumed.wait("session_recovery_snapshot")
             assert snapshot["lifecycle"] == "suspended", snapshot
             assert snapshot["pending_turn"]["reconcile_reason"] == "provider_outcome_unknown", snapshot
             resumed.stop()
+        receipt["stage"] = "uncertain-no-redispatch"
         os.kill(provider.pid, signal.SIGCONT)
         deadline = time.monotonic() + 10
         while len(requests()) < 4:
@@ -327,9 +387,9 @@ key_params_path = {json.dumps(str(home / "credentials.params.json"))}
         receipt["checks"]["unknown_outcome_survives_roundtrip_without_redispatch"] = True
         receipt["checks"]["forward_recovery_retains_authority"] = True
         receipt["checks"].update(storage_checks(args, root, home, sessions, workspace,
-                                                sid, uncertain, launch, requests))
+                                                sid, uncertain, launch, requests, receipt))
     except Exception as error:
-        receipt["failure"] = str(error)
+        receipt["failure"] = f"{receipt['stage']}: {type(error).__name__}: {error}"
     finally:
         for core in cores:
             if core.process.poll() is None:
