@@ -188,6 +188,10 @@ pub(crate) const PASSTHROUGH_VENDOR_MODELS: &[(&str, u32, u32)] = &[
     ("gpt-5.6-luna", 128_000, 1_050_000),
     ("gpt-5.6-sol", 128_000, 1_050_000),
     ("gpt-5.6-terra", 128_000, 1_050_000),
+    // Added 2026-09-06: OpenAI documentation and models.dev `openai` agree.
+    // Snapshot sha256 d918bb97da7705f6725ed038536d254bbc51ed37e2a20c9e412eaf302096d95e
+    // (4,492,340 bytes); no Azure vendor row exists for this id.
+    ("gpt-6-astra", 128_000, 1_050_000),
     // --- xAI Grok 3.x / 4.x - vendor rows: xai, amazon-bedrock (xai. prefix).
     ("grok-4.20-0309-non-reasoning", 30_000, 1_000_000),
     ("grok-4.20-0309-reasoning", 30_000, 1_000_000),

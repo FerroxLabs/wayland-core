@@ -290,6 +290,16 @@ pub fn model_output_ceiling(provider: &str, model: &str) -> Option<(u32, u32)> {
         return Some((16_384, 128_000));
     }
 
+    // GPT-6 Astra: official OpenAI model page and models.dev `openai` agree,
+    // 2026-09-06: 1,050,000 context, 922,000 input, 128,000 output.
+    // https://developers.openai.com/api/docs/models/gpt-6-astra
+    // models.dev snapshot sha256:
+    // d918bb97da7705f6725ed038536d254bbc51ed37e2a20c9e412eaf302096d95e
+    // Only the documented id; do not infer limits for future GPT-6 siblings.
+    if m == "gpt-6-astra" {
+        return Some((128_000, 1_050_000));
+    }
+
     // --- OpenAI GPT-5 family ---
     // Fixes #165 (customer: a gpt-5.4 run died at 178,336 tokens against a fake
     // ~177k ceiling). With no entry every gpt-5.x id fell to the 200_000
@@ -1639,6 +1649,19 @@ mod tests {
             model_output_ceiling("anthropic", "Claude-Opus-5"),
             Some((128_000, 1_000_000))
         );
+    }
+
+    #[test]
+    fn gpt_6_astra_uses_verified_limits_without_guessing_siblings() {
+        for id in ["gpt-6-astra", "GPT-6-ASTRA"] {
+            assert_eq!(
+                model_output_ceiling("openai", id),
+                Some((128_000, 1_050_000))
+            );
+        }
+        for id in ["gpt-6", "gpt-6-astra-mini", "gpt-6-astra-pro"] {
+            assert_eq!(model_output_ceiling("openai", id), None);
+        }
     }
 
     #[test]
