@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "scope": "FINAL-PLAN W15/C10 bounded enabled critical journeys and high-risk boundaries; evidence bookkeeping is not runtime proof",
-  "source_base": "54932b140",
+  "source_base": "3abeeef2bf27a35457b0aa2e2df3204f551037d4",
   "carrier": "https://github.com/FerroxLabs/wayland/issues/1324",
   "rows": [
     {
@@ -12,7 +12,12 @@
       "state": "externally_blocked",
       "reason": "Current integrated packaged receipt, all-call totals and cleanup required",
       "carrier": "https://github.com/FerroxLabs/wayland/issues/1324",
-      "evidence": []
+      "evidence": [
+        {
+          "receipt": "evidence/execution-progress.json",
+          "scope": "Parent-owned accepted package and integration receipts must be reconciled to this journey; this pointer is not itself behavioral proof."
+        }
+      ]
     },
     {
       "id": "acp-http-rest",
@@ -22,7 +27,12 @@
       "state": "externally_blocked",
       "reason": "Current combined ACP lifecycle and resource receipts required",
       "carrier": "https://github.com/FerroxLabs/wayland/issues/1324",
-      "evidence": []
+      "evidence": [
+        {
+          "receipt": "evidence/execution-progress.json",
+          "scope": "Parent-owned accepted package and integration receipts must be reconciled to this journey; this pointer is not itself behavioral proof."
+        }
+      ]
     },
     {
       "id": "channel-ingress",
@@ -32,7 +42,12 @@
       "state": "externally_blocked",
       "reason": "Current channel and remote-authority integration receipts required",
       "carrier": "https://github.com/FerroxLabs/wayland/issues/1324",
-      "evidence": []
+      "evidence": [
+        {
+          "receipt": "evidence/execution-progress.json",
+          "scope": "Parent-owned accepted package and integration receipts must be reconciled to this journey; this pointer is not itself behavioral proof."
+        }
+      ]
     },
     {
       "id": "credentials",
@@ -42,7 +57,12 @@
       "state": "externally_blocked",
       "reason": "Current combined all-writer/backend transaction receipt required",
       "carrier": "https://github.com/FerroxLabs/wayland/issues/1324",
-      "evidence": []
+      "evidence": [
+        {
+          "receipt": "evidence/execution-progress.json",
+          "scope": "Parent-owned accepted package and integration receipts must be reconciled to this journey; this pointer is not itself behavioral proof."
+        }
+      ]
     },
     {
       "id": "daily-auxiliary-budget",
@@ -52,7 +72,12 @@
       "state": "externally_blocked",
       "reason": "Current combined durable spend and physical-call reconciliation receipt required",
       "carrier": "https://github.com/FerroxLabs/wayland/issues/1324",
-      "evidence": []
+      "evidence": [
+        {
+          "receipt": "evidence/execution-progress.json",
+          "scope": "Parent-owned accepted package and integration receipts must be reconciled to this journey; this pointer is not itself behavioral proof."
+        }
+      ]
     },
     {
       "id": "mcp-remote-tools",
@@ -62,7 +87,12 @@
       "state": "externally_blocked",
       "reason": "Current restriction/reconnect proof and paired Desktop/Flux receipt required",
       "carrier": "https://github.com/FerroxLabs/wayland/issues/1324",
-      "evidence": []
+      "evidence": [
+        {
+          "receipt": "evidence/execution-progress.json",
+          "scope": "Parent-owned accepted package and integration receipts must be reconciled to this journey; this pointer is not itself behavioral proof."
+        }
+      ]
     },
     {
       "id": "browser-boundary",
@@ -70,9 +100,35 @@
       "journey": "Browser network policy, actual navigation, process cancellation and cleanup",
       "owner": "W15/W16",
       "state": "externally_blocked",
-      "reason": "Current backend-specific network/refusal and cleanup receipt required",
+      "reason": "Earlier Xvfb survival was corrected, runtime-verified and integrated. Remaining: current-source receipt binding and evidence for any other backend/platform claimed supported; do not repeat the resolved Linux cleanup defect.",
       "carrier": "https://github.com/FerroxLabs/wayland/issues/1324",
-      "evidence": []
+      "evidence": [
+        {
+          "source_sha": "34d8e8f62f5820e25325f8287f13ccb9374f7afa",
+          "platform": "linux",
+          "command": "cargo nextest run --locked --retries 0 --no-tests=fail --run-ignored all --test-threads 1 --no-capture -p wcore-browser --lib --test owned_descendant_cleanup --test camoufox_live_egress_test --test process_count_reaper_baseline_test -E test(supervisor::tests::) | binary(owned_descendant_cleanup) | binary(camoufox_live_egress_test) | binary(process_count_reaper_baseline_test)",
+          "receipt": "evidence/proof-1788673124-6303.json",
+          "exit_code": 100,
+          "scope": "16 supervisor tests, detached-child regression and strengthened real Camoufox navigation/refusal/cleanup passed. Overall command also had an unrelated ignored baseline configuration failure; not an all-green command.",
+          "kind": "historical_executed_behavior"
+        },
+        {
+          "source_sha": "34d8e8f62f5820e25325f8287f13ccb9374f7afa",
+          "platform": "linux",
+          "command": "cargo nextest run --locked --retries 0 --no-tests=fail --test-threads 1 -p wcore-browser --test process_count_reaper_baseline_test",
+          "receipt": "evidence/proof-1788673277-11068.json",
+          "exit_code": 0,
+          "scope": "Two remaining ordinary process-count/reaper controls passed.",
+          "kind": "historical_executed_behavior"
+        },
+        {
+          "receipt": "evidence/W15-BROWSER-CLEANUP-RESULT.md",
+          "cleanup_receipt": "evidence/w15-browser-postcleanup.json",
+          "source_sha": "34d8e8f62f5820e25325f8287f13ccb9374f7afa",
+          "integrated_source": "c279a1d5da8c0fc305e9ae5a9bf389b4e80b0de2",
+          "scope": "All nine recorded real sidecar/browser/Xvfb birth identities absent without manual cleanup. Linux Camoufox only."
+        }
+      ]
     },
     {
       "id": "cua-boundary",
@@ -80,9 +136,21 @@
       "journey": "Computer use: background invariant, native authority and cleanup",
       "owner": "W14/W15/W16",
       "state": "externally_blocked",
-      "reason": "Native OS/backend receipt required; source and mocks do not establish native behavior",
+      "reason": "Linux X11 input is explicitly unsupported: seven input operations refuse safely; native screenshot/read-only and denial controls passed. Actual background input is not supported by this evidence. Broader native/backend claims and current-source binding remain blocked; no inference from terminal/console tests.",
       "carrier": "https://github.com/FerroxLabs/wayland/issues/1324",
-      "evidence": []
+      "evidence": [
+        {
+          "source_sha": "0002395f0011c616deca375ee4d791197798cbf4",
+          "receipt": "evidence/native-cua-1788676101",
+          "scope": "Original RED: click changed pointer, focus and stacking while returning Ok; retained."
+        },
+        {
+          "source_sha": "39fb874d6f8592f4f23de54d949b2e80b047a782",
+          "integrated_source": "6b5f1e3d4ab03c7feca206cdf4e9a1af0caafa97",
+          "receipt": "evidence/native-cua-containment-1788691415",
+          "scope": "2 selected/2 passed plus lint; seven input refusals preserved pointer/focus/stack with no events; read-only controls passed. Does not establish background input functionality."
+        }
+      ]
     },
     {
       "id": "plugin-wasm-subprocess",
@@ -90,9 +158,24 @@
       "journey": "Plugins including WASM and subprocess extensions: authority and process lifetime",
       "owner": "W13/W15/W16",
       "state": "externally_blocked",
-      "reason": "Current supported runtime isolation and cleanup receipts required; trusted extension is not OS sandbox proof",
+      "reason": "Actual adapted-guest Hello component dispatch passed. Remaining supported-journey authority/isolation and process-lifetime proof is not supplied by mock subprocess transports or Hello. Unchanged canonical example and WASIP1 are unverified; retain their documented build failures. Trusted ambient extensions have no OS sandbox claim.",
       "carrier": "https://github.com/FerroxLabs/wayland/issues/1324",
-      "evidence": []
+      "evidence": [
+        {
+          "source_sha": "88e80b13ab6841b5df364a9ab0a57fd536c57dea",
+          "receipt": "evidence/w15-wasm-standalone-1788671739/RESULT.json",
+          "scope": "1 selected/1 passed real_component_execute_round_trip, adapted Guest trait and wasm32-unknown-unknown guest; not canonical-example/WASIP1 or malicious-guest isolation proof."
+        },
+        {
+          "source_sha": "88e80b13ab6841b5df364a9ab0a57fd536c57dea",
+          "platform": "linux",
+          "command": "cargo nextest run --locked --retries 0 --no-tests=fail -p wcore-browser -p wcore-plugin-wasm -p wcore-plugin-subprocess -p wcore-exec-backend -p wcore-agent --test timeout_and_cancel_test --test sidecar_loopback_containment_test --test sidecar_egress_proxy_test --test wasm_real_execute --test subprocess_e2e --test shutdown_lifecycle --test ssh_remote_runner_cleanup --test fleet_dispatcher_wired_test --test workflow_e2e --test workflow_limits_test",
+          "receipt": "evidence/proof-1788669053-58963.json",
+          "exit_code": 0,
+          "scope": "Subprocess protocol/restart/shutdown 13 and WASM instantiate/limiter 2 passed; real component test was ignored in this command.",
+          "kind": "historical_executed_behavior"
+        }
+      ]
     },
     {
       "id": "fleet-swarm",
@@ -100,9 +183,19 @@
       "journey": "Fleet/swarm children: identity, cumulative spend, cancellation and result provenance",
       "owner": "W09/W15/W16",
       "state": "externally_blocked",
-      "reason": "Current real-child and fleet transport receipt required",
+      "reason": "Remaining: real-child/fleet transport identity, cumulative spend, cancellation and restart/result provenance receipt. Mock-provider routing is retained partial proof, not the supported distributed journey.",
       "carrier": "https://github.com/FerroxLabs/wayland/issues/1324",
-      "evidence": []
+      "evidence": [
+        {
+          "source_sha": "88e80b13ab6841b5df364a9ab0a57fd536c57dea",
+          "platform": "linux",
+          "command": "cargo nextest run --locked --retries 0 --no-tests=fail -p wcore-browser -p wcore-plugin-wasm -p wcore-plugin-subprocess -p wcore-exec-backend -p wcore-agent --test timeout_and_cancel_test --test sidecar_loopback_containment_test --test sidecar_egress_proxy_test --test wasm_real_execute --test subprocess_e2e --test shutdown_lifecycle --test ssh_remote_runner_cleanup --test fleet_dispatcher_wired_test --test workflow_e2e --test workflow_limits_test",
+          "receipt": "evidence/proof-1788669053-58963.json",
+          "exit_code": 0,
+          "scope": "Fleet routing 2 passed through real SpawnTool/AgentSpawner with mock provider.",
+          "kind": "historical_executed_behavior"
+        }
+      ]
     },
     {
       "id": "remote-execution",
@@ -110,9 +203,19 @@
       "journey": "Remote execution: target identity, authority, interruption and cleanup",
       "owner": "W13/W15/W16",
       "state": "externally_blocked",
-      "reason": "Current supported remote-executor receipt required; SSH access alone is insufficient",
+      "reason": "Remaining: actual supported remote executor target identity/authority, interruption and cleanup end-to-end. Local runner-shell checks are retained partial proof; SSH access alone does not close this row.",
       "carrier": "https://github.com/FerroxLabs/wayland/issues/1324",
-      "evidence": []
+      "evidence": [
+        {
+          "source_sha": "88e80b13ab6841b5df364a9ab0a57fd536c57dea",
+          "platform": "linux",
+          "command": "cargo nextest run --locked --retries 0 --no-tests=fail -p wcore-browser -p wcore-plugin-wasm -p wcore-plugin-subprocess -p wcore-exec-backend -p wcore-agent --test timeout_and_cancel_test --test sidecar_loopback_containment_test --test sidecar_egress_proxy_test --test wasm_real_execute --test subprocess_e2e --test shutdown_lifecycle --test ssh_remote_runner_cleanup --test fleet_dispatcher_wired_test --test workflow_e2e --test workflow_limits_test",
+          "receipt": "evidence/proof-1788669053-58963.json",
+          "exit_code": 0,
+          "scope": "Shipped SSH runner shell cleanup 3 passed locally on Linux, not an SSH end-to-end journey.",
+          "kind": "historical_executed_behavior"
+        }
+      ]
     },
     {
       "id": "workflow-runner",
@@ -120,9 +223,19 @@
       "journey": "Explicit WorkflowRunner: independent children and inter-stage data",
       "owner": "W09/W15/W16",
       "state": "externally_blocked",
-      "reason": "Current independent-child execution, spend and cancellation receipt required",
+      "reason": "Remaining: combined physical-child spend and cancellation receipt for supported WorkflowRunner execution. Mock-provider independent-stage/data/limit controls already passed.",
       "carrier": "https://github.com/FerroxLabs/wayland/issues/1324",
-      "evidence": []
+      "evidence": [
+        {
+          "source_sha": "88e80b13ab6841b5df364a9ab0a57fd536c57dea",
+          "platform": "linux",
+          "command": "cargo nextest run --locked --retries 0 --no-tests=fail -p wcore-browser -p wcore-plugin-wasm -p wcore-plugin-subprocess -p wcore-exec-backend -p wcore-agent --test timeout_and_cancel_test --test sidecar_loopback_containment_test --test sidecar_egress_proxy_test --test wasm_real_execute --test subprocess_e2e --test shutdown_lifecycle --test ssh_remote_runner_cleanup --test fleet_dispatcher_wired_test --test workflow_e2e --test workflow_limits_test",
+          "receipt": "evidence/proof-1788669053-58963.json",
+          "exit_code": 0,
+          "scope": "Full-stack workflow 1 and limits 9 passed with mock provider; independent stages and inter-stage data only.",
+          "kind": "historical_executed_behavior"
+        }
+      ]
     },
     {
       "id": "manual-skill-governance",
@@ -130,9 +243,19 @@
       "journey": "Manual structural skill admission and governance grant",
       "owner": "W11/W15",
       "state": "externally_blocked",
-      "reason": "Current promotion_gate and stabilization_behavioral_admission results required; efficacy remains unmeasured",
+      "reason": "Scoped component behavior passed on the recorded historical source, unchanged through 88e80b13 according to W15-JOURNEY-EVIDENCE-88.md. Current-source ledger binding remains; no new functional implementation gap evidenced.",
       "carrier": "https://github.com/FerroxLabs/wayland/issues/1324",
-      "evidence": []
+      "evidence": [
+        {
+          "source_sha": "63197b5dfaf1a8b0452a8048c78856f8d61f2997",
+          "platform": "linux",
+          "command": "cargo nextest run --locked --retries 0 --no-tests=fail --no-fail-fast --test-threads 1 -p wcore-agent --test stabilization_capability_contract -p wcore-eval --test stabilization_behavioral_admission --test promotion_gate -p wcore-evolve --test evolve_end_to_end",
+          "receipt": "evidence/proof-1788666697-25963.json",
+          "exit_code": 100,
+          "scope": "Promotion gate 6 and structural admission 1 passed; no behavioral efficacy claim. Overall command retained its separate capability fixture failure.",
+          "kind": "historical_executed_behavior"
+        }
+      ]
     },
     {
       "id": "retention-events",
@@ -140,9 +263,19 @@
       "journey": "Offline evolution provisional retention and sibling ranking",
       "owner": "W15",
       "state": "externally_blocked",
-      "reason": "Current evolve_end_to_end receipt required; retention is not persistence or consumption",
+      "reason": "Scoped component behavior passed on the recorded historical source, unchanged through 88e80b13 according to W15-JOURNEY-EVIDENCE-88.md. Current-source ledger binding remains; no new functional implementation gap evidenced.",
       "carrier": "https://github.com/FerroxLabs/wayland/issues/1324",
-      "evidence": []
+      "evidence": [
+        {
+          "source_sha": "63197b5dfaf1a8b0452a8048c78856f8d61f2997",
+          "platform": "linux",
+          "command": "cargo nextest run --locked --retries 0 --no-tests=fail --no-fail-fast --test-threads 1 -p wcore-agent --test stabilization_capability_contract -p wcore-eval --test stabilization_behavioral_admission --test promotion_gate -p wcore-evolve --test evolve_end_to_end",
+          "receipt": "evidence/proof-1788666697-25963.json",
+          "exit_code": 100,
+          "scope": "Evolution end-to-end 2 passed; retention and sibling ranking only, not persistence/consumption. Overall command retained its separate capability fixture failure.",
+          "kind": "historical_executed_behavior"
+        }
+      ]
     },
     {
       "id": "per-turn-strategy-downgrade",
@@ -150,9 +283,19 @@
       "journey": "Per-turn independent strategy request visibly becomes one Direct tool batch",
       "owner": "W15",
       "state": "externally_blocked",
-      "reason": "Current stabilization_capability_contract runtime receipt required",
+      "reason": "Historical capability contract passed 4/4. Current-source ledger binding remains; no new functional implementation gap evidenced.",
       "carrier": "https://github.com/FerroxLabs/wayland/issues/1324",
-      "evidence": []
+      "evidence": [
+        {
+          "source_sha": "88e80b13ab6841b5df364a9ab0a57fd536c57dea",
+          "platform": "linux",
+          "command": "cargo nextest run --locked --retries 0 --no-tests=fail --no-fail-fast --test-threads 1 -p wcore-agent --test stabilization_capability_contract",
+          "receipt": "evidence/proof-1788666844-32848.json",
+          "exit_code": 0,
+          "scope": "4/4 passed, including actual engine-visible independent-strategy downgrade.",
+          "kind": "historical_executed_behavior"
+        }
+      ]
     },
     {
       "id": "network-a2a",
@@ -184,5 +327,11 @@
       "carrier": "https://github.com/FerroxLabs/wayland/issues/1324",
       "evidence": []
     }
-  ]
+  ],
+  "reconciliation": {
+    "contract": "FINAL-PLAN.md:88,113",
+    "execution_record": "evidence/execution-progress.json",
+    "scope": "Existing historical runtime evidence only. Receipt source identities are unchanged. The validator requires verified rows to bind to one current source; retained historical passes are not relabeled as current execution.",
+    "remaining": "Externally blocked rows include exact-candidate evidence binding and separately named runtime gaps; they do not imply the retained checks failed."
+  }
 }
