@@ -1852,9 +1852,10 @@ impl CredentialsStore for LadderCredentialsStore {
 ///    `CredentialsBackend::Pipe` for production).
 /// 2. Interactive `rpassword` prompt on a TTY.
 ///
-/// Concurrency: each store holds a `parking_lot::Mutex` over the cached
-/// passphrase + KDF params so the Argon2id derivation runs once per
-/// process even when callers thrash `get`/`put`. Cross-process locking
+/// Concurrency: each store holds a `parking_lot::Mutex` over its passphrase,
+/// validated KDF params and zeroizing derived key. Unchanged parameters reuse
+/// that key within this store; every operation still reads current ciphertext.
+/// Cross-process locking
 /// is not modeled — operators who run multiple writers should serialize
 /// at the application layer.
 pub struct EncryptedFileCredentialsStore {
@@ -1874,6 +1875,38 @@ struct UnlockedVault {
     passphrase: std::sync::Arc<VaultPassphraseAuthority>,
     /// KDF params (salt + tuning knobs). Persisted to `key_params_path`.
     params: encrypted_file::KdfParams,
+    /// This is a cryptographic key, never a cached credential or recovery KEY_REF.
+    /// Dropped/zeroized when parameters change or this store is dropped.
+    derived_key: Option<zeroize::Zeroizing<[u8; encrypted_file::KEY_LEN]>>,
+}
+
+impl UnlockedVault {
+    fn key(
+        &mut self,
+    ) -> Result<&[u8; encrypted_file::KEY_LEN], encrypted_file::EncryptedFileError> {
+        if self.derived_key.is_none() {
+            self.derived_key = Some(zeroize::Zeroizing::new(encrypted_file::derive_key(
+                self.passphrase.expose(),
+                &self.params,
+            )?));
+        }
+        Ok(self
+            .derived_key
+            .as_deref()
+            .expect("derived key initialized"))
+    }
+
+    fn decrypt(&mut self, blob: &[u8]) -> Result<Vec<u8>, encrypted_file::EncryptedFileError> {
+        if blob.len() < encrypted_file::NONCE_LEN + encrypted_file::TAG_LEN {
+            self.derived_key = None;
+            return Err(encrypted_file::EncryptedFileError::TooShort);
+        }
+        let result = encrypted_file::decrypt_with_key(blob, self.key()?);
+        if result.is_err() {
+            self.derived_key = None;
+        }
+        result
+    }
 }
 
 /// Process-scoped vault passphrase authority.
@@ -2079,41 +2112,77 @@ impl EncryptedFileCredentialsStore {
 
     /// Acquire (or reuse) the unlocked-state cache.
     ///
-    /// On first call:
-    /// * If `key_params_path` exists, load the persisted KDF params and
-    ///   verify the cached passphrase by attempting to decrypt the
-    ///   existing cipher blob.
-    /// * Otherwise, generate fresh [`KdfParams`] (with a random salt) and
-    ///   accept the passphrase as the new vault password.
+    /// Re-read permissions and the complete persisted KDF parameters on every
+    /// operation under the existing store lock. A changed parameter set cannot
+    /// reuse the previous derived key. Ciphertext is never cached.
     fn unlock(&self) -> Result<parking_lot::MappedMutexGuard<'_, UnlockedVault>, CredentialsError> {
         let mut guard = self.unlocked.lock();
-        if guard.is_none() {
-            // Check perms BEFORE prompting for a passphrase: a vault that will
-            // be refused must not first extract a secret from the operator.
-            refuse_if_world_readable(&self.cipher_path)?;
-            refuse_if_world_readable(&self.key_params_path)?;
-            let passphrase = Self::read_passphrase()?;
-            let params = if self.key_params_path.exists() {
-                encrypted_file::load_key_params(&self.key_params_path)
-                    .map_err(|e| CredentialsError::BackendUnavailable(format!("kdf params: {e}")))?
-            } else {
-                encrypted_file::KdfParams::default()
+        // Preserve refusal before reading unlock material, including warm stores.
+        if let Err(error) = refuse_if_world_readable(&self.cipher_path)
+            .and_then(|()| refuse_if_world_readable(&self.key_params_path))
+        {
+            if let Some(vault) = guard.as_mut() {
+                vault.derived_key = None;
+            }
+            return Err(error);
+        }
+        let cipher_exists = self.cipher_path.exists();
+        let params = if self.key_params_path.exists() {
+            match encrypted_file::load_key_params(&self.key_params_path) {
+                Ok(params) => params,
+                Err(error) => {
+                    if let Some(vault) = guard.as_mut() {
+                        vault.derived_key = None;
+                    }
+                    return Err(CredentialsError::BackendUnavailable(format!(
+                        "kdf params: {error}"
+                    )));
+                }
+            }
+        } else if cipher_exists {
+            if let Some(vault) = guard.as_mut() {
+                vault.derived_key = None;
+            }
+            return Err(CredentialsError::BackendUnavailable(
+                "kdf params missing for existing vault".into(),
+            ));
+        } else {
+            // A read of a never-written vault remains lazy: no KDF or write.
+            match guard.as_mut() {
+                Some(vault) => {
+                    vault.derived_key = None;
+                    vault.params.clone()
+                }
+                None => encrypted_file::KdfParams::default(),
+            }
+        };
+        if guard.as_ref().is_none_or(|vault| vault.params != params) {
+            let passphrase = match guard.as_mut() {
+                Some(vault) => {
+                    vault.derived_key = None;
+                    Arc::clone(&vault.passphrase)
+                }
+                None => Self::read_passphrase()?,
+            };
+            let mut vault = UnlockedVault {
+                passphrase,
+                params,
+                derived_key: None,
             };
 
             // If a ciphertext blob already exists, verify the passphrase
             // by decrypting it — otherwise a typo would silently rotate
             // the vault key on next write.
-            if self.cipher_path.exists() {
+            if cipher_exists {
                 let blob = std::fs::read(&self.cipher_path)?;
-                let _pt =
-                    encrypted_file::decrypt(&blob, passphrase.expose(), &params).map_err(|e| {
-                        CredentialsError::BackendUnavailable(format!(
-                            "vault unlock failed (wrong passphrase or corrupt file): {e}"
-                        ))
-                    })?;
+                let _pt = vault.decrypt(&blob).map_err(|e| {
+                    CredentialsError::BackendUnavailable(format!(
+                        "vault unlock failed (wrong passphrase or corrupt file): {e}"
+                    ))
+                })?;
             }
 
-            *guard = Some(UnlockedVault { passphrase, params });
+            *guard = Some(vault);
         }
         Ok(parking_lot::MutexGuard::map(guard, |o| {
             o.as_mut().expect("just initialized")
@@ -2124,7 +2193,7 @@ impl EncryptedFileCredentialsStore {
     ///
     /// Returns an empty table when no ciphertext has been persisted yet
     /// (first write will materialize the vault).
-    fn load_secrets(&self, vault: &UnlockedVault) -> Result<toml::Table, CredentialsError> {
+    fn load_secrets(&self, vault: &mut UnlockedVault) -> Result<toml::Table, CredentialsError> {
         if !self.cipher_path.exists() {
             return Ok(toml::Table::new());
         }
@@ -2133,9 +2202,9 @@ impl EncryptedFileCredentialsStore {
         // process runs would otherwise never be noticed.
         refuse_if_world_readable(&self.cipher_path)?;
         let blob = std::fs::read(&self.cipher_path)?;
-        let pt = encrypted_file::decrypt(&blob, vault.passphrase.expose(), &vault.params).map_err(
-            |e| CredentialsError::BackendUnavailable(format!("vault decrypt failed: {e}")),
-        )?;
+        let pt = vault.decrypt(&blob).map_err(|e| {
+            CredentialsError::BackendUnavailable(format!("vault decrypt failed: {e}"))
+        })?;
         let parsed: toml::Table = std::str::from_utf8(&pt)
             .map_err(|e| {
                 CredentialsError::BackendUnavailable(format!("vault plaintext utf8: {e}"))
@@ -2147,7 +2216,7 @@ impl EncryptedFileCredentialsStore {
     /// Re-encrypt and atomically persist the given table.
     fn save_secrets(
         &self,
-        vault: &UnlockedVault,
+        vault: &mut UnlockedVault,
         table: &toml::Table,
     ) -> Result<(), CredentialsError> {
         let serialized = toml::to_string_pretty(table)?;
@@ -2155,9 +2224,10 @@ impl EncryptedFileCredentialsStore {
         // so the existing passphrase keeps deriving the same key. Only
         // the AEAD nonce is rotated on each encrypt (handled inside
         // `encrypted_file::encrypt`).
-        let key = encrypted_file::derive_key(vault.passphrase.expose(), &vault.params)
+        let key = vault
+            .key()
             .map_err(|e| CredentialsError::BackendUnavailable(format!("derive_key: {e}")))?;
-        let blob = encrypted_file::encrypt_with_key(serialized.as_bytes(), &key).map_err(|e| {
+        let blob = encrypted_file::encrypt_with_key(serialized.as_bytes(), key).map_err(|e| {
             CredentialsError::BackendUnavailable(format!("vault encrypt failed: {e}"))
         })?;
 
@@ -2190,8 +2260,8 @@ impl EncryptedFileCredentialsStore {
     /// could). Existing keys are PRESERVED (`or_insert`) — a pre-existing vault
     /// value is authoritative and never clobbered by an incoming plaintext one.
     fn import_secrets(&self, entries: &[(String, String)]) -> Result<(), CredentialsError> {
-        let vault = self.unlock()?;
-        let mut table = self.load_secrets(&vault)?;
+        let mut vault = self.unlock()?;
+        let mut table = self.load_secrets(&mut vault)?;
         let secrets = table
             .entry("secrets".to_string())
             .or_insert_with(|| toml::Value::Table(toml::Table::new()));
@@ -2206,14 +2276,14 @@ impl EncryptedFileCredentialsStore {
                 .entry(k.clone())
                 .or_insert_with(|| toml::Value::String(v.clone()));
         }
-        self.save_secrets(&vault, &table)
+        self.save_secrets(&mut vault, &table)
     }
 }
 
 impl CredentialsStore for EncryptedFileCredentialsStore {
     fn get(&self, key: &str) -> Result<Option<String>, CredentialsError> {
-        let vault = self.unlock()?;
-        let table = self.load_secrets(&vault)?;
+        let mut vault = self.unlock()?;
+        let table = self.load_secrets(&mut vault)?;
         let secrets = match table.get("secrets") {
             Some(toml::Value::Table(t)) => t,
             _ => return Ok(None),
@@ -2222,8 +2292,8 @@ impl CredentialsStore for EncryptedFileCredentialsStore {
     }
 
     fn get_many(&self, keys: &[&str]) -> Result<Vec<Option<String>>, CredentialsError> {
-        let vault = self.unlock()?;
-        let table = self.load_secrets(&vault)?;
+        let mut vault = self.unlock()?;
+        let table = self.load_secrets(&mut vault)?;
         let secrets = match table.get("secrets") {
             Some(toml::Value::Table(table)) => Some(table),
             _ => None,
@@ -2240,8 +2310,8 @@ impl CredentialsStore for EncryptedFileCredentialsStore {
     }
 
     fn put(&self, key: &str, value: &str) -> Result<(), CredentialsError> {
-        let vault = self.unlock()?;
-        let mut table = self.load_secrets(&vault)?;
+        let mut vault = self.unlock()?;
+        let mut table = self.load_secrets(&mut vault)?;
         let entry = table
             .entry("secrets".to_string())
             .or_insert_with(|| toml::Value::Table(toml::Table::new()));
@@ -2252,16 +2322,16 @@ impl CredentialsStore for EncryptedFileCredentialsStore {
             unreachable!("just normalized to Table");
         };
         secrets_table.insert(key.to_string(), toml::Value::String(value.to_string()));
-        self.save_secrets(&vault, &table)
+        self.save_secrets(&mut vault, &table)
     }
 
     fn delete(&self, key: &str) -> Result<(), CredentialsError> {
-        let vault = self.unlock()?;
-        let mut table = self.load_secrets(&vault)?;
+        let mut vault = self.unlock()?;
+        let mut table = self.load_secrets(&mut vault)?;
         if let Some(toml::Value::Table(secrets_table)) = table.get_mut("secrets") {
             secrets_table.remove(key);
         }
-        self.save_secrets(&vault, &table)
+        self.save_secrets(&mut vault, &table)
     }
 }
 
@@ -3577,15 +3647,27 @@ pub(crate) mod encrypted_file {
         if cipher_blob.len() < NONCE_LEN + TAG_LEN {
             return Err(EncryptedFileError::TooShort);
         }
-        let (nonce_bytes, ct) = cipher_blob.split_at(NONCE_LEN);
         let mut key_bytes = derive_key(password, params)?;
-        let cipher = XChaCha20Poly1305::new(Key::from_slice(&key_bytes));
-        let nonce = XNonce::from_slice(nonce_bytes);
-        let pt = cipher
-            .decrypt(nonce, ct)
-            .map_err(|e| EncryptedFileError::Aead(e.to_string()));
+        let result = decrypt_with_key(cipher_blob, &key_bytes);
         key_bytes.zeroize();
-        pt
+        result
+    }
+
+    /// Authenticate current ciphertext with a store-owned, pre-derived key.
+    /// Wire format, nonce, tag and empty AAD remain identical to `decrypt`.
+    pub fn decrypt_with_key(
+        cipher_blob: &[u8],
+        key: &[u8; KEY_LEN],
+    ) -> Result<Vec<u8>, EncryptedFileError> {
+        if cipher_blob.len() < NONCE_LEN + TAG_LEN {
+            return Err(EncryptedFileError::TooShort);
+        }
+        let (nonce_bytes, ct) = cipher_blob.split_at(NONCE_LEN);
+        let cipher = XChaCha20Poly1305::new(Key::from_slice(key));
+        let nonce = XNonce::from_slice(nonce_bytes);
+        cipher
+            .decrypt(nonce, ct)
+            .map_err(|e| EncryptedFileError::Aead(e.to_string()))
     }
 
     /// Persist [`KdfParams`] to disk as pretty-printed JSON.
