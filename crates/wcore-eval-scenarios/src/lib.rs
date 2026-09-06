@@ -46,6 +46,7 @@ mod child_env;
 /// evidence pointer, no bounds, or a scope its evidence does not contain cannot be rendered,
 /// and the published documents are produced only by this module's renderer.
 pub mod claims;
+pub mod comparison_budget;
 pub mod cost;
 pub mod coverage;
 pub mod cron_scenarios;

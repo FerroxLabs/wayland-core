@@ -108,6 +108,8 @@ vt100        = "0.15"
 # ProtocolCommand enums instead of redefining shapes that would drift.
 wcore-protocol = { workspace = true }
 wcore-config = { workspace = true }
+wcore-budget = { workspace = true }
+fd-lock = { workspace = true }
 # `wcore_types::process_liveness` — the single zombie-aware liveness probe.
 # wcore-types is the bottom layer with zero internal deps, so this edge cannot
 # create a cycle. See .planning/ZOMBIE-PROBE.md.
