@@ -135,6 +135,47 @@ fn receipt_from_trace(run_id: &str, result: &ScenarioResult) -> EvidenceReceiptV
 }
 
 #[test]
+fn paired_diagnostic_outcome_does_not_invent_cleanup_authority() {
+    let mut result = traced_result("/private/paired-fixture", "/outside/policy.toml");
+    result.name = "w16_answer_without_action".into();
+    result.trace.entries.clear();
+    result.execution.containment_authoritative = false;
+    result.execution.cleanup_verified = false;
+    let receipt = receipt_from_trace("paired-unqualified", &result);
+    assert!(receipt.body.results[0].passed);
+    assert!(matches!(&receipt.body.process.orphan_count,
+        Evidence::Unavailable { code } if code == "cleanup_not_verified"));
+    assert!(
+        wcore_eval_scenarios::receipt::milestone_evidence_gaps(&receipt.body)
+            .contains(&"process.orphan_count")
+    );
+    ReceiptVerifier::new()
+        .verify(&receipt, &VerificationPolicy::default())
+        .unwrap();
+
+    result.passed = false;
+    assert!(
+        try_receipt_from_trace("unexplained-failure", &result).is_err(),
+        "the receipt validator must still reject the original inconsistent shape"
+    );
+    result
+        .failures
+        .push(wcore_eval_scenarios::runner::Failure::RunnerError(
+            "process-tree cleanup failed: fixture child remained alive".into(),
+        ));
+    let failed = receipt_from_trace("paired-cleanup-failed", &result);
+    assert!(!failed.body.results[0].passed);
+    assert_eq!(
+        failed.body.assertions[0].failure_code.as_deref(),
+        Some("runner_error")
+    );
+    assert!(
+        wcore_eval_scenarios::receipt::milestone_evidence_gaps(&failed.body)
+            .contains(&"results.passed")
+    );
+}
+
+#[test]
 fn filesystem_evidence_is_observed_only_after_capture_completes() {
     let mut result = traced_result("/private/ephemeral", "/outside/policy.toml");
 

@@ -1274,6 +1274,28 @@ async fn packaged_paired_task_preserves_inputs_and_rejects_wrong_answer() {
             fs::read_to_string(report.join("paired-paired-control/workspace/KEEP.txt")).unwrap(),
             "unchanged"
         );
+        let receipt: wcore_eval_scenarios::receipt::EvidenceReceiptV1 = serde_json::from_slice(
+            &fs::read(report.join("000-w16_answer_without_action-openai/receipt.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(receipt.body.results[0].passed, expected);
+        let gaps = wcore_eval_scenarios::receipt::milestone_evidence_gaps(&receipt.body);
+        if !matches!(
+            receipt.body.process.orphan_count,
+            wcore_eval_scenarios::receipt::Evidence::Observed { value: 0 }
+        ) {
+            assert!(
+                gaps.contains(&"process.orphan_count"),
+                "unqualified cleanup cannot certify a live benchmark"
+            );
+        }
+        if !expected {
+            assert_eq!(
+                receipt.body.assertions[0].failure_code.as_deref(),
+                Some("runner_error")
+            );
+            assert!(gaps.contains(&"results.passed"));
+        }
     }
 }
 

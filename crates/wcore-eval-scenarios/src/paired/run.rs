@@ -294,8 +294,12 @@ impl PairedTask {
                 "paired whole-task time bound exceeded".into(),
             ));
         }
-        result.passed =
-            result.passed && result.failures.is_empty() && result.execution.cleanup_verified;
+        // Keep the ordinary runner's diagnostic outcome semantics. A real
+        // cleanup failure is already a typed Failure; unavailable authoritative
+        // proof stays in execution evidence and blocks receipt certification.
+        // Converting that absence into an unexplained failed outcome produces
+        // an invalid receipt (passed=false with no stable failure reason).
+        result.passed = result.passed && result.failures.is_empty();
         std::fs::write(
             output.join("sessions.json"),
             serde_json::to_vec_pretty(&results)?,

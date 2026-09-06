@@ -160,6 +160,12 @@ the task, final workspace and authoritative effect journal. Paid paired calls
 remain refused until the separate shared spend-admission prerequisite is
 verified; explicit known-free loopback fixture controls can run now.
 
+A successful local diagnostic outcome does not imply authoritative cleanup.
+Unavailable containment/orphan evidence remains unavailable and blocks receipt
+certification. Actual runner cleanup failures remain failed outcomes with their
+existing typed failure codes; recovery still requires authoritative cleanup
+before resuming an interrupted session.
+
 Memory drives a clean-home negative, store, and cold recall in three actual
 processes. Their native session IDs must differ. Recovery creates a fixed
 session ID, cuts its owned process tree only after the external effect journal
