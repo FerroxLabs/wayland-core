@@ -1,4 +1,4 @@
-name: Nightly Mutation Tests
+name: Nightly Mutation Tests (advisory)
 
 # Schedule: 06:00 UTC = 13:00 ICT (Sean's GMT+7)
 # Full nightly per no-rotation policy (AGENTS.md §8).
@@ -22,6 +22,8 @@ concurrency:
   cancel-in-progress: false   # Never cancel an in-flight nightly
 
 jobs:
+  # Broad survey is advisory. W09 emits the enumerated viable/caught receipts
+  # consumed by stabilization_release_gate.py; this summary cannot promote.
   mutants:
     name: "mutants / ${{ matrix.crate }}"
     runs-on: macos-latest
