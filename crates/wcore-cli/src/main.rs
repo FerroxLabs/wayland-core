@@ -6264,6 +6264,9 @@ async fn run_json_stream_mode(
 
                     loop {
                         tokio::select! {
+                            // Install the new turn token on first poll before accepting Stop.
+                            // Otherwise the engine could renew an already-cancelled token.
+                            biased;
                             result = &mut engine_fut => {
                                 if stopped {
                                     if let Err(error) = result
