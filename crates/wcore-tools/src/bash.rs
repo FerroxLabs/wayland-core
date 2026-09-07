@@ -914,6 +914,15 @@ impl Tool for BashTool {
             };
         }
 
+        // Do not schedule blocking preparation for an already-cancelled call.
+        // The mandatory command floor and denylist above still take precedence.
+        if ctx.cancel.is_cancelled() {
+            return ToolResult {
+                content: "Bash command cancelled by cancellation token".to_string(),
+                is_error: true,
+            };
+        }
+
         let timeout_ms = input["timeout"]
             .as_u64()
             .unwrap_or(DEFAULT_TIMEOUT_MS)
@@ -1089,6 +1098,15 @@ impl Tool for BashTool {
         if let Some(reason) = check_denylist(command) {
             return ToolResult {
                 content: reason.to_string(),
+                is_error: true,
+            };
+        }
+
+        // Do not schedule blocking preparation for an already-cancelled call.
+        // The mandatory command floor and denylist above still take precedence.
+        if ctx.cancel.is_cancelled() {
+            return ToolResult {
+                content: "Bash command cancelled by cancellation token".to_string(),
                 is_error: true,
             };
         }
