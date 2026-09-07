@@ -110,7 +110,7 @@ if [ "$TOTAL" -gt 0 ]; then
     echo
     echo "| Windows leg | state |"
     echo "| --- | --- |"
-    echo "| \`CI (Array)\` (self-hosted) | $SELF_HOSTED_STATE |"
+    echo "| \`CI (Array)\` (primary Windows route) | $SELF_HOSTED_STATE |"
     echo "| \`CI (windows-latest, hosted)\` | $HOSTED_STATE |"
     echo
     echo "A leg marked SKIPPED ran no Windows test and certifies nothing."
@@ -127,7 +127,7 @@ echo "::warning title=Windows: not exercised::This run published a test report w
   echo
   echo "| Windows leg | state |"
   echo "| --- | --- |"
-  echo "| \`CI (Array)\` (self-hosted) | $SELF_HOSTED_STATE |"
+  echo "| \`CI (Array)\` (primary Windows route) | $SELF_HOSTED_STATE |"
   echo "| \`CI (windows-latest, hosted)\` | $HOSTED_STATE |"
   echo
   echo "To get a Windows verdict, push with \`[ci-windows]\` in the commit message."

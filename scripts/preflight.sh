@@ -103,6 +103,12 @@ GATES=(
   "armed|python3 scripts/check-windows-attribution.py --self-test"
   "armed|python3 scripts/check-windows-attribution.py"
   "armed|python3 scripts/flake-ledger.py --self-test"
+  "armed|bash .github/scripts/tests/capture-test-command.test.sh"
+  "armed|bash .github/scripts/tests/outer-retry-evidence.test.sh"
+  "armed|python3 .github/scripts/tests/qualification-prerequisites.test.py"
+  "armed|python3 scripts/test-ci-build-artifact.py"
+  "armed|python3 .github/scripts/tests/qualification-status.test.py"
+  "armed|python3 .github/scripts/tests/release-workflow-contract.test.py"
   "armed|python3 .planning/evidence/ci-macos-budget/gate.py --self-test .github/workflows/ci.yml"
   "armed|python3 .planning/evidence/ci-macos-budget/gate.py .github/workflows/ci.yml"
 )
@@ -276,12 +282,33 @@ if start is None or stop is None:
           "in ci.yml. The job or the image step was renamed; fix this script.")
     sys.exit(2)
 region = "\n".join(lines[start:stop])
+# Fast admission is a separate owner of prerequisite/evidence controls.
+# Include it in drift coverage so moving a gate earlier cannot hide it here.
+for i, line in enumerate(lines):
+    if line == "  admission:":
+        end = next((j for j in range(i + 1, len(lines))
+                    if re.match(r"^  [a-zA-Z0-9_-]+:\s*$", lines[j])), len(lines))
+        region += "\n" + "\n".join(lines[i:end])
+        break
 # Any .py gate, not only scripts/ -- the macOS admission gate lives under
 # .planning/evidence/, and a guard that only looks in one directory is exactly
 # how that gate stayed uncovered while it was red.
 PAT = r"(?:scripts|\.planning/evidence)/[A-Za-z0-9_./-]+\.py"
 in_ci = set(re.findall(PAT, region))
-mine  = set(re.findall(PAT, open("scripts/preflight.sh").read()))
+preflight = open("scripts/preflight.sh").read()
+gate_commands = preflight.split("GATES=(", 1)[1].split("\n)", 1)[0]
+mine = set(re.findall(PAT, gate_commands))
+# Runner admission needs the current GitHub event and runner inventory. Locally
+# run its actual companion tests; do not pretend a local fixture proves CI's
+# runner availability. Runtime admission still executes in the CI job.
+runtime_companions = {
+    "scripts/qualification-prerequisites.py": ".github/scripts/tests/qualification-prerequisites.test.py",
+}
+for runtime, companion in runtime_companions.items():
+    companion_tokens = set(re.findall(PAT, companion))
+    if runtime in in_ci and companion_tokens <= mine:
+        mine.add(runtime)
+        print(f"runtime admission: {runtime} logic covered by {companion}; live CI context remains unverified here")
 missing = in_ci - mine
 if missing:
     print("PREFLIGHT DRIFT GUARD: ci.yml runs host-side gate(s) this pre-flight "
