@@ -9568,7 +9568,10 @@ mod tests {
             child.env("WCORE_TEST_SHUTDOWN_SIGNAL", signal);
             // Preserve helper panics and stage diagnostics in the parent test's
             // capture even when the timeout drops child.output().
-            child.stderr(std::process::Stdio::inherit());
+            let diagnostics = tempfile::NamedTempFile::new().expect("signal diagnostic file");
+            child.stderr(std::process::Stdio::from(
+                diagnostics.reopen().expect("signal diagnostic handle"),
+            ));
             #[cfg(windows)]
             {
                 use std::os::windows::process::CommandExt as _;
@@ -9578,7 +9581,10 @@ mod tests {
             }
             let output = tokio::time::timeout(std::time::Duration::from_secs(60), child.output())
                 .await
-                .unwrap_or_else(|_| panic!("native {signal} cleanup subprocess timed out"))
+                .unwrap_or_else(|_| {
+                    let log = std::fs::read_to_string(diagnostics.path()).unwrap_or_default();
+                    panic!("native {signal} cleanup subprocess timed out; child stderr={log}")
+                })
                 .expect("run native signal subprocess");
             assert!(
                 output.status.success(),

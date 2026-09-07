@@ -317,6 +317,8 @@ def run_nextest(
         "fail",
         "--color",
         "never",
+        "--success-output",
+        "immediate",
         "-E",
         expr,
     ]
