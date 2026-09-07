@@ -32,47 +32,11 @@ the expected PR head is separate because a PR merge checkout can have a differen
 SHA. Freeze the manifest with the agreed checks; the helper does not discover or
 silently reduce release requirements.
 
-Minimal illustrative manifest (replace the fixture commands/contracts with the
-actual required build, affected, native, and release-gate checks):
-
-```json
-{
-  "schema": 1,
-  "candidate_sha": "FULL_CHECKOUT_SHA",
-  "pr_head_sha": "FULL_PR_HEAD_SHA_OR_NULL",
-  "release_tag": "vX.Y.Z",
-  "checks": [
-    {
-      "id": "core-build",
-      "stage": "build",
-      "kind": "build",
-      "owner": "core",
-      "command": ["cargo", "build", "-p", "wcore-cli", "--bin", "wayland-core"],
-      "toolchain": {"rustc": "EXACT_VERSION", "linker": "EXACT_IDENTITY"},
-      "features": [],
-      "target": "x86_64-unknown-linux-gnu",
-      "runtime_contract": {"profile": "debug", "executor": "DECLARED_ENVIRONMENT"},
-      "inputs_complete": false,
-      "inputs": []
-    },
-    {
-      "id": "paired-contract",
-      "stage": "affected",
-      "kind": "test",
-      "owner": "core",
-      "command": ["cargo", "nextest", "run", "-p", "wcore-eval-scenarios", "--test", "paired_fixture_contract", "--retries", "0", "--no-tests=fail"],
-      "toolchain": {"rustc": "EXACT_VERSION", "linker": "EXACT_IDENTITY"},
-      "features": [],
-      "target": "x86_64-unknown-linux-gnu",
-      "runtime_contract": {"profile": "debug", "executor": "DECLARED_ENVIRONMENT"},
-      "inputs_complete": false,
-      "inputs": [],
-      "cargo_targets": ["wcore-eval-scenarios::test::paired_fixture_contract"]
-    }
-  ],
-  "fixture_owners": {}
-}
-```
+The worked example below writes a concrete manifest for a deliberately small,
+helper-only contract. A real qualification manifest must instead enumerate the
+already-agreed build, affected, native, and release-admission checks. Do not infer
+that complete set from changed paths or remove a required check because no receipt
+is available yet.
 
 Stages are `fast`, `build`, `affected`, or `release`; kinds are `gate`, `build`,
 or `test`. Include existing release-admission and outstanding native requirements
@@ -135,3 +99,126 @@ failed qualification without making `ready` true. Default exit status gates
 checks. `--require-phase merged|published` still requires full verification.
 Malformed input exits nonzero and replaces any old green output with a refused
 report. None of these commands merges, tags, or publishes.
+
+## Operator recipes
+
+From the repository root, with Python 3.11+ and the pinned `just` available:
+
+```sh
+vx just qualification-plan BASE_SHA manifest.json metadata.json
+vx just qualification-status manifest.json state.json receipts.json
+```
+
+The defaults are `target/qualification/plan.json`,
+`target/qualification/readiness.json`, and `target/qualification/readiness.md`.
+Optional trailing arguments override these paths; `qualification-status` accepts
+one final phase argument, defaulting to `verified`. Both recipes create output
+parents and propagate refusal/nonzero exit codes. They pass parameters as Python
+argv, without interpolating path contents into a shell. Existing push, lint, and
+test recipes are unchanged.
+
+## Worked example: helper-only checks at an exact source
+
+This runnable example qualifies **only this helper's syntax and focused tests**.
+It neither builds Core nor qualifies a release. Its manifest intentionally has no
+reviewed reusable input closure, so it cannot reuse results from another SHA.
+The full release/native qualification remains mandatory afterward, using the
+frozen release manifest and authenticated CI/native receipts.
+
+Start from a clean committed checkout. Generate inputs outside tracked source;
+otherwise embedding the candidate SHA in a tracked manifest would change that SHA.
+The example uses the parent commit only to demonstrate planning, not as a claimed
+verified baseline. Metadata inspection below does not compile Rust. Perform real
+Rust build/test recipes only on the approved native executor.
+
+```sh
+export QUAL_INPUTS="$(mktemp -d)"
+python3 - <<'PYCODE'
+import json, os, pathlib, platform, subprocess, sys, sysconfig
+repo = pathlib.Path(subprocess.check_output(
+    ['git', 'rev-parse', '--show-toplevel'], text=True).strip())
+out = pathlib.Path(os.environ['QUAL_INPUTS'])
+def git(*args):
+    return subprocess.check_output(['git', '-C', str(repo), *args], text=True).strip()
+source = git('rev-parse', 'HEAD')
+assert not git('status', '--porcelain'), 'commit or isolate changes first'
+# Warm vx outside JSON capture; metadata reads the workspace without compiling.
+subprocess.run(['vx', 'cargo', '--version'], cwd=repo, check=True)
+raw = subprocess.check_output(['vx', '--no-auto-install', 'cargo', 'metadata',
+    '--no-deps', '--format-version', '1', '--locked'], cwd=repo, text=True)
+assert git('rev-parse', 'HEAD') == source and not git('status', '--porcelain')
+(out / 'metadata.json').write_text(json.dumps({'source_sha': source, 'cargo': json.loads(raw)}))
+identity = {'toolchain': {'python': sys.version}, 'features': [],
+    'target': sysconfig.get_platform(),
+    'runtime_contract': {'executor': platform.node(), 'scope': 'helper-only',
+                         'python': sys.executable},
+    'owner': 'core', 'inputs_complete': False, 'inputs': []}
+checks = [
+    dict(identity, id='helper-syntax', stage='build', kind='build',
+         command=[sys.executable, '-m', 'py_compile', 'scripts/qualification-status.py']),
+    dict(identity, id='helper-self-tests', stage='affected', kind='gate',
+         command=[sys.executable, '.github/scripts/tests/qualification-status.test.py'])]
+manifest = {'schema': 1, 'candidate_sha': source, 'pr_head_sha': None,
+            'release_tag': None, 'checks': checks, 'fixture_owners': {}}
+(out / 'manifest.json').write_text(json.dumps(manifest, indent=2))
+(out / 'state.json').write_text(json.dumps(
+    {'checkout_sha': source, 'pr_head_sha': None, 'worktree_clean': True}, indent=2))
+(out / 'receipts.json').write_text('[]')
+(out / 'base.sha').write_text(git('rev-parse', 'HEAD^'))
+PYCODE
+vx just qualification-plan "$(cat "$QUAL_INPUTS/base.sha")" "$QUAL_INPUTS/manifest.json" "$QUAL_INPUTS/metadata.json"
+```
+
+Review `target/qualification/plan.json` and the explicit manifest commands before
+execution. The following executor runs **only** `commands[].argv`, never joins them
+into a shell string, and preserves stdout/stderr and measured command results. It
+requires `full` for this example because no verified baseline was supplied. A real
+`affected` plan additionally needs the verified baseline and individually admitted
+reuse evidence; do not delete that prerequisite to make the example run.
+
+```sh
+python3 - <<'PYCODE'
+import json, os, pathlib, subprocess
+repo = pathlib.Path.cwd()
+out = pathlib.Path(os.environ['QUAL_INPUTS'])
+manifest = json.loads((out / 'manifest.json').read_text())
+plan = json.loads((repo / 'target/qualification/plan.json').read_text())
+source = manifest['candidate_sha']
+assert plan['candidate_sha'] == source and plan['disposition'] == 'full'
+checks = {row['id']: row for row in manifest['checks']}
+assert plan['required_checks'] == list(checks)
+receipts = []
+env = dict(os.environ, PYTHONPYCACHEPREFIX=str(out / 'pycache'))
+def unchanged():
+    assert subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip() == source
+    assert not subprocess.check_output(['git', 'status', '--porcelain'], text=True).strip()
+for entry in plan['commands']:
+    unchanged()
+    check = checks[entry['id']]
+    assert entry['argv'] == check['command'], 'plan/manifest command mismatch'
+    with (out / (entry['id'] + '.stdout')).open('wb') as stdout, \
+         (out / (entry['id'] + '.stderr')).open('wb') as stderr:
+        result = subprocess.run(entry['argv'], cwd=repo, env=env,
+                                stdout=stdout, stderr=stderr, shell=False)
+    unchanged()
+    receipt = {key: check[key] for key in
+        ('id', 'command', 'toolchain', 'features', 'target', 'runtime_contract')}
+    receipt.update(source_sha=source, complete=True, exit_code=result.returncode,
+                   status='passed' if result.returncode == 0 else 'failed',
+                   attempts=1, flaky=False)
+    receipts.append(receipt)
+    (out / 'receipts.json').write_text(json.dumps(receipts, indent=2))
+    if result.returncode != 0:
+        raise SystemExit(result.returncode)
+PYCODE
+vx just qualification-status "$QUAL_INPUTS/manifest.json" "$QUAL_INPUTS/state.json" "$QUAL_INPUTS/receipts.json"
+```
+
+The resulting verification applies only to the two named helper checks. Merge and
+publication remain pending, and no Core release readiness is established. For a
+PR, collect its latest actual head separately instead of using this non-PR
+example's `null`; do not substitute the checkout SHA for that observation.
+For a real `kind: test` receipt, derive selected/passed/failed/skipped/retry counts
+from its captured test evidence; never copy the helper example's exit-only gate
+shape. Retain original source IDs on any reused passes and run the remaining
+frozen release qualification before treating the release manifest as verified.
