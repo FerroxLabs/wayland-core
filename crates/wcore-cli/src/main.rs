@@ -9481,13 +9481,30 @@ mod tests {
 
     #[cfg(windows)]
     fn raise_native_shutdown_signal(kind: &str) {
-        use windows_sys::Win32::System::Console::{CTRL_C_EVENT, GenerateConsoleCtrlEvent};
+        use windows_sys::Win32::System::Console::{
+            CTRL_C_EVENT, GenerateConsoleCtrlEvent, SetConsoleCtrlHandler,
+        };
 
         assert_eq!(kind, "ctrl-c");
+        // Ignore-Ctrl-C is inherited independently of the handler table.
+        // This isolated helper explicitly tests delivery, so restore normal
+        // processing without changing the parent runner's console policy.
+        // SAFETY: NULL/FALSE changes only this process's ignore attribute.
+        assert_ne!(
+            unsafe { SetConsoleCtrlHandler(None, 0) },
+            0,
+            "restore Ctrl-C processing: {}",
+            std::io::Error::last_os_error()
+        );
         // SAFETY: the parent launches this helper with CREATE_NEW_CONSOLE, so
         // group zero targets only this subprocess's console. Tokio's Ctrl+C
         // handler is installed before the extraction future signals ready.
-        assert_ne!(unsafe { GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0) }, 0);
+        assert_ne!(
+            unsafe { GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0) },
+            0,
+            "GenerateConsoleCtrlEvent failed: {}",
+            std::io::Error::last_os_error()
+        );
     }
 
     #[tokio::test]
@@ -9495,6 +9512,7 @@ mod tests {
     async fn signal_shutdown_native_subprocess() {
         let kind = std::env::var("WCORE_TEST_SHUTDOWN_SIGNAL")
             .expect("native signal kind supplied by parent test");
+        eprintln!("native shutdown helper: starting {kind}");
         let extracted_root = Arc::new(std::sync::Mutex::new(None::<PathBuf>));
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let session = pending_bundled_reference_session(extracted_root.clone(), ready_tx);
@@ -9503,14 +9521,17 @@ mod tests {
             ready_rx
                 .await
                 .expect("reference extraction reaches signal point");
+            eprintln!("native shutdown helper: references extracted; raising {raised}");
             tokio::task::yield_now().await;
             raise_native_shutdown_signal(&raised);
+            eprintln!("native shutdown helper: signal generation returned");
         });
 
         let cleanup = BundledSkillTmpCleanup;
         let status = run_until_shutdown(session, shutdown_signal())
             .await
             .expect("native signal shutdown must complete cleanly");
+        eprintln!("native shutdown helper: shutdown received");
         trigger.await.expect("native signal trigger task");
         // B3: a signalled shutdown reports 128+signal, not SUCCESS. This
         // assertion previously demanded `ExitCode::SUCCESS`, which is what let
@@ -9529,6 +9550,7 @@ mod tests {
             .expect("subprocess records extraction root");
         assert!(process_root.exists());
         drop(cleanup);
+        eprintln!("native shutdown helper: cleanup returned");
         assert!(
             !process_root.exists(),
             "native signal shutdown must remove the exact UUID root"
@@ -9556,6 +9578,16 @@ mod tests {
             );
             child.kill_on_drop(true);
             child.env("WCORE_TEST_SHUTDOWN_SIGNAL", signal);
+            // Preserve both streams without waiting for inherited pipe handles.
+            let diagnostics = tempfile::NamedTempFile::new().expect("signal diagnostic file");
+            let transcript = tempfile::NamedTempFile::new().expect("signal transcript file");
+            child.stdin(std::process::Stdio::null());
+            child.stdout(std::process::Stdio::from(
+                transcript.reopen().expect("signal transcript handle"),
+            ));
+            child.stderr(std::process::Stdio::from(
+                diagnostics.reopen().expect("signal diagnostic handle"),
+            ));
             #[cfg(windows)]
             {
                 use std::os::windows::process::CommandExt as _;
@@ -9563,15 +9595,20 @@ mod tests {
 
                 child.as_std_mut().creation_flags(CREATE_NEW_CONSOLE);
             }
-            let output = tokio::time::timeout(std::time::Duration::from_secs(60), child.output())
-                .await
-                .unwrap_or_else(|_| panic!("native {signal} cleanup subprocess timed out"))
+            let status =
+                tokio::time::timeout(std::time::Duration::from_secs(60), child.status()).await;
+            let stdout = std::fs::read_to_string(transcript.path())
+                .unwrap_or_else(|error| format!("cannot read child stdout: {error}"));
+            let stderr = std::fs::read_to_string(diagnostics.path())
+                .unwrap_or_else(|error| format!("cannot read child stderr: {error}"));
+            let status = status
+                .unwrap_or_else(|_| {
+                    panic!("native {signal} process timed out; stdout={stdout}; stderr={stderr}")
+                })
                 .expect("run native signal subprocess");
             assert!(
-                output.status.success(),
-                "native {signal} cleanup subprocess failed; stdout={} stderr={}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
+                status.success(),
+                "native {signal} cleanup subprocess failed; stdout={stdout} stderr={stderr}"
             );
         }
     }
