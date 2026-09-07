@@ -74,6 +74,14 @@ def audit(text):
                     errors.append(f"{name}: isolated budget missing {required}")
             if BUDGET not in main or not isolated or (main and job.index(isolated) >= job.index(main)):
                 errors.append(f"{name}: budget exclusion is not paired with early execution")
+            durable = steps.get("Durable lifecycle (isolated Windows execution)", "")
+            target = "w02_delete_releases_real_durable_writer_and_preserves_history"
+            if (target not in durable or target not in main
+                    or "--test stabilization_acp_durable" not in durable
+                    or "--retries 0" not in durable or "--test-threads 1" not in durable
+                    or "--no-tests=fail" not in durable or "shell: bash" not in durable
+                    or (main and durable and job.index(durable) >= job.index(main))):
+                errors.append(f"{name}: durable exclusion lacks isolated execution")
             reuse = steps.get("Reuse source-bound native release binary", "")
             if "ci-build-artifact.py fetch" not in reuse or (smoke and reuse and job.index(reuse) >= job.index(smoke)):
                 errors.append(f"{name}: native reuse missing or too late")
@@ -97,6 +105,10 @@ class Contract(unittest.TestCase):
         changed = self.source.replace("-E 'test(=" + BUDGET + ")'", "-E 'test(no_such_test)'", 1)
         self.assertNotEqual(changed, self.source)
         self.assertTrue(any("isolated budget" in error for error in audit(changed)))
+
+    def test_durable_exclusion_cannot_drop_execution(self):
+        changed = self.source.replace("--test stabilization_acp_durable", "--test missing_target", 1)
+        self.assertTrue(any("durable exclusion" in error for error in audit(changed)))
 
     def test_duplicate_smoke_is_detected(self):
         changed = self.source.replace("not binary_id(=wcore-cli::release_binary_smoke)", "all()", 2)

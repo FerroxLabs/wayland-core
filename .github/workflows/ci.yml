@@ -682,13 +682,24 @@ jobs:
             --profile ci --retries 0 --no-tests=fail --test-threads 1 \
             -E 'test(=fix1_dispatch_budget_aborts_with_partial_result)'
 
+      - name: Durable lifecycle (isolated Windows execution)
+        shell: bash
+        if: runner.os == 'Windows'
+        env:
+          ATTEMPT_DIR: ${{ runner.temp }}/wayland-ci-evidence/durable-lifecycle
+        run: |
+          bash .github/scripts/run-tests-with-attempt-evidence.sh \
+            vx cargo nextest run --locked -p wcore-cli --test stabilization_acp_durable \
+            --profile ci --retries 0 --no-tests=fail --test-threads 1 \
+            -E 'test(=w02_delete_releases_real_durable_writer_and_preserves_history)'
+
       - name: Run tests (nextest CI profile)
         shell: bash
         run: |
           if [ "$RUNNER_OS" = Windows ]; then
             bash .github/scripts/run-tests-with-attempt-evidence.sh \
               vx cargo nextest run --workspace --profile ci --no-fail-fast \
-              -E 'not binary_id(=wcore-cli::release_binary_smoke) & not (package(wcore-agent) & binary(workflow_limits_test) & test(=fix1_dispatch_budget_aborts_with_partial_result))'
+              -E 'not binary_id(=wcore-cli::release_binary_smoke) & not (package(wcore-agent) & binary(workflow_limits_test) & test(=fix1_dispatch_budget_aborts_with_partial_result)) & not (package(wcore-cli) & binary(stabilization_acp_durable) & test(=w02_delete_releases_real_durable_writer_and_preserves_history))'
           else
             bash .github/scripts/run-tests-with-attempt-evidence.sh scripts/fd-budget.sh \
               vx cargo nextest run --workspace --profile ci --no-fail-fast \
@@ -1223,13 +1234,24 @@ jobs:
             --profile ci --retries 0 --no-tests=fail --test-threads 1 \
             -E 'test(=fix1_dispatch_budget_aborts_with_partial_result)'
 
+      - name: Durable lifecycle (isolated Windows execution)
+        shell: bash
+        if: runner.os == 'Windows'
+        env:
+          ATTEMPT_DIR: ${{ runner.temp }}/wayland-ci-evidence/durable-lifecycle
+        run: |
+          bash .github/scripts/run-tests-with-attempt-evidence.sh \
+            vx cargo nextest run --locked -p wcore-cli --test stabilization_acp_durable \
+            --profile ci --retries 0 --no-tests=fail --test-threads 1 \
+            -E 'test(=w02_delete_releases_real_durable_writer_and_preserves_history)'
+
       - name: Run tests (nextest CI profile)
         shell: bash
         run: |
           if [ "$RUNNER_OS" = Windows ]; then
             bash .github/scripts/run-tests-with-attempt-evidence.sh \
               vx cargo nextest run --workspace --profile ci --no-fail-fast \
-              -E 'not binary_id(=wcore-cli::release_binary_smoke) & not (package(wcore-agent) & binary(workflow_limits_test) & test(=fix1_dispatch_budget_aborts_with_partial_result))'
+              -E 'not binary_id(=wcore-cli::release_binary_smoke) & not (package(wcore-agent) & binary(workflow_limits_test) & test(=fix1_dispatch_budget_aborts_with_partial_result)) & not (package(wcore-cli) & binary(stabilization_acp_durable) & test(=w02_delete_releases_real_durable_writer_and_preserves_history))'
           else
             bash .github/scripts/run-tests-with-attempt-evidence.sh scripts/fd-budget.sh \
               vx cargo nextest run --workspace --profile ci --no-fail-fast \
