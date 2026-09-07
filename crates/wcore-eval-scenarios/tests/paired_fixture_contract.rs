@@ -121,3 +121,40 @@ fn paired_memory_budget_is_one_whole_task_ceiling() {
         "three native processes do not grant three task budgets"
     );
 }
+
+#[test]
+fn portable_answer_admission_does_not_broaden_other_paired_families() {
+    use wcore_eval_scenarios::scenario::{ApprovalPolicy, Platform, PlatformDisposition};
+
+    let scenario = task().scenario().unwrap();
+    assert!(matches!(scenario.approval, ApprovalPolicy::DenyAll));
+    for platform in Platform::ALL {
+        assert_eq!(
+            scenario.resolve_platform(platform, true).unwrap(),
+            PlatformDisposition::Runnable
+        );
+    }
+    for family in [
+        Family::RepositoryDiagnosis,
+        Family::BoundedCodeChange,
+        Family::MultiFileChange,
+        Family::ToolSkillDiscovery,
+        Family::RelevantMemoryRecall,
+        Family::LongSessionConstraintRetention,
+        Family::InterruptedExecutionRecovery,
+    ] {
+        let mut value = task();
+        value.family = family;
+        if family == Family::LongSessionConstraintRetention {
+            value.prompts = vec!["Retain the original constraint.".into(); 8];
+            value
+                .files
+                .insert("history.txt".into(), "x".repeat(200_000));
+        }
+        let scenario = value.scenario().unwrap();
+        assert_eq!(scenario.supported_platforms, vec![Platform::Linux]);
+        for platform in [Platform::Macos, Platform::Windows] {
+            assert!(scenario.resolve_platform(platform, true).is_err());
+        }
+    }
+}

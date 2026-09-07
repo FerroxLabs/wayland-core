@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     fixtures::repository::SeededRepository,
-    scenario::{Category, Scenario, Turn},
+    scenario::{Category, Platform, Scenario, Turn},
 };
 
 mod effect;
@@ -143,8 +143,13 @@ impl PairedTask {
     pub fn scenario(&self) -> anyhow::Result<Scenario> {
         self.validate()?;
         let repository = self.repository()?;
+        // The answer-only family uses portable file/text checks and denies tools.
+        let platforms: &[Platform] = match self.family {
+            Family::AnswerWithoutAction => &Platform::ALL,
+            _ => &[Platform::Linux],
+        };
         let mut scenario = Scenario::new(self.family.scenario_id(), Category::Multiturn)
-            .platforms([crate::scenario::Platform::Linux])
+            .platforms(platforms.iter().copied())
             .max_total_cost_usd(self.max_cost_usd)
             .max_total_time(Duration::from_secs(self.max_time_secs))
             .approval(
