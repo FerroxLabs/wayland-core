@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# ADMISSION: caller-decides -- executes the caller-selected test/build command;
+# aggregate evidence gates independently require its result.
 # Run nextest ONCE and retain complete command output plus per-attempt evidence.
 # No exit code or missing JUnit justifies retrying a suite: infrastructure retries
 # belong to classified setup steps BEFORE test execution. Manual invocations keep

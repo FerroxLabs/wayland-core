@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# ADMISSION: caller-decides -- executes the caller-selected test/build command;
+# aggregate evidence gates independently require its result.
 # Capture one command, without retries or output filtering. CAPTURE_DIR must be
 # a fresh directory; EVIDENCE_SOURCE_SHA defaults to git HEAD. Arguments are
 # recorded verbatim: pass only CI commands, never credentials in argv. Environment
