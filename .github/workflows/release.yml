@@ -1243,10 +1243,105 @@ jobs:
           }
           Write-Host "ARM64 PE binary verified: $bin ($size bytes)"
 
+  # These are the original W12 mutation and W14 native admission producers.
+  # They run once, against the checked-out tag; completed same-run producer
+  # jobs authenticate their artifacts without waiting for this run to finish.
+  collect-release-mutants:
+    name: Collect original release mutation receipts
+    runs-on: ubuntu-latest
+    needs: [prepare-release, github-release]
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: refs/tags/${{ inputs.tag_name || github.ref_name }}
+          fetch-depth: 0
+      - name: Install existing Linux test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libdbus-1-dev libseccomp-dev libasound2-dev libssl-dev mold
+      - uses: loonghao/vx@v0.9.17
+        with:
+          setup: 'true'
+          cache: 'true'
+      - uses: taiki-e/install-action@cargo-nextest
+      - name: Capture eight original baseline and mutant pairs once
+        shell: bash
+        env:
+          CARGO_BUILD_JOBS: '2'
+          CARGO_INCREMENTAL: '0'
+          CARGO_PROFILE_DEV_DEBUG: '0'
+          CARGO_PROFILE_TEST_DEBUG: '0'
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/collect-stabilization-mutants.py \
+            --output "$RUNNER_TEMP/stabilization-mutants" --source "$(git rev-parse HEAD)" \
+            --target-dir "$RUNNER_TEMP/stabilization-mutant-target"
+      - name: Preserve complete mutation evidence including failures
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-mutants-raw
+          path: ${{ runner.temp }}/stabilization-mutants/
+          if-no-files-found: error
+
+  collect-release-native:
+    name: Collect original native Windows release receipts
+    runs-on: windows-latest
+    needs: [prepare-release, github-release]
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: refs/tags/${{ inputs.tag_name || github.ref_name }}
+          fetch-depth: 0
+      - name: Record which Windows executor served this job
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${RUNNER_NAME:-}"
+          echo "runner_name=$RUNNER_NAME computername=${COMPUTERNAME:-unknown}"
+          echo "Native executor: $RUNNER_NAME (${COMPUTERNAME:-unknown})" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/download-artifact@v8
+        with:
+          name: private-release-candidate
+          path: ${{ runner.temp }}/private-release-candidate
+      - uses: loonghao/vx@v0.9.17
+        with:
+          setup: 'true'
+          cache: 'true'
+      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: taiki-e/install-action@cargo-nextest
+      - name: Capture unchanged Windows authority and containment checks
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag_name || github.ref_name }}
+          CARGO_BUILD_JOBS: '2'
+          CARGO_INCREMENTAL: '0'
+          CARGO_PROFILE_DEV_DEBUG: '0'
+          CARGO_PROFILE_TEST_DEBUG: '0'
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/collect-stabilization-native.py \
+            --output "$RUNNER_TEMP/stabilization-native" --sha "$(git rev-parse HEAD)" \
+            --archive "$RUNNER_TEMP/private-release-candidate/wayland-core-${RELEASE_TAG}-x86_64-pc-windows-msvc.zip"
+      - name: Preserve complete native evidence including failures
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-native-raw
+          path: ${{ runner.temp }}/stabilization-native/
+          if-no-files-found: error
+
   produce-release-evidence:
     name: Produce source-bound behavioral admission receipt
     runs-on: ubuntu-latest
-    needs: [prepare-release, github-release, post-tag-smoke]
+    needs: [prepare-release, github-release, post-tag-smoke, collect-release-mutants, collect-release-native]
     outputs:
       sha: ${{ steps.source.outputs.sha }}
     permissions:
@@ -1286,6 +1381,28 @@ jobs:
           PY
           gh run download "$EVIDENCE_RUN_ID" --repo "$REPOSITORY" \
             --name "stabilization-raw-$sha" --dir raw-evidence
+      # Explicit names and no run-id select artifacts from THIS authenticated
+      # release run; needs above requires both actual producer jobs to succeed.
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-mutants-raw
+          path: mutant-evidence
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-native-raw
+          path: native-evidence
+      - name: Merge authenticated source-bound producer receipts
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag_name || github.ref_name }}
+          EVIDENCE_RUN_ID: ${{ inputs.evidence_run_id }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/merge-stabilization-inputs.py \
+            --ci raw-evidence --mutants mutant-evidence --native native-evidence \
+            --output merged-evidence --artifacts artifacts --sha "$(git rev-parse HEAD)" \
+            --tag "$RELEASE_TAG" --repository "$GITHUB_REPOSITORY" \
+            --run-id "$GITHUB_RUN_ID" --ci-run-id "$EVIDENCE_RUN_ID"
       - name: Produce admission from exact candidate and actual command outputs
         shell: bash
         env:
@@ -1293,14 +1410,16 @@ jobs:
         run: |
           set -euo pipefail
           python3 -B scripts/stabilization_release_gate.py --action produce \
-            --artifacts artifacts --inputs raw-evidence/index.json --output evidence/receipt.json \
+            --artifacts artifacts --inputs merged-evidence/index.json --output evidence/receipt.json \
             --sha "$(git rev-parse HEAD)" --tag "$RELEASE_TAG"
       - name: Upload admission receipt including blocked prerequisites
         if: ${{ !cancelled() && steps.source.outputs.sha != '' }}
         uses: actions/upload-artifact@v7
         with:
           name: stabilization-evidence-${{ steps.source.outputs.sha }}
-          path: evidence/receipt.json
+          path: |
+            evidence/receipt.json
+            merged-evidence/
           if-no-files-found: error
 
   promote-release:
@@ -1322,7 +1441,7 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           name: stabilization-evidence-${{ needs.produce-release-evidence.outputs.sha }}
-          path: evidence
+          path: .
       - name: Promote exact accepted bytes; retain deferred risk in release notes
         shell: bash
         env:
