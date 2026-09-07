@@ -444,11 +444,7 @@ impl AcpServer {
         }
         let channels = crate::bounded::channel(overflow.clone())
             .ok()
-            .and_then(|live| {
-                crate::bounded::channel(DeliveryPosition::Overload)
-                    .ok()
-                    .map(|positions| (live, positions))
-            });
+            .zip(crate::bounded::channel(DeliveryPosition::Overload).ok());
         let (mut positions_tx, rx) = match channels {
             Some(((tx, rx), (positions_tx, mut positions_rx))) => {
                 let events = Arc::clone(&self.events);
