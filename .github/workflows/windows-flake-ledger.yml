@@ -174,26 +174,6 @@ jobs:
       # Compile the three test binaries BEFORE measuring, so the first
       # repetition of the first test is not the one that pays for the build and
       # blows its own wall-clock budget.
-      - name: Warm the test binaries
-        shell: bash
-        env:
-          LEDGER_TESTS: ${{ github.event.inputs.tests || '' }}
-        run: |
-          set -euo pipefail
-          # With a custom target set the two hardcoded filters warm the wrong
-          # binaries, and the harness's own presence check would then pay for
-          # the build. Listing the whole workspace warms whatever was asked for.
-          if [ -n "${LEDGER_TESTS}" ]; then
-            cargo nextest list --profile ci -p wcore-cli --bin wayland-core --test stabilization_acp_durable > /dev/null
-            exit 0
-          fi
-          cargo nextest list --profile ci \
-            -E 'package(wcore-swarm) and (binary(dispatch_smoke) or binary(worker_runtime_limits))' \
-            > /dev/null
-          cargo nextest list --profile ci \
-            -E 'package(wcore-cli) and binary(deterministic_openai_loop)' \
-            > /dev/null
-
       - name: Measure with retries disabled
         shell: bash
         env:
@@ -281,26 +261,6 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
-
-      - name: Warm the test binaries
-        shell: bash
-        env:
-          LEDGER_TESTS: ${{ github.event.inputs.tests || '' }}
-        run: |
-          set -euo pipefail
-          # With a custom target set the two hardcoded filters warm the wrong
-          # binaries, and the harness's own presence check would then pay for
-          # the build. Listing the whole workspace warms whatever was asked for.
-          if [ -n "${LEDGER_TESTS}" ]; then
-            cargo nextest list --profile ci -p wcore-cli --bin wayland-core --test stabilization_acp_durable > /dev/null
-            exit 0
-          fi
-          cargo nextest list --profile ci \
-            -E 'package(wcore-swarm) and (binary(dispatch_smoke) or binary(worker_runtime_limits))' \
-            > /dev/null
-          cargo nextest list --profile ci \
-            -E 'package(wcore-cli) and binary(deterministic_openai_loop)' \
-            > /dev/null
 
       - name: Measure with retries disabled
         shell: bash
