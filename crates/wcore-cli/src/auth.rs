@@ -1552,8 +1552,10 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(auth_credentials_env)]
     fn remove_errors_when_the_provider_is_not_configured() {
         let dir = tempdir().unwrap();
+        let _env = LadderEnv::scoped(dir.path());
         let path = dir.path().join("config.toml");
         let err = run_with_path(
             AuthCmd::Remove {
