@@ -503,12 +503,19 @@ fn output_to_result(output: SandboxOutput) -> ToolResult {
 ///   call at all and any cache key without "now" in it is wrong (#234).
 /// * No prune. See the guard at `workspace_policy.rs:1417-1425` and
 ///   `no_prune_survives_the_922_backend_gate`.
+#[cfg(test)]
+thread_local! {
+    static MANIFEST_BUILD_SPAWNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn spawn_manifest_build(
     command: &str,
     workspace: Option<Arc<crate::workspace_policy::WorkspacePolicy>>,
     sandbox: Arc<wcore_sandbox::SandboxRegistry>,
     backend_enforces_read_deny: bool,
 ) -> tokio::task::JoinHandle<(SandboxManifest, SandboxCommand)> {
+    #[cfg(test)]
+    MANIFEST_BUILD_SPAWNS.with(|count| count.set(count.get() + 1));
     let command = command.to_string();
     tokio::task::spawn_blocking(move || {
         build_sandbox_pieces_for_session(
