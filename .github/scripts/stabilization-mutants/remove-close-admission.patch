@@ -1,0 +1,26 @@
+diff --git a/crates/wcore-acp/src/server.rs b/crates/wcore-acp/src/server.rs
+index 3d462827c..7dc04dd8e 100644
+--- a/crates/wcore-acp/src/server.rs
++++ b/crates/wcore-acp/src/server.rs
+@@ -918,7 +918,6 @@ impl HttpHandler for AcpServer {
+         };
+         let upstream = tokio::select! {
+             biased;
+-            _ = record.lifecycle.closed() => return Err(AcpError::Cleanup("session is closing".into())),
+             result = establish => result?,
+         };
+         Ok(self.tee_into_log(&session_id, upstream, &record.lifecycle, turn_slot, turn_id))
+diff --git a/crates/wcore-acp/src/server/lifecycle.rs b/crates/wcore-acp/src/server/lifecycle.rs
+index 98c4deb6e..b4a8ce192 100644
+--- a/crates/wcore-acp/src/server/lifecycle.rs
++++ b/crates/wcore-acp/src/server/lifecycle.rs
+@@ -36,9 +36,6 @@ impl SessionLifecycle {
+     }
+     pub(super) async fn admit(&self) -> Result<OwnedRwLockReadGuard<()>, AcpError> {
+         let permit = self.admission.clone().read_owned().await;
+-        if self.closing.load(Ordering::Acquire) {
+-            return Err(AcpError::Cleanup("session is closing".to_string()));
+-        }
+         Ok(permit)
+     }
+ 

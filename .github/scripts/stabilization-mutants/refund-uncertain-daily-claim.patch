@@ -1,0 +1,13 @@
+diff --git a/crates/wcore-budget/src/daily.rs b/crates/wcore-budget/src/daily.rs
+index bf7389835..97e1a90da 100644
+--- a/crates/wcore-budget/src/daily.rs
++++ b/crates/wcore-budget/src/daily.rs
+@@ -419,7 +419,7 @@ impl DailyLedgerFile {
+                     if claim.expires_at_unix_ms <= stamp
+                         && matches!(claim.status, ClaimState::Reserved)
+                     {
+-                        claim.status = ClaimState::Uncertain;
++                        claim.status = ClaimState::Released;
+                     }
+                 }
+             }

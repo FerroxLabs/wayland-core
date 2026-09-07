@@ -1,0 +1,15 @@
+diff --git a/crates/wcore-config/src/credentials.rs b/crates/wcore-config/src/credentials.rs
+index 68c645657..52dc6f648 100644
+--- a/crates/wcore-config/src/credentials.rs
++++ b/crates/wcore-config/src/credentials.rs
+@@ -1825,7 +1825,9 @@ impl CredentialsStore for LadderCredentialsStore {
+                 first_error.get_or_insert(error);
+             }
+         }
+-        first_error.map_or(Ok(()), Err)
++        // W12 mutant: all tiers were attempted, but suppress retained-secret failure.
++        let _ = first_error;
++        Ok(())
+     }
+ }
+ 

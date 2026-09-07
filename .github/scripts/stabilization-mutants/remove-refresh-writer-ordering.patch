@@ -1,0 +1,16 @@
+diff --git a/crates/wcore-agent/src/oauth/chatgpt.rs b/crates/wcore-agent/src/oauth/chatgpt.rs
+index 7802ee749..e24b7126a 100644
+--- a/crates/wcore-agent/src/oauth/chatgpt.rs
++++ b/crates/wcore-agent/src/oauth/chatgpt.rs
+@@ -580,10 +580,8 @@ impl ChatGptTokenManager {
+         let path = self.storage.refresh_lock_path(PROVIDER);
+         match refresh_lock::acquire(path, "ChatGPT OAuth refresh").await {
+             refresh_lock::Acquisition::Held(lock) => {
+-                let outcome = self.gated_refresh(entry, true).await;
+-                // Explicit, not end-of-scope: the lock must outlive the store
+-                // write and be released the moment it does.
+                 drop(lock);
++                let outcome = self.gated_refresh(entry, true).await;
+                 outcome
+             }
+             refresh_lock::Acquisition::Busy(why) => {

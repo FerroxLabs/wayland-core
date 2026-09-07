@@ -1,0 +1,17 @@
+diff --git a/crates/wcore-agent/src/channel_tools.rs b/crates/wcore-agent/src/channel_tools.rs
+index d2b2c8762..3335236ac 100644
+--- a/crates/wcore-agent/src/channel_tools.rs
++++ b/crates/wcore-agent/src/channel_tools.rs
+@@ -66,9 +66,9 @@ impl ChannelToolScope {
+ /// Shared operator-authority predicate for tool and lifecycle-hook dispatch.
+ /// A local session has no channel scope and keeps its installed extensions.
+ pub fn allows_ambient_mcp(scope: Option<&ChannelToolScope>) -> bool {
+-    scope.is_none_or(|scope| {
+-        scope.posture == ChannelToolPosture::Full || scope.ambient_mcp_full_authority_v1
+-    })
++    // W12 mutant: ignore the host's remote MCP authority restriction.
++    let _ = scope;
++    true
+ }
+ 
+ /// Built-in tools provably free of host filesystem / shell access — safe to
