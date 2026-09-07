@@ -9566,9 +9566,13 @@ mod tests {
             );
             child.kill_on_drop(true);
             child.env("WCORE_TEST_SHUTDOWN_SIGNAL", signal);
-            // Preserve helper panics and stage diagnostics in the parent test's
-            // capture even when the timeout drops child.output().
+            // Preserve both streams without waiting for inherited pipe handles.
             let diagnostics = tempfile::NamedTempFile::new().expect("signal diagnostic file");
+            let transcript = tempfile::NamedTempFile::new().expect("signal transcript file");
+            child.stdin(std::process::Stdio::null());
+            child.stdout(std::process::Stdio::from(
+                transcript.reopen().expect("signal transcript handle"),
+            ));
             child.stderr(std::process::Stdio::from(
                 diagnostics.reopen().expect("signal diagnostic handle"),
             ));
@@ -9579,18 +9583,20 @@ mod tests {
 
                 child.as_std_mut().creation_flags(CREATE_NEW_CONSOLE);
             }
-            let output = tokio::time::timeout(std::time::Duration::from_secs(60), child.output())
-                .await
+            let status =
+                tokio::time::timeout(std::time::Duration::from_secs(60), child.status()).await;
+            let stdout = std::fs::read_to_string(transcript.path())
+                .unwrap_or_else(|error| format!("cannot read child stdout: {error}"));
+            let stderr = std::fs::read_to_string(diagnostics.path())
+                .unwrap_or_else(|error| format!("cannot read child stderr: {error}"));
+            let status = status
                 .unwrap_or_else(|_| {
-                    let log = std::fs::read_to_string(diagnostics.path()).unwrap_or_default();
-                    panic!("native {signal} cleanup subprocess timed out; child stderr={log}")
+                    panic!("native {signal} process timed out; stdout={stdout}; stderr={stderr}")
                 })
                 .expect("run native signal subprocess");
             assert!(
-                output.status.success(),
-                "native {signal} cleanup subprocess failed; stdout={} stderr={}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
+                status.success(),
+                "native {signal} cleanup subprocess failed; stdout={stdout} stderr={stderr}"
             );
         }
     }
