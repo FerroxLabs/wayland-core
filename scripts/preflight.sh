@@ -99,6 +99,7 @@ GATES=(
   "armed|python3 scripts/check-criteria-ledger.py --self-test"
   "disarmed:--offline|python3 scripts/check-criteria-ledger.py --offline"
   "armed|python3 scripts/check-release-readiness.py --self-test"
+  "armed|python3 -B scripts/stabilization_release_gate.py --self-test"
   "armed|python3 scripts/check-windows-attribution.py --self-test"
   "armed|python3 scripts/check-windows-attribution.py"
   "armed|python3 scripts/flake-ledger.py --self-test"
