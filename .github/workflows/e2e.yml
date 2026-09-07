@@ -151,7 +151,9 @@ jobs:
         env:
           E2E_PROVIDER: ${{ matrix.provider }}
         run: |
-          vx cargo nextest list --locked -p wcore-agent --features ${{ matrix.features }} \
+          # Keep first-use rustup installer output out of the JSON inventory.
+          vx cargo --version
+          vx --no-auto-install cargo nextest list --locked -p wcore-agent --features ${{ matrix.features }} \
             --test e2e -E '${{ matrix.filter }}' --message-format json > e2e-selection.json
           python3 - <<'PYCODE'
           import json, os
