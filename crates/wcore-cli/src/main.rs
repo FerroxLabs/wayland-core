@@ -6243,6 +6243,7 @@ async fn run_json_stream_mode(
                     }
                 };
 
+                let usage_before_run = engine.usage_snapshot().0;
                 let mut stopped = false;
                 // #1070: latched false once the host's command stream reaches
                 // EOF, so the select never polls a closed receiver again.
@@ -6263,7 +6264,19 @@ async fn run_json_stream_mode(
 
                     loop {
                         tokio::select! {
+                            // Install the new turn token on first poll before accepting Stop.
+                            // Otherwise the engine could renew an already-cancelled token.
+                            biased;
                             result = &mut engine_fut => {
+                                if stopped {
+                                    if let Err(error) = result
+                                        && !matches!(error, wcore_agent::engine::AgentError::UserAborted)
+                                    {
+                                        output.emit_error(&format!("{error:#}"), false, error.failure_category());
+                                        run_failed = true;
+                                    }
+                                    break;
+                                }
                                 match result {
                                     Ok(result) => {
                                         if result.finish_reason == FinishReason::Error {
@@ -6333,20 +6346,11 @@ async fn run_json_stream_mode(
                                         approval_manager.resolve(&call_id, ToolApprovalResult::Denied { reason });
                                     }
                                     ProtocolCommand::Stop => {
-                                        // wayland#403 fix-3: Stop CANCELS THE ACTIVE TURN — it must
-                                        // NOT end the session. Fire the engine-owned active-turn
-                                        // token before dropping `engine_fut`; we emit `stream_end`
-                                        // (FinishReason::Stop) for this msg_id so the host's turn-loop
-                                        // gets its terminator and doesn't hang. `stopped` then makes
-                                        // the outer loop `continue` (keep reading commands) instead of
-                                        // breaking — the pre-fix `break` stranded the session
-                                        // ("new chat required") after any mid-turn Stop. Only EOF and
-                                        // `/exit` end a json-stream session, matching the TUI (Esc
-                                        // cancels the turn, never closes the session).
+                                        // Let the cancelled engine future finish its durable
+                                        // cleanup before emitting the terminal event. Dropping
+                                        // it here leaves the next message journal-blocked.
                                         session_control.cancel_active_turn();
-                                        output.emit_stream_end(&msg_id, 0, 0, 0, 0, 0, FinishReason::Stop);
                                         stopped = true;
-                                        break;
                                     }
                                     ProtocolCommand::SetConfig { model, thinking, thinking_budget, effort, compaction } => {
                                         pending_config = Some((model, thinking, thinking_budget, effort, compaction));
@@ -6616,14 +6620,38 @@ async fn run_json_stream_mode(
                     }
                 }
 
-                if run_failed {
+                if run_failed || stopped {
                     // CORE-2: the failed run's terminal stream_end. When the
                     // run consumed provider round-trips before dying, report
                     // the cumulative usage + this run's delta from the
                     // engine's snapshot (the counters already grew and will
                     // be persisted); otherwise keep the legacy zero-usage
                     // emission byte-identical.
-                    let (total, delta) = engine.usage_snapshot();
+                    let (total, mut delta) = engine.usage_snapshot();
+                    let finish_reason = if stopped {
+                        // Stop may win before the future resets run_usage. Derive
+                        // its delta from the pre-run cumulative snapshot so an
+                        // unpolled turn cannot inherit the previous turn's usage.
+                        delta.input_tokens = total
+                            .input_tokens
+                            .saturating_sub(usage_before_run.input_tokens);
+                        delta.output_tokens = total
+                            .output_tokens
+                            .saturating_sub(usage_before_run.output_tokens);
+                        delta.cache_creation_tokens = total
+                            .cache_creation_tokens
+                            .saturating_sub(usage_before_run.cache_creation_tokens);
+                        delta.cache_read_tokens = total
+                            .cache_read_tokens
+                            .saturating_sub(usage_before_run.cache_read_tokens);
+                        if run_failed {
+                            FinishReason::Error
+                        } else {
+                            FinishReason::Stop
+                        }
+                    } else {
+                        FinishReason::Error
+                    };
                     let delta_nonzero = delta.input_tokens > 0
                         || delta.output_tokens > 0
                         || delta.cache_creation_tokens > 0
@@ -6636,13 +6664,13 @@ async fn run_json_stream_mode(
                             total.output_tokens,
                             total.cache_creation_tokens,
                             total.cache_read_tokens,
-                            FinishReason::Error,
+                            finish_reason,
                             None,
                             None,
                             Some(&delta),
                         );
                     } else {
-                        output.emit_stream_end(&msg_id, 0, 0, 0, 0, 0, FinishReason::Error);
+                        output.emit_stream_end(&msg_id, 0, 0, 0, 0, 0, finish_reason);
                     }
                 }
 
