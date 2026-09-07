@@ -9481,9 +9481,21 @@ mod tests {
 
     #[cfg(windows)]
     fn raise_native_shutdown_signal(kind: &str) {
-        use windows_sys::Win32::System::Console::{CTRL_C_EVENT, GenerateConsoleCtrlEvent};
+        use windows_sys::Win32::System::Console::{
+            CTRL_C_EVENT, GenerateConsoleCtrlEvent, SetConsoleCtrlHandler,
+        };
 
         assert_eq!(kind, "ctrl-c");
+        // Ignore-Ctrl-C is inherited independently of the handler table.
+        // This isolated helper explicitly tests delivery, so restore normal
+        // processing without changing the parent runner's console policy.
+        // SAFETY: NULL/FALSE changes only this process's ignore attribute.
+        assert_ne!(
+            unsafe { SetConsoleCtrlHandler(None, 0) },
+            0,
+            "restore Ctrl-C processing: {}",
+            std::io::Error::last_os_error()
+        );
         // SAFETY: the parent launches this helper with CREATE_NEW_CONSOLE, so
         // group zero targets only this subprocess's console. Tokio's Ctrl+C
         // handler is installed before the extraction future signals ready.
