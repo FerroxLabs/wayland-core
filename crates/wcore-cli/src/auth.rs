@@ -1003,6 +1003,8 @@ mod tests {
         store.get(&store_slot(Provider::from_slug(slug)?)?).ok()?
     }
 
+    /// These tests share the default serial lock with the other CLI tests
+    /// that mutate WAYLAND_HOME; a private auth lock cannot protect that env.
     /// Scope the ladder for a test: `WAYLAND_HOME` forces the isolated-profile
     /// path (so the OS keyring is never touched — a test that wrote into the
     /// developer's real Keychain would be a defect in itself), and a passphrase
@@ -1067,7 +1069,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(auth_credentials_env)]
+    #[serial_test::serial]
     fn add_stores_two_accounts_on_one_provider_in_two_separate_slots() {
         // #14 end to end through the CLI: two OpenRouter accounts, two keys,
         // neither in cleartext, and neither overwriting the other.
@@ -1113,7 +1115,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(auth_credentials_env)]
+    #[serial_test::serial]
     fn add_moves_an_accounts_cleartext_key_out_of_config() {
         let dir = tempdir().unwrap();
         let _env = LadderEnv::scoped(dir.path());
@@ -1145,7 +1147,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(auth_credentials_env)]
+    #[serial_test::serial]
     fn add_refuses_to_validate_an_account_that_overrides_base_url() {
         // SECURITY: the account's key belongs to its own endpoint. Validating
         // it against the built-in provider would post the operator's
@@ -1176,7 +1178,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(auth_credentials_env)]
+    #[serial_test::serial]
     fn remove_clears_an_accounts_slot_and_list_shows_it_first() {
         let dir = tempdir().unwrap();
         let _env = LadderEnv::scoped(dir.path());
@@ -1217,7 +1219,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(auth_credentials_env)]
+    #[serial_test::serial]
     fn an_undeclared_id_is_not_silently_promoted_to_an_account() {
         // A typo'd slug must still be an error. Creating a slot for an
         // undeclared id would write a key nothing can ever resolve.
@@ -1240,7 +1242,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(auth_credentials_env)]
+    #[serial_test::serial]
     fn add_no_validate_stores_the_provider_key_and_never_writes_it_in_cleartext() {
         let dir = tempdir().unwrap();
         let _env = LadderEnv::scoped(dir.path());
@@ -1281,7 +1283,7 @@ mod tests {
     /// `resolve_api_key`, so a stale cleartext copy would make the secure write
     /// a silent no-op from the user's point of view.
     #[test]
-    #[serial_test::serial(auth_credentials_env)]
+    #[serial_test::serial]
     fn add_strips_a_pre_existing_cleartext_key_that_would_shadow_the_store() {
         let dir = tempdir().unwrap();
         let _env = LadderEnv::scoped(dir.path());
@@ -1321,7 +1323,7 @@ mod tests {
     /// passphrase there is no secure tier, and `auth add` must refuse with the
     /// actionable message rather than falling back to cleartext.
     #[test]
-    #[serial_test::serial(auth_credentials_env)]
+    #[serial_test::serial]
     fn add_refuses_rather_than_writing_cleartext_when_no_secure_tier_exists() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.toml");
@@ -1382,7 +1384,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(auth_credentials_env)]
+    #[serial_test::serial]
     fn autodetect_resolves_provider_from_key_prefix() {
         let dir = tempdir().unwrap();
         let _env = LadderEnv::scoped(dir.path());
@@ -1440,7 +1442,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(auth_credentials_env)]
+    #[serial_test::serial]
     fn add_replaces_an_existing_key_in_place() {
         let dir = tempdir().unwrap();
         let _env = LadderEnv::scoped(dir.path());
@@ -1465,7 +1467,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(auth_credentials_env)]
+    #[serial_test::serial]
     fn add_preserves_other_config_tables() {
         let dir = tempdir().unwrap();
         let _env = LadderEnv::scoped(dir.path());
@@ -1502,7 +1504,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(auth_credentials_env)]
+    #[serial_test::serial]
     fn remove_clears_the_key_from_both_the_store_and_the_legacy_config_table() {
         let dir = tempdir().unwrap();
         let _env = LadderEnv::scoped(dir.path());
@@ -1552,7 +1554,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(auth_credentials_env)]
+    #[serial_test::serial]
     fn remove_errors_when_the_provider_is_not_configured() {
         let dir = tempdir().unwrap();
         let _env = LadderEnv::scoped(dir.path());
