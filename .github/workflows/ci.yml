@@ -109,6 +109,8 @@ jobs:
           python3 scripts/test-ci-build-artifact.py
           python3 .github/scripts/tests/qualification-status.test.py
           python3 .github/scripts/tests/release-workflow-contract.test.py
+          python3 .github/scripts/tests/release-collection.test.py
+          python3 .github/scripts/tests/collect-stabilization-mutants.test.py
       - name: Confirm Windows routing before reserving native runners
         run: |
           python3 - <<'PY'

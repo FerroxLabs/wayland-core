@@ -1259,6 +1259,7 @@ jobs:
         with:
           ref: refs/tags/${{ inputs.tag_name || github.ref_name }}
           fetch-depth: 0
+          persist-credentials: false
       - name: Install existing Linux test dependencies
         run: |
           sudo apt-get update
@@ -1301,6 +1302,11 @@ jobs:
         with:
           ref: refs/tags/${{ inputs.tag_name || github.ref_name }}
           fetch-depth: 0
+          persist-credentials: false
+      - name: Set up native collector Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
       - name: Record which Windows executor served this job
         shell: bash
         run: |
@@ -1328,7 +1334,7 @@ jobs:
           CARGO_PROFILE_TEST_DEBUG: '0'
         run: |
           set -euo pipefail
-          python3 .github/scripts/collect-stabilization-native.py \
+          python .github/scripts/collect-stabilization-native.py \
             --output "$RUNNER_TEMP/stabilization-native" --sha "$(git rev-parse HEAD)" \
             --archive "$RUNNER_TEMP/private-release-candidate/wayland-core-${RELEASE_TAG}-x86_64-pc-windows-msvc.zip"
       - name: Preserve complete native evidence including failures
