@@ -88,8 +88,16 @@ class Collection(unittest.TestCase):
         self.assertEqual(len(result["mutants"]), 8)
         self.assertEqual(len(result["native"]), 4)
         self.assertIn("prior ACL nonpass retained", result["deferred_risks"][0]["disposition"])
+        self.assertIn("ACL repair verified", result["deferred_risks"][0]["disposition"])
         self.assertEqual(result["deferred_risks"][1]["disposition"], "standing disposition; native evidence pending")
         self.assertEqual(result["provenance"][0]["run_id"], "4")
+
+    def test_legacy_quarantine_cannot_qualify_the_current_release(self):
+        legacy = {"admission": "accepted", "blockers": [],
+                  "native": [{"outcome": "quarantined", "exit_code": 100}]}
+        with patch.object(merge.gate, "produce", return_value=legacy):
+            with self.assertRaisesRegex(ValueError, "not legacy quarantine"):
+                self.run_merge()
 
     def test_stale_source_is_not_relabelled(self):
         self.mutate_index("mutants", lambda d: d.update(source_sha="b" * 40))

@@ -47,10 +47,11 @@ def merge(sources, output, sha, repository, run_id, ci_run_id, artifacts, tag):
     # This binds all four native rows to the exact private ZIP and source.
     receipt = gate.produce(index_path, artifacts, sha, tag, output / "collection-admission.json")
     gate.require(receipt["admission"] == "accepted", "; ".join(receipt["blockers"]))
+    gate.require(all(row.get("outcome") == "passed" and row.get("exit_code") == 0
+                     for row in receipt["native"]), "current release requires passing native checks, not legacy quarantine")
     for risk in result["deferred_risks"]:
         if risk.get("id") == "core#368":
-            risk["disposition"] = risk["disposition"].replace(
-                "native evidence pending", "native evidence captured for this candidate; prior ACL nonpass retained")
+            risk["disposition"] = "ACL repair verified by this candidate's native ACL and lease checks; prior ACL nonpass retained"
     index_path.write_text(json.dumps(result, indent=2) + "\n")
     return result
 
