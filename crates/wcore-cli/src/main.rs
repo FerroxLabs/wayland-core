@@ -9487,7 +9487,12 @@ mod tests {
         // SAFETY: the parent launches this helper with CREATE_NEW_CONSOLE, so
         // group zero targets only this subprocess's console. Tokio's Ctrl+C
         // handler is installed before the extraction future signals ready.
-        assert_ne!(unsafe { GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0) }, 0);
+        assert_ne!(
+            unsafe { GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0) },
+            0,
+            "GenerateConsoleCtrlEvent failed: {}",
+            std::io::Error::last_os_error()
+        );
     }
 
     #[tokio::test]
@@ -9495,6 +9500,7 @@ mod tests {
     async fn signal_shutdown_native_subprocess() {
         let kind = std::env::var("WCORE_TEST_SHUTDOWN_SIGNAL")
             .expect("native signal kind supplied by parent test");
+        eprintln!("native shutdown helper: starting {kind}");
         let extracted_root = Arc::new(std::sync::Mutex::new(None::<PathBuf>));
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let session = pending_bundled_reference_session(extracted_root.clone(), ready_tx);
@@ -9503,14 +9509,17 @@ mod tests {
             ready_rx
                 .await
                 .expect("reference extraction reaches signal point");
+            eprintln!("native shutdown helper: references extracted; raising {raised}");
             tokio::task::yield_now().await;
             raise_native_shutdown_signal(&raised);
+            eprintln!("native shutdown helper: signal generation returned");
         });
 
         let cleanup = BundledSkillTmpCleanup;
         let status = run_until_shutdown(session, shutdown_signal())
             .await
             .expect("native signal shutdown must complete cleanly");
+        eprintln!("native shutdown helper: shutdown received");
         trigger.await.expect("native signal trigger task");
         // B3: a signalled shutdown reports 128+signal, not SUCCESS. This
         // assertion previously demanded `ExitCode::SUCCESS`, which is what let
@@ -9529,6 +9538,7 @@ mod tests {
             .expect("subprocess records extraction root");
         assert!(process_root.exists());
         drop(cleanup);
+        eprintln!("native shutdown helper: cleanup returned");
         assert!(
             !process_root.exists(),
             "native signal shutdown must remove the exact UUID root"
@@ -9556,6 +9566,9 @@ mod tests {
             );
             child.kill_on_drop(true);
             child.env("WCORE_TEST_SHUTDOWN_SIGNAL", signal);
+            // Preserve helper panics and stage diagnostics in the parent test's
+            // capture even when the timeout drops child.output().
+            child.stderr(std::process::Stdio::inherit());
             #[cfg(windows)]
             {
                 use std::os::windows::process::CommandExt as _;

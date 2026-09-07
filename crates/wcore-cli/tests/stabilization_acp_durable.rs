@@ -60,6 +60,9 @@ async fn run_with_private_vault(test: &str) -> bool {
         .expect("reap durable fixture");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
+    if output.status.success() {
+        eprint!("{stderr}");
+    }
     assert!(output.status.success(), "{stdout}\n{stderr}");
     assert!(
         stdout.contains("test result: ok. 1 passed; 0 failed;"),
@@ -87,6 +90,53 @@ fn config(workspace: &Path, durable: bool) -> Config {
     config.memory.enabled = false;
     config.builtin_tools.defer_cold.enabled = false;
     config
+}
+
+// Diagnostic only: a separate cold vault keeps production KDF settings and
+// cannot warm or pin the acceptance fixture's confidential store.
+fn diagnose_cold_vault() {
+    use wcore_config::confidential_blob::{
+        load_confidential_blob_key, load_or_create_confidential_blob_key,
+    };
+    use wcore_config::credentials::{RECOVERY_PREPARED_REQUEST_KEY_REF, open_confidential_store};
+
+    let workspace = tempfile::tempdir().expect("diagnostic vault workspace");
+    let config = config(workspace.path(), true);
+    let plaintext = workspace.path().join("credentials.toml");
+    let started = std::time::Instant::now();
+    let store = open_confidential_store(&config.storage.credentials, &plaintext);
+    eprintln!(
+        "W02 vault diagnostic: cold open elapsed={:?} ok={}",
+        started.elapsed(),
+        store.is_ok()
+    );
+    let Ok(store) = store else { return };
+    let started = std::time::Instant::now();
+    let key = load_or_create_confidential_blob_key(&store, RECOVERY_PREPARED_REQUEST_KEY_REF);
+    eprintln!(
+        "W02 vault diagnostic: cold key create elapsed={:?} ok={}",
+        started.elapsed(),
+        key.is_ok()
+    );
+    let Ok(key) = key else { return };
+    drop(key);
+    drop(store);
+
+    let started = std::time::Instant::now();
+    let store = open_confidential_store(&config.storage.credentials, &plaintext);
+    eprintln!(
+        "W02 vault diagnostic: fresh store reopen elapsed={:?} ok={}",
+        started.elapsed(),
+        store.is_ok()
+    );
+    let Ok(store) = store else { return };
+    let started = std::time::Instant::now();
+    let key = load_confidential_blob_key(&store, RECOVERY_PREPARED_REQUEST_KEY_REF);
+    eprintln!(
+        "W02 vault diagnostic: fresh store key load elapsed={:?} ok={}",
+        started.elapsed(),
+        key.is_ok()
+    );
 }
 
 fn server(config: Config, workspace: &Path, provider_url: &str, force: bool) -> AcpServer {
@@ -290,6 +340,7 @@ async fn w02_delete_releases_real_durable_writer_and_preserves_history() {
     {
         return;
     }
+    diagnose_cold_vault();
     let workspace = tempfile::tempdir().expect("workspace");
     let provider = MockLlm::new()
         .text("durable lifecycle history sentinel")

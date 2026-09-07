@@ -82,6 +82,7 @@ concurrency:
 
 jobs:
   ledger:
+    if: false # Task-owned diagnostic: hosted Windows only.
     name: Windows flake ledger (self-hosted msvc, retries=0)
     runs-on:
       - self-hosted
@@ -183,7 +184,7 @@ jobs:
           # binaries, and the harness's own presence check would then pay for
           # the build. Listing the whole workspace warms whatever was asked for.
           if [ -n "${LEDGER_TESTS}" ]; then
-            cargo nextest list --profile ci > /dev/null
+            cargo nextest list --profile ci -p wcore-cli --bin wayland-core --test stabilization_acp_durable > /dev/null
             exit 0
           fi
           cargo nextest list --profile ci \
@@ -291,7 +292,7 @@ jobs:
           # binaries, and the harness's own presence check would then pay for
           # the build. Listing the whole workspace warms whatever was asked for.
           if [ -n "${LEDGER_TESTS}" ]; then
-            cargo nextest list --profile ci > /dev/null
+            cargo nextest list --profile ci -p wcore-cli --bin wayland-core --test stabilization_acp_durable > /dev/null
             exit 0
           fi
           cargo nextest list --profile ci \
