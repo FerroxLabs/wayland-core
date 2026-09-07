@@ -585,7 +585,9 @@ def main() -> int:
             flush=True,
         )
         if args.logdir and blob:
-            name = f"{cond}-{row.test[:60]}-{i + 1}.log"
+            # Stable row index avoids Windows-forbidden test-name characters and
+            # collisions between different tests sharing a truncated prefix.
+            name = f"{cond}-target-{rows.index(row)}-{i + 1}.log"
             with open(os.path.join(args.logdir, name), "w", errors="replace") as fh:
                 fh.write(blob)
 
