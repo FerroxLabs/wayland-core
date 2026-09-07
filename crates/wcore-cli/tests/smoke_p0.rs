@@ -572,7 +572,7 @@ fn stop_mid_turn_does_not_strand_json_stream_session() {
     // Normal completion still reports cumulative counters and only its own
     // delta; the stopped turn must neither disappear nor be billed twice.
     let completed = terminal("m2");
-    assert_eq!(completed["finish_reason"], "stop");
+    assert_eq!(completed["finish_reason"], "stop", "frames={frames:?}");
     assert_eq!(completed["usage"]["input_tokens"], 22);
     assert_eq!(completed["usage"]["output_tokens"], 45);
     assert_eq!(completed["usage"]["cache_write_tokens"], 7);
