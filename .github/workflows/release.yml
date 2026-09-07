@@ -1249,7 +1249,8 @@ jobs:
   collect-release-mutants:
     name: Collect original release mutation receipts
     runs-on: ubuntu-latest
-    needs: [prepare-release, github-release]
+    # Mutations need source only; run alongside the six artifact builds.
+    needs: prepare-release
     timeout-minutes: 180
     permissions:
       contents: read

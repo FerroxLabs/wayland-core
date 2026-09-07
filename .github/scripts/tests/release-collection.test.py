@@ -152,7 +152,10 @@ class Collection(unittest.TestCase):
         collectors = text.split("  collect-release-mutants:\n", 1)[1].split("  produce-release-evidence:\n", 1)[0]
         self.assertNotIn("GH_TOKEN:", collectors)
         self.assertNotIn("continue-on-error", collectors)
-        self.assertEqual(collectors.count("needs: [prepare-release, github-release]"), 2)
+        mutant_job, native_job = collectors.split("  collect-release-native:\n", 1)
+        self.assertIn("    needs: prepare-release\n", mutant_job)
+        self.assertNotIn("needs: [prepare-release, github-release]", mutant_job)
+        self.assertIn("needs: [prepare-release, github-release]", native_job)
 
 
 if __name__ == "__main__":
