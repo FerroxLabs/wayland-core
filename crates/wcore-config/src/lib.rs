@@ -1,3 +1,4 @@
+pub mod allocator;
 // Configuration layer: runtime Config, ProviderCompat, auth, hooks, provider-specific configs.
 
 // v0.6.1 H2-R5: reusable circuit-breaker primitive shared by wcore-providers
