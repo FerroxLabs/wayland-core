@@ -350,7 +350,53 @@ async fn close_releases_aborted_host_child_without_erasing_recovery_evidence() {
     canonical_host_child_close(true).await;
 }
 
+#[path = "../../tests/support/owned_tree.rs"]
+mod fixture_owned_tree;
+#[path = "../../tests/support/vault.rs"]
+mod fixture_vault;
+
+// Keep the real encrypted recovery store private to this test process.
+async fn run_with_private_vault(test: &str) -> bool {
+    const CHILD: &str = "WAYLAND_ACP_DURABLE_FIXTURE_CHILD";
+    if std::env::var(CHILD).as_deref() == Ok(test) {
+        return false;
+    }
+    let home = tempfile::tempdir().expect("private recovery home");
+    let mut command =
+        tokio::process::Command::new(std::env::current_exe().expect("test executable"));
+    command
+        .args(["--exact", test, "--nocapture"])
+        .env(CHILD, test)
+        .env("WAYLAND_HOME", home.path())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let guard = fixture_vault::configure_process(command.as_std_mut());
+    let child = fixture_owned_tree::OwnedTree::new(command.spawn().expect("spawn durable fixture"));
+    drop(guard);
+    let output = tokio::time::timeout(Duration::from_secs(90), child.wait_with_output())
+        .await
+        .expect("durable fixture deadline")
+        .expect("reap durable fixture");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stdout}\n{stderr}");
+    assert!(
+        stdout.contains("test result: ok. 1 passed; 0 failed;"),
+        "child must execute exactly the requested fixture: {stdout}\n{stderr}"
+    );
+    true
+}
+
 async fn canonical_host_child_close(abort_before_close: bool) {
+    let test = if abort_before_close {
+        "acp_engine::lifecycle_tests::close_releases_aborted_host_child_without_erasing_recovery_evidence"
+    } else {
+        "acp_engine::lifecycle_tests::close_waits_for_canonical_host_child_cancellation_and_parent_lease_release"
+    };
+    if run_with_private_vault(test).await {
+        return;
+    }
     let workspace = tempfile::tempdir().unwrap();
     let mock = child_mock_llm::MockLlm::new()
         .text("child fixture control")
@@ -376,6 +422,11 @@ async fn canonical_host_child_close(abort_before_close: bool) {
     config.memory.enabled = false;
     config.session.enabled = true;
     config.session.require_durability = true;
+    config.storage.credentials.backend =
+        wcore_config::credentials::CredentialsBackend::EncryptedFile {
+            cipher_path: workspace.path().join("credentials.enc"),
+            key_params_path: workspace.path().join("credentials.params.json"),
+        };
     config.session.directory = workspace
         .path()
         .join("sessions")

@@ -1,10 +1,14 @@
 //! W02: real provider/approval/journal/tool cleanup through ordinary ACP.
 //!
-//! The runner supplies an isolated WAYLAND_HOME and confidential-store fixture.
+//! Durable cases re-execute with an isolated WAYLAND_HOME and encrypted vault.
 //! Every case owns a separate workspace and session directory; no test mutates
 //! process-global environment. Select `test(w02_)` so support self-tests cannot
 //! substitute for these acceptance cases.
 
+#[path = "support/owned_tree.rs"]
+mod fixture_owned_tree;
+#[path = "support/vault.rs"]
+mod fixture_vault;
 #[path = "support/mock_llm.rs"]
 mod mock_llm;
 
@@ -31,6 +35,39 @@ use wcore_providers::anthropic::AnthropicProvider;
 const DEADLINE: Duration = Duration::from_secs(20);
 type Events = Pin<Box<dyn Stream<Item = MessageEvent> + Send>>;
 
+// Keep the real encrypted recovery store private to this test process.
+async fn run_with_private_vault(test: &str) -> bool {
+    const CHILD: &str = "WAYLAND_ACP_DURABLE_FIXTURE_CHILD";
+    if std::env::var(CHILD).as_deref() == Ok(test) {
+        return false;
+    }
+    let home = tempfile::tempdir().expect("private recovery home");
+    let mut command =
+        tokio::process::Command::new(std::env::current_exe().expect("test executable"));
+    command
+        .args(["--exact", test, "--nocapture"])
+        .env(CHILD, test)
+        .env("WAYLAND_HOME", home.path())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let guard = fixture_vault::configure_process(command.as_std_mut());
+    let child = fixture_owned_tree::OwnedTree::new(command.spawn().expect("spawn durable fixture"));
+    drop(guard);
+    let output = tokio::time::timeout(Duration::from_secs(90), child.wait_with_output())
+        .await
+        .expect("durable fixture deadline")
+        .expect("reap durable fixture");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stdout}\n{stderr}");
+    assert!(
+        stdout.contains("test result: ok. 1 passed; 0 failed;"),
+        "child must execute exactly the requested fixture: {stdout}\n{stderr}"
+    );
+    true
+}
+
 fn config(workspace: &Path, durable: bool) -> Config {
     let mut config = Config {
         model: "claude-mock".into(),
@@ -39,6 +76,13 @@ fn config(workspace: &Path, durable: bool) -> Config {
     };
     config.session.enabled = durable;
     config.session.require_durability = durable;
+    if durable {
+        config.storage.credentials.backend =
+            wcore_config::credentials::CredentialsBackend::EncryptedFile {
+                cipher_path: workspace.join("credentials.enc"),
+                key_params_path: workspace.join("credentials.params.json"),
+            };
+    }
     config.session.directory = workspace.join("sessions").to_string_lossy().into_owned();
     config.memory.enabled = false;
     config.builtin_tools.defer_cold.enabled = false;
@@ -242,6 +286,10 @@ async fn w02_delete_cancels_real_pending_write_approval_without_effect() {
 
 #[tokio::test]
 async fn w02_delete_releases_real_durable_writer_and_preserves_history() {
+    if run_with_private_vault("w02_delete_releases_real_durable_writer_and_preserves_history").await
+    {
+        return;
+    }
     let workspace = tempfile::tempdir().expect("workspace");
     let provider = MockLlm::new()
         .text("durable lifecycle history sentinel")
@@ -326,6 +374,9 @@ mod process_cleanup {
 
     #[tokio::test]
     async fn w02_delete_during_real_mcp_tool_reaps_child_and_retains_unknown_effect() {
+        if run_with_private_vault("process_cleanup::w02_delete_during_real_mcp_tool_reaps_child_and_retains_unknown_effect").await {
+            return;
+        }
         let workspace = tempfile::tempdir().expect("workspace");
         let _cleanup = FixtureCleanup(workspace.path().to_path_buf());
         let script = workspace.path().join("mcp_child.py");
