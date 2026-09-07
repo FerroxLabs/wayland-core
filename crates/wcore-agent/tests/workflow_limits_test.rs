@@ -49,6 +49,7 @@ fn ok_events(text: String) -> Vec<LlmEvent> {
 struct CountingProvider {
     calls: Arc<Mutex<usize>>,
     body: String,
+    diagnostic_started: std::time::Instant,
 }
 
 impl CountingProvider {
@@ -56,6 +57,7 @@ impl CountingProvider {
         Self {
             calls,
             body: body.to_string(),
+            diagnostic_started: std::time::Instant::now(),
         }
     }
 }
@@ -63,7 +65,17 @@ impl CountingProvider {
 #[async_trait]
 impl LlmProvider for CountingProvider {
     async fn stream(&self, _req: &LlmRequest) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
-        *self.calls.lock().unwrap() += 1;
+        let count = {
+            let mut calls = self.calls.lock().unwrap();
+            *calls += 1;
+            *calls
+        };
+        if count == 1 || count % 100 == 0 {
+            eprintln!(
+                "workflow dispatch progress: calls={count} elapsed={:?}",
+                self.diagnostic_started.elapsed()
+            );
+        }
         let body = self.body.clone();
         let (tx, rx) = mpsc::channel(64);
         tokio::spawn(async move {
@@ -190,6 +202,8 @@ async fn fix1_dispatch_budget_aborts_with_partial_result() {
     let calls = Arc::new(Mutex::new(0usize));
     let provider = Arc::new(CountingProvider::new(Arc::clone(&calls), "ok"));
     let (spawner, _session_root) = bound_test_spawner(AgentSpawner::new(provider, test_config()));
+
+    eprintln!("workflow dispatch progress: parent bound; starting original 400 x 3 workload");
 
     // 400 items (< MAX_OVER_CARDINALITY = 500) × 3 stages = 1200 dispatches,
     // which exceeds MAX_TOTAL_DISPATCHES = 1000.
