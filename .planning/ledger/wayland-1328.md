@@ -1,7 +1,7 @@
 ---
 issue: 1328
 repo: FerroxLabs/wayland
-kind: defect
+kind: feature
 title: "Core contract: expose effective tool approvals and preserve per-tool default inheritance (#1188)"
 status: open
 last_verified_commit: 3d2089b45
@@ -29,3 +29,5 @@ criteria:
 ---
 
 Recorded from live #1328 on 2026-09-06. Tracker is OPEN, area:core, needs:core, with no milestone. Dependency for Desktop #1188; no implementation or milestone change is authorized by recording this issue. Classified defect conservatively because the body names duplicated authority and accidental materialization of inherited configuration.
+
+Classification: the tracker requests a new typed producer policy/inventory and inheritance-preserving mutation contract. This is a feature dependency; the motivating Desktop defects and every unmet criterion above remain unresolved.

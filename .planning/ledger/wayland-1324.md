@@ -1,7 +1,7 @@
 ---
 issue: 1324
 repo: FerroxLabs/wayland
-kind: defect
+kind: task
 title: "Core stabilization: verified lifecycle, credential, budget and acceptance repair program"
 status: open
 last_verified_commit: 3d2089b45
@@ -19,3 +19,5 @@ criteria:
 ---
 
 Recorded from live #1324 on 2026-09-06. Tracker is OPEN, area:core, state:in-progress, with no milestone. Acceptance above follows the coordination handle; existing individual carriers retain their criteria. This entry records pending work, not a new implementation plan or release waiver.
+
+Classification: the tracker describes a programme coordination handle, not an individual defect. Package completion and external residuals remain separate, and unmet criteria above remain unmet.
