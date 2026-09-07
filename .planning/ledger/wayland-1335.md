@@ -4,23 +4,23 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "[Core] Active JSON-stream Stop drops accrued run usage and emits a zero-usage terminal"
 status: open
-last_verified_commit: 3d2089b45
+last_verified_commit: 04b2868032999942829bbf79e54672fafd74132b
 criteria:
   - id: c1
     text: "A real engine fixture that completes provider/tool work then receives host Stop reports accrued input/output/cache-read/cache-write delta exactly once with the same message correlation."
-    state: not-met
+    state: met
     owner: core
-    note: "Reported on pinned Core 6e4eca07fe5a215e365daa4e540767e0c9b8158b. Current-candidate reproduction and correction remain pending; active Stop accounting is distinct from normal completion and failed Spawn accounting."
+    note: "Real binary smoke stop_mid_turn_does_not_strand_json_stream_session passes: accrued input12/output25/cache-write7/cache-read9 retained in exactly one m1 terminal and matching delta."
   - id: c2
     text: "The next turn remains usable and normal completion is unchanged."
-    state: not-met
+    state: met
     owner: core
-    note: "Required cancellation/session-reuse regression coverage has not been executed for this issue."
+    note: "Same fixture m2 completes normally with cumulative22/45 and delta10/20; cancelled engine future finishes durable cleanup before terminal emission."
   - id: c3
     text: "Stopping before any usage does not fabricate cost; do not invent usage for an in-flight provider response that never supplied it, and distinguish accrued partial usage from complete billing."
-    state: not-met
+    state: met
     owner: core
-    note: "Required no-usage and partial-usage acceptance remains pending. Desktop per-run delta mapping and runaway protection must be preserved."
+    note: "Same fixture m3 stops before delayed provider usage: input/output zero and no usage_delta; no inherited or invented provider usage."
 ---
 
-Recorded from live #1335 on 2026-09-06. Tracker is OPEN, area:core, needs:core, with no milestone. Source lines in its report refer to the pinned release; they are not current-candidate proof. This ledger task neither fixes the defect nor authorizes wider implementation.
+Verified on Hetzner with zero retries; receipt proof-1788759590-13903.json in stabilization execution evidence. Strict CLI all-targets clippy passed on production-equivalent 8dc531201. Source integrated; tracker remains open pending release. No claim of complete billing for unobserved provider responses.
