@@ -1783,6 +1783,7 @@ jobs:
         run: python3 scripts/check-release-readiness.py --self-test
 
       - name: Stabilization promotion fails closed (offline controls)
+        if: ${{ !cancelled() }}
         run: python3 -B scripts/stabilization_release_gate.py --self-test
       # ── Windows-attribution gate (#1146) ──────────────────────────────
       # Same placement reasoning as the two steps above: AFTER checkout (it

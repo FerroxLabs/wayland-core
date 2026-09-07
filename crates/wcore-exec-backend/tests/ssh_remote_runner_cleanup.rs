@@ -102,6 +102,7 @@ async fn drive(runner: &str, nonce: &str, exit_with: i32) -> Outcome {
 
 /// The repair, and the control that proves the repair does something.
 #[tokio::test]
+#[serial_test::serial]
 async fn a_failing_task_leaves_nothing_on_the_far_end() {
     // 1. THE NEGATIVE CONTROL, FIRST. If the pre-fix runner does not leak in
     //    this harness, every assertion below is vacuous and the harness — not
@@ -144,6 +145,7 @@ async fn a_failing_task_leaves_nothing_on_the_far_end() {
 /// The success path must not have regressed: it cleaned up before, and the
 /// status it reports is still zero.
 #[tokio::test]
+#[serial_test::serial]
 async fn a_succeeding_task_still_leaves_nothing_and_still_reports_success() {
     let outcome = drive(REMOTE_RUNNER, "f25-c1-succeeding", 0).await;
     assert_eq!(outcome.exit_code, 0);
@@ -163,6 +165,7 @@ async fn a_succeeding_task_still_leaves_nothing_and_still_reports_success() {
 /// reads, and turn Criterion 4's only unplanted positive control into a clean
 /// zero.
 #[test]
+#[serial_test::serial]
 fn cleanup_is_not_bought_by_deleting_a_live_orphans_evidence() {
     assert!(
         !REMOTE_RUNNER.contains("trap"),
@@ -195,6 +198,7 @@ impl Drop for PrivateSshTarget {
 /// Trusted SSH transport proof, not a remote OS sandbox claim. Requires the
 /// explicitly provisioned Linux root buildbox; never silently skips on failure.
 #[tokio::test]
+#[serial_test::serial]
 #[ignore = "starts a task-owned loopback sshd; requires Linux root and openssh-server"]
 async fn ssh_transport_binds_artifact_and_cancels_observed_remote_task() {
     use std::time::Duration;
@@ -249,8 +253,8 @@ async fn ssh_transport_binds_artifact_and_cancels_observed_remote_task() {
     std::fs::write(at("known_hosts"), known_host("host.pub")).unwrap();
     let state = tempfile::tempdir().unwrap();
     let _state = wcore_exec_backend::registry::StateDirGuard::set(state.path());
-    // This ignored test runs on a single-thread Tokio runtime in its own nextest
-    // process. Environment changes precede all backend/transport construction.
+    // Every test in this binary is serialized, including under cargo test.
+    // Environment changes precede all backend/transport construction.
     unsafe {
         std::env::set_var(TARGET_ENV, "w15-private");
         std::env::set_var(CONFIG_ENV, at("ssh_config"));

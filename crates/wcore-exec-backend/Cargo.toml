@@ -36,6 +36,7 @@ libc = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+serial_test = { workspace = true }
 
 [target.'cfg(unix)'.dev-dependencies]
 # Shared OwnedTree fixture also implements ownership for PTY children.
