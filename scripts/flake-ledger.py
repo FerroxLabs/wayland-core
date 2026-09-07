@@ -607,12 +607,14 @@ def main() -> int:
     metadata = json.loads(metadata_run.stdout)
     present: list[Row] = []
     selectors: dict[str, list[str]] = {}
-    for index, row in enumerate(rows):
+    # Resolve every requested target before any inventory command can compile.
+    for row in rows:
         try:
             selectors[row.key] = cargo_target_args(metadata, [row])
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr, flush=True)
             return 2
+    for index, row in enumerate(rows):
         n = list_count(
             args.root, args.profile, filterset(row.package, row.binary, row.test),
             selectors[row.key], os.path.join(args.logdir, f"inventory-{index}.log") if args.logdir else "",
