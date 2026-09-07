@@ -179,18 +179,6 @@ async fn a_toolchain_outside_home_still_runs_cargo_under_the_real_sandbox() {
         eprintln!("skip: bwrap not available on this host");
         return;
     }
-    // Resolve the rustup SHIM off PATH — `std::env::var("CARGO")` may point at
-    // a toolchain binary directly, which would not consult RUSTUP_HOME at all
-    // and would make this probe vacuous.
-    let Some(cargo_shim) = std::env::var_os("PATH")
-        .into_iter()
-        .flat_map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
-        .map(|dir| dir.join("cargo"))
-        .find(|c| c.is_file())
-    else {
-        eprintln!("skip: no `cargo` on PATH");
-        return;
-    };
     // The store as it is TODAY, captured before HOME is redirected.
     let host_home = std::env::var("HOME").expect("HOME is set");
     let rustup_home = std::env::var_os("RUSTUP_HOME")
@@ -199,6 +187,14 @@ async fn a_toolchain_outside_home_still_runs_cargo_under_the_real_sandbox() {
     let cargo_home = std::env::var_os("CARGO_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(&host_home).join(".cargo"));
+    // Resolve the shim from its declared store. Tool managers such as vx put
+    // the real toolchain binary first on PATH; that binary bypasses rustup and
+    // cannot discriminate whether RUSTUP_HOME survives the sandbox boundary.
+    let cargo_shim = cargo_home.join("bin/cargo");
+    assert!(
+        cargo_shim.is_file(),
+        "rustup cargo shim missing from CARGO_HOME"
+    );
     if !rustup_home.is_dir() {
         eprintln!("skip: no rustup store at {}", rustup_home.display());
         return;
