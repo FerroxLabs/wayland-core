@@ -6265,6 +6265,15 @@ async fn run_json_stream_mode(
                     loop {
                         tokio::select! {
                             result = &mut engine_fut => {
+                                if stopped {
+                                    if let Err(error) = result
+                                        && !matches!(error, wcore_agent::engine::AgentError::UserAborted)
+                                    {
+                                        output.emit_error(&format!("{error:#}"), false, error.failure_category());
+                                        run_failed = true;
+                                    }
+                                    break;
+                                }
                                 match result {
                                     Ok(result) => {
                                         if result.finish_reason == FinishReason::Error {
@@ -6334,21 +6343,11 @@ async fn run_json_stream_mode(
                                         approval_manager.resolve(&call_id, ToolApprovalResult::Denied { reason });
                                     }
                                     ProtocolCommand::Stop => {
-                                        // wayland#403 fix-3: Stop CANCELS THE ACTIVE TURN — it must
-                                        // NOT end the session. Fire the engine-owned active-turn
-                                        // token before dropping `engine_fut`; we emit `stream_end`
-                                        // (FinishReason::Stop) for this msg_id so the host's turn-loop
-                                        // gets its terminator and doesn't hang. `stopped` then makes
-                                        // the outer loop `continue` (keep reading commands) instead of
-                                        // breaking — the pre-fix `break` stranded the session
-                                        // ("new chat required") after any mid-turn Stop. Only EOF and
-                                        // `/exit` end a json-stream session, matching the TUI (Esc
-                                        // cancels the turn, never closes the session).
+                                        // Let the cancelled engine future finish its durable
+                                        // cleanup before emitting the terminal event. Dropping
+                                        // it here leaves the next message journal-blocked.
                                         session_control.cancel_active_turn();
-                                        // Emit after engine_fut releases its borrow so accrued
-                                        // provider usage survives cancellation (#1335).
                                         stopped = true;
-                                        break;
                                     }
                                     ProtocolCommand::SetConfig { model, thinking, thinking_budget, effort, compaction } => {
                                         pending_config = Some((model, thinking, thinking_budget, effort, compaction));
@@ -6642,7 +6641,11 @@ async fn run_json_stream_mode(
                         delta.cache_read_tokens = total
                             .cache_read_tokens
                             .saturating_sub(usage_before_run.cache_read_tokens);
-                        FinishReason::Stop
+                        if run_failed {
+                            FinishReason::Error
+                        } else {
+                            FinishReason::Stop
+                        }
                     } else {
                         FinishReason::Error
                     };
