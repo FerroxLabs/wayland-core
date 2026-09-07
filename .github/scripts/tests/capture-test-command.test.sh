@@ -41,6 +41,7 @@ with tempfile.TemporaryDirectory() as temp:
     assert (attempt / "stderr.log").read_text() == "full-panic-body\n"
     assert (attempt / "stdout.log").read_text() == "running 1 test\n"
     assert (attempt.parent / "outer-attempt-1.xml").exists()
+    assert (attempt / "junit.snapshot").read_bytes() == (attempt.parent / "outer-attempt-1.xml").read_bytes()
     print("PASS actual test failure runs once and retains full streams and receipt")
 
     for code in (75, 42, 143):
@@ -56,9 +57,13 @@ with tempfile.TemporaryDirectory() as temp:
     assert (attempt / "runner-exit-code.txt").read_text().strip() == "2"
     print("PASS zero command exit without fresh JUnit is an evidence failure")
 
-    _, attempt, metadata = run("success", 'echo "<testsuites/>" > "$JUNIT_PATH"; echo success', 0)
+    directory, attempt, metadata = run("success", 'echo "<testsuites/>" > "$JUNIT_PATH"; echo success', 0)
     assert (attempt.parent / "final-status.txt").read_text().strip() == "success"
-    print("PASS successful nextest command remains successful")
+    snapshot = (attempt / "junit.snapshot").read_bytes()
+    (directory / "junit.xml").write_text("REPLACED BY LATER SUITE")
+    assert snapshot == b"<testsuites/>\n"
+    assert (attempt / "junit.snapshot").read_bytes() == snapshot
+    print("PASS successful nextest command remains successful and keeps an immutable JUnit snapshot")
 
     directory = home / "shared"
     env = {**os.environ, "CAPTURE_DIR": str(directory)}

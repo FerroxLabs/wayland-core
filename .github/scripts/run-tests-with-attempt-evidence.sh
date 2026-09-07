@@ -39,6 +39,9 @@ CAPTURE_DIR="$ATTEMPT_DIR/attempt-$attempt" \
   bash "$HERE/capture-test-command.sh" "$@"
 status=$?
 if [ -f "$JUNIT_PATH" ]; then
+  # Immutable XML content, deliberately not *.xml: the legacy report graders
+  # recursively count XML files and must not count this raw snapshot twice.
+  cp "$JUNIT_PATH" "$ATTEMPT_DIR/attempt-$attempt/junit.snapshot" || exit 2
   if [ "$status" -ne 0 ]; then
     cp "$JUNIT_PATH" "$ATTEMPT_DIR/outer-attempt-${attempt}.xml" || exit 2
   fi
