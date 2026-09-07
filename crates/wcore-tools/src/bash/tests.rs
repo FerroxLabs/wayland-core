@@ -3595,6 +3595,7 @@ async fn assert_precancelled_bash_schedules_no_manifest(streaming: bool) {
     let policy = std::sync::Arc::new(crate::workspace_policy::WorkspacePolicy::contained(&root));
     let sink = crate::NullToolOutputSink;
     let active = canned_ctx(policy.clone(), CannedBackend::enforcing());
+    UNSAVED_GUARD_SPAWNS.with(|count| count.set(0));
     MANIFEST_BUILD_SPAWNS.with(|count| count.set(0));
     let control = if streaming {
         BashTool
@@ -3616,8 +3617,14 @@ async fn assert_precancelled_bash_schedules_no_manifest(streaming: bool) {
         "active control must schedule a manifest"
     );
 
+    assert_eq!(
+        UNSAVED_GUARD_SPAWNS.with(|count| count.get()),
+        1,
+        "active control must schedule the unsaved guard"
+    );
     let cancelled = canned_ctx(policy, CannedBackend::enforcing());
     cancelled.cancel.cancel();
+    UNSAVED_GUARD_SPAWNS.with(|count| count.set(0));
     MANIFEST_BUILD_SPAWNS.with(|count| count.set(0));
     // Exercise both ready-arm orders in the formerly unbiased guard select.
     for _ in 0..64 {
@@ -3640,6 +3647,11 @@ async fn assert_precancelled_bash_schedules_no_manifest(streaming: bool) {
         MANIFEST_BUILD_SPAWNS.with(|count| count.get()),
         0,
         "pre-cancelled calls must not schedule manifest work"
+    );
+    assert_eq!(
+        UNSAVED_GUARD_SPAWNS.with(|count| count.get()),
+        0,
+        "pre-cancelled calls must not schedule the unsaved guard"
     );
 }
 

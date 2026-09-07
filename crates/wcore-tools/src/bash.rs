@@ -338,6 +338,8 @@ async fn bounded_unsaved_shell_refusal(
     workspace: Option<Arc<crate::workspace_policy::WorkspacePolicy>>,
     timeout: Duration,
 ) -> Option<String> {
+    #[cfg(test)]
+    UNSAVED_GUARD_SPAWNS.with(|count| count.set(count.get() + 1));
     let budget = timeout.min(Duration::from_millis(UNSAVED_GUARD_BUDGET_MS));
     let owned = command.to_string();
     let task =
@@ -480,6 +482,12 @@ fn output_to_result(output: SandboxOutput) -> ToolResult {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static UNSAVED_GUARD_SPAWNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static MANIFEST_BUILD_SPAWNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// #1111 — run the manifest build on the blocking pool.
 ///
 /// `build_sandbox_pieces_for_session` calls
@@ -503,11 +511,6 @@ fn output_to_result(output: SandboxOutput) -> ToolResult {
 ///   call at all and any cache key without "now" in it is wrong (#234).
 /// * No prune. See the guard at `workspace_policy.rs:1417-1425` and
 ///   `no_prune_survives_the_922_backend_gate`.
-#[cfg(test)]
-thread_local! {
-    static MANIFEST_BUILD_SPAWNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
 fn spawn_manifest_build(
     command: &str,
     workspace: Option<Arc<crate::workspace_policy::WorkspacePolicy>>,
