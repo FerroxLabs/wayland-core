@@ -440,7 +440,8 @@ fn stop_mid_turn_does_not_strand_json_stream_session() {
     let (_rt, server) = start_mock(
         MockLlm::new()
             .raw_sse(format!("{charged_tool}\n"))
-            .text("SESSION-ALIVE"),
+            .text("SESSION-ALIVE")
+            .slow_text("UNOBSERVED", 30_000),
     );
     // Default posture (NO --force): the Bash call must pause on approval.
     let home = TempDir::new().expect("tempdir");
@@ -536,6 +537,18 @@ fn stop_mid_turn_does_not_strand_json_stream_session() {
 
     let m2_streamed = wait_until(&|| seen(&["stream_end"], Some("m2")), 20);
 
+    // A third turn supplies no provider usage before Stop. Its delta must
+    // not inherit either completed turn or invent the delayed response.
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({"type": "message", "msg_id": "m3", "content": "wait"})
+    )
+    .expect("write m3");
+    assert!(wait_until(&|| seen(&["stream_start"], Some("m3")), 10));
+    writeln!(stdin, "{}", serde_json::json!({"type": "stop"})).expect("stop m3");
+    assert!(wait_until(&|| seen(&["stream_end"], Some("m3")), 10));
+
     let _ = writeln!(stdin, "{{\"type\":\"stop\"}}");
     let _ = child.kill();
     let _ = child.wait();
@@ -582,6 +595,11 @@ fn stop_mid_turn_does_not_strand_json_stream_session() {
     assert!(completed["usage_delta"]["cache_write_tokens"].is_null());
     assert!(completed["usage_delta"]["cache_read_tokens"].is_null());
     assert!(completed["agent_run_id"].as_str().is_some());
+    let uncharged = terminal("m3");
+    assert_eq!(uncharged["finish_reason"], "stop", "{uncharged}");
+    assert_eq!(uncharged["usage"]["input_tokens"], 0);
+    assert_eq!(uncharged["usage"]["output_tokens"], 0);
+    assert!(uncharged["usage_delta"].is_null(), "{uncharged}");
 }
 
 /// wayland#241 regression: config `[default] approval_mode = "auto-edit"`
