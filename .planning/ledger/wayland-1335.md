@@ -3,7 +3,7 @@ issue: 1335
 repo: FerroxLabs/wayland
 kind: defect
 title: "[Core] Active JSON-stream Stop drops accrued run usage and emits a zero-usage terminal"
-status: open
+status: closed
 last_verified_commit: 04b2868032999942829bbf79e54672fafd74132b
 criteria:
   - id: c1
@@ -26,4 +26,4 @@ criteria:
     note: "Same fixture m3 stops before delayed provider usage: input/output zero and no usage_delta; no inherited or invented provider usage."
 ---
 
-Verified on Hetzner with zero retries; receipt proof-1788759590-13903.json in stabilization execution evidence. Strict CLI all-targets clippy passed on production-equivalent 8dc531201. Source integrated; tracker remains open pending release. No claim of complete billing for unobserved provider responses.
+Verified on Hetzner with zero retries; receipt proof-1788759590-13903.json in stabilization execution evidence. Strict CLI all-targets clippy passed on production-equivalent 8dc531201. Source integrated; tracker closed with explicit Sean authorization after verification; publication pending. No claim of complete billing for unobserved provider responses.
