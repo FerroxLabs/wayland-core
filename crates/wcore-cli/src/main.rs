@@ -11853,7 +11853,7 @@ mod tests {
     /// hold nothing but someone else's words, and c2 says those must keep
     /// saying `Unknown`.
     ///
-    /// RED ARM (re-runnable): swap any one of the four back to
+    /// RED ARM (re-runnable): swap any one of the five back to
     /// `wcore_protocol::events::FailureCategory::Unknown`, `touch` main.rs,
     /// rebuild — this test fails naming that function.
     #[test]
@@ -11897,7 +11897,8 @@ mod tests {
         // POSITIVE CONTROL on the SET AND THE COUNT. A walk that found
         // nothing, a splitter that returned nothing, or a rename that hid a
         // site would all pass the loop above vacuously. `run` legitimately
-        // holds two. A new site is fine — grade it and update this. One GOING
+        // holds two; JSON-stream now also grades cancelled-turn cleanup errors.
+        // A new site is fine — grade it and update this. One GOING
         // MISSING is the failure this control exists for.
         graded.sort();
         assert_eq!(
@@ -11905,10 +11906,10 @@ mod tests {
             vec![
                 "main.rs::repl_loop:1".to_string(),
                 "main.rs::run:2".to_string(),
-                "main.rs::run_json_stream_mode:1".to_string(),
+                "main.rs::run_json_stream_mode:2".to_string(),
             ],
             "the walk graded a different set of AgentError-rendering error \
-             sites than the four known ones"
+             sites than the five known ones"
         );
     }
 
