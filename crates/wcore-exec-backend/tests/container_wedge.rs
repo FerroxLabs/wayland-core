@@ -14,7 +14,9 @@
 //! `conformance_matrix` uses — the backend's names are deterministic, so two
 //! tests sharing an id would fight over one container.
 
-use wcore_exec_backend::backends::container::{ContainerBackend, NONCE_LABEL};
+use wcore_exec_backend::backends::container::{
+    ContainerBackend, NONCE_LABEL, linux_daemon_availability,
+};
 use wcore_exec_backend::conformance::{reference_budget, reference_task, run_conformance};
 use wcore_exec_backend::contract::ExecutionBackend;
 use wcore_exec_backend::error::ExecError;
@@ -58,16 +60,6 @@ fn docker(args: &[&str]) -> std::process::Output {
         .args(args)
         .output()
         .expect("the docker client is launchable")
-}
-
-/// A real daemon round trip. Mirrors the backend's own availability rule:
-/// socket presence is not readiness.
-fn daemon_answers() -> bool {
-    std::process::Command::new("docker")
-        .args(["version", "--format", "{{.Server.Version}}"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
 }
 
 /// Create a container that reaches `Created` and never starts — precisely the
@@ -117,10 +109,9 @@ fn exists(name: &str) -> bool {
 #[tokio::test(flavor = "multi_thread")]
 async fn conformance_passes_with_a_leftover_container_already_holding_the_name() {
     let _state = temp_state();
-    if !daemon_answers() {
-        println!(
-            "backend container: UNEXERCISED — no docker daemon answered a version ping on this host"
-        );
+    let availability = linux_daemon_availability().await;
+    if !availability.available {
+        println!("backend container: UNEXERCISED — {}", availability.detail);
         return;
     }
     let prefix = "wedge365-container";
@@ -160,8 +151,9 @@ async fn conformance_passes_with_a_leftover_container_already_holding_the_name()
 #[tokio::test(flavor = "multi_thread")]
 async fn the_leftover_is_actually_reclaimed_and_not_merely_stepped_around() {
     let _state = temp_state();
-    if !daemon_answers() {
-        println!("UNEXERCISED — no docker daemon on this host");
+    let availability = linux_daemon_availability().await;
+    if !availability.available {
+        println!("backend container: UNEXERCISED — {}", availability.detail);
         return;
     }
     let task_id = "wedge365-reclaim";
@@ -200,8 +192,9 @@ async fn the_leftover_is_actually_reclaimed_and_not_merely_stepped_around() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_running_container_holding_the_name_is_refused_never_removed() {
     let _state = temp_state();
-    if !daemon_answers() {
-        println!("UNEXERCISED — no docker daemon on this host");
+    let availability = linux_daemon_availability().await;
+    if !availability.available {
+        println!("backend container: UNEXERCISED — {}", availability.detail);
         return;
     }
     let task_id = "wedge365-live";
@@ -257,8 +250,9 @@ async fn a_running_container_holding_the_name_is_refused_never_removed() {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_unlabelled_container_holding_the_name_belongs_to_someone_else() {
     let _state = temp_state();
-    if !daemon_answers() {
-        println!("UNEXERCISED — no docker daemon on this host");
+    let availability = linux_daemon_availability().await;
+    if !availability.available {
+        println!("backend container: UNEXERCISED — {}", availability.detail);
         return;
     }
     let task_id = "wedge365-foreign";
@@ -292,8 +286,9 @@ async fn an_unlabelled_container_holding_the_name_belongs_to_someone_else() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_daemon_refusal_yields_no_receipt_and_carries_the_daemons_words() {
     let _state = temp_state();
-    if !daemon_answers() {
-        println!("UNEXERCISED — no docker daemon on this host");
+    let availability = linux_daemon_availability().await;
+    if !availability.available {
+        println!("backend container: UNEXERCISED — {}", availability.detail);
         return;
     }
     // An image the daemon cannot resolve is a refusal no naming scheme can
@@ -345,8 +340,9 @@ async fn a_daemon_refusal_yields_no_receipt_and_carries_the_daemons_words() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_client_side_refusal_yields_no_receipt_either() {
     let _state = temp_state();
-    if !daemon_answers() {
-        println!("UNEXERCISED — no docker daemon on this host");
+    let availability = linux_daemon_availability().await;
+    if !availability.available {
+        println!("backend container: UNEXERCISED — {}", availability.detail);
         return;
     }
     // Uppercase is not a legal repository name, so the docker CLI rejects the
@@ -397,8 +393,9 @@ async fn a_client_side_refusal_yields_no_receipt_either() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_task_that_exits_125_on_its_own_is_attested_as_a_real_run() {
     let _state = temp_state();
-    if !daemon_answers() {
-        println!("UNEXERCISED — no docker daemon on this host");
+    let availability = linux_daemon_availability().await;
+    if !availability.available {
+        println!("backend container: UNEXERCISED — {}", availability.detail);
         return;
     }
     let task_id = "wedge365-self125";
