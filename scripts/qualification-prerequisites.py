@@ -36,19 +36,24 @@ def artifact(path, executable=False):
     return path.resolve()
 
 
-def windows_runner(event, runners=None):
+def windows_runner(event, runners=None, hosted_default=False):
     require(isinstance(event, dict), "GitHub event must be an object")
     pr = event.get("pull_request")
     if pr is not None:
         require(isinstance(pr, dict), "malformed pull_request event")
         labels = pr.get("labels", [])
         require(isinstance(labels, list), "malformed pull_request labels")
-        if any(isinstance(label, dict) and label.get("name") == "windows-hosted" for label in labels):
-            return "windows-latest (existing windows-hosted PR label)"
+        names = {label.get("name") for label in labels if isinstance(label, dict)}
         head = pr.get("head", {}).get("repo", {}).get("full_name")
         repository = event.get("repository", {}).get("full_name")
         if head and repository and head != repository:
             return "windows-latest (existing fork PR route)"
+        if hosted_default and "windows-self-hosted" not in names:
+            return "windows-latest (hosted default; no self-hosted opt-in)"
+        if not hosted_default and "windows-hosted" in names:
+            return "windows-latest (existing windows-hosted PR label)"
+    elif hosted_default:
+        return "windows-latest (hosted default)"
     require(isinstance(runners, dict) and isinstance(runners.get("runners"), list),
             "self-hosted Windows route needs a fresh repository runner inventory; "
             "for a PR, the existing windows-hosted label selects the hosted route")
@@ -60,8 +65,10 @@ def windows_runner(event, runners=None):
         names = {label.get("name", "").lower() for label in labels if isinstance(label, dict)}
         if runner.get("status") == "online" and needed <= names:
             return "self-hosted Windows (online matching runner in supplied snapshot; queue not proven)"
-    raise Refused("no online self-hosted Windows/X64/msvc runner; use the existing "
-                  "windows-hosted PR label before starting a new workflow run")
+    remedy = ("remove the windows-self-hosted PR opt-in" if hosted_default
+              else "use the existing windows-hosted PR label")
+    raise Refused(f"no online self-hosted Windows/X64/msvc runner; {remedy} "
+                  "before starting a new workflow run")
 
 
 def inventory(data, required=(), include_ignored=False):
@@ -204,6 +211,7 @@ def main(argv=None):
     runner = sub.add_parser("windows-runner")
     runner.add_argument("--event", type=Path, required=True)
     runner.add_argument("--runners", type=Path)
+    runner.add_argument("--hosted-default", action="store_true")
     selection = sub.add_parser("inventory")
     selection.add_argument("--input", type=Path, required=True)
     selection.add_argument("--collect", action="store_true", help="run vx nextest list into --input")
@@ -227,7 +235,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         if args.check == "windows-runner":
-            detail = windows_runner(read_json(args.event), read_json(args.runners) if args.runners else None)
+            detail = windows_runner(read_json(args.event), read_json(args.runners) if args.runners else None,
+                                    args.hosted_default)
         elif args.check == "inventory":
             selectors = args.selectors[1:] if args.selectors[:1] == ["--"] else args.selectors
             require(args.collect or not selectors, "nextest selectors require --collect")

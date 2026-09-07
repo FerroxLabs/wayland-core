@@ -26,6 +26,11 @@ An online runner may be busy; this check does not promise queue completion.
 Apply a route-changing label before starting the next workflow run. It cannot
 reschedule an already-queued job.
 
+Where the workflow uses hosted Windows by default, pass `--hosted-default`.
+Only an internal PR's explicit `windows-self-hosted` label then requires the
+runner snapshot. Fork PRs always remain hosted, even with that label. Omitting
+the flag retains the older opt-in-hosted routing policy for existing callers.
+
 Only container-execution workloads require this additional check:
 
 ```sh

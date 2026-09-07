@@ -131,6 +131,17 @@ class Prerequisites(unittest.TestCase):
         with patch.object(gate.subprocess, "run", return_value=subprocess.CompletedProcess([], 1)), self.assertRaises(gate.Refused):
             gate.run_checked(["docker", "info"])
 
+    def test_hosted_default_keeps_forks_hosted_and_checks_explicit_opt_in(self):
+        event = {"repository": {"full_name": "FerroxLabs/wayland-core"}, "pull_request": {
+            "labels": [], "head": {"repo": {"full_name": "FerroxLabs/wayland-core"}}
+        }}
+        self.assertIn("hosted default", gate.windows_runner(event, hosted_default=True))
+        event["pull_request"]["labels"] = [{"name": "windows-self-hosted"}]
+        with self.assertRaises(gate.Refused):
+            gate.windows_runner(event, {"runners": []}, hosted_default=True)
+        event["pull_request"]["head"]["repo"]["full_name"] = "contributor/wayland-core"
+        self.assertIn("fork PR", gate.windows_runner(event, {"runners": []}, hosted_default=True))
+
     def test_private_vault_preconditions_without_reading_credentials(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
