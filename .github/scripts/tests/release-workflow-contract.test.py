@@ -69,7 +69,7 @@ def audit(text):
             if name == "ci" and "        shell: bash\n" not in steps.get("F01 packaged wayland-eval driver gate", ""):
                 errors.append("ci: packaged Bash script has no explicit Bash shell")
             isolated = steps.get("Dispatch budget boundary (isolated Windows execution)", "")
-            for required in (BUDGET, "--retries 0", "--no-tests=fail", "--test-threads 1", "--profile ci"):
+            for required in (BUDGET, "--release", "--retries 0", "--no-tests=fail", "--test-threads 1", "--profile ci"):
                 if required not in isolated:
                     errors.append(f"{name}: isolated budget missing {required}")
             if BUDGET not in main or not isolated or (main and job.index(isolated) >= job.index(main)):

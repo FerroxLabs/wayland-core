@@ -678,7 +678,7 @@ jobs:
           ATTEMPT_DIR: ${{ runner.temp }}/wayland-ci-evidence/dispatch-budget
         run: |
           bash .github/scripts/run-tests-with-attempt-evidence.sh \
-            vx cargo nextest run --locked -p wcore-agent --test workflow_limits_test \
+            vx cargo nextest run --locked --release -p wcore-agent --test workflow_limits_test \
             --profile ci --retries 0 --no-tests=fail --test-threads 1 \
             -E 'test(=fix1_dispatch_budget_aborts_with_partial_result)'
 
@@ -1230,7 +1230,7 @@ jobs:
           ATTEMPT_DIR: ${{ runner.temp }}/wayland-ci-evidence/dispatch-budget
         run: |
           bash .github/scripts/run-tests-with-attempt-evidence.sh \
-            vx cargo nextest run --locked -p wcore-agent --test workflow_limits_test \
+            vx cargo nextest run --locked --release -p wcore-agent --test workflow_limits_test \
             --profile ci --retries 0 --no-tests=fail --test-threads 1 \
             -E 'test(=fix1_dispatch_budget_aborts_with_partial_result)'
 
