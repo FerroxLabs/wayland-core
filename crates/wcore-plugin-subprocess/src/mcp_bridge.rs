@@ -67,7 +67,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
@@ -158,6 +158,8 @@ pub struct McpBridgePluginRunner {
     reader_task: Mutex<Option<JoinHandle<()>>>,
     child: Mutex<Option<Child>>,
     _gate: Arc<PluginAccessGate>,
+    closing: AtomicBool,
+    shutdown_lock: Mutex<()>,
 }
 
 impl McpBridgePluginRunner {
@@ -186,6 +188,17 @@ impl McpBridgePluginRunner {
         manifest: &PluginManifest,
         gate: Arc<PluginAccessGate>,
         verified_binary: Option<&Path>,
+    ) -> Result<LoadedMcpBridgePlugin> {
+        Self::load_with_cleanup_owner(manifest_path, manifest, gate, verified_binary, None).await
+    }
+
+    /// Register the host's cleanup ownership before initialization can fail.
+    pub async fn load_with_cleanup_owner(
+        manifest_path: &Path,
+        manifest: &PluginManifest,
+        gate: Arc<PluginAccessGate>,
+        verified_binary: Option<&Path>,
+        cleanup: Option<&dyn crate::RuntimeCleanupOwner>,
     ) -> Result<LoadedMcpBridgePlugin> {
         let binary_rel = manifest
             .runtime
@@ -254,6 +267,7 @@ impl McpBridgePluginRunner {
             gate,
             Some(child),
             &binary.display().to_string(),
+            cleanup,
         )
         .await
     }
@@ -272,8 +286,15 @@ impl McpBridgePluginRunner {
         W: AsyncWrite + Send + Unpin + 'static,
         R: AsyncRead + Send + Unpin + 'static,
     {
-        Self::handshake_over_transport(Box::new(stdin), Box::new(stdout), gate, None, "<duplex>")
-            .await
+        Self::handshake_over_transport(
+            Box::new(stdin),
+            Box::new(stdout),
+            gate,
+            None,
+            "<duplex>",
+            None,
+        )
+        .await
     }
 
     async fn handshake_over_transport(
@@ -282,6 +303,7 @@ impl McpBridgePluginRunner {
         gate: Arc<PluginAccessGate>,
         child: Option<Child>,
         binary_for_logs: &str,
+        cleanup: Option<&dyn crate::RuntimeCleanupOwner>,
     ) -> Result<LoadedMcpBridgePlugin> {
         let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>> =
             Arc::new(Mutex::new(HashMap::new()));
@@ -379,7 +401,12 @@ impl McpBridgePluginRunner {
             reader_task: Mutex::new(Some(reader_task)),
             child: Mutex::new(child),
             _gate: gate,
+            closing: AtomicBool::new(false),
+            shutdown_lock: Mutex::new(()),
         });
+        if let Some(cleanup) = cleanup {
+            cleanup.mcp_bridge_started(runner.clone());
+        }
 
         // 1. initialize handshake.
         let init_params = InitializeParams {
@@ -443,6 +470,9 @@ impl McpBridgePluginRunner {
 
     /// Send a JSON-RPC request line, await the response matching its id.
     async fn send_request(&self, method: &str, params: Option<Value>) -> Result<JsonRpcResponse> {
+        if self.closing.load(Ordering::Acquire) {
+            return Err(SubprocessPluginError::WorkerTerminated);
+        }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let req = JsonRpcRequest::new(id, method, params);
         let line = serde_json::to_string(&req)
@@ -456,6 +486,10 @@ impl McpBridgePluginRunner {
 
         {
             let mut stdin = self.stdin.lock().await;
+            if self.closing.load(Ordering::Acquire) {
+                self.pending.lock().await.remove(&id);
+                return Err(SubprocessPluginError::WorkerTerminated);
+            }
             if let Err(e) = stdin.write_all(line.as_bytes()).await {
                 self.pending.lock().await.remove(&id);
                 return Err(map_io_err(e));
@@ -570,31 +604,19 @@ impl McpBridgePluginRunner {
     /// Best-effort shutdown — closes stdin, waits up to [`SHUTDOWN_GRACE`]
     /// for the child to exit, then SIGKILL. Idempotent.
     pub async fn shutdown(&self) -> Result<()> {
-        // Closing stdin signals MCP servers to exit per the spec.
-        // We don't have a way to drop just the inner Box here without
-        // taking ownership; instead we reap the child with grace.
-        let mut child_guard = self.child.lock().await;
-        if let Some(mut child) = child_guard.take() {
-            // Try a graceful wait first — the server may exit on its own.
-            match timeout(SHUTDOWN_GRACE, child.wait()).await {
-                Ok(Ok(_)) => {}
-                Ok(Err(e)) => warn!(error = %e, "mcp-bridge child wait failed"),
-                Err(_) => {
-                    warn!("mcp-bridge child did not exit within grace — SIGKILL");
-                    let _ = child.kill().await;
-                    let _ = child.wait().await;
-                }
-            }
+        self.closing.store(true, Ordering::Release);
+        let deadline = tokio::time::Instant::now() + SHUTDOWN_GRACE;
+        let _shutdown = self.shutdown_lock.lock().await;
+        if let Ok(mut stdin) = self.stdin.try_lock() {
+            *stdin = Box::new(tokio::io::sink());
         }
-
-        let mut reader_guard = self.reader_task.lock().await;
-        if let Some(handle) = reader_guard.take() {
-            match timeout(Duration::from_secs(1), handle).await {
-                Ok(Ok(_)) => {}
-                Ok(Err(e)) => warn!(error = %e, "mcp-bridge reader join error"),
-                Err(_) => warn!("mcp-bridge reader did not finish — leaking"),
-            }
-        }
+        let child_result = crate::shutdown::reap_child(&self.child, deadline).await;
+        let reader_result = crate::shutdown::join_reader(&self.reader_task).await;
+        self.pending.lock().await.clear();
+        child_result?;
+        reader_result?;
+        // A writer that was active at shutdown must also release its pipe.
+        *self.stdin.lock().await = Box::new(tokio::io::sink());
         Ok(())
     }
 }

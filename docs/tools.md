@@ -501,6 +501,13 @@ the sidecar and a `browser policy` row directly under it.
 `wcore-cua`). Every op honours the background-mode invariant: no
 foreground-app focus stealing.
 
+Linux X11 currently refuses mouse and keyboard input with a typed unsupported
+error: native XTest input moves the operator's pointer and can change focus and
+window stacking. Screenshot, wait, and frontmost-app queries remain supported;
+background input remains unresolved. This is a safety restriction, not a claim
+that background input was implemented. The X11 accessibility tree also remains
+an explicit unsupported operation.
+
 Available ops (variants of `CuaOp`):
 
 | Op | Description |

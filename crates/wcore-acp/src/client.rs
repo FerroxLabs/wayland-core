@@ -319,6 +319,7 @@ async fn check(resp: reqwest::Response) -> Result<reqwest::Response, AcpError> {
         reqwest::StatusCode::UNAUTHORIZED => AcpError::Auth(format!("HTTP {status}")),
         reqwest::StatusCode::FORBIDDEN => AcpError::Forbidden(format!("HTTP {status}")),
         reqwest::StatusCode::NOT_FOUND => AcpError::Session(format!("HTTP {status}")),
+        reqwest::StatusCode::SERVICE_UNAVAILABLE => AcpError::Cleanup(format!("HTTP {status}")),
         _ => AcpError::Transport(format!("HTTP {status} from server")),
     };
     match resp.json::<JsonRpcError>().await {
@@ -330,6 +331,7 @@ async fn check(resp: reqwest::Response) -> Result<reqwest::Response, AcpError> {
                 c if c == ErrorCode::SessionNotFound.code() => AcpError::Session(msg),
                 c if c == ErrorCode::AgentNotFound.code() => AcpError::Agent(msg),
                 c if c == ErrorCode::InvalidRequest.code() => AcpError::Protocol(msg),
+                _ if status == reqwest::StatusCode::SERVICE_UNAVAILABLE => AcpError::Cleanup(msg),
                 _ => AcpError::Transport(format!("HTTP {status}: {msg}")),
             })
         }
@@ -433,6 +435,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl TurnEngine for DoneTurnEngine {
+        async fn close_session(&self, _session_id: &str) -> Result<(), AcpError> {
+            // This stateless fixture owns no tasks, processes or session data.
+            Ok(())
+        }
+
         async fn run_turn(
             &self,
             _req: TurnRequest,

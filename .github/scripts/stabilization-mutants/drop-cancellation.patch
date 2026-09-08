@@ -1,0 +1,42 @@
+diff --git a/crates/wcore-cli/src/acp_engine/lifecycle.rs b/crates/wcore-cli/src/acp_engine/lifecycle.rs
+index 116a6bfb8..c8246186d 100644
+--- a/crates/wcore-cli/src/acp_engine/lifecycle.rs
++++ b/crates/wcore-cli/src/acp_engine/lifecycle.rs
+@@ -80,11 +80,11 @@ impl EngineSession {
+     pub(super) async fn close(&self) -> Result<(), AcpError> {
+         self.lifetime.closing.store(true, Ordering::Release);
+         if let Some(root) = &self.lifetime.root {
+-            root.cancel();
++            let _ = root; // W12 mutant: drop the admitted session cancellation signal.
+         }
+         let mut turns = self.lifetime.turns.lock().await;
+         for (cancel, _) in turns.iter() {
+-            cancel.cancel();
++            let _ = cancel; // W12 mutant: drop the admitted turn cancellation signal.
+         }
+         let deadline = tokio::time::Instant::now() + CANCEL_GRACE;
+         while let Some((_, handle)) = turns.last_mut() {
+@@ -92,7 +92,7 @@ impl EngineSession {
+                 .await
+                 .is_err()
+             {
+-                handle.abort();
++                // W12 mutant: drop forced cancellation as well as cooperative signals.
+                 let _ = handle.await;
+             }
+             // Retire each joined handle before the next await. If an outer
+@@ -154,12 +154,12 @@ impl EngineTurnEngine {
+     pub(super) async fn signal_close(&self, session_id: &str) {
+         if let Some(initializer) = self.initializers.lock().await.get(session_id) {
+             initializer.closing.store(true, Ordering::Release);
+-            initializer.cancel.cancel();
++            // W12 mutant: the initializer token also parents the admitted session.
+         }
+         if let Some(session) = self.sessions.lock().await.get(session_id) {
+             session.lifetime.closing.store(true, Ordering::Release);
+             if let Some(root) = &session.lifetime.root {
+-                root.cancel();
++                let _ = root; // W12 mutant: drop the admitted session cancellation signal.
+             }
+         }
+     }

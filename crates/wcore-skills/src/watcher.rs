@@ -177,6 +177,24 @@ impl SkillWatcher {
         self.watched_dirs.clear();
     }
 
+    /// Stop monitoring and join the debounce task. An interrupted wait retains
+    /// its handle so the host can retry without claiming premature cleanup.
+    pub async fn stop_and_join(&mut self) -> Result<(), tokio::task::JoinError> {
+        self.watcher = None;
+        self.watched_dirs.clear();
+        let result = if let Some(handle) = self.debounce_task.as_mut() {
+            handle.abort();
+            handle.await
+        } else {
+            Ok(())
+        };
+        self.debounce_task.take();
+        match result {
+            Err(error) if error.is_cancelled() => Ok(()),
+            other => other,
+        }
+    }
+
     /// Return the list of directories currently being watched.
     pub fn watched_dirs(&self) -> &[PathBuf] {
         &self.watched_dirs

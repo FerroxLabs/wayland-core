@@ -76,6 +76,7 @@ async fn conversational_posture_drops_all_host_tools() {
         .channel_tool_posture(ChannelToolScope {
             posture: ChannelToolPosture::Conversational,
             workspace_root: ws.into(),
+            ambient_mcp_full_authority_v1: false,
         })
         .build()
         .await
@@ -111,6 +112,7 @@ async fn full_channel_remote_drops_search_and_git() {
         .channel_tool_posture(ChannelToolScope {
             posture: ChannelToolPosture::Full,
             workspace_root: ws.into(),
+            ambient_mcp_full_authority_v1: false,
         })
         .build()
         .await
@@ -149,6 +151,7 @@ async fn workspace_posture_jails_filesystem_reads() {
         .channel_tool_posture(ChannelToolScope {
             posture: ChannelToolPosture::Workspace,
             workspace_root: inside.path().to_path_buf(),
+            ambient_mcp_full_authority_v1: false,
         })
         .build()
         .await
@@ -224,6 +227,7 @@ fn relaxed_windows_default_withholds_bash_from_workspace_posture() {
     let scope = ChannelToolScope {
         posture: ChannelToolPosture::Workspace,
         workspace_root: tmp.path().to_path_buf(),
+        ambient_mcp_full_authority_v1: false,
     };
 
     let mut relaxed = ToolRegistry::new();

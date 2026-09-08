@@ -898,8 +898,11 @@ fn owned_child_status(session: &str) -> Option<std::process::ExitStatus> {
 
 fn terminate_owned_session(session: &str) {
     if let Some(mut owned) = children_map().lock().remove(session) {
-        let _ = owned.child.start_kill();
+        // The guard discovers identity-bound descendants while their parent
+        // still exists. Killing the parent first can reparent a detached Xvfb
+        // before that discovery, leaving it outside the owned process group.
         drop(owned.tree_guard);
+        let _ = owned.child.start_kill();
     }
 }
 
@@ -913,9 +916,11 @@ fn terminate_owned_session(session: &str) {
 fn terminate_session(session: &str, pid: u32) {
     let mut map = children_map().lock();
     if let Some(mut owned) = map.remove(session) {
-        // start_kill targets the Child by handle — immune to PID reuse.
-        let _ = owned.child.start_kill();
+        // Keep the ancestry observable until the identity-backed tree guard
+        // has captured and terminated detached descendants. The Child handle
+        // remains the race-free direct-child kill/reap fallback.
         drop(owned.tree_guard);
+        let _ = owned.child.start_kill();
     } else {
         drop(map);
         terminate_pid(pid);

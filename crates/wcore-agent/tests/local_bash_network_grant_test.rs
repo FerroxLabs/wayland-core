@@ -216,6 +216,7 @@ async fn channel_attached_session_is_denied_the_local_network_grant() {
         .channel_tool_posture(ChannelToolScope {
             posture: ChannelToolPosture::Full,
             workspace_root: workdir.path().to_path_buf(),
+            ambient_mcp_full_authority_v1: false,
         })
         .build()
         .await

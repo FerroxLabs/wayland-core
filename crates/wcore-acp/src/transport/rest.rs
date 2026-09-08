@@ -538,6 +538,7 @@ async fn get_session<H: HttpHandler>(
     params(("id" = String, Path, description = "Session id")),
     responses(
         (status = 204, description = "Deleted"),
+        (status = 503, description = "Cleanup incomplete; session remains closed to new work", body = JsonRpcError),
         (status = 404, description = "Not found", body = JsonRpcError)
     )
 )]

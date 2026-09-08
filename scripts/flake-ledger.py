@@ -198,6 +198,50 @@ def parse_targets(tests: list[str], targets_file: str) -> list[tuple[str, str, s
     return out
 
 
+def cargo_target_args(metadata: dict, rows: list[Row]) -> list[str]:
+    """Resolve Cargo targets before nextest can expand the build to the workspace."""
+    packages = {package["name"]: package for package in metadata["packages"]}
+    selected_packages: list[str] = []
+    selected_targets: list[tuple[str, ...]] = []
+    for row in rows:
+        package = packages.get(row.package)
+        if package is None:
+            raise ValueError(f"unknown Cargo package {row.package}")
+        matches = []
+        for target in package["targets"]:
+            kinds = target["kind"]
+            is_lib = any(kind in ("lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro") for kind in kinds)
+            if target["name"] != row.binary and not (is_lib and row.binary == row.package):
+                continue
+            if is_lib:
+                matches.append(("--lib",))
+            elif "test" in kinds:
+                matches.append(("--test", target["name"]))
+            elif "bin" in kinds:
+                matches.append(("--bin", target["name"]))
+        if len(matches) != 1:
+            raise ValueError(f"{row.package}::{row.binary} resolves to {len(matches)} supported Cargo test targets")
+        if row.package not in selected_packages:
+            selected_packages.append(row.package)
+        if matches[0] not in selected_targets:
+            selected_targets.append(matches[0])
+    if not selected_packages:
+        raise ValueError("refusing an unscoped empty Cargo target selection")
+    return [arg for package in selected_packages for arg in ("-p", package)] + [
+        arg for target in selected_targets for arg in target
+    ]
+
+
+def captured_text(value: str | bytes | None) -> str:
+    return value.decode(errors="replace") if isinstance(value, bytes) else value or ""
+
+
+def save_capture(path: str, stdout: str | bytes | None, stderr: str | bytes | None) -> None:
+    if path:
+        with open(path, "w", encoding="utf-8", errors="replace") as fh:
+            fh.write("=== stdout ===\n" + captured_text(stdout) + "\n=== stderr ===\n" + captured_text(stderr))
+
+
 def parse_summary(text: str) -> tuple[int, int, int] | None:
     m = SUMMARY_RE.search(text)
     if not m:
@@ -208,7 +252,7 @@ def parse_summary(text: str) -> tuple[int, int, int] | None:
     return run, passed, failed
 
 
-def list_count(root: str, profile: str, expr: str) -> int:
+def list_count(root: str, profile: str, expr: str, cargo_args: list[str], log_path: str = "") -> int:
     """How many tests this filter actually selects on THIS platform.
 
     A target can be absent here and present elsewhere — the Windows-only
@@ -216,13 +260,18 @@ def list_count(root: str, profile: str, expr: str) -> int:
     assuming is what keeps an absent test graded NOTRUN rather than silently
     shrinking the batch's expected count into an ERROR.
     """
+    command = ["cargo", "nextest", "list", *cargo_args, "--profile", profile, "-E", expr]
+    print("phase=inventory/build " + shlex.join(command), flush=True)
+    started = time.monotonic()
     proc = subprocess.run(
-        ["cargo", "nextest", "list", "--profile", profile, "-E", expr],
+        command,
         cwd=root,
         capture_output=True,
         text=True,
         errors="replace",
     )
+    save_capture(log_path, proc.stdout, proc.stderr)
+    print(f"phase=inventory/build completed rc={proc.returncode} elapsed={time.monotonic() - started:.3f}s", flush=True)
     if proc.returncode != 0:
         return -1
     # `nextest list` writes ONE flat `binary-id test-name` line per test to
@@ -247,7 +296,7 @@ def read_skips(root: str) -> str:
 
 
 def run_nextest(
-    root: str, profile: str, expr: str, expected: int, timeout: int
+    root: str, profile: str, expr: str, expected: int, timeout: int, cargo_args: list[str]
 ) -> tuple[Outcome, str]:
     # Clear the skip ledger so what it holds afterwards belongs to THIS run.
     try:
@@ -258,6 +307,7 @@ def run_nextest(
         "cargo",
         "nextest",
         "run",
+        *cargo_args,
         "--profile",
         profile,
         "--retries",
@@ -270,6 +320,7 @@ def run_nextest(
         "-E",
         expr,
     ]
+    print("phase=run " + shlex.join(cmd), flush=True)
     started = time.monotonic()
     try:
         proc = subprocess.run(
@@ -280,10 +331,10 @@ def run_nextest(
             errors="replace",
             timeout=timeout,
         )
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
         return (
             Outcome("ERROR", time.monotonic() - started, -1, f"timeout after {timeout}s"),
-            "",
+            captured_text(exc.stdout) + captured_text(exc.stderr),
         )
     elapsed = time.monotonic() - started
     blob = ANSI_RE.sub("", proc.stdout + proc.stderr)
@@ -422,11 +473,54 @@ def self_test() -> int:
         == "package(wcore-tools) and binary(wcore-tools) and test(=bash::tests::x)",
     )
 
+    metadata = {"packages": [
+        {"name": "unit-pkg", "targets": [{"name": "unit_pkg", "kind": ["lib"]}]},
+        {"name": "app", "targets": [
+            {"name": "contract", "kind": ["test"]},
+            {"name": "cli", "kind": ["bin"]},
+            {"name": "ignored-example", "kind": ["example"]},
+        ]},
+    ]}
+    unit = Row("unit", "unit-pkg", "unit-pkg", "test_name")
+    integration = Row("integration", "app", "contract", "test_name")
+    binary = Row("binary", "app", "cli", "test_name")
+    check("hyphenated library resolves to --lib", cargo_target_args(metadata, [unit]) == ["-p", "unit-pkg", "--lib"])
+    check("integration is not inferred as a lib", cargo_target_args(metadata, [integration]) == ["-p", "app", "--test", "contract"])
+    check("binary resolves by metadata kind", cargo_target_args(metadata, [binary]) == ["-p", "app", "--bin", "cli"])
+    check("batch scope deduplicates packages and targets", cargo_target_args(metadata, [unit, integration, integration, binary]) == ["-p", "unit-pkg", "-p", "app", "--lib", "--test", "contract", "--bin", "cli"])
+    for invalid in [[], [Row("bad", "missing", "contract", "x")], [Row("bad", "app", "missing", "x")], [Row("bad", "app", "ignored-example", "x")]]:
+        try:
+            cargo_target_args(metadata, invalid)
+        except ValueError:
+            pass
+        else:
+            failures.append("invalid Cargo target must not fall back to an unscoped build")
+
+    from unittest.mock import patch
+    scope = cargo_target_args(metadata, [integration])
+    commands = []
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        if "list" in command:
+            return subprocess.CompletedProcess(command, 0, "app::contract test_name\n", "compile inventory diagnostic")
+        return subprocess.CompletedProcess(command, 0, "Summary [ 0.100s] 1 test run: 1 passed, 0 skipped\n", "")
+    with tempfile.TemporaryDirectory() as td, patch.object(subprocess, "run", fake_run):
+        log_path = os.path.join(td, "inventory.log")
+        check("scoped inventory still counts the selected test", list_count(td, "ci", "test(=test_name)", scope, log_path) == 1)
+        out, _ = run_nextest(td, "ci", "test(=test_name)", 1, 900, scope)
+        check("scoped run keeps the original verdict", out.verdict == "PASS")
+        check("inventory and execution share Cargo selectors", all(command[3:7] == scope for command in commands))
+        with open(log_path) as fh:
+            check("inventory capture includes compiler diagnostics", "compile inventory diagnostic" in fh.read())
+    with tempfile.TemporaryDirectory() as td, patch.object(subprocess, "run", side_effect=subprocess.TimeoutExpired("cargo", 900, output=b"progress 100", stderr=b"last diagnostic")):
+        out, blob = run_nextest(td, "ci", "test(=test_name)", 1, 900, scope)
+        check("timeout retains partial progress", out.verdict == "ERROR" and "progress 100" in blob and "last diagnostic" in blob)
+
     if failures:
         for f in failures:
             print(f"SELF-TEST FAIL: {f}")
         return 1
-    print("self-test OK: target parser, both directions")
+    print("self-test OK: target parser, Cargo build scope, capture and timeout evidence")
     return 0
 
 
@@ -490,8 +584,10 @@ def main() -> int:
             + (f"  {out.detail[:160]}" if out.detail else ""),
             flush=True,
         )
-        if args.logdir and out.verdict != "PASS" and blob:
-            name = f"{cond}-{row.test[:60]}-{i + 1}.log"
+        if args.logdir and blob:
+            # Stable row index avoids Windows-forbidden test-name characters and
+            # collisions between different tests sharing a truncated prefix.
+            name = f"{cond}-target-{rows.index(row)}-{i + 1}.log"
             with open(os.path.join(args.logdir, name), "w", errors="replace") as fh:
                 fh.write(blob)
 
@@ -499,9 +595,30 @@ def main() -> int:
     # recorded as NOTRUN in every condition and excluded from the batch, so an
     # absent test can never render as a pass and can never turn the batch's
     # own count into a spurious ERROR.
+    print("phase=metadata cargo metadata --no-deps --format-version 1", flush=True)
+    metadata_run = subprocess.run(
+        ["cargo", "metadata", "--no-deps", "--format-version", "1"],
+        cwd=args.root, capture_output=True, text=True, errors="replace",
+    )
+    save_capture(os.path.join(args.logdir, "metadata.log") if args.logdir else "", metadata_run.stdout, metadata_run.stderr)
+    if metadata_run.returncode:
+        print(metadata_run.stderr, file=sys.stderr, flush=True)
+        return 2
+    metadata = json.loads(metadata_run.stdout)
     present: list[Row] = []
+    selectors: dict[str, list[str]] = {}
+    # Resolve every requested target before any inventory command can compile.
     for row in rows:
-        n = list_count(args.root, args.profile, filterset(row.package, row.binary, row.test))
+        try:
+            selectors[row.key] = cargo_target_args(metadata, [row])
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr, flush=True)
+            return 2
+    for index, row in enumerate(rows):
+        n = list_count(
+            args.root, args.profile, filterset(row.package, row.binary, row.test),
+            selectors[row.key], os.path.join(args.logdir, f"inventory-{index}.log") if args.logdir else "",
+        )
         if n == 1:
             present.append(row)
         else:
@@ -521,6 +638,7 @@ def main() -> int:
                     filterset(row.package, row.binary, row.test),
                     1,
                     args.timeout,
+                    selectors[row.key],
                 )
                 record(row, "isolated", out, blob, i)
 
@@ -542,7 +660,8 @@ def main() -> int:
             )
             with ctx:
                 out, blob = run_nextest(
-                    args.root, args.profile, batch_expr, len(present), args.timeout
+                    args.root, args.profile, batch_expr, len(present), args.timeout,
+                    cargo_target_args(metadata, present),
                 )
             # A batch invocation grades the SET. Attribute per test from the log.
             for row in present:
@@ -561,7 +680,7 @@ def main() -> int:
                     per = Outcome("PASS", out.seconds, out.rc, "(other test in batch failed)")
                 else:
                     per = Outcome("PASS", out.seconds, out.rc)
-                record(row, cond, per, blob if per.verdict != "PASS" else "", i)
+                record(row, cond, per, blob, i)
 
     if "batch" in conditions:
         batch_pass("batch")

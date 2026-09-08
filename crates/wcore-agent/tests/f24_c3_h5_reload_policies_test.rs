@@ -138,6 +138,7 @@ async fn a_reloaded_channel_carries_its_policy_and_its_posture() {
 
     let n = host
         .reload_policies()
+        .await
         .expect("a well-formed channel directory must reload");
     assert_eq!(n, 2, "the reload must pick up both channels");
     assert_eq!(
@@ -220,6 +221,7 @@ async fn a_reloaded_channel_carries_its_policy_and_its_posture() {
 
     let err = host
         .reload_policies()
+        .await
         .expect_err("a malformed channel config must surface as an error, not an empty reload");
     let msg = err.to_string();
     assert!(
@@ -247,6 +249,7 @@ async fn a_reloaded_channel_carries_its_policy_and_its_posture() {
     std::fs::remove_file(channels.join("broken.toml")).expect("remove malformed config");
     let n = host
         .reload_policies()
+        .await
         .expect("once the directory is well-formed again the reload must succeed");
     assert_eq!(n, 2);
     assert_eq!(host.policies.generation(), 2);
@@ -255,7 +258,7 @@ async fn a_reloaded_channel_carries_its_policy_and_its_posture() {
     // Without this the repair is a one-way ratchet that can grant authority but
     // never withdraw it.
     std::fs::remove_file(channels.join("addedlater.toml")).expect("remove channel config");
-    let n = host.reload_policies().expect("reload after removal");
+    let n = host.reload_policies().await.expect("reload after removal");
     assert_eq!(n, 1);
     assert_eq!(
         host.policies.policy_for("addedlater").dm_allowlist,

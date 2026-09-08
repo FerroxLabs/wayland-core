@@ -80,6 +80,9 @@ struct DoneEngine;
 
 #[async_trait]
 impl TurnEngine for DoneEngine {
+    async fn close_session(&self, _: &str) -> Result<(), AcpError> {
+        Ok(()) // This fixture owns no engine task or external resource.
+    }
     async fn run_turn(
         &self,
         _req: TurnRequest,

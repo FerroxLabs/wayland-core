@@ -338,6 +338,8 @@ async fn bounded_unsaved_shell_refusal(
     workspace: Option<Arc<crate::workspace_policy::WorkspacePolicy>>,
     timeout: Duration,
 ) -> Option<String> {
+    #[cfg(test)]
+    UNSAVED_GUARD_SPAWNS.with(|count| count.set(count.get() + 1));
     let budget = timeout.min(Duration::from_millis(UNSAVED_GUARD_BUDGET_MS));
     let owned = command.to_string();
     let task =
@@ -480,6 +482,12 @@ fn output_to_result(output: SandboxOutput) -> ToolResult {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static UNSAVED_GUARD_SPAWNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static MANIFEST_BUILD_SPAWNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// #1111 — run the manifest build on the blocking pool.
 ///
 /// `build_sandbox_pieces_for_session` calls
@@ -509,6 +517,8 @@ fn spawn_manifest_build(
     sandbox: Arc<wcore_sandbox::SandboxRegistry>,
     backend_enforces_read_deny: bool,
 ) -> tokio::task::JoinHandle<(SandboxManifest, SandboxCommand)> {
+    #[cfg(test)]
+    MANIFEST_BUILD_SPAWNS.with(|count| count.set(count.get() + 1));
     let command = command.to_string();
     tokio::task::spawn_blocking(move || {
         build_sandbox_pieces_for_session(
@@ -904,6 +914,15 @@ impl Tool for BashTool {
             };
         }
 
+        // Do not schedule blocking preparation for an already-cancelled call.
+        // The mandatory command floor and denylist above still take precedence.
+        if ctx.cancel.is_cancelled() {
+            return ToolResult {
+                content: "Bash command cancelled by cancellation token".to_string(),
+                is_error: true,
+            };
+        }
+
         let timeout_ms = input["timeout"]
             .as_u64()
             .unwrap_or(DEFAULT_TIMEOUT_MS)
@@ -1079,6 +1098,15 @@ impl Tool for BashTool {
         if let Some(reason) = check_denylist(command) {
             return ToolResult {
                 content: reason.to_string(),
+                is_error: true,
+            };
+        }
+
+        // Do not schedule blocking preparation for an already-cancelled call.
+        // The mandatory command floor and denylist above still take precedence.
+        if ctx.cancel.is_cancelled() {
+            return ToolResult {
+                content: "Bash command cancelled by cancellation token".to_string(),
                 is_error: true,
             };
         }

@@ -17,6 +17,8 @@ use wcore_providers::create_provider;
 use wcore_tools::read::ReadTool;
 use wcore_tools::registry::ToolRegistry;
 
+use super::live_acceptance;
+
 /// The provider endpoint these live tests dial.
 ///
 /// Env-overridable for the same reason the MODEL ids already are
@@ -113,7 +115,8 @@ async fn test_openai_tool_use() {
     );
 
     let tmp = tempfile::NamedTempFile::new().expect("tempfile");
-    std::fs::write(tmp.path(), "e2e-openai-content-99").expect("write tempfile");
+    let sentinel = format!("e2e-read-{}", uuid::Uuid::new_v4());
+    std::fs::write(tmp.path(), &sentinel).expect("write tempfile");
     let path = tmp.path().to_string_lossy().to_string();
 
     let config = openai_config(&api_key);
@@ -134,8 +137,13 @@ async fn test_openai_tool_use() {
 
     assert!(!result.text.is_empty());
     assert!(
-        result.text.contains("e2e-openai-content-99") || result.turns > 1,
-        "model should echo the content or use multiple turns: {}",
+        live_acceptance::successful_read_answer(
+            &result.text,
+            &sentinel,
+            result.turns as usize,
+            live_acceptance::observed_read(engine.conversation_messages(), &path, &sentinel),
+        ),
+        "model must return the random content after a successful Read: {}",
         result.text
     );
 

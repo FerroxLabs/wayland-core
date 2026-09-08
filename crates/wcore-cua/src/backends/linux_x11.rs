@@ -1,14 +1,12 @@
-//! Linux X11 backend — REAL XTest synthesized input via `x11rb` +
-//! `xproto::get_image` screenshot + AT-SPI for the accessibility tree.
+//! Linux X11 backend — native `xproto::get_image` screenshots.
 //!
-//! Background invariant on X11: XTest's `fake_input` posts events at the
-//! X server's "as-if-from-the-real-device" layer. Unlike `XSendEvent`
-//! (which sets the `send_event` bit and is filtered by most modern
-//! toolkits) XTest events are indistinguishable from physical input AND
-//! do NOT activate the target window. The agent never calls
-//! `xproto::set_input_focus` or `xproto::map_window` — only
-//! `xtest::fake_input`. The `focus_invariance_test` asserts the
-//! frontmost WM_CLASS cache is unchanged after a synthesized click.
+//! Input is currently refused. A native Xvfb + xfwm4 measurement showed
+//! XTest moving the global pointer, focusing the target and raising it even
+//! though this backend never called SetInputFocus itself. XTest simulates
+//! physical device input; it does not provide background targeting. Returning
+//! success would violate `ComputerUseBackend`'s pointer/focus/stack contract.
+//! Screenshot, Wait and FrontmostApp remain available; AxTree is still an
+//! explicit implementation gap. This containment does not implement safe input.
 //!
 //! Feature gating: real XTest paths require the `x11` feature (enables
 //! `x11rb`). Without it the backend falls back to typed
@@ -20,7 +18,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
-use tokio::process::Command;
 
 use crate::backend::{ComputerUseBackend, CuaSession, Platform};
 use crate::error::{CuaError, CuaResult};
@@ -47,22 +44,16 @@ impl LinuxX11Backend {
         *self.cached_frontmost.lock() = app;
     }
 
-    /// Probe via `xdotool getactivewindow getwindowclassname` — falls
-    /// back to the cached value on any failure.
-    async fn xdotool_frontmost(&self) -> CuaResult<Option<String>> {
-        let res = Command::new("xdotool")
-            .args(["getactivewindow", "getwindowclassname"])
-            .output();
-        match tokio::time::timeout(Duration::from_millis(500), res).await {
-            Ok(Ok(out)) if out.status.success() => {
-                let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if s.is_empty() {
-                    Ok(self.cached_frontmost.lock().clone())
-                } else {
-                    Ok(Some(s))
-                }
-            }
-            _ => Ok(self.cached_frontmost.lock().clone()),
+    /// Read the WM's active client and its ICCCM class without changing focus.
+    /// `xdotool getwindowclassname` is not a supported xdotool command.
+    async fn native_frontmost(&self) -> CuaResult<Option<String>> {
+        #[cfg(all(target_os = "linux", feature = "x11"))]
+        {
+            x11_impl::frontmost_app()
+        }
+        #[cfg(not(all(target_os = "linux", feature = "x11")))]
+        {
+            Ok(self.cached_frontmost.lock().clone())
         }
     }
 }
@@ -78,6 +69,20 @@ impl ComputerUseBackend for LinuxX11Backend {
     }
 
     async fn dispatch(&self, _session: &CuaSession, op: CuaOp) -> CuaResult<CuaOpResult> {
+        if matches!(
+            op,
+            CuaOp::LeftClick { .. }
+                | CuaOp::RightClick { .. }
+                | CuaOp::DoubleClick { .. }
+                | CuaOp::MouseMove { .. }
+                | CuaOp::Scroll { .. }
+                | CuaOp::Type { .. }
+                | CuaOp::Key { .. }
+        ) {
+            return Err(CuaError::UnsupportedPlatform(
+                "X11 background input is unavailable: XTest cannot preserve the operator's pointer, focus and window stacking; screenshot and read-only operations remain available",
+            ));
+        }
         match op {
             CuaOp::LeftClick { x, y, button, mods } => {
                 xt_mouse_click(x, y, button.into(), mods, /*double=*/ false)
@@ -111,13 +116,13 @@ impl ComputerUseBackend for LinuxX11Backend {
                     .to_string(),
             )),
             CuaOp::FrontmostApp {} => Ok(CuaOpResult::FrontmostApp {
-                app_id: self.xdotool_frontmost().await?,
+                app_id: self.native_frontmost().await?,
             }),
         }
     }
 
     async fn frontmost_app(&self) -> CuaResult<Option<String>> {
-        self.xdotool_frontmost().await
+        self.native_frontmost().await
     }
 }
 
@@ -163,6 +168,59 @@ mod x11_impl {
             ));
         }
         RustConnection::connect(None).map_err(|e| CuaError::Backend(format!("X11 connect: {e}")))
+    }
+
+    pub fn frontmost_app() -> CuaResult<Option<String>> {
+        use x11rb::protocol::xproto::AtomEnum;
+        let (conn, screen) = connect()?;
+        let active = conn
+            .intern_atom(false, b"_NET_ACTIVE_WINDOW")
+            .map_err(|e| CuaError::Backend(format!("X11 active-window atom: {e}")))?
+            .reply()
+            .map_err(|e| CuaError::Backend(format!("X11 active-window atom reply: {e}")))?
+            .atom;
+        let property = conn
+            .get_property(
+                false,
+                conn.setup().roots[screen].root,
+                active,
+                AtomEnum::WINDOW,
+                0,
+                1,
+            )
+            .map_err(|e| CuaError::Backend(format!("X11 active-window query: {e}")))?
+            .reply()
+            .map_err(|e| CuaError::Backend(format!("X11 active-window reply: {e}")))?;
+        let Some(window) = property
+            .value32()
+            .and_then(|mut values| values.next())
+            .filter(|window| *window != x11rb::NONE)
+        else {
+            return Ok(None);
+        };
+        let property = conn
+            .get_property(false, window, AtomEnum::WM_CLASS, AtomEnum::STRING, 0, 1024)
+            .map_err(|e| CuaError::Backend(format!("X11 WM_CLASS query: {e}")))?
+            .reply()
+            .map_err(|e| CuaError::Backend(format!("X11 WM_CLASS reply: {e}")))?;
+        if property.format != 8 || property.bytes_after != 0 {
+            return Err(CuaError::Backend(
+                "X11 WM_CLASS is malformed or exceeds the read bound".into(),
+            ));
+        }
+        // ICCCM: instance name, NUL, class name, NUL. Never substitute the
+        // title or the instance name for the policy's application class.
+        let Some(class) = property
+            .value
+            .split(|byte| *byte == 0)
+            .nth(1)
+            .filter(|value| !value.is_empty())
+        else {
+            return Ok(None);
+        };
+        let class = std::str::from_utf8(class)
+            .map_err(|_| CuaError::Backend("X11 WM_CLASS is not UTF-8".into()))?;
+        Ok(Some(class.to_owned()))
     }
 
     /// Canonical x11rb sync pattern: flush the request queue, then
@@ -565,36 +623,34 @@ mod tests {
         assert_eq!(b.platform(), Platform::LinuxX11);
     }
 
-    /// Audit F7 background invariance — synthesized input MUST NOT
-    /// change the cached frontmost WM_CLASS. On Linux without the `x11`
-    /// feature (or without `$DISPLAY`) the call must return a typed
-    /// `UnsupportedPlatform` error — NOT a silent Ok-no-op.
+    /// All input variants refuse before connecting to X11 or emitting input.
+    /// The separate native test measures real pointer/focus/stack and event
+    /// delivery; cached frontmost identity is not a native oracle.
     #[tokio::test]
     async fn focus_invariance_or_typed_blocker() {
         let b = LinuxX11Backend::new();
         b.set_frontmost_for_test(Some("xterm".into()));
         let before = b.cached_frontmost.lock().clone();
-        let r = b
-            .dispatch(
-                &CuaSession::for_test("inv"),
-                CuaOp::LeftClick {
-                    x: 5000,
-                    y: 5000,
-                    button: crate::backend::MouseButton::Left,
-                    mods: crate::backend::KeyMods::default(),
-                },
+        let mut refused = 0;
+        for op in CuaOp::all_variants_for_test().into_iter().filter(|op| {
+            matches!(
+                op,
+                CuaOp::LeftClick { .. }
+                    | CuaOp::RightClick { .. }
+                    | CuaOp::DoubleClick { .. }
+                    | CuaOp::MouseMove { .. }
+                    | CuaOp::Scroll { .. }
+                    | CuaOp::Type { .. }
+                    | CuaOp::Key { .. }
             )
-            .await;
-        match r {
-            Ok(CuaOpResult::Ok) => {
-                // Real X server present + `x11` feature — the click ran.
-            }
-            Err(CuaError::UnsupportedPlatform(_)) | Err(CuaError::Backend(_)) => {
-                // Either feature off OR no $DISPLAY — typed honest
-                // blocker, not a silent no-op.
-            }
-            other => panic!("unexpected dispatch result: {other:?}"),
+        }) {
+            let r = b.dispatch(&CuaSession::for_test("inv"), op).await;
+            assert!(
+                matches!(r, Err(CuaError::UnsupportedPlatform(reason)) if reason.contains("background input"))
+            );
+            refused += 1;
         }
+        assert_eq!(refused, 7);
         assert_eq!(before, b.cached_frontmost.lock().clone());
     }
 }

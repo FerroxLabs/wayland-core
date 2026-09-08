@@ -56,6 +56,11 @@ fn main() {
         };
         match command.get("type").and_then(serde_json::Value::as_str) {
             Some("message") => {
+                if let Some(spec) = model.strip_prefix("fixture-precommand-")
+                    && let Some((_, marker)) = spec.split_once(':')
+                {
+                    std::fs::write(marker, b"message dispatched").expect("publish message receipt");
+                }
                 completed_turns += 1;
                 let msg_id = command
                     .get("msg_id")
@@ -172,10 +177,32 @@ fn main() {
                     }
                 }));
             }
-            Some("set_config" | "set_mode") => emit(&serde_json::json!({
-                "type": "info",
-                "message": "fixture: no changes"
-            })),
+            Some("set_config" | "set_mode") => {
+                if model.starts_with("fixture-precommand-noack:") {
+                    for _ in 0..16 {
+                        emit(&serde_json::json!({"type":"info", "message":"unrelated event"}));
+                    }
+                } else if model.starts_with("fixture-precommand-error:") {
+                    emit(&serde_json::json!({"type":"error", "message":"effort refused"}));
+                } else if model.starts_with("fixture-precommand-mismatch:") {
+                    emit(
+                        &serde_json::json!({"type":"info", "message":"config updated: effort: none → low"}),
+                    );
+                    emit(&serde_json::json!({"type":"config_changed", "capabilities":{}}));
+                } else if model.starts_with("fixture-precommand-ack:") {
+                    emit(
+                        &serde_json::json!({"type":"info", "message":"config updated: effort: none → high"}),
+                    );
+                    emit(&serde_json::json!({"type":"config_changed", "capabilities":{}}));
+                } else {
+                    let message = if command["type"] == "set_mode" {
+                        "mode unchanged: default"
+                    } else {
+                        "set_config: no changes"
+                    };
+                    emit(&serde_json::json!({"type":"info", "message":message}));
+                }
+            }
             Some("stop") => {
                 if let Some(control_path) = model.strip_prefix("fixture-owned-orphan-cancel:") {
                     let marker = std::path::Path::new(control_path).with_extension("stop-observed");

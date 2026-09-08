@@ -84,6 +84,10 @@ const STRIPPED_PROVIDER_ENV: &[&str] = &[
 fn harden_child_env(cmd: &mut std::process::Command, home: &Path) {
     cmd.env("WAYLAND_HOME", home)
         .env("HOME", home)
+        // The absent-command assertion needs a bounded, known search path,
+        // not an arbitrary runner PATH that readiness may refuse to inspect.
+        .env("PATH", home)
+        .env("PATHEXT", ".COM;.EXE;.BAT;.CMD")
         .env("TERM", "dumb");
     for key in STRIPPED_PROVIDER_ENV {
         cmd.env_remove(key);

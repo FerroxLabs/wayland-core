@@ -9,7 +9,8 @@
 //!
 //! - **Conversational** (default): drop every built-in host filesystem /
 //!   shell tool. Keep only the fail-closed [`CONVERSATIONAL_SAFE`] allowlist
-//!   (conversational + network tools) plus operator-wired MCP tools.
+//!   (conversational + network tools). Ambient MCP requires an explicit
+//!   `ambient_mcp_full_authority_v1` operator grant.
 //! - **Workspace**: as Conversational, but add the vfs-jailable filesystem
 //!   tools ([`WORKSPACE_FS_TOOLS`]) back and pin a [`SandboxedFs`] jail on
 //!   the registry so they cannot escape the configured workspace root.
@@ -47,13 +48,34 @@ use wcore_tools::registry::ToolRegistry;
 pub struct ChannelToolScope {
     pub posture: ChannelToolPosture,
     pub workspace_root: PathBuf,
+    /// Trusted operator opt-in; MCP processes retain Full-equivalent ambient authority.
+    pub ambient_mcp_full_authority_v1: bool,
+}
+
+impl ChannelToolScope {
+    /// Effective extension authority, separate from built-in filesystem posture.
+    pub fn effective_mcp_authority(&self) -> &'static str {
+        if allows_ambient_mcp(Some(self)) {
+            "ambient-full-equivalent"
+        } else {
+            "denied"
+        }
+    }
+}
+
+/// Shared operator-authority predicate for tool and lifecycle-hook dispatch.
+/// A local session has no channel scope and keeps its installed extensions.
+pub fn allows_ambient_mcp(scope: Option<&ChannelToolScope>) -> bool {
+    scope.is_none_or(|scope| {
+        scope.posture == ChannelToolPosture::Full || scope.ambient_mcp_full_authority_v1
+    })
 }
 
 /// Built-in tools provably free of host filesystem / shell access — safe to
 /// expose to a remote channel sender in `Conversational` posture.
 ///
 /// **Fail-closed allowlist.** A tool NOT named here (and not an
-/// operator-wired MCP tool) is DROPPED. A newly-added host-touching built-in
+/// explicitly delegated MCP tool) is DROPPED. A newly-added host-touching built-in
 /// therefore can never silently leak to channels: it stays dropped until
 /// someone deliberately adds it here. (Network tools `web`/`WebFetch` reach
 /// the network, not the host fs; SSRF is gated separately by the egress
@@ -112,10 +134,8 @@ const WORKSPACE_FS_TOOLS: &[&str] = &["Read", "Write", "Edit", "Bash"];
 // never runs there).
 const FULL_CHANNEL_DENY: &[&str] = &["Grep", "Glob", "Git"];
 
-/// Operator-wired MCP tools are kept under restricted postures: they are
-/// deliberate, named extensions the operator installed, not ambient host
-/// access. (Caveat: an MCP server that itself exposes host filesystem
-/// access should be threat-modeled as `Full`-equivalent for that channel.)
+/// MCP processes have ambient authority regardless of their advertised names.
+/// Installing a local extension does not delegate it to a remote participant.
 fn is_mcp(t: &dyn Tool) -> bool {
     matches!(t.category(), ToolCategory::Mcp)
 }
@@ -128,22 +148,21 @@ fn is_mcp(t: &dyn Tool) -> bool {
 /// provably enforce secret-read-deny at the OS layer — advertising it would
 /// only result in exec-time refusals from `bash.rs`.
 fn keep_under(posture: ChannelToolPosture, tool: &dyn Tool, read_deny_enforced: bool) -> bool {
+    if is_mcp(tool) {
+        return posture == ChannelToolPosture::Full;
+    }
     match posture {
         // Full host access, EXCEPT the unconfined-search built-ins
         // (`FULL_CHANNEL_DENY`). `apply_posture` runs only for channel/remote
         // engines (a local CLI has no scope), so a LOCAL Full session never
         // reaches here and keeps them. Operator-wired MCP tools are exempt.
         ChannelToolPosture::Full => is_mcp(tool) || !FULL_CHANNEL_DENY.contains(&tool.name()),
-        ChannelToolPosture::Conversational => {
-            CONVERSATIONAL_SAFE.contains(&tool.name()) || is_mcp(tool)
-        }
+        ChannelToolPosture::Conversational => CONVERSATIONAL_SAFE.contains(&tool.name()),
         ChannelToolPosture::Workspace => {
             if tool.name() == "Bash" && !read_deny_enforced {
                 return false;
             }
-            CONVERSATIONAL_SAFE.contains(&tool.name())
-                || WORKSPACE_FS_TOOLS.contains(&tool.name())
-                || is_mcp(tool)
+            CONVERSATIONAL_SAFE.contains(&tool.name()) || WORKSPACE_FS_TOOLS.contains(&tool.name())
         }
     }
 }
@@ -171,7 +190,18 @@ pub fn apply_posture(
     // drops `FULL_CHANNEL_DENY` (Grep/Glob/Git) while keeping all else. Only
     // channel/remote engines reach here, so local Full is untouched.
     let posture = scope.posture;
-    registry.retain(|t| keep_under(posture, t, read_deny_enforced));
+    let ambient_mcp = allows_ambient_mcp(Some(scope));
+    registry.set_ambient_mcp_allowed(ambient_mcp);
+    registry.retain(|t| {
+        if is_mcp(t) {
+            ambient_mcp
+        } else {
+            keep_under(posture, t, read_deny_enforced)
+        }
+    });
+    if registry.get("ToolSearch").is_some() {
+        registry.refresh_current_tool_search_catalog();
+    }
     if scope.posture == ChannelToolPosture::Workspace {
         let policy = Arc::new(wcore_tools::workspace_policy::WorkspacePolicy::contained(
             scope.workspace_root.clone(),
@@ -275,7 +305,7 @@ mod tests {
             ("web", Info),
             ("WebFetch", Info),
             ("ToolSearch", Info),
-            // Operator-wired MCP — kept under restricted postures.
+            // Operator-wired MCP — requires an explicit remote grant.
             ("some_mcp_tool", Mcp),
         ]
         .into_iter()
@@ -324,13 +354,13 @@ mod tests {
     }
 
     #[test]
-    fn conversational_keeps_safe_and_mcp_tools() {
+    fn conversational_keeps_safe_builtin_tools() {
         for t in builtin_roster() {
-            if CONVERSATIONAL_SAFE.contains(&t.name()) || matches!(t.category(), ToolCategory::Mcp)
+            if CONVERSATIONAL_SAFE.contains(&t.name()) && !matches!(t.category(), ToolCategory::Mcp)
             {
                 assert!(
                     keep_under(ChannelToolPosture::Conversational, &t, false),
-                    "safe/mcp tool '{}' must survive conversational posture",
+                    "safe builtin '{}' must survive conversational posture",
                     t.name()
                 );
             }
@@ -533,6 +563,7 @@ mod tests {
         let scope = ChannelToolScope {
             posture: ChannelToolPosture::Workspace,
             workspace_root: PathBuf::from("/tmp"),
+            ambient_mcp_full_authority_v1: false,
         };
         apply_posture(&mut reg, &scope, false);
         assert!(
@@ -547,6 +578,7 @@ mod tests {
         let scope = ChannelToolScope {
             posture: ChannelToolPosture::Conversational,
             workspace_root: PathBuf::from("/tmp"),
+            ambient_mcp_full_authority_v1: false,
         };
         apply_posture(&mut reg, &scope, false);
         assert!(
@@ -570,6 +602,7 @@ mod tests {
         let scope = ChannelToolScope {
             posture: ChannelToolPosture::Full,
             workspace_root: PathBuf::from("/tmp"),
+            ambient_mcp_full_authority_v1: false,
         };
         apply_posture(&mut reg, &scope, false);
         // Full installs NO jail (unconfined by design; the drop is the guard).
@@ -594,6 +627,7 @@ mod tests {
         let scope = ChannelToolScope {
             posture: ChannelToolPosture::Workspace,
             workspace_root: dir.path().to_path_buf(),
+            ambient_mcp_full_authority_v1: false,
         };
         apply_posture(&mut registry, &scope, false);
         assert!(registry.tool_vfs().is_some());

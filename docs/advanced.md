@@ -708,6 +708,11 @@ audit F2). Capability advertised on the wire via
 synthesized mouse, keyboard, and screenshot ops across macOS, Linux
 X11, Linux Wayland, and Windows backends.
 
+The Linux X11 backend supports screenshots, waits, and frontmost-app queries.
+Its mouse and keyboard operations currently refuse before emitting native input
+because XTest cannot preserve pointer, focus, and stacking state. Safe background
+input remains an unresolved capability; the refusal does not establish support.
+
 Background-mode invariant: every CUA op MUST be performable without
 stealing focus from the user's foreground app. `CuaPolicy` enforces
 this at the type level and additionally gates:

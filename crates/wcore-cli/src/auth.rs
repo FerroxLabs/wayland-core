@@ -150,6 +150,7 @@ fn load_doc(config_path: &std::path::Path) -> Result<Table> {
     let body = std::fs::read_to_string(config_path)
         .with_context(|| format!("reading config at {}", config_path.display()))?;
     toml::from_str::<Table>(&body)
+        .map_err(wcore_config::credentials::CredentialsError::from)
         .with_context(|| format!("parsing config at {}", config_path.display()))
 }
 
@@ -201,6 +202,7 @@ fn credentials_store(
         .cloned()
         .map(toml::Value::try_into)
         .transpose()
+        .map_err(wcore_config::credentials::CredentialsError::from)
         .context("parsing [storage.credentials]")?
         .unwrap_or_default();
     let store_path = config_path.with_file_name("credentials.toml");
@@ -639,30 +641,36 @@ fn remove_cmd(provider_arg: &str, config_path: &std::path::Path) -> Result<()> {
 
     // BOTH locations. A remove that clears only one leaves the key resolvable
     // from the other, and the one it would leave behind is the cleartext one.
-    let removed_config = providers_table_mut(&mut doc)?.remove(slug).is_some();
+    let removed_entry = providers_table_mut(&mut doc)?.remove(slug);
+    let removed_config = removed_entry.is_some();
 
     let removed_store = match (credentials_store(config_path, &doc), slot) {
         (Ok(store), Some(slot)) => {
             let had = store.get(&slot).unwrap_or_default().is_some();
             store
                 .delete(&slot)
-                .with_context(|| format!("removing the {label} API key from the store"))?;
-            had
+                .with_context(|| format!("removing the {label} API key from the store"))
+                .map(|()| had)
         }
-        (Err(error), _) => {
-            // Report rather than swallow: a user told "removed" while the key
-            // is still in a store we could not open has been actively misled.
-            eprintln!("warning: could not open the credentials store: {error:#}");
-            false
-        }
-        (_, None) => false,
+        (Err(error), _) => Err(error),
+        (_, None) => Ok(false),
     };
 
-    if !removed_config && !removed_store {
-        bail!("no API key configured for {label} ({slug})");
+    // The config copy is independent: remove it even if the store could not
+    // be cleaned. Retain account identity on failure so the same command can
+    // resolve and remove its stored credential when the backend recovers.
+    if removed_store.is_err()
+        && let Some(toml::Value::Table(mut fields)) = removed_entry
+    {
+        fields.remove("api_key");
+        providers_table_mut(&mut doc)?.insert(slug.to_string(), toml::Value::Table(fields));
     }
     if removed_config {
         save_doc(&doc, config_path)?;
+    }
+    let removed_store = removed_store?;
+    if !removed_config && !removed_store {
+        bail!("no API key configured for {label} ({slug})");
     }
     println!("Removed API key for {label} ({slug}).");
     Ok(())
@@ -693,7 +701,7 @@ fn resolve_oauth_provider(arg: &str) -> Result<&'static str> {
 async fn login_cmd(provider_arg: &str, import_codex: bool, device: bool) -> Result<()> {
     resolve_oauth_provider(provider_arg)?;
     if import_codex {
-        return import_codex_login();
+        return import_codex_login().await;
     }
     if device {
         return login_chatgpt_device().await;
@@ -705,8 +713,15 @@ async fn login_cmd(provider_arg: &str, import_codex: bool, device: bool) -> Resu
 /// our own OAuth store. Shared by `--import-codex` and the auto-import
 /// fallback in `status`/`login`. Returns the decoded plan for the success
 /// line.
-fn import_codex_login() -> Result<()> {
+async fn import_codex_login() -> Result<()> {
     let storage = OAuthStorage::from_home().map_err(|e| anyhow!("opening token store: {e}"))?;
+    let _writer = wcore_agent::oauth::refresh_lock::hold_for_writer(
+        storage.refresh_lock_path(chatgpt::PROVIDER),
+    )
+    .await
+    .map_err(|e| anyhow!(e))?;
+    // Explicit login replaces prior state; malformed old OAuth JSON must not
+    // prevent storing a newly validated login under this writer lock.
     let tokens = chatgpt::import_codex_cli_tokens()
         .map_err(|e| anyhow!("importing Codex CLI login: {e}"))?;
     storage
@@ -736,6 +751,12 @@ async fn logout_cmd(provider_arg: &str) -> Result<()> {
     let provider = resolve_oauth_provider(provider_arg)?;
     let storage = OAuthStorage::from_home().map_err(|e| anyhow!("opening token store: {e}"))?;
 
+    let _writer =
+        wcore_agent::oauth::refresh_lock::hold_for_writer(storage.refresh_lock_path(provider))
+            .await
+            .map_err(|e| anyhow!(e))?;
+    // delete re-reads and attempts every tier under this lock, even if a tier
+    // cannot be read. A preliminary failing load must not skip W06 cleanup.
     let removed = storage
         .delete(provider)
         .map_err(|e| anyhow!("removing the stored token: {e}"))?;
@@ -745,6 +766,9 @@ async fn logout_cmd(provider_arg: &str) -> Result<()> {
     } else {
         println!("Already signed out of ChatGPT (no stored token).");
     }
+    println!(
+        "This removes this profile's local login. An existing Codex CLI login can authenticate or be imported again; upstream access was not revoked."
+    );
     Ok(())
 }
 
@@ -756,6 +780,12 @@ async fn logout_cmd(provider_arg: &str) -> Result<()> {
 async fn status_cmd() -> Result<()> {
     let storage = OAuthStorage::from_home().map_err(|e| anyhow!("opening token store: {e}"))?;
 
+    // Re-read under writer authority before deciding whether to auto-import.
+    let _writer = wcore_agent::oauth::refresh_lock::hold_for_writer(
+        storage.refresh_lock_path(chatgpt::PROVIDER),
+    )
+    .await
+    .map_err(|e| anyhow!(e))?;
     let tokens = match storage
         .load(chatgpt::PROVIDER)
         .map_err(|e| anyhow!("reading token store: {e}"))?
@@ -882,12 +912,24 @@ async fn login_chatgpt() -> Result<()> {
 
     // 6. Persist the bundle to `~/.wayland/oauth/chatgpt.json`.
     let storage = OAuthStorage::from_home().map_err(|e| anyhow!("opening token store: {e}"))?;
-    storage
-        .store(chatgpt::PROVIDER, &tokens)
-        .map_err(|e| anyhow!("persisting the tokens failed: {e}"))?;
+    persist_chatgpt_login(&storage, &tokens).await?;
 
     println!("Signed in to ChatGPT. Use `--provider openai-chatgpt`.");
     Ok(())
+}
+
+/// Both network login flows finish their exchange before entering this
+/// persistence transaction. Login is an explicit replacement of current state.
+#[cfg(any(feature = "remote-registry", test))]
+async fn persist_chatgpt_login(storage: &OAuthStorage, tokens: &OAuthTokens) -> Result<()> {
+    let _writer = wcore_agent::oauth::refresh_lock::hold_for_writer(
+        storage.refresh_lock_path(chatgpt::PROVIDER),
+    )
+    .await
+    .map_err(|e| anyhow!(e))?;
+    storage
+        .store(chatgpt::PROVIDER, tokens)
+        .map_err(|e| anyhow!("persisting the tokens failed: {e}"))
 }
 
 /// Stripped-build variant: with `remote-registry` (and `wcore-egress`)
@@ -923,9 +965,7 @@ async fn login_chatgpt_device() -> Result<()> {
 
     // Persist the bundle to `~/.wayland/oauth/chatgpt.json`.
     let storage = OAuthStorage::from_home().map_err(|e| anyhow!("opening token store: {e}"))?;
-    storage
-        .store(chatgpt::PROVIDER, &tokens)
-        .map_err(|e| anyhow!("persisting the tokens failed: {e}"))?;
+    persist_chatgpt_login(&storage, &tokens).await?;
 
     println!("Signed in to ChatGPT. Use `--provider openai-chatgpt`.");
     Ok(())
@@ -963,6 +1003,8 @@ mod tests {
         store.get(&store_slot(Provider::from_slug(slug)?)?).ok()?
     }
 
+    /// These tests share the default serial lock with the other CLI tests
+    /// that mutate WAYLAND_HOME; a private auth lock cannot protect that env.
     /// Scope the ladder for a test: `WAYLAND_HOME` forces the isolated-profile
     /// path (so the OS keyring is never touched — a test that wrote into the
     /// developer's real Keychain would be a defect in itself), and a passphrase
@@ -1027,7 +1069,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(auth_credentials_env)]
+    #[serial_test::serial]
     fn add_stores_two_accounts_on_one_provider_in_two_separate_slots() {
         // #14 end to end through the CLI: two OpenRouter accounts, two keys,
         // neither in cleartext, and neither overwriting the other.
@@ -1073,7 +1115,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(auth_credentials_env)]
+    #[serial_test::serial]
     fn add_moves_an_accounts_cleartext_key_out_of_config() {
         let dir = tempdir().unwrap();
         let _env = LadderEnv::scoped(dir.path());
@@ -1105,7 +1147,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(auth_credentials_env)]
+    #[serial_test::serial]
     fn add_refuses_to_validate_an_account_that_overrides_base_url() {
         // SECURITY: the account's key belongs to its own endpoint. Validating
         // it against the built-in provider would post the operator's
@@ -1136,7 +1178,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(auth_credentials_env)]
+    #[serial_test::serial]
     fn remove_clears_an_accounts_slot_and_list_shows_it_first() {
         let dir = tempdir().unwrap();
         let _env = LadderEnv::scoped(dir.path());
@@ -1177,7 +1219,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(auth_credentials_env)]
+    #[serial_test::serial]
     fn an_undeclared_id_is_not_silently_promoted_to_an_account() {
         // A typo'd slug must still be an error. Creating a slot for an
         // undeclared id would write a key nothing can ever resolve.
@@ -1200,7 +1242,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(auth_credentials_env)]
+    #[serial_test::serial]
     fn add_no_validate_stores_the_provider_key_and_never_writes_it_in_cleartext() {
         let dir = tempdir().unwrap();
         let _env = LadderEnv::scoped(dir.path());
@@ -1241,7 +1283,7 @@ mod tests {
     /// `resolve_api_key`, so a stale cleartext copy would make the secure write
     /// a silent no-op from the user's point of view.
     #[test]
-    #[serial_test::serial(auth_credentials_env)]
+    #[serial_test::serial]
     fn add_strips_a_pre_existing_cleartext_key_that_would_shadow_the_store() {
         let dir = tempdir().unwrap();
         let _env = LadderEnv::scoped(dir.path());
@@ -1281,7 +1323,7 @@ mod tests {
     /// passphrase there is no secure tier, and `auth add` must refuse with the
     /// actionable message rather than falling back to cleartext.
     #[test]
-    #[serial_test::serial(auth_credentials_env)]
+    #[serial_test::serial]
     fn add_refuses_rather_than_writing_cleartext_when_no_secure_tier_exists() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.toml");
@@ -1342,7 +1384,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(auth_credentials_env)]
+    #[serial_test::serial]
     fn autodetect_resolves_provider_from_key_prefix() {
         let dir = tempdir().unwrap();
         let _env = LadderEnv::scoped(dir.path());
@@ -1400,7 +1442,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(auth_credentials_env)]
+    #[serial_test::serial]
     fn add_replaces_an_existing_key_in_place() {
         let dir = tempdir().unwrap();
         let _env = LadderEnv::scoped(dir.path());
@@ -1425,7 +1467,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(auth_credentials_env)]
+    #[serial_test::serial]
     fn add_preserves_other_config_tables() {
         let dir = tempdir().unwrap();
         let _env = LadderEnv::scoped(dir.path());
@@ -1462,7 +1504,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(auth_credentials_env)]
+    #[serial_test::serial]
     fn remove_clears_the_key_from_both_the_store_and_the_legacy_config_table() {
         let dir = tempdir().unwrap();
         let _env = LadderEnv::scoped(dir.path());
@@ -1512,8 +1554,10 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn remove_errors_when_the_provider_is_not_configured() {
         let dir = tempdir().unwrap();
+        let _env = LadderEnv::scoped(dir.path());
         let path = dir.path().join("config.toml");
         let err = run_with_path(
             AuthCmd::Remove {
@@ -1685,5 +1729,90 @@ mod tests {
         let tokens = result.expect("import");
         assert_eq!(tokens.access_token, access);
         assert_eq!(tokens.refresh_token.as_deref(), Some("rt-c"));
+    }
+    #[tokio::test]
+    async fn network_login_persistence_waits_for_prior_writer() {
+        let root = tempdir().unwrap();
+        let secure = wcore_config::credentials::InMemoryCredentialsStore::new();
+        let storage = OAuthStorage::at_root(root.path().join("oauth"), Box::new(secure)).unwrap();
+        let tokens = OAuthTokens {
+            access_token: "new-login".into(),
+            refresh_token: Some("new-refresh".into()),
+            expires_at_unix_secs: Some(0),
+            token_type: "Bearer".into(),
+            scope: None,
+            id_token: None,
+        };
+        let writer = wcore_agent::oauth::refresh_lock::hold_for_writer(
+            storage.refresh_lock_path(chatgpt::PROVIDER),
+        )
+        .await
+        .unwrap();
+        let persist = persist_chatgpt_login(&storage, &tokens);
+        tokio::pin!(persist);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(150), &mut persist)
+                .await
+                .is_err()
+        );
+        storage.delete(chatgpt::PROVIDER).unwrap();
+        drop(writer);
+        persist.await.unwrap();
+        assert_eq!(
+            storage
+                .load(chatgpt::PROVIDER)
+                .unwrap()
+                .unwrap()
+                .access_token,
+            tokens.access_token
+        );
+        let writer = wcore_agent::oauth::refresh_lock::hold_for_writer(
+            storage.refresh_lock_path(chatgpt::PROVIDER),
+        )
+        .await
+        .unwrap();
+        storage.delete(chatgpt::PROVIDER).unwrap();
+        drop(writer);
+        assert!(storage.load(chatgpt::PROVIDER).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn network_login_replaces_malformed_prior_oauth_json() {
+        use wcore_config::credentials::{
+            CredentialsStore, InMemoryCredentialsStore, oauth_tokens_key,
+        };
+        for secure_source in [false, true] {
+            let root = tempdir().unwrap();
+            let secure = InMemoryCredentialsStore::new();
+            let storage =
+                OAuthStorage::at_root(root.path().join("oauth"), Box::new(secure.clone())).unwrap();
+            if secure_source {
+                secure
+                    .put(&oauth_tokens_key(chatgpt::PROVIDER), "{malformed-old-login")
+                    .unwrap();
+            } else {
+                std::fs::write(storage.path_for(chatgpt::PROVIDER), "{malformed-old-login")
+                    .unwrap();
+            }
+            assert!(storage.load(chatgpt::PROVIDER).is_err());
+            let tokens = OAuthTokens {
+                access_token: "new-login".into(),
+                refresh_token: Some("new-refresh".into()),
+                expires_at_unix_secs: Some(0),
+                token_type: "Bearer".into(),
+                scope: None,
+                id_token: None,
+            };
+            persist_chatgpt_login(&storage, &tokens).await.unwrap();
+            assert_eq!(
+                storage
+                    .load(chatgpt::PROVIDER)
+                    .unwrap()
+                    .unwrap()
+                    .access_token,
+                "new-login"
+            );
+            assert!(!storage.path_for(chatgpt::PROVIDER).exists());
+        }
     }
 }

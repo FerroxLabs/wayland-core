@@ -859,3 +859,43 @@ impl Drop for EnvGuard {
         }
     }
 }
+
+#[tokio::test]
+async fn explicit_effort_requires_ack_before_message_dispatch() {
+    for (response, error) in [
+        ("noack", Some("acknowledgement missing after 16 events")),
+        ("error", Some("pre-command rejected")),
+        ("mismatch", Some("effort rejected or mismatched")),
+        ("ack", None),
+    ] {
+        let control = external_control_dir();
+        let marker = control.path().join("message-dispatched");
+        let model = format!("fixture-precommand-{response}:{}", marker.display());
+        let mut selected =
+            ProviderConfig::new(ProviderId::OpenAI, model).with_api_key("fixture-key");
+        selected.effort = Some("high".into());
+        let scenario = Scenario::new("effort_ack_barrier", Category::Hardening)
+            .max_total_time(Duration::from_secs(5))
+            .turn(Turn::new("must wait for acknowledgement").max_time(Duration::from_secs(2)));
+        let result = run_with_binary(&scenario, &selected, fixture())
+            .await
+            .expect("runner returns a scenario result");
+        if let Some(error) = error {
+            assert!(result.failures.iter().any(|failure| matches!(failure, Failure::RunnerError(message) if message.contains(error))), "{response}: {:?}", result.failures);
+            assert!(
+                !marker.exists(),
+                "{response}: sent Message before a valid effort acknowledgement"
+            );
+        } else {
+            assert!(
+                marker.exists(),
+                "positive control: acknowledged effort did not dispatch Message: {:?}",
+                result.failures
+            );
+            assert_eq!(
+                std::fs::read_to_string(&marker).unwrap(),
+                "message dispatched"
+            );
+        }
+    }
+}

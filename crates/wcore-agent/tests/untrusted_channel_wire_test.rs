@@ -69,8 +69,8 @@ use wcore_agent::channel_policy::ChannelPolicyRegistry;
 use wcore_agent::channel_tools::ChannelToolScope;
 use wcore_agent::output::OutputSink;
 use wcore_agent::output::null_sink::NullSink;
-use wcore_channels::ChannelToolPosture;
 use wcore_channels::untrusted::UNTRUSTED_CHANNEL_SESSION_DIRECTIVE;
+use wcore_channels::{ChannelToolPosture, InboundPolicy, config::ChannelConfig};
 use wcore_config::compat::ProviderCompat;
 use wcore_config::config::{Config, ProviderType};
 use wcore_config::debug::DebugConfig;
@@ -285,6 +285,7 @@ async fn drive_turn(
         bootstrap = bootstrap.channel_tool_posture(ChannelToolScope {
             posture: ChannelToolPosture::Conversational,
             workspace_root: cwd.to_path_buf(),
+            ambient_mcp_full_authority_v1: false,
         });
     }
     let mut built = bootstrap.build().await.expect("bootstrap against the mock");
@@ -752,23 +753,43 @@ async fn the_real_dispatcher_puts_only_the_funnel_output_on_the_wire() {
     );
     configure_persisted_test_session(&mut config, &cwd);
 
-    // An EMPTY registry: `scope_for` finds nothing and the dispatcher falls
-    // back to the safe `Conversational` posture rooted at cwd, which is what
-    // carries the untrusted-channel directive. `Default` is one of the two
-    // public ways into the registry (`from_parts` is `#[cfg(test)]`, so an
-    // integration test cannot reach it) and is fail-closed by design.
+    // Use the public validated registry with the intended Conversational
+    // posture. An absent channel now means revoked authority, not a fallback
+    // scope, so this wire fixture must configure its own channel and sender.
+    let policies = Arc::new(
+        ChannelPolicyRegistry::from_configs(
+            vec![ChannelConfig {
+                name: "c1".into(),
+                platform: "slack".into(),
+                enabled: true,
+                options: toml::Table::new(),
+                inbound: InboundPolicy {
+                    dm_allowlist: vec!["alice".into()],
+                    tools: ChannelToolPosture::Conversational,
+                    tool_workspace_root: Some(cwd.to_string_lossy().into_owned()),
+                    ..Default::default()
+                },
+            }],
+            &cwd,
+        )
+        .expect("validated bounded channel fixture"),
+    );
     let dispatcher = ChannelTurnDispatcher::new(
         config,
         cwd.to_str().expect("utf-8 workdir").to_string(),
         provider,
-        Arc::new(ChannelPolicyRegistry::default()),
+        policies,
         None,
     );
 
     let reply = dispatcher
         .dispatch("agent:main:slack:dm:c1", "c1", &hostile_message())
+        .await;
+    dispatcher
+        .reload_from_configs(vec![])
         .await
-        .expect("the dispatcher drove a turn against the mock");
+        .expect("retire the owned channel fixture session");
+    let reply = reply.expect("the dispatcher drove a turn against the mock");
     assert_eq!(
         reply.as_deref(),
         Some("ok"),

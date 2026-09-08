@@ -323,6 +323,7 @@ pub fn spawn_for_run(
         ChildInputs {
             secret: secret.as_deref(),
             stream_retry_budget: None,
+            session: &crate::scenario::SessionIdentity::Fresh,
         },
         SpawnInstrumentation::default(),
     )
@@ -343,6 +344,7 @@ struct SpawnInstrumentation<'a> {
 struct ChildInputs<'a> {
     secret: Option<&'a str>,
     stream_retry_budget: Option<u32>,
+    session: &'a crate::scenario::SessionIdentity,
 }
 
 fn spawn_for_run_with_secret(
@@ -393,8 +395,20 @@ fn spawn_for_run_with_secret(
         .arg(provider.id.cli_name())
         .arg("--model")
         .arg(&provider.model);
+    if let Some(max_tokens) = provider.max_tokens {
+        cmd.arg("--max-tokens").arg(max_tokens.to_string());
+    }
     if let Some(base_url) = &provider.base_url {
         cmd.arg("--base-url").arg(base_url);
+    }
+    match child_inputs.session {
+        crate::scenario::SessionIdentity::Fresh => {}
+        crate::scenario::SessionIdentity::Create(id) => {
+            cmd.arg("--session-id").arg(id);
+        }
+        crate::scenario::SessionIdentity::Resume(id) => {
+            cmd.arg("--resume").arg(id);
+        }
     }
     cmd.current_dir(cwd)
         .stdin(Stdio::piped())
@@ -659,6 +673,28 @@ struct SessionRun<'a> {
     evidence_roots: &'a EvidenceRoots,
 }
 
+async fn wait_for_effect_cut(
+    barrier: Option<&crate::scenario::EffectBarrier>,
+) -> anyhow::Result<()> {
+    let Some(barrier) = barrier else {
+        return std::future::pending().await;
+    };
+    loop {
+        match tokio::fs::read(&barrier.path).await {
+            Ok(bytes) => {
+                anyhow::ensure!(
+                    bytes == barrier.expected,
+                    "effect barrier evidence mismatch"
+                );
+                return Ok(());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResult> {
     let SessionRun {
         scenario,
@@ -671,6 +707,27 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
         config_sha256,
         evidence_roots: _,
     } = input;
+    if let Some(barrier) = &scenario.cut_after_effect {
+        let parent = barrier
+            .path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("effect barrier has no parent"))?
+            .canonicalize()?;
+        anyhow::ensure!(
+            !barrier.path.exists() && !barrier.expected.is_empty(),
+            "effect barrier must start absent and have exact evidence"
+        );
+        anyhow::ensure!(
+            !parent.starts_with(cwd.canonicalize()?),
+            "effect barrier cannot be candidate workspace evidence"
+        );
+        if let Some(home) = wayland_home {
+            anyhow::ensure!(
+                !parent.starts_with(home.canonicalize()?),
+                "effect barrier cannot be candidate home evidence"
+            );
+        }
+    }
     let authority_evidence_required = authority_evidence_required();
     let egress_capture = authority_evidence_required
         .then(|| crate::egress_evidence::Capture::create(cwd))
@@ -699,6 +756,7 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
         ChildInputs {
             secret,
             stream_retry_budget: scenario.stream_retry_budget,
+            session: &scenario.session,
         },
         SpawnInstrumentation {
             process_tree: Some(&process_tree),
@@ -741,10 +799,20 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
         stdin,
         stdout,
         scenario,
+        provider.effort.as_deref(),
         redactor.clone(),
         Arc::clone(&stdout_secret_detected),
     );
-    let result = tokio::time::timeout(scenario.max_total_time, drive).await;
+    let result = tokio::time::timeout(scenario.max_total_time, async {
+        tokio::select! {
+            result = drive => result,
+            evidence = wait_for_effect_cut(scenario.cut_after_effect.as_ref()) => {
+                evidence?;
+                Err(anyhow::anyhow!("fixture after-effect process cut"))
+            }
+        }
+    })
+    .await;
 
     let (
         turn_results,
@@ -811,14 +879,27 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
                 passed: false,
                 failures,
                 wall_time: start.elapsed(),
-                cost_usd: 0.0,
+                // A cut after possible dispatch has unknown usage. Preserve the
+                // full admitted bound rather than making the interrupted leg free.
+                cost_usd: if scenario.cut_after_effect.is_some() {
+                    scenario.max_total_cost_usd
+                } else {
+                    0.0
+                },
                 trace: ToolTrace::default(),
                 final_text: String::new(),
                 stderr_tail,
                 turn_results: Vec::new(),
                 workdir: cwd.to_path_buf(),
                 boot_time: Duration::ZERO,
-                info_events: Vec::new(),
+                info_events: if scenario.cut_after_effect.is_some() {
+                    vec![format!(
+                        "paired interrupted cost is the conservative admitted bound, not reported usage: {}",
+                        scenario.max_total_cost_usd
+                    )]
+                } else {
+                    Vec::new()
+                },
                 execution: ExecutionEvidence {
                     config_sha256,
                     sandbox_backend,
@@ -870,14 +951,25 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
                 passed: false,
                 failures,
                 wall_time: start.elapsed(),
-                cost_usd: 0.0,
+                cost_usd: if scenario.cut_after_effect.is_some() {
+                    scenario.max_total_cost_usd
+                } else {
+                    0.0
+                },
                 trace: ToolTrace::default(),
                 final_text: String::new(),
                 stderr_tail,
                 turn_results: Vec::new(),
                 workdir: cwd.to_path_buf(),
                 boot_time: Duration::ZERO,
-                info_events: Vec::new(),
+                info_events: if scenario.cut_after_effect.is_some() {
+                    vec![format!(
+                        "paired interrupted cost is the conservative admitted bound, not reported usage: {}",
+                        scenario.max_total_cost_usd
+                    )]
+                } else {
+                    Vec::new()
+                },
                 execution: ExecutionEvidence {
                     config_sha256,
                     sandbox_backend,
@@ -1323,6 +1415,48 @@ fn turn_command_to_json(cmd: &crate::scenario::TurnCommand) -> serde_json::Value
     }
 }
 
+/// Validate the canonical effort receipt when the child reports one. The
+/// current CLI reports it in the config-updated notice; capability `effort`
+/// is a support boolean, not the selected value.
+fn validate_precommand_effort(
+    pre: &crate::scenario::TurnCommand,
+    ev: &Value,
+) -> anyhow::Result<()> {
+    let crate::scenario::TurnCommand::SetConfig {
+        effort: Some(expected),
+        ..
+    } = pre
+    else {
+        return Ok(());
+    };
+    for actual in [
+        ev.get("effort"),
+        ev.pointer("/config/effort"),
+        ev.pointer("/capabilities/current_effort"),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        anyhow::ensure!(
+            actual.as_str() == Some(expected.as_str()),
+            "pre-command effort mismatch: expected {expected}, received {actual}"
+        );
+    }
+    if let Some(message) = ev.get("message").and_then(Value::as_str)
+        && let Some(changes) = message.strip_prefix("config updated: ")
+        && let Some(receipt) = changes
+            .split(", ")
+            .find_map(|part| part.strip_prefix("effort: "))
+    {
+        let actual = receipt.split_once(" → ").map(|(_, value)| value);
+        anyhow::ensure!(
+            actual == Some(expected.as_str()) || (expected.is_empty() && receipt == "cleared"),
+            "pre-command effort rejected or mismatched: {receipt}; expected {expected}"
+        );
+    }
+    Ok(())
+}
+
 /// D2: fold a `config_changed` event into `info_events` as a synthetic line.
 ///
 /// `ScenarioResult` surfaces protocol notices through `info_events` (asserted
@@ -1403,6 +1537,7 @@ async fn drive_session(
     mut stdin: tokio::process::ChildStdin,
     stdout: crate::candidate_stdout::CandidateStdout,
     scenario: &crate::scenario::Scenario,
+    effort: Option<&str>,
     redactor: SecretRedactor,
     secret_detected: Arc<AtomicBool>,
 ) -> anyhow::Result<DriveOutput> {
@@ -1412,6 +1547,7 @@ async fn drive_session(
     let drive_start = Instant::now();
     let mut capability_evidence = CapabilityEvidence::default();
     let mut ready_memory_enabled = false;
+    let mut ready_session_id = None;
 
     // Consume engine bootstrap output up to AND INCLUDING the `ready` event
     // before sending the first user message, so we don't race bootstrap. We
@@ -1426,6 +1562,16 @@ async fn drive_session(
                 Some(ev) => {
                     capability_evidence.capture(&ev);
                     if ev.get("type").and_then(Value::as_str) == Some("ready") {
+                        ready_session_id = ev
+                            .get("session_id")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned);
+                        if let Some(expected) = scenario.session.id() {
+                            anyhow::ensure!(
+                                ev.get("session_id").and_then(Value::as_str) == Some(expected),
+                                "ready session identity does not match requested create/resume id"
+                            );
+                        }
                         ready_memory_enabled = ev
                             .get("capabilities")
                             .and_then(|capabilities| capabilities.get("memory_enabled"))
@@ -1450,6 +1596,11 @@ async fn drive_session(
     let mut turn_results: Vec<TurnResult> = Vec::new();
     let mut runner_error: Option<String> = None;
     let mut info_events = vec![format!("ready: memory_enabled={ready_memory_enabled}")];
+    if scenario.name.starts_with("w16_") || scenario.session.id().is_some() {
+        let identity = ready_session_id
+            .ok_or_else(|| anyhow::anyhow!("paired ready has no native session id"))?;
+        info_events.push(format!("paired_session_identity:{identity}"));
+    }
     let mut prompt_dispatch_time = Duration::ZERO;
     let mut first_token_time = None;
     let mut approval_response_time = Duration::ZERO;
@@ -1500,7 +1651,12 @@ async fn drive_session(
         // `info_events` so it doesn't bleed into the turn's message stream.
         // Sending pre-commands first means the model swap / mode change is in
         // effect for this turn.
-        for pre in &turn.pre_commands {
+        let effort_command = effort.map(|effort| crate::scenario::TurnCommand::SetConfig {
+            model: None,
+            thinking: None,
+            effort: Some(effort.to_owned()),
+        });
+        for pre in turn.pre_commands.iter().chain(effort_command.iter()) {
             let pre_cmd = turn_command_to_json(pre);
             let mut pline = serde_json::to_vec(&pre_cmd)?;
             pline.push(b'\n');
@@ -1518,6 +1674,7 @@ async fn drive_session(
             // and a no-op `info` as terminal otherwise. Bounded so neither
             // case can hang us.
             let mut response_events = 0usize;
+            let mut acknowledged = false;
             while response_events < 16 {
                 match read_turn_event(
                     &mut reader,
@@ -1536,9 +1693,15 @@ async fn drive_session(
                             continue;
                         }
                         response_events += 1;
+                        anyhow::ensure!(
+                            !matches!(ty, "error" | "set_mode_refused"),
+                            "pre-command rejected for turn {turn_idx}: {ev}"
+                        );
+                        validate_precommand_effort(pre, &ev)?;
                         if ty == "config_changed" {
                             capture_config_changed(&ev, &mut info_events);
                             // Terminal for a successful change.
+                            acknowledged = true;
                             break;
                         } else if ty == "info" {
                             let m = ev
@@ -1546,12 +1709,20 @@ async fn drive_session(
                                 .and_then(Value::as_str)
                                 .unwrap_or("")
                                 .to_string();
-                            let is_noop = m.contains("no changes");
+                            let is_noop = match pre {
+                                crate::scenario::TurnCommand::SetConfig { .. } => {
+                                    m == "set_config: no changes"
+                                }
+                                crate::scenario::TurnCommand::SetMode { .. } => {
+                                    m.starts_with("mode unchanged: ")
+                                }
+                            };
                             info_events.push(m);
                             // A no-op set_config emits no `config_changed`;
                             // stop here. Otherwise keep draining for the
                             // trailing `config_changed`.
                             if is_noop {
+                                acknowledged = true;
                                 break;
                             }
                         }
@@ -1562,6 +1733,10 @@ async fn drive_session(
                     ),
                 }
             }
+            anyhow::ensure!(
+                acknowledged,
+                "pre-command acknowledgement missing after {response_events} events for turn {turn_idx}"
+            );
         }
 
         // Wire format per crates/wcore-protocol/src/commands.rs:9
@@ -1866,6 +2041,15 @@ async fn drive_session(
                     if let Some(m) = ev.get("message").and_then(Value::as_str) {
                         info_events.push(m.to_string());
                     }
+                }
+                "compact_offload"
+                    if scenario.name == "w16_long_session_constraint_retention"
+                        && ev
+                            .get("tokens_freed")
+                            .and_then(Value::as_u64)
+                            .is_some_and(|n| n > 0) =>
+                {
+                    info_events.push(format!("paired_compaction_observed:{ev}"));
                 }
                 "config_changed" => {
                     // D2: a SetConfig/SetMode that lands DURING a turn (the

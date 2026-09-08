@@ -642,6 +642,23 @@ impl SessionJournal {
             .map(|writer| writer.state.clone())
     }
 
+    /// Read the same live writer state as `state`, without copying unrelated
+    /// conversation and provider payloads for child-supervision queries.
+    pub(crate) fn durable_children(
+        &self,
+    ) -> Result<Vec<wcore_types::spawner::DurableChildRecord>, JournalError> {
+        let writer = self
+            .inner
+            .lock()
+            .map_err(|_| JournalError::WriterPoisoned)?;
+        Ok(writer
+            .state
+            .children
+            .values()
+            .filter_map(|child| child.durable.clone())
+            .collect())
+    }
+
     /// Snapshot the reduced state and committed entries from one locked writer.
     ///
     /// Reading the already-open data file prevents a pathname replacement from
@@ -1479,6 +1496,14 @@ impl JournalWriter {
         if self.faulted {
             return Err(JournalError::WriterFaulted);
         }
+        #[cfg(feature = "test-utils")]
+        if stabilization_crash_cut(&event, &self.state, "before") {
+            self.faulted = true;
+            return Err(JournalError::Io {
+                path: self.path.clone(),
+                source: std::io::Error::other("W04 injected cleanup journal failure"),
+            });
+        }
         let envelope = JournalEnvelope::create(
             self.session_id.clone(),
             self.next_seq,
@@ -1515,6 +1540,8 @@ impl JournalWriter {
         self.previous_checksum.clone_from(&envelope.checksum);
         self.state = candidate_state;
         self.last_envelope = Some(envelope.clone());
+        #[cfg(feature = "test-utils")]
+        stabilization_crash_cut(&envelope.event, &self.state, "after");
         Ok(envelope)
     }
 
@@ -2830,6 +2857,57 @@ fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
 
+/// Deterministic process-cut rendezvous for the instrumented W04 test host.
+/// This symbol and its environment switch do not exist in release builds.
+#[cfg(feature = "test-utils")]
+pub fn stabilization_test_barrier(cut: &str) -> bool {
+    use std::io::{Read, Write};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static HIT: AtomicBool = AtomicBool::new(false);
+    if std::env::var("WAYLAND_W04_CUT").as_deref() != Ok(cut) {
+        return false;
+    }
+    let Ok(address) = std::env::var("WAYLAND_W04_BARRIER") else {
+        return false;
+    };
+    if HIT.swap(true, Ordering::SeqCst) {
+        return false;
+    }
+    let address: std::net::SocketAddr = address.parse().expect("W04 barrier address");
+    assert!(address.ip().is_loopback(), "W04 barrier must be loopback");
+    let mut socket =
+        std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_secs(20))
+            .expect("connect W04 barrier");
+    socket
+        .set_read_timeout(Some(std::time::Duration::from_secs(60)))
+        .expect("bound W04 barrier wait");
+    writeln!(socket, "{cut}").expect("signal W04 cut");
+    let mut action = [0];
+    socket
+        .read_exact(&mut action)
+        .expect("release W04 barrier or kill child");
+    action[0] == b'F'
+}
+
+#[cfg(feature = "test-utils")]
+fn stabilization_crash_cut(event: &SessionEvent, state: &ReducedSessionState, phase: &str) -> bool {
+    let label = match (phase, event) {
+        ("before", SessionEvent::ToolIntentRecordedV2 { .. }) => "before_intent",
+        ("after", SessionEvent::ToolIntentRecordedV2 { .. }) => "intent_before_dispatch",
+        ("before", SessionEvent::ToolExecutionFinished { .. }) => "physical_before_receipt",
+        ("after", SessionEvent::ToolExecutionFinished { .. }) => "receipt_before_settlement",
+        ("after", SessionEvent::BudgetAuthorityCommitted { authority })
+            if authority.active_turn.is_none()
+                && state.turns.values().any(|turn| turn.completion.is_some()) =>
+        {
+            "settlement_before_terminal"
+        }
+        ("before", SessionEvent::TurnCancelled { .. }) => "delete_finalizer",
+        _ => return false,
+    };
+    stabilization_test_barrier(label)
+}
+
 #[cfg(test)]
 mod fault_tests {
     use super::*;
@@ -3952,6 +4030,68 @@ mod fault_tests {
             Err(JournalError::WriterFaulted)
         ));
         assert_eq!(SessionJournal::replay(&journal_path).unwrap(), vec![forged]);
+    }
+
+    #[test]
+    fn stabilization_cleanup_keeps_disk_head_and_budget_refusals() {
+        for fault in ["disk", "head", "budget"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("session.journal");
+            let journal = SessionJournal::open(&path, "session").unwrap();
+            journal
+                .append(SessionEvent::TurnStarted {
+                    turn_id: "turn".into(),
+                    user_message: "positive".into(),
+                })
+                .unwrap();
+            assert!(crate::recovery::RecoveryPlan::validate_cleanup(&journal).unwrap());
+            match fault {
+                "disk" => {
+                    let mut bytes = std::fs::read(&path).unwrap();
+                    bytes[20] ^= 1;
+                    std::fs::write(&path, bytes).unwrap();
+                }
+                "head" => {
+                    journal.inner.lock().unwrap().state.last_checksum = GENESIS_CHECKSUM.into()
+                }
+                "budget" => {
+                    let tracker = wcore_budget::BudgetTracker::new(Default::default())
+                        .snapshot()
+                        .unwrap();
+                    let mut value = serde_json::to_value(tracker).unwrap();
+                    value["schema_version"] = serde_json::json!(999);
+                    let state = journal.state().unwrap();
+                    journal.inner.lock().unwrap().state.budget_authority =
+                        Some(BudgetAuthorityState {
+                            schema_version: BUDGET_AUTHORITY_SCHEMA_VERSION,
+                            authority_epoch: 1,
+                            prior_cursor: BudgetAuthorityCursor {
+                                journal_sequence: state.last_seq,
+                                journal_checksum: state.last_checksum,
+                            },
+                            budget_session_id: "session".into(),
+                            provider_tracker: serde_json::from_value(value).unwrap(),
+                            provider_reservations: Default::default(),
+                            execution_root: wcore_budget::ExecutionBudget::default()
+                                .start_root()
+                                .snapshot()
+                                .unwrap(),
+                            active_turn: None,
+                            captured_at_unix_millis: 1,
+                            wall_clock: BudgetWallClockAuthority::ActiveRuntime,
+                            conversation_digest: state_payload_digest(&serde_json::Value::Array(
+                                state.conversation,
+                            ))
+                            .unwrap(),
+                        });
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                crate::recovery::RecoveryPlan::validate_cleanup(&journal).is_err(),
+                "{fault} must still refuse"
+            );
+        }
     }
 
     #[test]

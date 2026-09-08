@@ -364,8 +364,9 @@ pub struct EvolutionEventTrace {
     pub mutation_kind: String,
     /// Composite score from `wcore_eval::ScoreDimensions::combined`.
     pub score: f64,
-    /// True iff this child is the new top — populated by the loop, not the
-    /// scorer.
+    /// Provisional in-memory retention at this event, not final selection.
+    /// Does not attest persistence, promotion, or consumption by any agent.
+    /// Later children can displace this candidate.
     pub retained: bool,
     pub source_product: String,
 }

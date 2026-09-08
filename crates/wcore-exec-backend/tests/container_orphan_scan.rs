@@ -16,7 +16,9 @@
 //! Names are prefixed `orphan366-` so they cannot collide with the ids
 //! `conformance_matrix` or `container_wedge` use.
 
-use wcore_exec_backend::backends::container::{ContainerBackend, NONCE_LABEL};
+use wcore_exec_backend::backends::container::{
+    ContainerBackend, NONCE_LABEL, linux_daemon_availability,
+};
 use wcore_exec_backend::conformance::reference_budget;
 use wcore_exec_backend::contract::ExecutionBackend;
 
@@ -61,15 +63,6 @@ fn docker(args: &[&str]) -> std::process::Output {
         .expect("the docker client is launchable")
 }
 
-/// A real daemon round trip. Socket presence is not readiness.
-fn daemon_answers() -> bool {
-    std::process::Command::new("docker")
-        .args(["version", "--format", "{{.Server.Version}}"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
 /// Create a container that reaches `Created` and never starts — the state
 /// `docker run --rm` cannot clean up, because `--rm` removes on EXIT. This is
 /// the shape both leftovers in #365 were found in.
@@ -109,8 +102,9 @@ fn remove(name: &str) {
 /// would pass against a scanner that simply returns everything.
 #[tokio::test]
 async fn the_unscoped_scan_reports_a_leftover_from_a_nonce_this_process_never_used() {
-    if !daemon_answers() {
-        eprintln!("SKIP: no docker daemon answers; this test requires a real one");
+    let availability = linux_daemon_availability().await;
+    if !availability.available {
+        eprintln!("backend container: UNEXERCISED — {}", availability.detail);
         return;
     }
     let _state = temp_state();
@@ -181,8 +175,9 @@ async fn the_unscoped_scan_reports_a_leftover_from_a_nonce_this_process_never_us
 /// an unlabelled container must not appear at all.
 #[tokio::test]
 async fn an_unlabelled_container_is_not_ours_and_a_known_nonce_is_not_a_leftover() {
-    if !daemon_answers() {
-        eprintln!("SKIP: no docker daemon answers; this test requires a real one");
+    let availability = linux_daemon_availability().await;
+    if !availability.available {
+        eprintln!("backend container: UNEXERCISED — {}", availability.detail);
         return;
     }
     let state = temp_state();

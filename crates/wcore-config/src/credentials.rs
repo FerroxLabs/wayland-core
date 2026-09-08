@@ -133,13 +133,28 @@ pub enum CredentialsError {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("toml parse error: {0}")]
-    TomlParse(#[from] toml::de::Error),
+    TomlParse(toml::de::Error),
     #[error("toml serialize error: {0}")]
     TomlSerialize(#[from] toml::ser::Error),
     #[error("keyring error: {0}")]
     Keyring(String),
     #[error("backend not available: {0}")]
     BackendUnavailable(String),
+}
+
+impl From<toml::de::Error> for CredentialsError {
+    fn from(error: toml::de::Error) -> Self {
+        // TOML diagnostics retain source text and may also include values in
+        // their message. Keep only a location, never the original error chain.
+        let message = match error.span() {
+            Some(span) => format!(
+                "invalid credential TOML at bytes {}..{}",
+                span.start, span.end
+            ),
+            None => "invalid credential TOML".to_string(),
+        };
+        Self::TomlParse(<toml::de::Error as serde::de::Error>::custom(message))
+    }
 }
 
 /// Generic key/value store for credentials.
@@ -820,11 +835,22 @@ fn chunked_delete(
     // logout would report success while the refresh token's fragments stayed in
     // the OS keyring, unreferenced and undeletable by any later call.
     let previous = read_previous_manifest(raw, key)?;
-    // Manifest first: once it is gone no reader can reach the parts, so a
-    // process killed here leaves orphans rather than a torn read.
-    raw.delete(key)?;
-    purge_chunks(raw, key, previous);
-    Ok(())
+    // Retain the manifest until every part is removed: it is the recovery
+    // identity a retry needs after a partial failure or process interruption.
+    // Readers that observe a partial set retry under this lock and fail
+    // closed if deletion remains incomplete.
+    if let Some(manifest) = previous {
+        let mut first_error = None;
+        for index in 0..manifest.count {
+            if let Err(error) = raw.delete(&chunk_key(key, manifest.generation, index)) {
+                first_error.get_or_insert(error);
+            }
+        }
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+    }
+    raw.delete(key)
 }
 
 /// Best-effort removal of a superseded generation's parts. A failure here
@@ -1445,7 +1471,8 @@ fn warn_explicit_plaintext_backend(path: &Path) {
 /// higher tier and the lower copy removed — so a host whose keyring comes back
 /// (a Windows service account that gains a logon session, a Linux box that
 /// starts its Secret Service) heals on the next read instead of staying
-/// downgraded forever.
+/// downgraded forever. OAuth token keys are excluded from read promotion:
+/// their writers must order promotion against logout under the provider lock.
 ///
 /// The two upper tiers are trait objects (the shape
 /// [`ConfidentialCredentialsStore`] already uses) rather than the concrete
@@ -1460,6 +1487,10 @@ struct LadderCredentialsStore {
     /// `Some` iff [`vault_unlock_material_present`] — otherwise opening it
     /// would block on an interactive passphrase prompt.
     vault: Option<Box<dyn CredentialsStore>>,
+    /// A failed global write probe cannot establish that no stored key exists.
+    unavailable_keyring: bool,
+    /// Preserve even an unopened vault's configured paths for deletion checks.
+    unopened_vault_paths: Option<(PathBuf, PathBuf)>,
     /// Legacy cleartext file. Read and delete only.
     legacy: PlaintextCredentialsStore,
 }
@@ -1473,6 +1504,8 @@ impl LadderCredentialsStore {
         Self {
             keyring,
             vault,
+            unavailable_keyring: false,
+            unopened_vault_paths: None,
             legacy: PlaintextCredentialsStore::new(plaintext_path),
         }
     }
@@ -1544,6 +1577,13 @@ impl LadderCredentialsStore {
     /// copy in place and readable. A permanent-but-correct downgrade beats a
     /// lossy heal.
     fn promote(&self, key: &str, value: &str, found_in: LadderTier) {
+        // OAuth readers also include connectivity checks and provider key
+        // resolution. None owns the provider writer lock: promoting a captured
+        // lower-tier token here could restore it after a completed logout.
+        // Explicit OAuth promotion uses the ordinary put path under that lock.
+        if key.starts_with("oauth.") && key.ends_with(".tokens") {
+            return;
+        }
         let Some(target) = self.top_tier() else {
             return;
         };
@@ -1624,10 +1664,29 @@ impl LadderCredentialsStore {
     /// file appearing as a side effect of the code whose job is to stop
     /// cleartext credentials files existing.
     fn delete_legacy(&self, key: &str) -> Result<(), CredentialsError> {
-        if !self.legacy.path().exists() {
-            return Ok(());
+        match std::fs::symlink_metadata(self.legacy.path()) {
+            Ok(_) => self.legacy.delete(key),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
         }
-        self.legacy.delete(key)
+    }
+
+    fn check_unopened_vault_for_delete(&self) -> Result<(), CredentialsError> {
+        if let Some((cipher, params)) = &self.unopened_vault_paths {
+            for path in [cipher, params] {
+                match std::fs::symlink_metadata(path) {
+                    Ok(_) => {
+                        return Err(CredentialsError::BackendUnavailable(format!(
+                            "credential removal is incomplete: vault material exists at {}; provide vault unlock material and retry",
+                            path.display()
+                        )));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1748,14 +1807,25 @@ impl CredentialsStore for LadderCredentialsStore {
 
     fn delete(&self, key: &str) -> Result<(), CredentialsError> {
         // Remove from EVERY tier, including the read-only legacy one, so a
-        // deleted key cannot resurface from below.
-        if let Some(keyring) = &self.keyring {
-            let _ = keyring.delete(key);
+        // deleted key cannot resurface from below. Attempt every removal even
+        // if one tier fails, but never report incomplete removal as success.
+        let mut first_error = None;
+        for tier in [LadderTier::Keyring, LadderTier::Vault, LadderTier::Legacy] {
+            let removed = match tier {
+                LadderTier::Keyring if self.unavailable_keyring => {
+                    Err(CredentialsError::BackendUnavailable(
+                        "credential removal is incomplete: the global keyring was unavailable; restore keyring access and retry".to_string(),
+                    ))
+                }
+                LadderTier::Vault if self.vault.is_none() => self.check_unopened_vault_for_delete(),
+                LadderTier::Legacy => self.delete_legacy(key),
+                other => self.tier(other).map_or(Ok(()), |store| store.delete(key)),
+            };
+            if let Err(error) = removed {
+                first_error.get_or_insert(error);
+            }
         }
-        if let Some(vault) = &self.vault {
-            let _ = vault.delete(key);
-        }
-        self.delete_legacy(key)
+        first_error.map_or(Ok(()), Err)
     }
 }
 
@@ -1782,9 +1852,10 @@ impl CredentialsStore for LadderCredentialsStore {
 ///    `CredentialsBackend::Pipe` for production).
 /// 2. Interactive `rpassword` prompt on a TTY.
 ///
-/// Concurrency: each store holds a `parking_lot::Mutex` over the cached
-/// passphrase + KDF params so the Argon2id derivation runs once per
-/// process even when callers thrash `get`/`put`. Cross-process locking
+/// Concurrency: each store holds a `parking_lot::Mutex` over its passphrase,
+/// validated KDF params and zeroizing derived key. Unchanged parameters reuse
+/// that key within this store; every operation still reads current ciphertext.
+/// Cross-process locking
 /// is not modeled — operators who run multiple writers should serialize
 /// at the application layer.
 pub struct EncryptedFileCredentialsStore {
@@ -1804,6 +1875,38 @@ struct UnlockedVault {
     passphrase: std::sync::Arc<VaultPassphraseAuthority>,
     /// KDF params (salt + tuning knobs). Persisted to `key_params_path`.
     params: encrypted_file::KdfParams,
+    /// This is a cryptographic key, never a cached credential or recovery KEY_REF.
+    /// Dropped/zeroized when parameters change or this store is dropped.
+    derived_key: Option<zeroize::Zeroizing<[u8; encrypted_file::KEY_LEN]>>,
+}
+
+impl UnlockedVault {
+    fn key(
+        &mut self,
+    ) -> Result<&[u8; encrypted_file::KEY_LEN], encrypted_file::EncryptedFileError> {
+        if self.derived_key.is_none() {
+            self.derived_key = Some(zeroize::Zeroizing::new(encrypted_file::derive_key(
+                self.passphrase.expose(),
+                &self.params,
+            )?));
+        }
+        Ok(self
+            .derived_key
+            .as_deref()
+            .expect("derived key initialized"))
+    }
+
+    fn decrypt(&mut self, blob: &[u8]) -> Result<Vec<u8>, encrypted_file::EncryptedFileError> {
+        if blob.len() < encrypted_file::NONCE_LEN + encrypted_file::TAG_LEN {
+            self.derived_key = None;
+            return Err(encrypted_file::EncryptedFileError::TooShort);
+        }
+        let result = encrypted_file::decrypt_with_key(blob, self.key()?);
+        if result.is_err() {
+            self.derived_key = None;
+        }
+        result
+    }
 }
 
 /// Process-scoped vault passphrase authority.
@@ -2009,41 +2112,77 @@ impl EncryptedFileCredentialsStore {
 
     /// Acquire (or reuse) the unlocked-state cache.
     ///
-    /// On first call:
-    /// * If `key_params_path` exists, load the persisted KDF params and
-    ///   verify the cached passphrase by attempting to decrypt the
-    ///   existing cipher blob.
-    /// * Otherwise, generate fresh [`KdfParams`] (with a random salt) and
-    ///   accept the passphrase as the new vault password.
+    /// Re-read permissions and the complete persisted KDF parameters on every
+    /// operation under the existing store lock. A changed parameter set cannot
+    /// reuse the previous derived key. Ciphertext is never cached.
     fn unlock(&self) -> Result<parking_lot::MappedMutexGuard<'_, UnlockedVault>, CredentialsError> {
         let mut guard = self.unlocked.lock();
-        if guard.is_none() {
-            // Check perms BEFORE prompting for a passphrase: a vault that will
-            // be refused must not first extract a secret from the operator.
-            refuse_if_world_readable(&self.cipher_path)?;
-            refuse_if_world_readable(&self.key_params_path)?;
-            let passphrase = Self::read_passphrase()?;
-            let params = if self.key_params_path.exists() {
-                encrypted_file::load_key_params(&self.key_params_path)
-                    .map_err(|e| CredentialsError::BackendUnavailable(format!("kdf params: {e}")))?
-            } else {
-                encrypted_file::KdfParams::default()
+        // Preserve refusal before reading unlock material, including warm stores.
+        if let Err(error) = refuse_if_world_readable(&self.cipher_path)
+            .and_then(|()| refuse_if_world_readable(&self.key_params_path))
+        {
+            if let Some(vault) = guard.as_mut() {
+                vault.derived_key = None;
+            }
+            return Err(error);
+        }
+        let cipher_exists = self.cipher_path.exists();
+        let params = if self.key_params_path.exists() {
+            match encrypted_file::load_key_params(&self.key_params_path) {
+                Ok(params) => params,
+                Err(error) => {
+                    if let Some(vault) = guard.as_mut() {
+                        vault.derived_key = None;
+                    }
+                    return Err(CredentialsError::BackendUnavailable(format!(
+                        "kdf params: {error}"
+                    )));
+                }
+            }
+        } else if cipher_exists {
+            if let Some(vault) = guard.as_mut() {
+                vault.derived_key = None;
+            }
+            return Err(CredentialsError::BackendUnavailable(
+                "kdf params missing for existing vault".into(),
+            ));
+        } else {
+            // A read of a never-written vault remains lazy: no KDF or write.
+            match guard.as_mut() {
+                Some(vault) => {
+                    vault.derived_key = None;
+                    vault.params.clone()
+                }
+                None => encrypted_file::KdfParams::default(),
+            }
+        };
+        if guard.as_ref().is_none_or(|vault| vault.params != params) {
+            let passphrase = match guard.as_mut() {
+                Some(vault) => {
+                    vault.derived_key = None;
+                    Arc::clone(&vault.passphrase)
+                }
+                None => Self::read_passphrase()?,
+            };
+            let mut vault = UnlockedVault {
+                passphrase,
+                params,
+                derived_key: None,
             };
 
             // If a ciphertext blob already exists, verify the passphrase
             // by decrypting it — otherwise a typo would silently rotate
             // the vault key on next write.
-            if self.cipher_path.exists() {
+            if cipher_exists {
                 let blob = std::fs::read(&self.cipher_path)?;
-                let _pt =
-                    encrypted_file::decrypt(&blob, passphrase.expose(), &params).map_err(|e| {
-                        CredentialsError::BackendUnavailable(format!(
-                            "vault unlock failed (wrong passphrase or corrupt file): {e}"
-                        ))
-                    })?;
+                let _pt = vault.decrypt(&blob).map_err(|e| {
+                    CredentialsError::BackendUnavailable(format!(
+                        "vault unlock failed (wrong passphrase or corrupt file): {e}"
+                    ))
+                })?;
             }
 
-            *guard = Some(UnlockedVault { passphrase, params });
+            *guard = Some(vault);
         }
         Ok(parking_lot::MutexGuard::map(guard, |o| {
             o.as_mut().expect("just initialized")
@@ -2054,7 +2193,7 @@ impl EncryptedFileCredentialsStore {
     ///
     /// Returns an empty table when no ciphertext has been persisted yet
     /// (first write will materialize the vault).
-    fn load_secrets(&self, vault: &UnlockedVault) -> Result<toml::Table, CredentialsError> {
+    fn load_secrets(&self, vault: &mut UnlockedVault) -> Result<toml::Table, CredentialsError> {
         if !self.cipher_path.exists() {
             return Ok(toml::Table::new());
         }
@@ -2063,9 +2202,9 @@ impl EncryptedFileCredentialsStore {
         // process runs would otherwise never be noticed.
         refuse_if_world_readable(&self.cipher_path)?;
         let blob = std::fs::read(&self.cipher_path)?;
-        let pt = encrypted_file::decrypt(&blob, vault.passphrase.expose(), &vault.params).map_err(
-            |e| CredentialsError::BackendUnavailable(format!("vault decrypt failed: {e}")),
-        )?;
+        let pt = vault.decrypt(&blob).map_err(|e| {
+            CredentialsError::BackendUnavailable(format!("vault decrypt failed: {e}"))
+        })?;
         let parsed: toml::Table = std::str::from_utf8(&pt)
             .map_err(|e| {
                 CredentialsError::BackendUnavailable(format!("vault plaintext utf8: {e}"))
@@ -2077,7 +2216,7 @@ impl EncryptedFileCredentialsStore {
     /// Re-encrypt and atomically persist the given table.
     fn save_secrets(
         &self,
-        vault: &UnlockedVault,
+        vault: &mut UnlockedVault,
         table: &toml::Table,
     ) -> Result<(), CredentialsError> {
         let serialized = toml::to_string_pretty(table)?;
@@ -2085,9 +2224,10 @@ impl EncryptedFileCredentialsStore {
         // so the existing passphrase keeps deriving the same key. Only
         // the AEAD nonce is rotated on each encrypt (handled inside
         // `encrypted_file::encrypt`).
-        let key = encrypted_file::derive_key(vault.passphrase.expose(), &vault.params)
+        let key = vault
+            .key()
             .map_err(|e| CredentialsError::BackendUnavailable(format!("derive_key: {e}")))?;
-        let blob = encrypted_file::encrypt_with_key(serialized.as_bytes(), &key).map_err(|e| {
+        let blob = encrypted_file::encrypt_with_key(serialized.as_bytes(), key).map_err(|e| {
             CredentialsError::BackendUnavailable(format!("vault encrypt failed: {e}"))
         })?;
 
@@ -2120,8 +2260,8 @@ impl EncryptedFileCredentialsStore {
     /// could). Existing keys are PRESERVED (`or_insert`) — a pre-existing vault
     /// value is authoritative and never clobbered by an incoming plaintext one.
     fn import_secrets(&self, entries: &[(String, String)]) -> Result<(), CredentialsError> {
-        let vault = self.unlock()?;
-        let mut table = self.load_secrets(&vault)?;
+        let mut vault = self.unlock()?;
+        let mut table = self.load_secrets(&mut vault)?;
         let secrets = table
             .entry("secrets".to_string())
             .or_insert_with(|| toml::Value::Table(toml::Table::new()));
@@ -2136,14 +2276,14 @@ impl EncryptedFileCredentialsStore {
                 .entry(k.clone())
                 .or_insert_with(|| toml::Value::String(v.clone()));
         }
-        self.save_secrets(&vault, &table)
+        self.save_secrets(&mut vault, &table)
     }
 }
 
 impl CredentialsStore for EncryptedFileCredentialsStore {
     fn get(&self, key: &str) -> Result<Option<String>, CredentialsError> {
-        let vault = self.unlock()?;
-        let table = self.load_secrets(&vault)?;
+        let mut vault = self.unlock()?;
+        let table = self.load_secrets(&mut vault)?;
         let secrets = match table.get("secrets") {
             Some(toml::Value::Table(t)) => t,
             _ => return Ok(None),
@@ -2152,8 +2292,8 @@ impl CredentialsStore for EncryptedFileCredentialsStore {
     }
 
     fn get_many(&self, keys: &[&str]) -> Result<Vec<Option<String>>, CredentialsError> {
-        let vault = self.unlock()?;
-        let table = self.load_secrets(&vault)?;
+        let mut vault = self.unlock()?;
+        let table = self.load_secrets(&mut vault)?;
         let secrets = match table.get("secrets") {
             Some(toml::Value::Table(table)) => Some(table),
             _ => None,
@@ -2170,8 +2310,8 @@ impl CredentialsStore for EncryptedFileCredentialsStore {
     }
 
     fn put(&self, key: &str, value: &str) -> Result<(), CredentialsError> {
-        let vault = self.unlock()?;
-        let mut table = self.load_secrets(&vault)?;
+        let mut vault = self.unlock()?;
+        let mut table = self.load_secrets(&mut vault)?;
         let entry = table
             .entry("secrets".to_string())
             .or_insert_with(|| toml::Value::Table(toml::Table::new()));
@@ -2182,16 +2322,16 @@ impl CredentialsStore for EncryptedFileCredentialsStore {
             unreachable!("just normalized to Table");
         };
         secrets_table.insert(key.to_string(), toml::Value::String(value.to_string()));
-        self.save_secrets(&vault, &table)
+        self.save_secrets(&mut vault, &table)
     }
 
     fn delete(&self, key: &str) -> Result<(), CredentialsError> {
-        let vault = self.unlock()?;
-        let mut table = self.load_secrets(&vault)?;
+        let mut vault = self.unlock()?;
+        let mut table = self.load_secrets(&mut vault)?;
         if let Some(toml::Value::Table(secrets_table)) = table.get_mut("secrets") {
             secrets_table.remove(key);
         }
-        self.save_secrets(&vault, &table)
+        self.save_secrets(&mut vault, &table)
     }
 }
 
@@ -2502,6 +2642,30 @@ fn take_forced_delete_pending_denial() -> Option<std::io::Error> {
     })
 }
 
+thread_local! {
+    static OAUTH_LOCK_DEADLINE: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// Bound lock acquisition during a synchronous OAuth storage transaction.
+/// Nested calls inherit the earlier deadline. This never cancels a write or
+/// moves it to a detached task; backend I/O already in progress finishes while
+/// the caller still owns its provider lock. Other callers retain their policy.
+pub fn with_oauth_lock_deadline<T>(
+    deadline: std::time::Instant,
+    operation: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Option<std::time::Instant>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            OAUTH_LOCK_DEADLINE.set(self.0);
+        }
+    }
+    let previous = OAUTH_LOCK_DEADLINE.get();
+    let _restore = Restore(previous);
+    OAUTH_LOCK_DEADLINE.set(Some(previous.map_or(deadline, |prior| prior.min(deadline))));
+    operation()
+}
+
 impl ExclusiveFileLock {
     /// `label` names the lock in the busy error, so a caller can tell a wedged
     /// migration from a wedged refresh.
@@ -2550,12 +2714,19 @@ impl ExclusiveFileLock {
             std::process::id(),
             SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         );
-        let deadline = std::time::Instant::now() + policy.wait_ceiling;
+        let policy_deadline = std::time::Instant::now() + policy.wait_ceiling;
+        let oauth_deadline = OAUTH_LOCK_DEADLINE.get();
+        let deadline = oauth_deadline.map_or(policy_deadline, |limit| limit.min(policy_deadline));
         // Start of the current UNBROKEN run of denied creates. Any other answer
         // resets it, because the grace measures how long one refusal has
         // persisted and not how long the whole acquisition has taken.
         let mut denied_since: Option<std::time::Instant> = None;
         loop {
+            if oauth_deadline.is_some() && std::time::Instant::now() >= deadline {
+                return Err(CredentialsError::BackendUnavailable(format!(
+                    "the {label} lock acquisition exceeded the OAuth storage deadline"
+                )));
+            }
             match create_new(&path) {
                 Ok(mut f) => {
                     use std::io::Write;
@@ -2607,7 +2778,10 @@ impl ExclusiveFileLock {
                             policy.wait_ceiling
                         )));
                     }
-                    std::thread::sleep(LockPolicy::POLL);
+                    std::thread::sleep(
+                        LockPolicy::POLL
+                            .min(deadline.saturating_duration_since(std::time::Instant::now())),
+                    );
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
                     // WINDOWS, gh#1303. `DeleteFile` on a lockfile whose last
@@ -2642,7 +2816,10 @@ impl ExclusiveFileLock {
                     if verdict == CreateDenial::Denied || std::time::Instant::now() >= deadline {
                         return Err(CredentialsError::Io(e));
                     }
-                    std::thread::sleep(LockPolicy::POLL);
+                    std::thread::sleep(
+                        LockPolicy::POLL
+                            .min(deadline.saturating_duration_since(std::time::Instant::now())),
+                    );
                 }
                 Err(e) => return Err(CredentialsError::Io(e)),
             }
@@ -2866,12 +3043,24 @@ fn migrate_plaintext_into_vault(
 /// [`open_secure_ladder_store`], so the two cannot drift in which rungs they
 /// mount or in the order they try them.
 fn build_ladder(cfg: &CredentialsStorageConfig, plaintext_path: &Path) -> LadderCredentialsStore {
+    build_ladder_with_probe(
+        cfg,
+        plaintext_path,
+        std::env::var_os("WAYLAND_HOME").is_some(),
+        &keyring_available,
+    )
+}
+
+fn build_ladder_with_probe(
+    cfg: &CredentialsStorageConfig,
+    plaintext_path: &Path,
+    isolated: bool,
+    keyring_probe: &dyn Fn(&str) -> bool,
+) -> LadderCredentialsStore {
     // Isolated-profile homes (WAYLAND_HOME set) must NOT use the OS
     // keyring: the keyring service is a process-global constant
     // ("wayland-core") that bleeds secrets across every profile on the
     // host (C4 / D1). Such a profile's top rung is the in-home vault.
-    let isolated = std::env::var_os("WAYLAND_HOME").is_some();
-
     let keyring: Option<Box<dyn CredentialsStore>> = if isolated {
         None
     } else {
@@ -2879,22 +3068,22 @@ fn build_ladder(cfg: &CredentialsStorageConfig, plaintext_path: &Path) -> Ladder
             .service_name
             .clone()
             .unwrap_or_else(|| "wayland-core".to_string());
-        keyring_available(&service)
+        keyring_probe(&service)
             .then(|| Box::new(KeyringCredentialsStore::new(service)) as Box<dyn CredentialsStore>)
     };
 
+    // Retain these paths even when locked; absence must be checked at delete
+    // time rather than inferred from unavailable unlock material at startup.
+    let (cipher_path, key_params_path) = match &cfg.backend {
+        CredentialsBackend::EncryptedFile {
+            cipher_path,
+            key_params_path,
+        } => (cipher_path.clone(), key_params_path.clone()),
+        _ => default_vault_paths(plaintext_path),
+    };
     let vault: Option<Box<dyn CredentialsStore>> = if vault_unlock_material_present() {
-        // An operator who named explicit vault paths gets THOSE, so the ladder
-        // and an explicit `backend = "encrypted_file"` never open two different
-        // vaults for the same profile.
-        let (cipher_path, key_params_path) = match &cfg.backend {
-            CredentialsBackend::EncryptedFile {
-                cipher_path,
-                key_params_path,
-            } => (cipher_path.clone(), key_params_path.clone()),
-            _ => default_vault_paths(plaintext_path),
-        };
-        let store = EncryptedFileCredentialsStore::new(cipher_path, key_params_path);
+        let store =
+            EncryptedFileCredentialsStore::new(cipher_path.clone(), key_params_path.clone());
         // #183: import any pre-existing plaintext secrets into the
         // vault once. On failure the legacy tier keeps serving them, so
         // no secret is ever lost — but the vault stays mounted, because
@@ -2917,7 +3106,12 @@ fn build_ladder(cfg: &CredentialsStorageConfig, plaintext_path: &Path) -> Ladder
         warn_no_secure_credential_tier(plaintext_path);
     }
 
-    LadderCredentialsStore::new(keyring, vault, plaintext_path.to_path_buf())
+    let unavailable_keyring = !isolated && keyring.is_none();
+    let unopened_vault_paths = vault.is_none().then_some((cipher_path, key_params_path));
+    let mut ladder = LadderCredentialsStore::new(keyring, vault, plaintext_path.to_path_buf());
+    ladder.unavailable_keyring = unavailable_keyring;
+    ladder.unopened_vault_paths = unopened_vault_paths;
+    ladder
 }
 
 /// The keyring → encrypted-vault → REFUSE ladder, built regardless of
@@ -3288,6 +3482,16 @@ pub(crate) mod encrypted_file {
     use serde::{Deserialize, Serialize};
     use zeroize::Zeroize;
 
+    #[cfg(test)]
+    std::thread_local! {
+        static DERIVATION_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_derivation_count() -> usize {
+        DERIVATION_COUNT.get()
+    }
+
     /// Default Argon2id memory cost in KiB (64 MiB). Matches the Forge
     /// vault.ts profile.
     const DEFAULT_M_COST_KIB: u32 = 64 * 1024;
@@ -3338,6 +3542,18 @@ pub(crate) mod encrypted_file {
         }
     }
 
+    impl KdfParams {
+        fn validate_version(&self) -> Result<(), EncryptedFileError> {
+            if self.version != 1 {
+                return Err(EncryptedFileError::KdfParams(format!(
+                    "unsupported version {}; expected 1",
+                    self.version
+                )));
+            }
+            Ok(())
+        }
+    }
+
     fn base64_url(bytes: &[u8]) -> String {
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
     }
@@ -3369,6 +3585,7 @@ pub(crate) mod encrypted_file {
         password: &str,
         params: &KdfParams,
     ) -> Result<[u8; KEY_LEN], EncryptedFileError> {
+        params.validate_version()?;
         let salt = base64_url_decode(&params.salt_b64)?;
         let argon = Argon2::new(
             Algorithm::Argon2id,
@@ -3377,6 +3594,8 @@ pub(crate) mod encrypted_file {
                 .map_err(|e| EncryptedFileError::KdfParams(e.to_string()))?,
         );
         let mut key = [0u8; KEY_LEN];
+        #[cfg(test)]
+        DERIVATION_COUNT.set(DERIVATION_COUNT.get() + 1);
         argon
             .hash_password_into(password.as_bytes(), &salt, &mut key)
             .map_err(|e| EncryptedFileError::Argon2(e.to_string()))?;
@@ -3441,15 +3660,27 @@ pub(crate) mod encrypted_file {
         if cipher_blob.len() < NONCE_LEN + TAG_LEN {
             return Err(EncryptedFileError::TooShort);
         }
-        let (nonce_bytes, ct) = cipher_blob.split_at(NONCE_LEN);
         let mut key_bytes = derive_key(password, params)?;
-        let cipher = XChaCha20Poly1305::new(Key::from_slice(&key_bytes));
-        let nonce = XNonce::from_slice(nonce_bytes);
-        let pt = cipher
-            .decrypt(nonce, ct)
-            .map_err(|e| EncryptedFileError::Aead(e.to_string()));
+        let result = decrypt_with_key(cipher_blob, &key_bytes);
         key_bytes.zeroize();
-        pt
+        result
+    }
+
+    /// Authenticate current ciphertext with a store-owned, pre-derived key.
+    /// Wire format, nonce, tag and empty AAD remain identical to `decrypt`.
+    pub fn decrypt_with_key(
+        cipher_blob: &[u8],
+        key: &[u8; KEY_LEN],
+    ) -> Result<Vec<u8>, EncryptedFileError> {
+        if cipher_blob.len() < NONCE_LEN + TAG_LEN {
+            return Err(EncryptedFileError::TooShort);
+        }
+        let (nonce_bytes, ct) = cipher_blob.split_at(NONCE_LEN);
+        let cipher = XChaCha20Poly1305::new(Key::from_slice(key));
+        let nonce = XNonce::from_slice(nonce_bytes);
+        cipher
+            .decrypt(nonce, ct)
+            .map_err(|e| EncryptedFileError::Aead(e.to_string()))
     }
 
     /// Persist [`KdfParams`] to disk as pretty-printed JSON.
@@ -3473,6 +3704,7 @@ pub(crate) mod encrypted_file {
     pub fn load_key_params(path: &std::path::Path) -> Result<KdfParams, EncryptedFileError> {
         let s = std::fs::read_to_string(path)?;
         let p: KdfParams = serde_json::from_str(&s)?;
+        p.validate_version()?;
         Ok(p)
     }
 
@@ -3696,7 +3928,14 @@ pub fn warn_if_world_readable(path: &Path) {
 }
 
 #[cfg(test)]
+#[path = "credentials_delete_tests.rs"]
+mod delete_backend_tests;
+
+#[cfg(test)]
 mod tests {
+    mod derived_key_tests {
+        include!("credentials_derived_key_tests.rs");
+    }
     use super::*;
     use tempfile::{TempDir, tempdir};
 
@@ -3735,8 +3974,8 @@ mod tests {
 
         // 2. What `build_ladder` actually mounts, in body order.
         let body_start = SOURCE
-            .find("fn build_ladder(")
-            .expect("known-positive control: `build_ladder` must be in this file");
+            .find("fn build_ladder_with_probe(")
+            .expect("known-positive control: the ladder builder must be in this file");
         // The first column-zero closing brace after the signature: every
         // block inside the function is indented, so this is its end.
         let body_end = SOURCE[body_start..]
@@ -5376,6 +5615,7 @@ mod tests {
         entries: Mutex<HashMap<String, String>>,
         log: Mutex<Vec<String>>,
         fail_put: std::sync::atomic::AtomicBool,
+        fail_delete: std::sync::atomic::AtomicBool,
     }
 
     impl FakeTier {
@@ -5434,6 +5674,9 @@ mod tests {
 
         fn delete(&self, key: &str) -> Result<(), CredentialsError> {
             self.record(&format!("delete:{key}"));
+            if self.fail_delete.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(CredentialsError::Keyring("injected delete failure".into()));
+            }
             self.entries.lock().unwrap().remove(key);
             Ok(())
         }
@@ -5445,6 +5688,88 @@ mod tests {
 
     fn boxed(tier: &std::sync::Arc<FakeTier>) -> Box<dyn CredentialsStore> {
         Box::new(std::sync::Arc::clone(tier))
+    }
+
+    #[test]
+    fn ladder_delete_reports_secure_failure_and_attempts_every_tier() {
+        for (keyring_fails, vault_fails) in [(true, false), (false, true), (true, true)] {
+            let keyring = tier(&[("k", "keyring-sentinel")]);
+            let vault = tier(&[("k", "vault-sentinel")]);
+            keyring
+                .fail_delete
+                .store(keyring_fails, std::sync::atomic::Ordering::SeqCst);
+            vault
+                .fail_delete
+                .store(vault_fails, std::sync::atomic::Ordering::SeqCst);
+            let dir = tempdir().unwrap();
+            let legacy = PlaintextCredentialsStore::new(dir.path().join("credentials.toml"));
+            legacy.put("k", "legacy-sentinel").unwrap();
+            let ladder = LadderCredentialsStore::new(
+                Some(boxed(&keyring)),
+                Some(boxed(&vault)),
+                legacy.path().to_path_buf(),
+            );
+
+            let error = ladder.delete("k").expect_err(
+                "a retained secure credential must not be reported as successfully deleted",
+            );
+            assert!(error.to_string().contains("injected delete failure"));
+            assert!(!error.to_string().contains("sentinel"));
+            assert_eq!(keyring.ops(), ["delete:k"]);
+            assert_eq!(vault.ops(), ["delete:k"]);
+            assert_eq!(keyring.snapshot().is_empty(), !keyring_fails);
+            assert_eq!(vault.snapshot().is_empty(), !vault_fails);
+            assert_eq!(legacy.get("k").unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn ladder_delete_retries_partial_removal_without_creating_plaintext() {
+        let keyring = tier(&[("k", "keyring-sentinel")]);
+        let vault = tier(&[("k", "vault-sentinel")]);
+        vault
+            .fail_delete
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let dir = tempdir().unwrap();
+        let legacy_path = dir.path().join("credentials.toml");
+        let ladder = LadderCredentialsStore::new(
+            Some(boxed(&keyring)),
+            Some(boxed(&vault)),
+            legacy_path.clone(),
+        );
+
+        assert!(ladder.delete("k").is_err());
+        assert!(keyring.snapshot().is_empty());
+        assert_eq!(
+            vault.snapshot(),
+            vec![("k".to_string(), "vault-sentinel".to_string())]
+        );
+        assert!(!legacy_path.exists());
+
+        vault
+            .fail_delete
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        ladder.delete("k").unwrap();
+        ladder.delete("k").unwrap();
+        assert!(keyring.snapshot().is_empty());
+        assert!(vault.snapshot().is_empty());
+        assert_eq!(ladder.get("k").unwrap(), None);
+        assert!(!legacy_path.exists());
+    }
+
+    #[test]
+    fn ladder_delete_reports_legacy_failure_after_removing_secure_copies() {
+        let keyring = tier(&[("k", "keyring-sentinel")]);
+        let vault = tier(&[("k", "vault-sentinel")]);
+        let dir = tempdir().unwrap();
+        let legacy_path = dir.path().join("credentials.toml");
+        std::fs::write(&legacy_path, "[invalid").unwrap();
+        let ladder =
+            LadderCredentialsStore::new(Some(boxed(&keyring)), Some(boxed(&vault)), legacy_path);
+
+        assert!(ladder.delete("k").is_err());
+        assert!(keyring.snapshot().is_empty());
+        assert!(vault.snapshot().is_empty());
     }
 
     // -----------------------------------------------------------------------
@@ -5765,6 +6090,132 @@ mod tests {
 
         // And the value is still readable afterwards, from the new tier.
         assert_eq!(ladder.get("k").unwrap().as_deref(), Some("v-from-vault"));
+    }
+
+    #[test]
+    fn oauth_ladder_read_cannot_resurrect_a_token_after_logout() {
+        use std::sync::{Arc, mpsc};
+        use std::time::Duration;
+
+        struct PausedTier {
+            inner: Arc<FakeTier>,
+            ready: Mutex<Option<mpsc::Sender<()>>>,
+            resume: Mutex<Option<mpsc::Receiver<()>>>,
+        }
+        impl CredentialsStore for PausedTier {
+            fn get(&self, key: &str) -> Result<Option<String>, CredentialsError> {
+                let captured = self.inner.get(key)?;
+                if let Some(ready) = self.ready.lock().unwrap().take() {
+                    ready.send(()).unwrap();
+                    self.resume
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(5))
+                        .unwrap();
+                }
+                Ok(captured)
+            }
+            fn put(&self, key: &str, value: &str) -> Result<(), CredentialsError> {
+                self.inner.put(key, value)
+            }
+            fn delete(&self, key: &str) -> Result<(), CredentialsError> {
+                self.inner.delete(key)
+            }
+        }
+
+        for provider in ["chatgpt", "xai", "custom-provider"] {
+            for batched in [false, true] {
+                let key = oauth_tokens_key(provider);
+                let keyring = tier(&[]);
+                let vault = tier(&[(&key, "oauth-fixture")]);
+                let (ready_tx, ready_rx) = mpsc::channel();
+                let (resume_tx, resume_rx) = mpsc::channel();
+                let dir = tempdir().unwrap();
+                let ladder = Arc::new(LadderCredentialsStore::new(
+                    Some(boxed(&keyring)),
+                    Some(Box::new(PausedTier {
+                        inner: vault.clone(),
+                        ready: Mutex::new(Some(ready_tx)),
+                        resume: Mutex::new(Some(resume_rx)),
+                    })),
+                    dir.path().join("credentials.toml"),
+                ));
+                let reader = ladder.clone();
+                let read_key = key.clone();
+                let pending = std::thread::spawn(move || {
+                    if batched {
+                        reader.get_many(&[&read_key]).unwrap().remove(0)
+                    } else {
+                        reader.get(&read_key).unwrap()
+                    }
+                });
+                ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                // The actual ladder deletes all tiers while the reader has a
+                // captured old token. Returning that snapshot is allowed;
+                // writing it back after deletion is the prohibited behavior.
+                ladder.delete(&key).unwrap();
+                assert!(keyring.snapshot().is_empty());
+                assert!(vault.snapshot().is_empty());
+                resume_tx.send(()).unwrap();
+                assert_eq!(pending.join().unwrap().as_deref(), Some("oauth-fixture"));
+                assert!(
+                    keyring.snapshot().is_empty(),
+                    "read resurrected the deleted token"
+                );
+                assert!(vault.snapshot().is_empty());
+                assert_eq!(ladder.get(&key).unwrap(), None);
+                assert!(!keyring.ops().iter().any(|op| op.starts_with("put:")));
+            }
+        }
+    }
+
+    #[test]
+    fn oauth_ladder_reads_preserve_lower_copies_but_api_keys_still_promote() {
+        for batched in [false, true] {
+            for legacy_source in [false, true] {
+                let oauth = oauth_tokens_key("chatgpt");
+                let api_key = "providers.openai.api_key";
+                let keyring = tier(&[]);
+                let vault = tier(&[]);
+                let dir = tempdir().unwrap();
+                let path = dir.path().join("credentials.toml");
+                let ladder = LadderCredentialsStore::new(
+                    Some(boxed(&keyring)),
+                    Some(boxed(&vault)),
+                    path.clone(),
+                );
+                if legacy_source {
+                    ladder.legacy.put(&oauth, "oauth-fixture").unwrap();
+                    ladder.legacy.put(api_key, "api-fixture").unwrap();
+                } else {
+                    vault.put(&oauth, "oauth-fixture").unwrap();
+                    vault.put(api_key, "api-fixture").unwrap();
+                }
+                let values = if batched {
+                    ladder.get_many(&[&oauth, api_key]).unwrap()
+                } else {
+                    vec![ladder.get(&oauth).unwrap(), ladder.get(api_key).unwrap()]
+                };
+                assert_eq!(
+                    values,
+                    vec![Some("oauth-fixture".into()), Some("api-fixture".into())]
+                );
+                assert_eq!(keyring.get(&oauth).unwrap(), None);
+                assert_eq!(
+                    keyring.get(api_key).unwrap().as_deref(),
+                    Some("api-fixture")
+                );
+                let lower: &dyn CredentialsStore = if legacy_source {
+                    &ladder.legacy
+                } else {
+                    &vault
+                };
+                assert_eq!(lower.get(&oauth).unwrap().as_deref(), Some("oauth-fixture"));
+                assert_eq!(lower.get(api_key).unwrap(), None);
+            }
+        }
     }
 
     /// The other direction of the same rule: a promotion whose destination
@@ -7333,5 +7784,61 @@ mod chunk_crash_injection {
             "entry count is still growing after 40 rotations ({first_half} -> {second_half}); \
              orphans leak without bound"
         );
+    }
+}
+
+#[cfg(test)]
+mod oauth_lock_deadline_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn oauth_deadline_bounds_a_nested_credential_lock_and_restores_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credential.lock");
+        let held =
+            ExclusiveFileLock::acquire(path.clone(), LockPolicy::CREDENTIAL_WRITE, "fixture")
+                .unwrap();
+        let start = Instant::now();
+        let result = with_oauth_lock_deadline(start + Duration::from_millis(100), || {
+            ExclusiveFileLock::acquire(path.clone(), LockPolicy::CREDENTIAL_WRITE, "fixture")
+        });
+        assert!(result.is_err());
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "must not wait the default 65 seconds"
+        );
+        assert!(OAUTH_LOCK_DEADLINE.get().is_none());
+        drop(held);
+        let _recovered =
+            ExclusiveFileLock::acquire(path, LockPolicy::CREDENTIAL_WRITE, "fixture").unwrap();
+    }
+
+    #[test]
+    fn nested_oauth_deadline_cannot_extend_or_leak_authority_after_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credential.lock");
+        let expired = Instant::now();
+        with_oauth_lock_deadline(expired, || {
+            with_oauth_lock_deadline(Instant::now() + Duration::from_secs(65), || {
+                assert!(
+                    ExclusiveFileLock::acquire(
+                        path.clone(),
+                        LockPolicy::CREDENTIAL_WRITE,
+                        "fixture"
+                    )
+                    .is_err()
+                );
+                assert!(
+                    !path.exists(),
+                    "expired work cannot acquire even an uncontended lock"
+                );
+            });
+        });
+        let _ =
+            std::panic::catch_unwind(|| with_oauth_lock_deadline(expired, || panic!("fixture")));
+        assert!(OAUTH_LOCK_DEADLINE.get().is_none());
+        let _held =
+            ExclusiveFileLock::acquire(path, LockPolicy::CREDENTIAL_WRITE, "fixture").unwrap();
     }
 }

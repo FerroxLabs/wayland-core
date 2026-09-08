@@ -10,6 +10,7 @@ pub mod approval;
 // runtime observation → draft → PromptStore → U1 SkillRouter seed.
 pub mod auto_skill;
 pub mod bootstrap;
+pub mod bootstrap_cleanup;
 // W8a A.2: ExecutionBudget + ExecutionBudgetView (S2 foundation).
 pub mod budget;
 pub mod budget_authority;
@@ -181,3 +182,5 @@ pub mod test_utils;
 // Re-export the skills crate so existing callers (wcore-cli, tests) can use
 // `wcore_agent::skills::` without changing their import paths.
 pub use wcore_skills as skills;
+
+mod recall_facts;

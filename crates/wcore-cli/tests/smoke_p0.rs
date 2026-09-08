@@ -417,10 +417,31 @@ fn stop_mid_turn_does_not_strand_json_stream_session() {
     // Turn 1: a Bash (exec-category) tool call — under the default posture the
     // engine emits ToolRequest and BLOCKS on approval. Turn 2 (a fresh LLM
     // call after Stop cancels turn 1): plain text.
+    // Include both cache classes in the completed provider round. Stop must
+    // retain these authoritative counters even while the tool awaits approval.
+    let charged_tool = support::mock_llm::tool_use_turn_sse(
+        "Bash",
+        &serde_json::json!({ "command": "echo repro-403" }),
+    )
+    .lines()
+    .map(|line| {
+        let Some(data) = line.strip_prefix("data: ") else {
+            return line.to_string();
+        };
+        let mut event: serde_json::Value = serde_json::from_str(data).unwrap();
+        if event["type"] == "message_start" {
+            event["message"]["usage"]["cache_creation_input_tokens"] = 7.into();
+            event["message"]["usage"]["cache_read_input_tokens"] = 9.into();
+        }
+        format!("data: {event}")
+    })
+    .collect::<Vec<_>>()
+    .join("\n");
     let (_rt, server) = start_mock(
         MockLlm::new()
-            .tool_use("Bash", serde_json::json!({ "command": "echo repro-403" }))
-            .text("SESSION-ALIVE"),
+            .raw_sse(format!("{charged_tool}\n"))
+            .text("SESSION-ALIVE")
+            .slow_text("UNOBSERVED", 30_000),
     );
     // Default posture (NO --force): the Bash call must pause on approval.
     let home = TempDir::new().expect("tempdir");
@@ -516,6 +537,18 @@ fn stop_mid_turn_does_not_strand_json_stream_session() {
 
     let m2_streamed = wait_until(&|| seen(&["stream_end"], Some("m2")), 20);
 
+    // A third turn supplies no provider usage before Stop. Its delta must
+    // not inherit either completed turn or invent the delayed response.
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({"type": "message", "msg_id": "m3", "content": "wait"})
+    )
+    .expect("write m3");
+    assert!(wait_until(&|| seen(&["stream_start"], Some("m3")), 10));
+    writeln!(stdin, "{}", serde_json::json!({"type": "stop"})).expect("stop m3");
+    assert!(wait_until(&|| seen(&["stream_end"], Some("m3")), 10));
+
     let _ = writeln!(stdin, "{{\"type\":\"stop\"}}");
     let _ = child.kill();
     let _ = child.wait();
@@ -527,6 +560,46 @@ fn stop_mid_turn_does_not_strand_json_stream_session() {
          frames={:?}",
         frames.lock().unwrap()
     );
+
+    let frames = frames.lock().unwrap();
+    let terminal = |msg_id: &str| {
+        let ends: Vec<serde_json::Value> = frames
+            .iter()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|event| event["type"] == "stream_end" && event["msg_id"] == msg_id)
+            .collect();
+        assert_eq!(ends.len(), 1, "exactly one terminal for {msg_id}: {ends:?}");
+        ends.into_iter().next().unwrap()
+    };
+    let stopped = terminal("m1");
+    assert_eq!(stopped["finish_reason"], "stop");
+    for (field, expected) in [
+        ("input_tokens", 12),
+        ("output_tokens", 25),
+        ("cache_write_tokens", 7),
+        ("cache_read_tokens", 9),
+    ] {
+        assert_eq!(stopped["usage"][field], expected, "{stopped}");
+        assert_eq!(stopped["usage_delta"][field], expected, "{stopped}");
+    }
+    // Normal completion still reports cumulative counters and only its own
+    // delta; the stopped turn must neither disappear nor be billed twice.
+    let completed = terminal("m2");
+    assert_eq!(completed["finish_reason"], "stop", "frames={frames:?}");
+    assert_eq!(completed["usage"]["input_tokens"], 22);
+    assert_eq!(completed["usage"]["output_tokens"], 45);
+    assert_eq!(completed["usage"]["cache_write_tokens"], 7);
+    assert_eq!(completed["usage"]["cache_read_tokens"], 9);
+    assert_eq!(completed["usage_delta"]["input_tokens"], 10);
+    assert_eq!(completed["usage_delta"]["output_tokens"], 20);
+    assert!(completed["usage_delta"]["cache_write_tokens"].is_null());
+    assert!(completed["usage_delta"]["cache_read_tokens"].is_null());
+    assert!(completed["agent_run_id"].as_str().is_some());
+    let uncharged = terminal("m3");
+    assert_eq!(uncharged["finish_reason"], "stop", "{uncharged}");
+    assert_eq!(uncharged["usage"]["input_tokens"], 0);
+    assert_eq!(uncharged["usage"]["output_tokens"], 0);
+    assert!(uncharged["usage_delta"].is_null(), "{uncharged}");
 }
 
 /// wayland#241 regression: config `[default] approval_mode = "auto-edit"`

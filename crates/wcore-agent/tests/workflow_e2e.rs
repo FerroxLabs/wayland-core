@@ -316,3 +316,187 @@ async fn review_changes_workflow_runs_full_stack_end_to_end() {
         "no stage should remain errored after the lint retry succeeded"
     );
 }
+
+/// W15: real HTTP transport and production in-process children, not a mock
+/// spawner. The second run cancels at a server-observed request boundary.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn workflow_http_children_share_charges_and_stop_after_observed_cancellation() {
+    use std::collections::BTreeSet;
+    use std::time::Duration;
+    use tokio::sync::Notify;
+    use tokio_util::sync::CancellationToken;
+    use wcore_budget::{BudgetCap, BudgetTracker};
+    use wcore_config::compat::ProviderCompat;
+    use wcore_config::config::ProviderType;
+    use wcore_config::debug::DebugConfig;
+    use wcore_providers::openai::OpenAIProvider;
+    use wcore_types::spawner::{ChildOrigin, DurableChildStatus};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const FIRST: &str = "W15_HTTP_FIRST";
+    const SECOND: &str = "W15_HTTP_SECOND";
+    const FIRST_COST: f64 = 0.000_137;
+    const SECOND_COST: f64 = 0.000_193;
+    let plan = WorkflowPlan::parse(&format!(
+        r#"Workflow(meta: (name: "http-witness"), phases: [
+            Phase(title: "sequential", steps: [
+                Agent((id: "first", prompt: "{FIRST}")),
+                Agent((id: "second", prompt: "{SECOND}")),
+            ]),
+        ])"#
+    ))
+    .unwrap();
+    let mut parent_sessions = BTreeSet::new();
+
+    for cancel_in_flight in [false, true] {
+        let server = MockServer::start().await;
+        let observed = Arc::new(Notify::new());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let response_observed = observed.clone();
+        let response_requests = requests.clone();
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(move |request: &wiremock::Request| {
+                let body: Value = serde_json::from_slice(&request.body).unwrap();
+                let messages = body["messages"].to_string();
+                let marker = if messages.contains(SECOND) { SECOND } else { FIRST };
+                assert!(messages.contains(marker), "request must carry its stage marker");
+                let billed = if marker == FIRST { FIRST_COST } else { SECOND_COST };
+                let index = {
+                    let mut seen = response_requests.lock().unwrap();
+                    seen.push(marker.to_string());
+                    seen.len()
+                };
+                let id = format!("chatcmpl-w15-{index}");
+                let text = json!({"id":id,"object":"chat.completion.chunk","created":0,
+                    "model":"gpt-4o","choices":[{"index":0,"delta":{"content":marker},"finish_reason":null}]});
+                let stop = json!({"id":id,"object":"chat.completion.chunk","created":0,
+                    "model":"gpt-4o","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]});
+                let usage = json!({"id":id,"object":"chat.completion.chunk","created":0,
+                    "model":"gpt-4o","choices":[],"usage":{"prompt_tokens":120,
+                    "completion_tokens":34,"cost_usd":billed}});
+                let response = ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(format!("data: {text}\n\ndata: {stop}\n\ndata: {usage}\n\ndata: [DONE]\n\n"));
+                response_observed.notify_one();
+                if cancel_in_flight {
+                    response.set_delay(Duration::from_millis(250))
+                } else {
+                    response
+                }
+            })
+            .mount(&server)
+            .await;
+
+        let compat = ProviderCompat::openai_defaults();
+        let provider = Arc::new(OpenAIProvider::new(
+            "w15-fake-loopback-key",
+            &server.uri(),
+            compat.clone(),
+            DebugConfig::default(),
+        ));
+        let mut config = test_config();
+        config.provider = ProviderType::OpenAI;
+        config.provider_label = "openai".into();
+        config.base_url = server.uri();
+        config.model = "gpt-4o".into();
+        config.compat = compat;
+        let budget = Arc::new(parking_lot::Mutex::new(BudgetTracker::new(
+            BudgetCap::builder().per_session_usd(1.0).build(),
+        )));
+        let cancel = CancellationToken::new();
+        let (spawner, journal, _root) = common::bind_test_spawner(
+            AgentSpawner::new(provider, config).with_cancel(cancel.clone()),
+        );
+        let parent_session = spawner.durable_session_id().unwrap();
+        assert!(parent_sessions.insert(parent_session.clone()));
+        let spawner = spawner.with_provider_budget(budget.clone(), parent_session.clone());
+        let runner = WorkflowRunner::new(&spawner);
+        let run = async {
+            let (result, ()) = tokio::join!(runner.run(&plan, json!({})), async {
+                if cancel_in_flight {
+                    observed.notified().await;
+                    cancel.cancel();
+                }
+            });
+            result
+        };
+        let result = tokio::time::timeout(Duration::from_secs(15), run)
+            .await
+            .expect("workflow and cancellation must terminate");
+        let state = journal.state().unwrap();
+        let children: Vec<_> = state
+            .children
+            .values()
+            .map(|child| child.durable.as_ref().expect("production durable child"))
+            .collect();
+        let ids: BTreeSet<_> = children
+            .iter()
+            .map(|child| child.child_id.as_str())
+            .collect();
+        assert_eq!(
+            ids.len(),
+            children.len(),
+            "distinct durable child identities"
+        );
+        for child in &children {
+            assert_eq!(child.parent.session_id, parent_session);
+            assert_eq!(child.origin, ChildOrigin::Workflow);
+            assert!(
+                child.status.is_terminal(),
+                "no live child after workflow returns"
+            );
+        }
+        if cancel_in_flight {
+            assert!(cancel.is_cancelled());
+            // The response delay has elapsed by this point, so also catch a
+            // detached provider retry that outlives the cancelled runner.
+            tokio::time::sleep(Duration::from_millis(350)).await;
+            assert_eq!(
+                *requests.lock().unwrap(),
+                vec![FIRST.to_string()],
+                "cancellation after physical dispatch must prevent the next stage/retry"
+            );
+            assert!(
+                !children.is_empty(),
+                "cancellation must follow actual child launch"
+            );
+            assert!(
+                children
+                    .iter()
+                    .any(|child| child.status != DurableChildStatus::Succeeded)
+            );
+            let (tokens, charged) = budget.lock().session_totals(&parent_session);
+            assert!(
+                tokens > 0 && charged > 0.0,
+                "a possibly dispatched call cannot become free on cancellation"
+            );
+            assert_eq!(budget.lock().reserved_totals(&parent_session), (0, 0.0));
+            // Workflow error shape is not the claim; physical dispatch,
+            // terminal children and retained uncertain charge are.
+            drop(result);
+        } else {
+            let result = result.expect("two HTTP-backed stages must succeed");
+            assert_eq!(result.final_state["first"], FIRST);
+            assert_eq!(result.final_state["second"], SECOND);
+            assert_eq!(
+                *requests.lock().unwrap(),
+                vec![FIRST.to_string(), SECOND.to_string()]
+            );
+            assert_eq!(children.len(), 2);
+            for child in &children {
+                assert_eq!(child.status, DurableChildStatus::Succeeded);
+                let usage = child.result.as_ref().expect("durable result usage");
+                assert_eq!((usage.input_tokens, usage.output_tokens), (120, 34));
+            }
+            let (tokens, charged) = budget.lock().session_totals(&parent_session);
+            assert_eq!(tokens, 2 * (120 + 34));
+            assert!(
+                (charged - FIRST_COST - SECOND_COST).abs() < 1e-9,
+                "both wire-reported costs must reach the shared parent budget: {charged}"
+            );
+            assert_eq!(budget.lock().reserved_totals(&parent_session), (0, 0.0));
+        }
+    }
+}

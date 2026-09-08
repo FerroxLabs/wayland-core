@@ -17,6 +17,8 @@ use wcore_providers::create_provider;
 use wcore_tools::read::ReadTool;
 use wcore_tools::registry::ToolRegistry;
 
+use super::live_acceptance;
+
 /// The provider endpoint these live tests dial.
 ///
 /// Env-overridable for the same reason the MODEL ids already are
@@ -116,7 +118,8 @@ async fn test_anthropic_tool_use() {
 
     // Write a temp file to read
     let tmp = tempfile::NamedTempFile::new().expect("tempfile");
-    std::fs::write(tmp.path(), "e2e-test-content-42").expect("write tempfile");
+    let sentinel = format!("e2e-read-{}", uuid::Uuid::new_v4());
+    std::fs::write(tmp.path(), &sentinel).expect("write tempfile");
     let path = tmp.path().to_string_lossy().to_string();
 
     let config = anthropic_config(&api_key);
@@ -138,8 +141,13 @@ async fn test_anthropic_tool_use() {
     assert!(!result.text.is_empty(), "response text should not be empty");
     // The model should have called Read and seen our content
     assert!(
-        result.text.contains("e2e-test-content-42") || result.turns > 1,
-        "model should either echo the content or have used multiple turns (tool call): {}",
+        live_acceptance::successful_read_answer(
+            &result.text,
+            &sentinel,
+            result.turns as usize,
+            live_acceptance::observed_read(engine.conversation_messages(), &path, &sentinel),
+        ),
+        "model must return the random content after a successful Read: {}",
         result.text
     );
 

@@ -14,10 +14,13 @@
 
 use async_trait::async_trait;
 
+mod daemon;
+pub use daemon::linux_daemon_availability;
+
 use crate::contract::{
     Availability, BackendCapabilities, BackendKind, CleanupObservation, ExecutionBackend,
-    ExecutionTask, Health, HibernationObservation, OrphanScan, ProbeBasis, ResourceBudget,
-    SecretChannel, UnscopedOrphan, UnscopedOrphanScan, validate_identifier,
+    ExecutionTask, Health, HibernationObservation, OrphanScan, ResourceBudget, SecretChannel,
+    UnscopedOrphan, UnscopedOrphanScan, validate_identifier,
 };
 use crate::error::{ExecError, Result};
 use crate::policy::{EffectivePolicy, declared_secret_exposure};
@@ -108,29 +111,6 @@ impl ContainerBackend {
 
     fn container_name(task_id: &str) -> String {
         format!("wayland-f25-{task_id}")
-    }
-}
-
-/// A real daemon round trip, with a bound so an unreachable daemon cannot hang
-/// `backend list`.
-async fn daemon_ping() -> std::result::Result<String, String> {
-    let mut command = wcore_config::shell::shell_command_argv(
-        "docker",
-        &["version", "--format", "{{.Server.Version}}"],
-    );
-    command.stdout(std::process::Stdio::piped());
-    command.stderr(std::process::Stdio::piped());
-    let fut = command.output();
-    match tokio::time::timeout(std::time::Duration::from_secs(5), fut).await {
-        Err(_) => Err("docker daemon did not answer a version ping within 5s".into()),
-        Ok(Err(e)) => Err(format!("docker client could not be launched: {e}")),
-        Ok(Ok(output)) if output.status.success() => {
-            Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-        }
-        Ok(Ok(output)) => Err(format!(
-            "docker daemon refused the version ping: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )),
     }
 }
 
@@ -557,13 +537,7 @@ impl ExecutionBackend for ContainerBackend {
     }
 
     async fn availability(&self) -> Availability {
-        match daemon_ping().await {
-            Ok(version) => Availability::up(
-                ProbeBasis::DaemonPing,
-                format!("container daemon answered a version ping: server {version}"),
-            ),
-            Err(detail) => Availability::down(ProbeBasis::DaemonPing, detail),
-        }
+        linux_daemon_availability().await
     }
 
     fn effective_policy(&self, task: &ExecutionTask) -> Result<EffectivePolicy> {

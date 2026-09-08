@@ -962,7 +962,9 @@ async fn status_output_cap_kills_git_descendant() {
     let pid_file = fixture.path().join("flood-child.pid");
     let mut manager = WorktreeManager::new_with_git_script_and_limits(
         fixture.path(),
-        "case \" $* \" in *\" config \"*) exit 1;; esac\n(while :; do printf 0123456789abcdef; done) &\nchild=$!\necho \"$child\" > \"$WAYLAND_TEST_PID_FILE\"\nwait \"$child\"",
+        // Publish the PID before allowing output to trigger process-tree cleanup.
+        // Otherwise the child can fill the cap before the parent reaches echo.
+        "case \" $* \" in *\" config \"*) exit 1;; esac\n(while [ ! -f \"$WAYLAND_TEST_PID_FILE.ready\" ]; do :; done; while :; do printf 0123456789abcdef; done) &\nchild=$!\necho \"$child\" > \"$WAYLAND_TEST_PID_FILE\"\n: > \"$WAYLAND_TEST_PID_FILE.ready\"\nwait \"$child\"",
         CaptureLimits {
             stdout_bytes: 4096,
             stderr_bytes: 4096,

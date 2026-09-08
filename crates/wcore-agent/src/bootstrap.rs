@@ -19,6 +19,8 @@ use wcore_types::execution_policy::{
 // E-H2: `CircuitReporter` / `NoOpCircuitReporter` are referenced by
 // fully-qualified path in the resilience wiring below.
 
+use anyhow::Context;
+
 use crate::budget::{ExecutionBudget, ExecutionBudgetView};
 use crate::cancel::{CancellationToken, SessionControl, SessionRuntimeGuard};
 use crate::engine::AgentEngine;
@@ -409,6 +411,7 @@ pub const UNREADABLE_CHANNEL_DIR: &str = "inbound channel configuration could no
 /// - AGENTS.md is loaded from the workspace hierarchy
 /// - Skills, MCP, plan mode, spawn are enabled based on `Config` fields
 pub struct AgentBootstrap {
+    cleanup: Option<Arc<crate::bootstrap_cleanup::BootstrapCleanup>>,
     config: Config,
     workspace: String,
     output: Arc<dyn OutputSink>,
@@ -437,6 +440,8 @@ pub struct AgentBootstrap {
     /// built by `ChannelTurnDispatcher` so they don't re-register channels
     /// or recurse. Default `false`.
     without_channels: bool,
+    outbound_channels_only: bool,
+    session_cancel_token: Option<CancellationToken>,
     /// Phase 1B-2 — primary session entry points opt in to spawn the
     /// `InboundSubscriber` that turns inbound channel messages into agent
     /// turns. Off by default so per-session / sub-agent / ACP builds never
@@ -619,6 +624,7 @@ fn local_shell_notice(
 impl AgentBootstrap {
     pub fn new(config: Config, workspace: impl Into<String>, output: Arc<dyn OutputSink>) -> Self {
         Self {
+            cleanup: None,
             config,
             workspace: canonical_workspace(workspace.into()),
             output,
@@ -628,6 +634,8 @@ impl AgentBootstrap {
             plugin_provider_router: None,
             span_sink: None,
             without_channels: false,
+            outbound_channels_only: false,
+            session_cancel_token: None,
             enable_inbound_dispatch: false,
             channel_tool_posture: None,
             persona_tool_allowlist: None,
@@ -639,6 +647,15 @@ impl AgentBootstrap {
             approval_manager: None,
             session_egress_policy: None,
         }
+    }
+
+    /// Retain startup cleanup authority in the host even if build returns Err.
+    pub fn with_cleanup(
+        mut self,
+        cleanup: Arc<crate::bootstrap_cleanup::BootstrapCleanup>,
+    ) -> Self {
+        self.cleanup = Some(cleanup);
+        self
     }
 
     /// #111 — set the host-supplied active assistant for per-assistant MCP
@@ -742,6 +759,20 @@ impl AgentBootstrap {
         self
     }
 
+    /// Keep configured outbound channels without starting a per-session
+    /// inbound poller, webhook listener or subscriber.
+    pub fn outbound_channels_only(mut self, enabled: bool) -> Self {
+        self.outbound_channels_only = enabled;
+        self
+    }
+
+    /// Use the host's cancellation token as the canonical session root from
+    /// the start of bootstrap. The existing runtime guard still owns it.
+    pub fn session_cancel_token(mut self, token: CancellationToken) -> Self {
+        self.session_cancel_token = Some(token);
+        self
+    }
+
     /// Waive the slow-MCP-dial notice for a surface that already covers this
     /// window itself. See [`AgentBootstrap::quiet_mcp_dial`] — there is one
     /// legitimate caller and a test that says so.
@@ -820,12 +851,18 @@ impl AgentBootstrap {
     }
 
     async fn build_scoped(mut self) -> anyhow::Result<BootstrapResult> {
+        // Establish cleanup ownership even when policy validation rejects startup.
+        if let Some(cleanup) = &self.cleanup {
+            cleanup.begin();
+        }
+        // Validate persisted restrictions before constructing session resources.
+        let learned_policy = load_learned_policy()?;
         let cwd = &self.workspace;
         let cwd_path = std::path::Path::new(cwd);
         // Mint the immutable session root before any child-capable tools are
         // built. The budget watcher is attached later, after engine creation,
         // but the spawner and engine then share this exact token lineage.
-        let session_cancel_root = CancellationToken::new();
+        let session_cancel_root = self.session_cancel_token.take().unwrap_or_default();
         let mut session_guard = SessionRuntimeGuard::new(session_cancel_root);
         let session_runtime = session_guard.observer();
         let cancel_root = session_guard.control();
@@ -982,10 +1019,13 @@ impl AgentBootstrap {
         };
         let plugin_gate = Arc::new(wcore_plugin_api::PluginAccessGate);
         plugin_loader
-            .discover_on_disk(
+            .discover_on_disk_with_cleanup(
                 &plugin_runner,
                 wasm_plugin_runner.as_ref(),
                 plugin_gate.clone(),
+                self.cleanup
+                    .as_deref()
+                    .map(|cleanup| cleanup as &dyn wcore_plugin_subprocess::RuntimeCleanupOwner),
             )
             .await;
         let mut plugin_runtime_keepalives: Vec<crate::plugins::LoadedRuntimeHandle> = Vec::new();
@@ -1849,6 +1889,9 @@ impl AgentBootstrap {
             match dialled {
                 Ok(mgr) => {
                     let mgr = Arc::new(mgr);
+                    if let Some(cleanup) = &self.cleanup {
+                        cleanup.mcp(mgr.clone());
+                    }
                     wcore_mcp::tool_proxy::register_mcp_tools(
                         &mut registry,
                         &mgr,
@@ -1916,6 +1959,9 @@ impl AgentBootstrap {
             })
             .collect();
         if let Some(plugin_mcp_mgr) = plugin_mcp_manager {
+            if let Some(cleanup) = &self.cleanup {
+                cleanup.mcp(plugin_mcp_mgr.clone());
+            }
             mcp_managers.push(plugin_mcp_mgr);
         }
 
@@ -1961,7 +2007,11 @@ impl AgentBootstrap {
         // plugin hooks stay log-only (the legacy behavior).
         // wayland#562 — captured before `self.config` is moved into the engine,
         // so the late-MCP rebind applies the SAME gate this boot-time block does.
-        let hook_dispatch_enabled = self.config.hooks.dispatch_enabled;
+        // Lifecycle MCP calls bypass ToolRegistry, so bind them only under
+        // the same operator authority as ordinary MCP tools. This resolved
+        // gate is also captured by LateMcpBinder below.
+        let hook_dispatch_enabled = self.config.hooks.dispatch_enabled
+            && crate::channel_tools::allows_ambient_mcp(self.channel_tool_posture.as_ref());
         let hook_dispatcher: Option<Arc<dyn crate::hooks::HookDispatcher>> =
             if hook_dispatch_enabled && !applied.plugin_hooks.is_empty() && !mcp_managers.is_empty()
             {
@@ -2631,7 +2681,12 @@ impl AgentBootstrap {
         // current project's parent directory holds sibling projects; a
         // `resolve()` miss widens to their `.wayland-core/skills/` dirs.
         // Degrades to single-project behaviour when cwd has no parent.
-        let mut catalog = wcore_skills::refs::SkillCatalog::from_refs(skill_refs);
+        let mut catalog = wcore_skills::refs::SkillCatalog::from_refs(skill_refs)
+            .with_local_reload(
+                cwd_path.to_path_buf(),
+                self.extra_skill_dirs.clone(),
+                crate::plugins::loader::resolved_plugins_roots(),
+            );
         if let Some(siblings_root) = cwd_path.parent() {
             catalog = catalog.with_cross_project_root(siblings_root);
         }
@@ -2850,7 +2905,6 @@ impl AgentBootstrap {
         // source. See `load_learned_policy`: a missing file yields `None`, NOT
         // an empty policy, so the F05 capability report cannot advertise
         // `ready` on a construction that would narrow nothing.
-        let learned_policy = load_learned_policy();
         let mut spawner_builder = session_budget
             .govern_spawner(
                 crate::spawner::AgentSpawner::new(provider.clone(), self.config.clone()),
@@ -3132,10 +3186,13 @@ impl AgentBootstrap {
             self.config.advertised_capabilities.cost_attribution = true;
         }
 
-        // F-092 (W7-N): mirror online_evolution config gate into the
-        // advertised capability surface so the host sees it on Ready.
+        // Keep the compatibility setting inert until system-prompt evolution
+        // has selection, persistence, cost and consumption evidence.
+        self.config.advertised_capabilities.online_evolution = false;
         if self.config.observability.online_evolution {
-            self.config.advertised_capabilities.online_evolution = true;
+            self.output.emit_info(
+                "Online system-prompt evolution is unavailable; the requested setting is inert.",
+            );
         }
 
         // Layer D1 (token-opt): seed ToolSearch from the same live-registry
@@ -3184,8 +3241,8 @@ impl AgentBootstrap {
         // tools. No-op for the local CLI/TUI/json-stream engines (posture
         // `None`); for `Full` channel/remote it drops only the unconfined-search
         // tools (Grep/Glob, #667 residual) and keeps the rest. Runs after all
-        // built-in registration; MCP tools survive every posture, so
-        // post-construction MCP wiring is unaffected.
+        // built-in registration; the persistent MCP gate also governs
+        // post-construction attach, refresh and reconnect.
         if let Some(scope) = self.channel_tool_posture.as_ref() {
             // Task 8 — bootstrap UX gate. Probe whether the platform's
             // sandbox backend enforces secret-read-deny; if not, suppress
@@ -3197,6 +3254,7 @@ impl AgentBootstrap {
             tracing::info!(
                 target: "wcore_agent::bootstrap",
                 posture = ?scope.posture,
+                effective_mcp_authority = scope.effective_mcp_authority(),
                 sandbox_enforces_read_deny = enforces,
                 "channel engine tool posture applied"
             );
@@ -3536,6 +3594,7 @@ impl AgentBootstrap {
         } else {
             AgentEngine::new_with_provider(provider.clone(), self.config, registry, self.output)
         };
+        engine.set_bootstrap_cleanup(self.cleanup.clone());
         engine.install_durable_session_authority(
             durable_session_authority,
             effective_execution_policy.clone(),
@@ -3732,104 +3791,10 @@ impl AgentBootstrap {
         // timing budget; a genuinely wedged backend simply never installs
         // (the same best-effort contract this block always had).
         engine.install_file_watcher_eventually(cwd_path.to_path_buf());
-        // F-039 (HIGH, Aud-10): wire SkillWatcher hot-reload into bootstrap.
-        // Previously `wcore_skills::watcher::SkillWatcher` shipped with zero
-        // production callers — skills added mid-session were invisible until
-        // the next boot. The watcher monitors the same dirs `load_catalog`
-        // reads from (user + project + extra); on any change it reloads the
-        // catalog and installs it on the engine.
-        //
-        // Best-effort: if the watcher can't arm (FSEvents degraded, no dirs,
-        // etc.) the session continues without hot-reload — same contract as
-        // FileWatcher above. The watcher's JoinHandle is parked on the
-        // engine's decay handles so it's aborted on session shutdown.
-        {
-            let skill_dirs: Vec<std::path::PathBuf> = {
-                let mut dirs = Vec::new();
-                if let Some(d) = wcore_skills::paths::user_skills_dir()
-                    && d.is_dir()
-                {
-                    dirs.push(d);
-                }
-                for d in wcore_skills::paths::project_skills_dirs(cwd_path) {
-                    if d.is_dir() {
-                        dirs.push(d);
-                    }
-                }
-                for d in &self.extra_skill_dirs {
-                    if d.is_dir() {
-                        dirs.push(d.clone());
-                    }
-                }
-                dirs
-            };
-
-            match wcore_skills::watcher::SkillWatcher::new() {
-                Ok((mut skill_watcher, mut version_rx)) => {
-                    if let Err(e) = skill_watcher.start(skill_dirs) {
-                        tracing::warn!(
-                            error = %e,
-                            "F-039: SkillWatcher::start failed; continuing without skill hot-reload"
-                        );
-                    } else {
-                        let catalog_for_reload = Arc::clone(&catalog);
-                        let engine_catalog_setter = {
-                            // We cannot hand an `&mut AgentEngine` into the
-                            // spawn closure, but `set_skill_catalog` takes an
-                            // `Arc<SkillCatalog>` and the engine is `!Send`.
-                            // The watcher fires on a tokio task on the same
-                            // thread; we deliver the reload via a one-shot
-                            // channel that the session main-loop drains.
-                            // For now, log the version bump. Full in-session
-                            // reload requires a reload_tx channel threaded into
-                            // the orchestration loop (future W3-G coordination).
-                            // TODO(W3-B-follow-on): thread reload_tx into
-                            // engine so set_skill_catalog is called mid-session.
-                            Arc::clone(&catalog_for_reload)
-                        };
-                        let reload_handle = tokio::spawn(async move {
-                            while version_rx.changed().await.is_ok() {
-                                let version = *version_rx.borrow();
-                                tracing::info!(
-                                    target: "wcore_agent::bootstrap",
-                                    version,
-                                    "F-039: skill catalog changed (version={version}); \
-                                     reload will apply on next session start \
-                                     (in-session hot-swap: TODO W3-B-follow-on)"
-                                );
-                                let _ = &engine_catalog_setter; // keep Arc alive
-                            }
-                        });
-                        // Park watcher + reload task so Drop shuts them down.
-                        // The watcher itself is kept alive by holding it in a
-                        // Box that we park via push_decay_handle on a
-                        // synthetic task that never resolves (the watcher's
-                        // own tokio task does the real work via version_rx).
-                        engine.push_decay_handle(reload_handle);
-                        // The SkillWatcher must stay alive; its Drop calls
-                        // stop() which aborts the OS watcher. We keep it alive
-                        // by leaking it into a Box held by the engine via a
-                        // dedicated boxed-handle approach.
-                        engine.push_decay_handle(tokio::spawn(async move {
-                            // Hold skill_watcher alive for the session.
-                            let _watcher = skill_watcher;
-                            // Park here forever; aborted by engine Drop.
-                            std::future::pending::<()>().await;
-                        }));
-                        tracing::debug!(
-                            target: "wcore_agent::bootstrap",
-                            "F-039: SkillWatcher armed (skill hot-reload active)"
-                        );
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "F-039: SkillWatcher::new failed; continuing without skill hot-reload"
-                    );
-                }
-            }
-        }
+        // Filesystem skill refresh is owned by the admitted user-turn boundary.
+        // Scanning there observes new directories and governance revocations,
+        // without mutating a catalog while an invocation is in flight.
+        tracing::debug!(target: "wcore_agent::bootstrap", "skill catalog refresh active at user-turn boundaries");
 
         // W7.1 S4-3.2: install the same `ApprovalBridge` the ScriptTool was
         // wired with so `engine.approval_bridge()` and the registered
@@ -3957,7 +3922,7 @@ impl AgentBootstrap {
             // Phase 1B-2 — spawn the inbound subscriber BEFORE start_all so no
             // early inbound event is dropped by the broadcast. Only when the
             // caller opted in via `enable_inbound_dispatch`.
-            inbound_subscriber = if self.enable_inbound_dispatch {
+            inbound_subscriber = if self.enable_inbound_dispatch && !self.outbound_channels_only {
                 // Load each channel's config ONCE, then derive two maps from
                 // it: the per-channel access policy (for the subscriber) and
                 // the per-channel tool posture (for the dispatcher's
@@ -4092,76 +4057,83 @@ impl AgentBootstrap {
             //
             // An observer still gets a fully working session and can still SEND;
             // it just does not poll. It says so loudly — see `channel_lease`.
-            let poll_lease = crate::channel_lease::attempt(
-                &wcore_config::config::wayland_config_dir(),
-                "session",
-            );
+            if self.outbound_channels_only {
+                channel_poll_lease = None;
+                inbound_webhook = None;
+            } else {
+                let poll_lease = crate::channel_lease::attempt(
+                    &wcore_config::config::wayland_config_dir(),
+                    "session",
+                );
 
-            if poll_lease.is_owner() {
-                // Call start_all to arm inbound poll tasks (now that the
-                // subscriber is listening). Best-effort: if start_all returns an
-                // error we warn and continue (session still works, channels just
-                // won't deliver inbound messages).
-                if let Err(e) = lifted.write().await.start_all().await {
-                    tracing::warn!(
-                        target: "wcore_agent::bootstrap",
-                        error = %e,
-                        "F-014: channel_manager.start_all() failed; inbound polling may be partial"
-                    );
+                if poll_lease.is_owner() {
+                    // Call start_all to arm inbound poll tasks (now that the
+                    // subscriber is listening). Best-effort: if start_all returns an
+                    // error we warn and continue (session still works, channels just
+                    // won't deliver inbound messages).
+                    if let Err(e) = lifted.write().await.start_all().await {
+                        tracing::warn!(
+                            target: "wcore_agent::bootstrap",
+                            error = %e,
+                            "F-014: channel_manager.start_all() failed; inbound polling may be partial"
+                        );
+                    } else {
+                        tracing::info!(
+                            target: "wcore_agent::bootstrap",
+                            "F-014: channel_manager.start_all() complete — inbound polling active"
+                        );
+                    }
                 } else {
                     tracing::info!(
                         target: "wcore_agent::bootstrap",
-                        "F-014: channel_manager.start_all() complete — inbound polling active"
+                        owner_pid = ?poll_lease.owner_pid(),
+                        "F24-CL: another process owns inbound polling; start_all NOT called"
                     );
                 }
-            } else {
-                tracing::info!(
-                    target: "wcore_agent::bootstrap",
-                    owner_pid = ?poll_lease.owner_pid(),
-                    "F24-CL: another process owns inbound polling; start_all NOT called"
-                );
-            }
-            // F24-CS. Supervise the role for the session's lifetime rather than
-            // deciding it once here.
-            //
-            // Deciding once was first-come, and first-come made the INSTALLED
-            // SERVICE the observer whenever a session happened to start first —
-            // for as long as that session lived. A session is transient and the
-            // service is the always-on role the user installed, so the session
-            // stands down when the service claims, and takes over again if the
-            // service goes away. `session` is the lowest rank, so this process
-            // preempts nobody.
-            channel_poll_lease = Some(crate::channel_lease::ChannelPollSupervisor::spawn(
-                &wcore_config::config::wayland_config_dir(),
-                "session",
-                poll_lease,
-                crate::channel_lease::ChannelManagerPollControl::new(std::sync::Arc::clone(
-                    &lifted,
-                )),
-            ));
+                // F24-CS. Supervise the role for the session's lifetime rather than
+                // deciding it once here.
+                //
+                // Deciding once was first-come, and first-come made the INSTALLED
+                // SERVICE the observer whenever a session happened to start first —
+                // for as long as that session lived. A session is transient and the
+                // service is the always-on role the user installed, so the session
+                // stands down when the service claims, and takes over again if the
+                // service goes away. `session` is the lowest rank, so this process
+                // preempts nobody.
+                channel_poll_lease = Some(crate::channel_lease::ChannelPollSupervisor::spawn(
+                    &wcore_config::config::wayland_config_dir(),
+                    "session",
+                    poll_lease,
+                    crate::channel_lease::ChannelManagerPollControl::new(std::sync::Arc::clone(
+                        &lifted,
+                    )),
+                ));
 
-            // Inbound webhook host — when enabled, bind an HTTP listener that
-            // routes platform webhook POSTs (Slack / WhatsApp / Twilio SMS /
-            // MS Teams) to each channel's authenticating `ingest_webhook`. Off
-            // by default. The host holds no per-platform allow-list: it routes
-            // `/webhooks/:channel` by name, and safety comes from the trait
-            // default, which returns `Rejected` so a connector that has NOT
-            // implemented an authenticated ingest is never exposed.
-            //
-            // msteams DOES implement one (Bot Framework JWT: signature,
-            // issuer, audience, expiry, plus a serviceUrl claim/Activity
-            // binding), so it is exposed and authenticated. This comment
-            // previously said the opposite; the regression test that pins it is
-            // `manager_dispatch_reaches_msteams_authenticated_ingest_not_the_default_impl`
-            // in `wcore-channel-msteams`.
-            inbound_webhook =
-                crate::inbound_webhook::spawn(std::sync::Arc::clone(&lifted), &inbound_webhook_cfg);
-            if inbound_webhook.is_some() {
-                tracing::info!(
-                    target: "wcore_agent::bootstrap",
-                    bind = %inbound_webhook_cfg.bind,
-                    "inbound webhook host listening"
+                // Inbound webhook host — when enabled, bind an HTTP listener that
+                // routes platform webhook POSTs (Slack / WhatsApp / Twilio SMS /
+                // MS Teams) to each channel's authenticating `ingest_webhook`. Off
+                // by default. The host holds no per-platform allow-list: it routes
+                // `/webhooks/:channel` by name, and safety comes from the trait
+                // default, which returns `Rejected` so a connector that has NOT
+                // implemented an authenticated ingest is never exposed.
+                //
+                // msteams DOES implement one (Bot Framework JWT: signature,
+                // issuer, audience, expiry, plus a serviceUrl claim/Activity
+                // binding), so it is exposed and authenticated. This comment
+                // previously said the opposite; the regression test that pins it is
+                // `manager_dispatch_reaches_msteams_authenticated_ingest_not_the_default_impl`
+                // in `wcore-channel-msteams`.
+                inbound_webhook = crate::inbound_webhook::spawn(
+                    std::sync::Arc::clone(&lifted),
+                    &inbound_webhook_cfg,
                 );
+                if inbound_webhook.is_some() {
+                    tracing::info!(
+                        target: "wcore_agent::bootstrap",
+                        bind = %inbound_webhook_cfg.bind,
+                        "inbound webhook host listening"
+                    );
+                }
             }
 
             // FleetDispatcher-class fix (audit 2026-05-24): SendMessageTool was
@@ -5033,42 +5005,20 @@ fn drop_revoked_auto_draft_seeds_with(
 /// advertised-but-dead shape this task exists to remove, so the readiness
 /// claim is bound to a policy that actually exists.
 ///
-/// A file that exists but does not parse is a WARN and `None`: an operator who
-/// wrote a malformed permissions file must not silently get "no restrictions".
-fn load_learned_policy() -> Option<Arc<wcore_permissions::LearnedPolicy>> {
-    let path = match wcore_permissions::LearnedPolicy::default_path() {
-        Ok(path) => path,
-        Err(error) => {
-            tracing::debug!(
-                target: "wcore_agent::permissions",
-                %error,
-                "no home directory; sub-agent learned policy not loaded"
-            );
-            return None;
-        }
-    };
-    if !path.exists() {
-        return None;
+/// Existing unreadable or malformed restrictions abort bootstrap; only an
+/// absent file leaves the optional narrowing layer unconfigured.
+fn load_learned_policy() -> anyhow::Result<Option<Arc<wcore_permissions::LearnedPolicy>>> {
+    let path = wcore_permissions::LearnedPolicy::default_path()?;
+    let policy = wcore_permissions::LearnedPolicy::load_optional_from(&path)
+        .with_context(|| format!("failed to load learned policy at {}", path.display()))?;
+    if policy.is_some() {
+        tracing::info!(
+            target: "wcore_agent::permissions",
+            path = %path.display(),
+            "sub-agent learned-policy pre-filter loaded"
+        );
     }
-    match wcore_permissions::LearnedPolicy::load_from(&path) {
-        Ok(policy) => {
-            tracing::info!(
-                target: "wcore_agent::permissions",
-                path = %path.display(),
-                "sub-agent learned-policy pre-filter loaded"
-            );
-            Some(Arc::new(policy))
-        }
-        Err(error) => {
-            tracing::warn!(
-                target: "wcore_agent::permissions",
-                path = %path.display(),
-                %error,
-                "sub-agent learned policy failed to parse; pre-filter NOT installed"
-            );
-            None
-        }
-    }
+    Ok(policy.map(Arc::new))
 }
 
 /// `F23A-C1-M1` — the auto-draft router-seed resurrection guard.
@@ -5527,6 +5477,7 @@ mod tests {
         let scope = crate::channel_tools::ChannelToolScope {
             posture: wcore_channels::ChannelToolPosture::Full,
             workspace_root: std::path::PathBuf::from("/tmp"),
+            ambient_mcp_full_authority_v1: false,
         };
         crate::channel_tools::apply_posture(&mut reg, &scope, false);
         assert!(

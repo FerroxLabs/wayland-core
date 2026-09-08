@@ -2,6 +2,7 @@ pub mod sse;
 pub mod stdio;
 pub mod stdio_readiness;
 pub mod streamable_http;
+mod task;
 
 use async_trait::async_trait;
 

@@ -80,6 +80,7 @@ on:
 permissions:
   contents: read
   checks: write
+  actions: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -90,6 +91,44 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  admission:
+    name: Fast qualification admission
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      publication_pr: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'stabilize/20260905-core' }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up qualification Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Check evidence and prerequisite controls
+        run: |
+          bash .github/scripts/tests/capture-test-command.test.sh
+          bash .github/scripts/tests/outer-retry-evidence.test.sh
+          python3 .github/scripts/tests/qualification-prerequisites.test.py
+          python3 scripts/test-ci-build-artifact.py
+          python3 .github/scripts/tests/qualification-status.test.py
+          python3 .github/scripts/tests/publication-push-proof.test.py
+          python3 .github/scripts/tests/release-workflow-contract.test.py
+          python3 .github/scripts/tests/release-collection.test.py
+          python3 .github/scripts/tests/collect-stabilization-mutants.test.py
+      - name: Confirm Windows routing before reserving native runners
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess
+          event = json.loads(pathlib.Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
+          pr = event.get("pull_request") or {}
+          labels = {label["name"] for label in pr.get("labels", [])}
+          own_repo = (pr.get("head", {}).get("repo") or {}).get("full_name") == os.environ["GITHUB_REPOSITORY"]
+          command = ["python3", "scripts/qualification-prerequisites.py", "windows-runner",
+                     "--hosted-default", "--event", os.environ["GITHUB_EVENT_PATH"]]
+          if own_repo and "windows-self-hosted" in labels:
+              raise SystemExit("Ordinary CI qualifies hosted Windows. Remove windows-self-hosted; use the existing manual/nightly workflow for private-fleet qualification.")
+          subprocess.run(command, check=True)
+          PY
+
   # ── macOS runner admission control (2026-07-29, lane/ci-macos-budget) ──
   # Measured, not inferred. Raw evidence: .planning/CI-MACOS-BUDGET.md.
   #
@@ -160,6 +199,9 @@ jobs:
   # completely untouched by that job and keep the full hermetic hosted matrix.
 
   ci:
+    # Compile while the six release builds run; the reuse helper gates only
+    # this native target before smoke. No other build output is consumed here.
+    needs: admission
     name: CI (${{ matrix.os }})
     # A PR from a FORK must never land on a self-hosted runner. That runner is a
     # personal Windows machine, and `pull_request` executes the fork's code on
@@ -180,63 +222,34 @@ jobs:
     # `contains()` is used rather than `matrix.os[0]` because the matrix mixes a
     # plain string (`macos-latest`) with a label array, and indexing a string in
     # a GitHub expression does not do what indexing an array does.
-    # 2026-08-27: the `windows-hosted` LABEL joins the fork condition as a
-    # second reason to substitute a GitHub-hosted Windows box for the
-    # self-hosted one. Both self-hosted Windows runners report `offline` (they
-    # are the same physical machine), and `CI (Array)` is a REQUIRED context,
-    # so while that box is down NO pull request can merge at all.
-    #
-    # This is deliberately done on `runs-on` and NOT on the matrix: the job
-    # NAME is rendered from `matrix.os`, and an array-valued matrix entry
-    # renders as literally "Array" — which is where the required check name
-    # `CI (Array)` comes from. Leaving the matrix untouched therefore keeps
-    # the check name identical by construction, while `runs-on` alone decides
-    # the machine. It is the same substitution this line already performs for
-    # fork PRs, which is the precedent for it being sound.
-    #
-    # NOT equivalent in one MEASURED respect: the matrix comment records that
-    # the "AppContainer probed available" lines came from the hosted leg and
-    # not from either self-hosted box. Hosted Windows probes AppContainer as
-    # AVAILABLE where self-hosted does not, so the sandbox tests can take a
-    # different path. A green here is real Windows evidence; it is NOT proof
-    # the self-hosted fleet is green.
-    #
-    # With no label the expression is byte-identical in effect to before, so
-    # nothing changes the moment the self-hosted box comes back.
-    #
-    # ORDERING MATTERS, and it is not obvious. `on: pull_request:` declares no
-    # `types:`, so it defaults to [opened, synchronize, reopened] -- `labeled`
-    # is NOT among them. Applying the label therefore starts NO run, and any
-    # run already in flight carries the label set as it was AT CREATION TIME.
-    # Measured on 2026-08-27: labelled PR #341 and the in-flight run
-    # (33028709448, pushed moments earlier) still resolved without the label.
-    # So: LABEL FIRST, THEN PUSH. Every later `synchronize` sees it, making
-    # this a one-time ordering cost per PR rather than per commit.
-    #
-    # `labeled` is deliberately NOT added to `types:`: that would fire the
-    # entire matrix on every routine label change (`area:core` and friends),
-    # a large recurring cost to save a single push.
-    runs-on: ${{ (contains(matrix.os, 'self-hosted') && (contains(github.event.pull_request.labels.*.name, 'windows-hosted') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository))) && 'windows-latest' || matrix.os }}
+    # Ordinary qualification uses hosted Windows. Private-fleet qualification
+    # remains in its explicit manual/nightly workflow; it cannot reuse a
+    # different hosted image identity. Preserve the required CI (Array) name
+    # by changing the executor rather than the matrix.
+    runs-on: ${{ contains(matrix.os, 'self-hosted') && 'windows-latest' || matrix.os }}
     # gh#1072. Without this the job inherits GitHub's 6-HOUR default, and this
     # is a required context, so one wedged job blocks every PR in the repo.
     # Sized from measurement, not guesswork: across the last four successful
     # runs the slowest arm was CI (macos-latest) at 65 min and CI (Array) at
     # 42 min. 120 gives ~1.8x headroom over the worst observed, and sits
     # between the sibling `ci-linux` (90) and `ci-windows-hosted` (180).
-    timeout-minutes: 120
+    # The former 75-minute producer dependency now overlaps this job. Preserve
+    # the former end-to-end envelope (75 + 120); individual test limits stay fixed.
+    timeout-minutes: 195
     # 2026-08-02. Skip this job entirely on a `lane/**` push that opted into
     # neither platform. See the matrix note below for why the self-hosted
     # Windows entry stopped being unconditional. Lanes keep `Lint`, the
     # containerized Linux job, the `Build (…)` artifacts that the `lane/**`
     # trigger exists to provide, and their own lane-scoped proof workflows.
     if: >-
-      github.event_name == 'pull_request'
-      || github.ref_name == 'main'
-      || startsWith(github.ref_name, 'integ/')
-      || github.ref_name == 'plan/f20-unified-audit-repair'
-      || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]')
-      || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')
-      || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-windows]')
+      needs.admission.outputs.publication_pr != 'true'
+      && (github.event_name == 'pull_request'
+          || github.ref_name == 'main'
+          || startsWith(github.ref_name, 'integ/')
+          || github.ref_name == 'plan/f20-unified-audit-repair'
+          || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]')
+          || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')
+          || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-windows]'))
     # Shrink debug info + disable incremental compile across the matrix.
     # The Windows runner has ~14GB free disk and the default Rust dev
     # profile + full PDB debug info blew past it on CI run 26396718138
@@ -363,6 +376,10 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/checkout@v6
+      - name: Set up qualification Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
 
       # ── Python, for the account CI actually runs as ───────────────────────
       # `wcore-cli::portability_hostile_corpus` shells to `python` to mint its
@@ -552,9 +569,6 @@ jobs:
       - name: Pre-build tool_token_bench
         run: vx cargo build -p wcore-agent --bin tool_token_bench --features test-utils
 
-      - name: Pre-build wcore-cli release binary (smoked by release_binary_smoke tests)
-        run: vx cargo build --release -p wcore-cli
-
       - name: Check formatting
         run: vx just fmt-check
 
@@ -590,8 +604,115 @@ jobs:
           vx cargo clippy -p wcore-sandbox --features live-docker --all-targets -- -D warnings
           vx cargo clippy -p wcore-swarm --features wcore-sandbox/live-docker --all-targets -- -D warnings
 
+      - name: Reuse source-bound native release binary
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          native_target=$(vx rustc -vV | sed -n "s/^host: //p")
+          binary=target/release/wayland-core
+          if [ "$RUNNER_OS" = Windows ]; then binary="${binary}.exe"; fi
+          CAPTURE_DIR="$RUNNER_TEMP/wayland-ci-evidence/build-reuse" \
+            bash .github/scripts/capture-test-command.sh \
+            python3 scripts/ci-build-artifact.py fetch \
+            --target "$native_target" --profile release --features default \
+            --abi-contract "native-${RUNNER_OS}-v1" \
+            --producer-job "Build ($native_target)" --artifact "wayland-core-$native_target" \
+            --binary "$binary" --wait-seconds 4500
+
+      # Affected native admission runs before the expensive workspace suite.
+      # V1 C2 — release-binary smoke. Catches the v0.2.0 BLOCKER #1 class
+      # of regression where `inventory::submit!` items get dead-code-stripped
+      # under `profile.release` (lto="thin" + codegen-units=1) but survive
+      # in the debug binary that test-ci exercises. Gating, no continue-on-error.
+      # WCORE_SMOKE_REQUIRE_PREBUILT=1 makes a missing artifact a hard failure
+      # here (dev checkouts without the env var skip instead — #190), so a
+      # dropped/broken "Pre-build wcore-cli release binary" step cannot
+      # silently degrade this gate into a skip.
+      - name: Release binary smoke (catches plugin dead-code-strip)
+        shell: bash
+        id: release_smoke
+        run: |
+          python3 scripts/qualification-prerequisites.py inventory --collect \
+            --input "$RUNNER_TEMP/wayland-ci-evidence/release-smoke-selection.json" \
+            --require release_binary_ready_event_advertises_plugin_capabilities \
+            -- --locked -p wcore-cli --test release_binary_smoke
+          bash .github/scripts/run-tests-with-attempt-evidence.sh vx cargo nextest run --locked --no-tests=fail --retries 0 -p wcore-cli --test release_binary_smoke
+        env:
+          WCORE_SMOKE_REQUIRE_PREBUILT: "1"
+          JUNIT_PATH: target/nextest/default/junit.xml
+          ATTEMPT_DIR: ${{ runner.temp }}/wayland-ci-evidence/release-smoke
+
+      # F01 E3 runs on every supported native OS. Bind discovery to the exact
+      # pre-built release artifact so a stale debug binary cannot satisfy it.
+      #
+      # nextest, NOT `cargo test`: `packaged_driver_gate.rs` is
+      # `#![cfg(feature = "packaged-driver-gate")]`, so if that feature is ever
+      # renamed, dropped, or fails to activate, the binary compiles EMPTY and
+      # `cargo test` prints `test result: ok. 0 passed` and exits 0 — a
+      # release-integrity gate certifying nothing. Measured on this checkout:
+      # `cargo test --test packaged_driver_gate` without the feature exits 0;
+      # `cargo nextest run` on the identical binary exits 4 ("no tests to run")
+      # via `no-tests = "fail"` in .config/nextest.toml.
+      - name: F01 packaged wayland-eval driver gate
+        shell: bash
+        id: packaged_admission
+        run: |
+          python3 scripts/qualification-prerequisites.py inventory --collect \
+            --input "$RUNNER_TEMP/wayland-ci-evidence/packaged-selection.json" \
+            --require packaged_paired_task_preserves_inputs_and_rejects_wrong_answer \
+            -- --locked -p wcore-eval-scenarios --features packaged-driver-gate --test packaged_driver_gate
+          bash .github/scripts/run-tests-with-attempt-evidence.sh vx cargo nextest run --no-tests=fail --retries 0 --locked -p wcore-eval-scenarios --features packaged-driver-gate --test packaged_driver_gate
+        env:
+          WAYLAND_BUILD_SOURCE_SHA: ${{ github.sha }}
+          WCORE_EVAL_BIN: ${{ github.workspace }}/target/release/wayland-core${{ runner.os == 'Windows' && '.exe' || '' }}
+          JUNIT_PATH: target/nextest/default/junit.xml
+          ATTEMPT_DIR: ${{ runner.temp }}/wayland-ci-evidence/packaged
+
+      - name: Walk identity controls (isolated macOS execution)
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          ATTEMPT_DIR: ${{ runner.temp }}/wayland-ci-evidence/walk-identity
+        run: |
+          bash .github/scripts/run-tests-with-attempt-evidence.sh \
+            vx cargo nextest run --locked -p wcore-tools --test walk_parallel_identity_test \
+            --profile ci --retries 0 --no-tests=fail --test-threads 1
+
+      - name: Dispatch budget boundary (isolated Windows execution)
+        shell: bash
+        if: runner.os == 'Windows'
+        env:
+          ATTEMPT_DIR: ${{ runner.temp }}/wayland-ci-evidence/dispatch-budget
+        run: |
+          bash .github/scripts/run-tests-with-attempt-evidence.sh \
+            vx cargo nextest run --locked --release -p wcore-agent --test workflow_limits_test \
+            --profile ci --retries 0 --no-tests=fail --test-threads 1 \
+            -E 'test(=fix1_dispatch_budget_aborts_with_partial_result)'
+
+      - name: Durable lifecycle (isolated Windows execution)
+        shell: bash
+        if: runner.os == 'Windows'
+        env:
+          ATTEMPT_DIR: ${{ runner.temp }}/wayland-ci-evidence/durable-lifecycle
+        run: |
+          bash .github/scripts/run-tests-with-attempt-evidence.sh \
+            vx cargo nextest run --locked -p wcore-cli --test stabilization_acp_durable \
+            --profile ci --retries 0 --no-tests=fail --test-threads 1 \
+            -E 'test(=w02_delete_releases_real_durable_writer_and_preserves_history)'
+
       - name: Run tests (nextest CI profile)
-        run: vx just test-ci
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            bash .github/scripts/run-tests-with-attempt-evidence.sh \
+              vx cargo nextest run --workspace --profile ci --no-fail-fast \
+              -E 'not binary_id(=wcore-cli::release_binary_smoke) & not (package(wcore-agent) & binary(workflow_limits_test) & test(=fix1_dispatch_budget_aborts_with_partial_result)) & not (package(wcore-cli) & binary(stabilization_acp_durable) & test(=w02_delete_releases_real_durable_writer_and_preserves_history))'
+          else
+            bash .github/scripts/run-tests-with-attempt-evidence.sh scripts/fd-budget.sh \
+              vx cargo nextest run --workspace --profile ci --no-fail-fast \
+              -E 'not binary_id(=wcore-cli::release_binary_smoke) & not binary_id(=wcore-tools::walk_parallel_identity_test)'
+          fi
 
 
       # ── core#238 c4: PRINT the NUL-device measurement, do not just assert it ─
@@ -733,36 +854,6 @@ jobs:
       # sits in exactly one job and that the job is `ci-linux`, so re-adding it
       # here fails a test instead of quietly restoring the old board.
 
-      # V1 C2 — release-binary smoke. Catches the v0.2.0 BLOCKER #1 class
-      # of regression where `inventory::submit!` items get dead-code-stripped
-      # under `profile.release` (lto="thin" + codegen-units=1) but survive
-      # in the debug binary that test-ci exercises. Gating, no continue-on-error.
-      # WCORE_SMOKE_REQUIRE_PREBUILT=1 makes a missing artifact a hard failure
-      # here (dev checkouts without the env var skip instead — #190), so a
-      # dropped/broken "Pre-build wcore-cli release binary" step cannot
-      # silently degrade this gate into a skip.
-      - name: Release binary smoke (catches plugin dead-code-strip)
-        run: vx cargo nextest run -p wcore-cli --test release_binary_smoke
-        env:
-          WCORE_SMOKE_REQUIRE_PREBUILT: "1"
-
-      # F01 E3 runs on every supported native OS. Bind discovery to the exact
-      # pre-built release artifact so a stale debug binary cannot satisfy it.
-      #
-      # nextest, NOT `cargo test`: `packaged_driver_gate.rs` is
-      # `#![cfg(feature = "packaged-driver-gate")]`, so if that feature is ever
-      # renamed, dropped, or fails to activate, the binary compiles EMPTY and
-      # `cargo test` prints `test result: ok. 0 passed` and exits 0 — a
-      # release-integrity gate certifying nothing. Measured on this checkout:
-      # `cargo test --test packaged_driver_gate` without the feature exits 0;
-      # `cargo nextest run` on the identical binary exits 4 ("no tests to run")
-      # via `no-tests = "fail"` in .config/nextest.toml.
-      - name: F01 packaged wayland-eval driver gate
-        run: vx cargo nextest run --no-tests=fail --locked -p wcore-eval-scenarios --features packaged-driver-gate --test packaged_driver_gate
-        env:
-          WAYLAND_BUILD_SOURCE_SHA: ${{ github.sha }}
-          WCORE_EVAL_BIN: ${{ github.workspace }}/target/release/wayland-core${{ runner.os == 'Windows' && '.exe' || '' }}
-
       # Z0 STABILITY MAJOR #4 — eval-gate runs on every PR/main commit so
       # the W10A LOCKED acceptance gate (precision/recall >= 0.80) is enforced
       # by automation, not by convention. Required to pass before merge.
@@ -794,7 +885,17 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: nextest-junit-${{ matrix.os }}
-          path: target/nextest/ci/junit.xml
+          path: |
+            target/nextest/ci/junit.xml
+            target/nextest/ci/outer-attempts/
+          if-no-files-found: ignore
+
+      - name: Upload complete native diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-diagnostics-${{ matrix.os }}-${{ github.sha }}
+          path: ${{ runner.temp }}/wayland-ci-evidence/
           if-no-files-found: ignore
 
   # ── SECOND WINDOWS SUPPLIER (2026-08-02, lane/ci-windows-fallback) ────────
@@ -892,6 +993,9 @@ jobs:
   # nextest command silently lost `--no-fail-fast`, which made every historical
   # CI failure count a lower bound rather than a total.
   ci-windows-hosted:
+    # Compile while the six release builds run; the reuse helper gates only
+    # this native target before smoke. No other build output is consumed here.
+    needs: admission
     name: CI (windows-latest, hosted)
     runs-on: windows-latest
     # OPT-IN ONLY as of 2026-08-04. This used to mirror the `ci` job's `if:`,
@@ -962,15 +1066,17 @@ jobs:
     # and asserts a Windows leg that actually runs tests is admitted — and, so
     # the gate can still fail, asserts an unrelated markerless branch is NOT.
     if: >-
-      startsWith(github.ref_name, 'lane/')
-      || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-windows]')
+      needs.admission.outputs.publication_pr != 'true'
+      && (startsWith(github.ref_name, 'lane/') || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-windows]'))
     # Bounded on purpose. The matrix job is unbounded (GHA default 6h), which is
     # tolerable on a box whose target/ is warm; a cold hosted compile that wedges
     # would otherwise burn six hours of hosted minutes per run. Sized from the
     # measured parts: ~30 min for the release pre-build (Build
     # (x86_64-pc-windows-msvc) measures 32 min cold on this same image), plus a
     # debug workspace compile, plus the 12.8k-test run.
-    timeout-minutes: 180
+    # The former 75-minute producer dependency now overlaps this job. Preserve
+    # the former end-to-end envelope (75 + 180); individual test limits stay fixed.
+    timeout-minutes: 255
     env:
       # Identical to the matrix job's. These two are the reason the v0.8.6
       # LNK1318/"Free space left: 4 MB" verdict no longer applies.
@@ -999,6 +1105,10 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/checkout@v6
+      - name: Set up qualification Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
 
       # The Linux jobs already do this (see "Free disk space" in `ci-linux`);
       # Windows never had it, and Windows is the leg that actually ran out.
@@ -1085,9 +1195,6 @@ jobs:
       - name: Pre-build tool_token_bench
         run: vx cargo build -p wcore-agent --bin tool_token_bench --features test-utils
 
-      - name: Pre-build wcore-cli release binary (smoked by release_binary_smoke tests)
-        run: vx cargo build --release -p wcore-cli
-
       - name: Disk after the release pre-build
         if: ${{ !cancelled() }}
         shell: pwsh
@@ -1095,8 +1202,73 @@ jobs:
           Write-Host "C: free = $([math]::Round((Get-PSDrive C).Free / 1GB, 2)) GB"
 
       # FIRST, not after clippy — see the step-order note in this job's header.
+      - name: Reuse source-bound native release binary
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          native_target=$(vx rustc -vV | sed -n "s/^host: //p")
+          binary=target/release/wayland-core
+          if [ "$RUNNER_OS" = Windows ]; then binary="${binary}.exe"; fi
+          CAPTURE_DIR="$RUNNER_TEMP/wayland-ci-evidence/build-reuse" \
+            bash .github/scripts/capture-test-command.sh \
+            python3 scripts/ci-build-artifact.py fetch \
+            --target "$native_target" --profile release --features default \
+            --abi-contract "native-${RUNNER_OS}-v1" \
+            --producer-job "Build ($native_target)" --artifact "wayland-core-$native_target" \
+            --binary "$binary" --wait-seconds 4500
+
+      - name: Release binary smoke (catches plugin dead-code-strip)
+        shell: bash
+        id: release_smoke
+        if: ${{ !cancelled() }}
+        run: |
+          python3 scripts/qualification-prerequisites.py inventory --collect \
+            --input "$RUNNER_TEMP/wayland-ci-evidence/release-smoke-selection.json" \
+            --require release_binary_ready_event_advertises_plugin_capabilities \
+            -- --locked -p wcore-cli --test release_binary_smoke
+          bash .github/scripts/run-tests-with-attempt-evidence.sh vx cargo nextest run --locked --no-tests=fail --retries 0 -p wcore-cli --test release_binary_smoke
+        env:
+          WCORE_SMOKE_REQUIRE_PREBUILT: "1"
+          JUNIT_PATH: target/nextest/default/junit.xml
+          ATTEMPT_DIR: ${{ runner.temp }}/wayland-ci-evidence/release-smoke
+
+      # The v0.8.6 abandonment verdict was a DISK verdict. Measure it on every
+      # run rather than re-deriving it from a link error two years later.
+      - name: Dispatch budget boundary (isolated Windows execution)
+        shell: bash
+        if: runner.os == 'Windows'
+        env:
+          ATTEMPT_DIR: ${{ runner.temp }}/wayland-ci-evidence/dispatch-budget
+        run: |
+          bash .github/scripts/run-tests-with-attempt-evidence.sh \
+            vx cargo nextest run --locked --release -p wcore-agent --test workflow_limits_test \
+            --profile ci --retries 0 --no-tests=fail --test-threads 1 \
+            -E 'test(=fix1_dispatch_budget_aborts_with_partial_result)'
+
+      - name: Durable lifecycle (isolated Windows execution)
+        shell: bash
+        if: runner.os == 'Windows'
+        env:
+          ATTEMPT_DIR: ${{ runner.temp }}/wayland-ci-evidence/durable-lifecycle
+        run: |
+          bash .github/scripts/run-tests-with-attempt-evidence.sh \
+            vx cargo nextest run --locked -p wcore-cli --test stabilization_acp_durable \
+            --profile ci --retries 0 --no-tests=fail --test-threads 1 \
+            -E 'test(=w02_delete_releases_real_durable_writer_and_preserves_history)'
+
       - name: Run tests (nextest CI profile)
-        run: vx just test-ci
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            bash .github/scripts/run-tests-with-attempt-evidence.sh \
+              vx cargo nextest run --workspace --profile ci --no-fail-fast \
+              -E 'not binary_id(=wcore-cli::release_binary_smoke) & not (package(wcore-agent) & binary(workflow_limits_test) & test(=fix1_dispatch_budget_aborts_with_partial_result)) & not (package(wcore-cli) & binary(stabilization_acp_durable) & test(=w02_delete_releases_real_durable_writer_and_preserves_history))'
+          else
+            bash .github/scripts/run-tests-with-attempt-evidence.sh scripts/fd-budget.sh \
+              vx cargo nextest run --workspace --profile ci --no-fail-fast \
+              -E 'not binary_id(=wcore-cli::release_binary_smoke)'
+          fi
 
       # core#238 c4, second Windows supplier. Same step as the matrix leg's:
       # `just test-ci` above already RAN and asserted the probe, and this
@@ -1170,14 +1342,6 @@ jobs:
       # stripped under `profile.release`, on the `.exe` this platform ships.
       # WCORE_SMOKE_REQUIRE_PREBUILT=1 makes a missing artifact a hard failure
       # rather than a silent skip (#190).
-      - name: Release binary smoke (catches plugin dead-code-strip)
-        if: ${{ !cancelled() }}
-        run: vx cargo nextest run -p wcore-cli --test release_binary_smoke
-        env:
-          WCORE_SMOKE_REQUIRE_PREBUILT: "1"
-
-      # The v0.8.6 abandonment verdict was a DISK verdict. Measure it on every
-      # run rather than re-deriving it from a link error two years later.
       - name: Report disk (the constraint that closed this route in v0.8.6)
         if: always()
         shell: pwsh
@@ -1188,7 +1352,17 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: nextest-junit-windows-latest-hosted
-          path: target/nextest/ci/junit.xml
+          path: |
+            target/nextest/ci/junit.xml
+            target/nextest/ci/outer-attempts/
+          if-no-files-found: ignore
+
+      - name: Upload complete hosted Windows diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-diagnostics-windows-hosted-${{ github.sha }}
+          path: ${{ runner.temp }}/wayland-ci-evidence/
           if-no-files-found: ignore
 
   # ── Full CI on Linux (host runner + per-step docker exec) ─────────────
@@ -1217,6 +1391,8 @@ jobs:
   # docker's layer cache; cargo's target/ accumulates in the workspace
   # mount across steps so each step's compile is incremental.
   ci-linux:
+    needs: admission
+    if: needs.admission.outputs.publication_pr != 'true'
     name: CI (linux-containerized)
     runs-on: ubuntu-latest
     # 90 was already marginal and this branch pushed it over. MEASURED: on
@@ -1531,7 +1707,12 @@ jobs:
       # repair a directory that need never have been root-owned.
       - name: Reserve the outer-retry evidence tree for the runner user
         if: ${{ !cancelled() }}
-        run: mkdir -p target/nextest/ci/outer-attempts
+        run: mkdir -p target/nextest/ci/outer-attempts target/nextest/default
+
+      - name: Confirm the Linux container prerequisite
+        id: container_admission
+        if: ${{ !cancelled() }}
+        run: python3 scripts/qualification-prerequisites.py linux-container-engine
 
       # ── anti-vacuity gate ─────────────────────────────────────────────
       # THIS STEP USED TO BE DEAD, TWICE, IN TWO DIFFERENT WAYS.
@@ -1781,6 +1962,10 @@ jobs:
       - name: Release-readiness gate can still fail
         if: ${{ !cancelled() }}
         run: python3 scripts/check-release-readiness.py --self-test
+
+      - name: Stabilization promotion fails closed (offline controls)
+        if: ${{ !cancelled() }}
+        run: python3 -B scripts/stabilization_release_gate.py --self-test
       # ── Windows-attribution gate (#1146) ──────────────────────────────
       # Same placement reasoning as the two steps above: AFTER checkout (it
       # reads the workflow YAML and .config/nextest.toml out of the working
@@ -1827,7 +2012,7 @@ jobs:
           echo "=== AFTER ==="; df -h /
 
       - name: Build CI image (deps + cargo tools baked in)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.container_admission.outcome == 'success' }}
         id: ci_image
         run: |
           docker build -t "$CI_IMAGE" -f - . <<'EOF'
@@ -1972,51 +2157,110 @@ jobs:
           $DOCKER_RUN "$CI_IMAGE" cargo clippy -p wcore-sandbox --features live-docker --all-targets -- -D warnings
           $DOCKER_RUN "$CI_IMAGE" cargo clippy -p wcore-swarm --features wcore-sandbox/live-docker --all-targets -- -D warnings
 
-      # Wrapped in a retry: the GHA runner-agent crash documented at the
-      # top of this file (line 28: "reproducibly crashes the runner agent
-      # ~56s into the nextest step") still hits this containerized job
-      # occasionally — nextest reports "Cancelling due to signal: N tests
-      # still running" with 0 actual test failures (1301 passed, 17
-      # skipped, 0 failed) right before SIGTERM. The container workaround
-      # eliminates the LOGS-NEVER-FLUSH variant but not the SIGTERM one.
-      # Two attempts so a transient signal is absorbed without hiding a
-      # genuine code-level test failure (which would fail both attempts).
-      #
-      # `--no-fail-fast` (2026-07-29): this command had drifted from
-      # `just test-ci`, which has always carried the flag, and from the native
-      # matrix leg above (line 164) which invokes `just test-ci` directly. Only
-      # this containerized leg fail-fasted, and Linux is the ONLY platform that
-      # runs here — so on the 2026-07-29 run nextest stopped at test 2,348 of
-      # 12,775 and reported ONE failure where there were THREE. The consequence
-      # is not limited to that run: every historical CI failure count on this
-      # repository is a LOWER BOUND, not a total, and any triage that treated a
-      # count as complete was reading a truncated suite.
-      # PER-ATTEMPT EVIDENCE (wayland#1177). The retry re-runs the SAME
-      # nextest command, and the `ci` profile writes its report to the FIXED
-      # path target/nextest/ci/junit.xml — so attempt 2 used to OVERWRITE
-      # attempt 1. A test that genuinely failed on attempt 1 and passed on
-      # attempt 2 left no structured trace anywhere: not a `<failure>`, not
-      # even a `<flakyFailure>`, because the flake record lived in the file
-      # that was just destroyed. The retry-flake grader added for #1169 reads
-      # exactly that file, so its gate was complete one layer down and blind
-      # one layer up.
-      #
-      # The retry is NOT dropped in favour of nextest's own graded `retries`:
-      # it exists for the runner-agent crash documented above, which SIGTERMs
-      # the nextest PROCESS. Per-test retries inside a process being killed
-      # cannot absorb that; only re-running the process can. So the wrapper
-      # keeps the retry and stops the evidence being destroyed — an agent
-      # crash writes no JUnit at all (nothing preserved, nothing graded, the
-      # retry absorbs it as designed), while a real attempt-1 test failure is
-      # preserved as outer-attempts/outer-attempt-1.xml and reds the required
-      # `report` check.
-      - name: Run tests (nextest CI profile)
+      # Resolve packaged compatibility before running the complete Linux suite.
+      # WCORE_SMOKE_REQUIRE_PREBUILT=1 (passed into the container): a missing
+      # release artifact is a hard failure here, never a silent skip (#190).
+      - name: Release binary smoke (catches plugin dead-code-strip)
+        shell: bash
+        id: release_smoke
         if: ${{ !cancelled() && steps.ci_image.outcome == 'success' }}
-        uses: nick-fields/retry@v3
+        env:
+          JUNIT_PATH: target/nextest/default/junit.xml
+          ATTEMPT_DIR: ${{ runner.temp }}/wayland-ci-evidence/release-smoke
+        run: |
+          read -r -a docker_run <<< "$DOCKER_RUN"
+          mkdir -p "$RUNNER_TEMP/wayland-ci-evidence"
+          "${docker_run[@]}" "$CI_IMAGE" cargo nextest list --locked \
+            -p wcore-cli --test release_binary_smoke --message-format json \
+            > "$RUNNER_TEMP/wayland-ci-evidence/release-smoke-selection.json"
+          python3 scripts/qualification-prerequisites.py inventory \
+            --input "$RUNNER_TEMP/wayland-ci-evidence/release-smoke-selection.json" \
+            --require release_binary_ready_event_advertises_plugin_capabilities
+          bash .github/scripts/run-tests-with-attempt-evidence.sh "${docker_run[@]}" \
+            -e WCORE_SMOKE_REQUIRE_PREBUILT=1 "$CI_IMAGE" cargo nextest run \
+            --locked --no-tests=fail --retries 0 -p wcore-cli --test release_binary_smoke
+
+      # F01 E3 — non-optional packaged boundary proof. The release Core binary
+      # built above reports this checkout's exact source SHA; wayland-eval then
+      # verifies its digest and drives both PASS and hard-gate failure locally.
+      #
+      # nextest, NOT `cargo test` — see the identical step in the native matrix
+      # job above for the measurement. The CI image already installs nextest
+      # (`cargo install --locked cargo-nextest` in the Dockerfile heredoc), and
+      # the two neighbouring steps in this job already use it.
+      - name: F01 packaged wayland-eval driver gate
+        shell: bash
+        id: packaged_admission
+        if: ${{ !cancelled() && steps.ci_image.outcome == 'success' }}
+        run: |
+          read -r -a docker_run <<< "$DOCKER_RUN"
+          mkdir -p "$RUNNER_TEMP/wayland-ci-evidence"
+          "${docker_run[@]}" "$CI_IMAGE" cargo nextest list --locked \
+            -p wcore-eval-scenarios --features packaged-driver-gate --test packaged_driver_gate \
+            --message-format json > "$RUNNER_TEMP/wayland-ci-evidence/packaged-selection.json"
+          python3 scripts/qualification-prerequisites.py inventory \
+            --input "$RUNNER_TEMP/wayland-ci-evidence/packaged-selection.json" \
+            --require packaged_paired_task_preserves_inputs_and_rejects_wrong_answer
+          CAPTURE_DIR="$RUNNER_TEMP/wayland-ci-evidence/packaged" \
+            bash .github/scripts/capture-test-command.sh \
+            python3 -B scripts/stabilization_release_gate.py --action capture \
+            --junit target/nextest/default/junit.xml --output target/stabilization/raw/proof.json \
+            -- "${docker_run[@]}" -e WAYLAND_BUILD_SOURCE_SHA=${{ github.sha }} "$CI_IMAGE" \
+            cargo nextest run --no-tests=fail --retries 0 --locked \
+            -p wcore-eval-scenarios --features packaged-driver-gate --test packaged_driver_gate
+
+      - name: Collect source-bound stabilization test input
+        if: ${{ !cancelled() && steps.ci_image.outcome == 'success' }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, pathlib, shutil, subprocess
+          root = pathlib.Path("target/stabilization/raw")
+          proof = json.loads((root / "proof.json").read_text())
+          assert proof["source"] == subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          assert proof["complete"] is True and proof["exit_code"] == 0
+          shutil.copyfile("target/nextest/default/junit.xml", root / "junit.xml")
+          def ref(name):
+              return {"path": name, "sha256": hashlib.sha256((root / name).read_bytes()).hexdigest()}
+          (root / "index.json").write_text(json.dumps({"schema": 1, "source_sha": proof["source"],
+              "tests": [{"id": "packaged_driver_gate", "proof": ref("proof.json"), "junit": ref("junit.xml")}],
+              "mutants": [], "native": [], "deferred_risks": [
+                  {"id": "core#368", "severity": "high", "disposition": "Q-368-disposition: ACL defect remains quarantined; native evidence pending"},
+                  {"id": "core#410", "severity": "high", "disposition": "External Windows authority reversal/disposition remains required"}
+              ]}, indent=2) + "\n")
+          PY
+
+      - name: Upload actual stabilization test input
+        if: ${{ !cancelled() && steps.ci_image.outcome == 'success' }}
+        uses: actions/upload-artifact@v7
         with:
-          timeout_minutes: 45
-          max_attempts: 2
-          command: bash .github/scripts/run-tests-with-attempt-evidence.sh $DOCKER_RUN_SANDBOX "$CI_IMAGE" cargo nextest run --workspace --profile ci --no-fail-fast
+          name: stabilization-raw-${{ github.sha }}
+          path: target/stabilization/raw/
+          if-no-files-found: error
+
+      # Execute once. Preserve complete output and every existing retry receipt.
+      # A test failure never authorizes replaying the whole workspace.
+      # Infrastructure retries belong to setup, before test execution starts.
+      - name: Recovery fault cuts (isolated Linux execution)
+        id: recovery_admission
+        shell: bash
+        if: ${{ !cancelled() && steps.ci_image.outcome == 'success' && steps.release_smoke.outcome == 'success' && steps.packaged_admission.outcome == 'success' }}
+        env:
+          ATTEMPT_DIR: ${{ runner.temp }}/wayland-ci-evidence/recovery
+        run: |
+          read -r -a docker_run <<< "$DOCKER_RUN_SANDBOX"
+          bash .github/scripts/run-tests-with-attempt-evidence.sh "${docker_run[@]}" "$CI_IMAGE" \
+            cargo nextest run --locked -p wcore-cli --test stabilization_recovery \
+            --profile ci --retries 0 --no-tests=fail --test-threads 1
+
+      - name: Run tests (nextest CI profile)
+        shell: bash
+        if: ${{ !cancelled() && steps.ci_image.outcome == 'success' && steps.release_smoke.outcome == 'success' && steps.packaged_admission.outcome == 'success' && steps.recovery_admission.outcome == 'success' }}
+        timeout-minutes: 45
+        run: |
+          read -r -a docker_run <<< "$DOCKER_RUN_SANDBOX"
+          bash .github/scripts/run-tests-with-attempt-evidence.sh "${docker_run[@]}" "$CI_IMAGE" \
+            cargo nextest run --workspace --profile ci --no-fail-fast \
+            -E 'not binary_id(=wcore-cli::release_binary_smoke) & not binary_id(=wcore-cli::stabilization_recovery)'
 
       # ── Swarm delegated-dispatch gate ────────────────────────────────────
       # THE COUNTERWEIGHT TO THE HONEST SKIP.
@@ -2138,7 +2382,7 @@ jobs:
       # would otherwise steal cargo's exit status. Floors are the counts
       # measured at the commit that added this step (agent 14, tools 32).
       - name: Voice suite (--features voice; runs in no other configuration)
-        if: ${{ !cancelled() && steps.ci_image.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.ci_image.outcome == 'success' && steps.release_smoke.outcome == 'success' && steps.packaged_admission.outcome == 'success' }}
         run: |
           set -euo pipefail
           run_suite() {
@@ -2221,14 +2465,15 @@ jobs:
       # below reads only 'test result: ok.' lines; the enclosing test's own
       # verdict is what decides the step.
       - name: Shared-process lib suite (cargo test, one process per binary)
-        if: ${{ !cancelled() && steps.ci_image.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.ci_image.outcome == 'success' && steps.release_smoke.outcome == 'success' && steps.packaged_admission.outcome == 'success' }}
         run: |
           set -euo pipefail
           MIN=11000
+          read -r -a docker_run <<< "$DOCKER_RUN_SANDBOX"
           # vacuity-checked: every 'test result: ok. N passed' line emitted by the
           # invocation below is summed into $total and compared against $MIN, which
           # exits 1 when it falls short. The exit status alone is not trusted.
-          if ! out="$($DOCKER_RUN_SANDBOX "$CI_IMAGE" cargo test --workspace --lib --no-fail-fast 2>&1)"; then
+          if ! out="$(CAPTURE_DIR="$RUNNER_TEMP/wayland-ci-evidence/shared-lib" bash .github/scripts/capture-test-command.sh "${docker_run[@]}" "$CI_IMAGE" cargo test --workspace --lib --no-fail-fast 2>&1)"; then
             printf '%s\n' "$out" | grep -E '^(failures:|test result:|thread .* panicked)' || true
             printf '%s\n' "$out" | tail -60
             echo "::error title=Shared-process lib suite::A lib test failed in a SHARED process. This leg exists because nextest gives every test its own process and can never see this class, so a failure here is usually a process-global -- an env var, a static hook, the panic hook -- written by one test and read by another in the same binary. Reproduce it locally with a plain (non-nextest) lib run of that one crate."
@@ -2287,26 +2532,28 @@ jobs:
       # no reason, and refuses one naming a target it no longer selects, so that
       # list cannot rot into a standing excuse.
       - name: Shared-process integration suite (cargo test, one process per target)
-        if: ${{ !cancelled() && steps.ci_image.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.ci_image.outcome == 'success' && steps.release_smoke.outcome == 'success' && steps.packaged_admission.outcome == 'success' }}
         run: |
           set -euo pipefail
           MIN_TARGETS=60
+          read -r -a docker_run <<< "$DOCKER_RUN_SANDBOX"
           MIN_TESTS=500
           targets=0
           total=0
           failed=""
           while read -r crate target skips; do
             targets=$((targets + 1))
-            args=""
-            for s in $(printf '%s' "${skips:-}" | tr ',' ' '); do
-              args="$args --skip $s"
+            args=()
+            IFS=, read -r -a excluded <<< "${skips:-}"
+            for excluded_test in "${excluded[@]}"; do
+              if [ -n "$excluded_test" ]; then args+=(--skip "$excluded_test"); fi
             done
             echo "=== $crate --test $target ${skips:+(excluded: $skips)} ==="
             # vacuity-checked: the `test result: ok. N passed` count from every
             # invocation in this loop is summed into $total and compared against
             # $MIN_TESTS below, which exits 1 when the total falls short. Exit
             # status alone is not trusted -- an empty run reports it as success.
-            if ! out="$($DOCKER_RUN_SANDBOX "$CI_IMAGE" cargo test -p "$crate" --test "$target" --no-fail-fast -- $args 2>&1)"; then
+            if ! out="$(CAPTURE_DIR="$RUNNER_TEMP/wayland-ci-evidence/shared-integration/$crate/$target" bash .github/scripts/capture-test-command.sh "${docker_run[@]}" "$CI_IMAGE" cargo test -p "$crate" --test "$target" --no-fail-fast -- "${args[@]}" 2>&1)"; then
               printf '%s\n' "$out" | grep -E '^(failures:|test result:|thread .* panicked)' || true
               printf '%s\n' "$out" | tail -40
               failed="$failed $crate::$target"
@@ -2343,27 +2590,17 @@ jobs:
       - name: Check Desktop protocol contract corpus drift
         run: $DOCKER_RUN "$CI_IMAGE" cargo run -p wcore-protocol --bin wcore-contract -- check
 
-      # WCORE_SMOKE_REQUIRE_PREBUILT=1 (passed into the container): a missing
-      # release artifact is a hard failure here, never a silent skip (#190).
-      - name: Release binary smoke (catches plugin dead-code-strip)
-        if: ${{ !cancelled() && steps.ci_image.outcome == 'success' }}
-        run: $DOCKER_RUN -e WCORE_SMOKE_REQUIRE_PREBUILT=1 "$CI_IMAGE" cargo nextest run -p wcore-cli --test release_binary_smoke
-
-      # F01 E3 — non-optional packaged boundary proof. The release Core binary
-      # built above reports this checkout's exact source SHA; wayland-eval then
-      # verifies its digest and drives both PASS and hard-gate failure locally.
-      #
-      # nextest, NOT `cargo test` — see the identical step in the native matrix
-      # job above for the measurement. The CI image already installs nextest
-      # (`cargo install --locked cargo-nextest` in the Dockerfile heredoc), and
-      # the two neighbouring steps in this job already use it.
-      - name: F01 packaged wayland-eval driver gate
-        if: ${{ !cancelled() && steps.ci_image.outcome == 'success' }}
-        run: $DOCKER_RUN -e WAYLAND_BUILD_SOURCE_SHA=${{ github.sha }} "$CI_IMAGE" cargo nextest run --no-tests=fail --locked -p wcore-eval-scenarios --features packaged-driver-gate --test packaged_driver_gate
-
       - name: Security audit
         if: ${{ !cancelled() && steps.ci_image.outcome == 'success' }}
         run: $DOCKER_RUN "$CI_IMAGE" cargo audit
+
+      - name: Upload complete shared-process diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-diagnostics-linux-${{ github.sha }}
+          path: ${{ runner.temp }}/wayland-ci-evidence/
+          if-no-files-found: ignore
 
       - name: Upload nextest JUnit report
         if: always()
@@ -2473,6 +2710,8 @@ jobs:
   # reproducible by any contributor or customer who pulls the same
   # rust:1.95-slim-bookworm image.
   eval-gate-linux:
+    needs: admission
+    if: needs.admission.outputs.publication_pr != 'true'
     name: Eval acceptance gate (Linux, containerized)
     runs-on: ubuntu-latest
     container:
@@ -2497,6 +2736,8 @@ jobs:
   # Mirrors the matrix in release.yml so CI catches compile regressions
   # before they reach the release workflow.
   build:
+    needs: admission
+    if: needs.admission.outputs.publication_pr != 'true'
     name: Build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     # gh#1072. Slowest measured arm is Build (aarch64-pc-windows-msvc) at
@@ -2550,6 +2791,11 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/checkout@v6
+      - name: Set up qualification Python
+        uses: actions/setup-python@v6
+        if: runner.os != 'Linux'
+        with:
+          python-version: "3.12"
 
       # Linux: same disk + linker setup as the ci: job.
       # Native x86_64-unknown-linux-gnu needs libdbus-1-dev for the keyring
@@ -2598,6 +2844,21 @@ jobs:
             vx cargo build --release --target ${{ matrix.target }} -p wcore-cli
           fi
 
+      - name: Seal reusable native build identity
+        if: runner.os != 'Linux'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          binary="target/${{ matrix.target }}/release/wayland-core"
+          if [ "$RUNNER_OS" = Windows ]; then binary="${binary}.exe"; fi
+          python3 scripts/ci-build-artifact.py produce \
+            --target "${{ matrix.target }}" --profile release --features default \
+            --abi-contract "native-${RUNNER_OS}-v1" \
+            --producer-job "Build (${{ matrix.target }})" \
+            --artifact "wayland-core-${{ matrix.target }}" --binary "$binary" \
+            --output "target/${{ matrix.target }}/release/build-identity.json"
+
       # The binary was already being built and then discarded. Keeping it makes
       # cross-platform live testing possible from a host that cannot compile for
       # the target — notably the arm64 macOS leg, where the planning Mac is
@@ -2611,6 +2872,7 @@ jobs:
           path: |
             target/${{ matrix.target }}/release/wayland-core
             target/${{ matrix.target }}/release/wayland-core.exe
+            target/${{ matrix.target }}/release/build-identity.json
           if-no-files-found: error
           retention-days: 14
 
@@ -2665,6 +2927,7 @@ jobs:
   # process-reaping) is exactly the thing that would both behave differently on a
   # real desktop and risk touching the owner's real keychain state.
   build-darwin-selfhosted:
+    needs: admission
     name: Build (aarch64-apple-darwin) [self-hosted]
     # Deliberately a DISTINCT job name from the hosted `Build
     # (aarch64-apple-darwin)`. Reusing the hosted name would keep check-name
@@ -2698,10 +2961,9 @@ jobs:
     #      `gh run download -n wayland-core-aarch64-apple-darwin` works on every
     #      lane run whether or not the token was used.
     if: >-
-      github.event_name == 'push'
-      && startsWith(github.ref_name, 'lane/')
-      && !(contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]')
-      || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]'))
+      needs.admission.outputs.publication_pr != 'true'
+      && (github.event_name == 'push' && startsWith(github.ref_name, 'lane/') && !(contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]')
+          || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')))
     runs-on: [self-hosted, macOS, ARM64]
     # ONE runner, ONE job at a time, on a machine its owner also works on. Without
     # coalescing, a 5-8-wide lane fan-out pushing ~7.2 times/hour against a
@@ -2826,6 +3088,8 @@ jobs:
         run: df -h / "$RUNNER_TEMP" 2>/dev/null || df -h /
 
   all-features-check:
+    needs: admission
+    if: needs.admission.outputs.publication_pr != 'true'
     name: All-features check (Linux)
     runs-on: ubuntu-latest
     # Measured cold on a comparable Linux box at ~7 min for the full union
@@ -2863,6 +3127,37 @@ jobs:
         run: vx cargo check --workspace --all-targets --all-features --locked
 
   # ── Annotate PR / commit with test results ────────────────────────────
+  publication-push-proof:
+    name: Publication source and base qualification proof
+    needs: admission
+    if: needs.admission.outputs.publication_pr == 'true'
+    runs-on: ubuntu-latest
+    # Observe the longest existing producer/consumer envelope plus report;
+    # this waiter runs no tests and never retries the qualification.
+    timeout-minutes: 275
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    outputs:
+      run_id: ${{ steps.proof.outputs.run_id }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Authenticate full push qualification and matching PR integration
+        id: proof
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/publication-push-proof.py
+      - name: Preserve delegated qualification provenance
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: publication-push-proof
+          path: ${{ runner.temp }}/publication-push-proof.json
+          if-no-files-found: error
+
   report:
     # EXPLICIT, because `report` is a required status context on main and a job
     # id doubles as the check name only until someone renames the job. e2e.yml
@@ -2906,7 +3201,7 @@ jobs:
     #
     # No signal is lost: the job publishes its own check,
     # `Build (aarch64-apple-darwin) [self-hosted]`, which is visible on the run.
-    needs: [ci, ci-windows-hosted, ci-linux, eval-gate-linux, build, all-features-check]
+    needs: [admission, ci, ci-windows-hosted, ci-linux, eval-gate-linux, build, all-features-check, publication-push-proof]
     if: always()
     runs-on: ubuntu-latest
     # gh#1072. Pure aggregation — measures under a minute in every sampled
@@ -2922,6 +3217,7 @@ jobs:
       # the token just can't see it). Cost us multiple weeks of red
       # `report` jobs before getting tracked down.
       contents: read
+      actions: read
       checks: write
       pull-requests: write
     steps:
@@ -3004,6 +3300,10 @@ jobs:
         with:
           pattern: nextest-junit-*
           path: junit-reports
+          # Only the controlled publication PR imports another run. The proof
+          # dependency authenticated its source, base, jobs and artifact IDs.
+          run-id: ${{ needs.publication-push-proof.outputs.run_id || github.run_id }}
+          github-token: ${{ github.token }}
         continue-on-error: true
 
       # A SKIPPED WINDOWS LEG MUST NOT READ AS WINDOWS COVERAGE (gh#1146).

@@ -226,28 +226,12 @@ pub fn select_graph_config(
     }
 }
 
-/// Phase 0 (rank 5) honesty gate: a [`TemplateDecision`] is "unwired" when
-/// an **explicit** override or a wired router selected a **non-Direct**
-/// orchestration shape.
-///
-/// Those templates (Consensus / SelfCritique / Hierarchical, and Adaptive
-/// when it projects to one of them) are structurally hollow under the
-/// per-turn `AgentNodeExecutor`: its first-dispatch-wins latch makes every
-/// node past the first an inert carrier, so the graph silently collapses
-/// to Direct. The engine coerces an unwired decision to an honest Direct
-/// turn (rather than walking the fake multi-node graph and emitting
-/// misleading per-node traces). ForgeFlows-Live Phase 3 repoints these to
-/// the real `WorkflowRunner` spawner and retires this coercion.
-///
-/// The test is deliberately **shape-based**, not variant-based: it keys on
-/// `!config.is_direct()` so an `@@template=adaptive` override that projects
-/// down to Direct passes, while one that projects to a hollow shape is
-/// caught — something a `Template`-variant match on the (pre-projection)
-/// requested value cannot do. The silent classifier heuristic
-/// (`source == Classifier`) is never treated as unwired, so ordinary turns
-/// are byte-for-byte unchanged.
+/// The per-turn executor dispatches only one agent call. Every non-Direct
+/// shape is therefore unsupported here, including classifier and mode choices.
+/// The engine must visibly downgrade these to Direct before walking the graph.
+/// This does not constrain the independent WorkflowRunner/spawner path.
 pub fn decision_is_unwired_template(decision: &TemplateDecision) -> bool {
-    decision.source != TemplateDecisionSource::Classifier && !decision.config.is_direct()
+    !decision.config.is_direct()
 }
 
 #[cfg(test)]
@@ -402,24 +386,22 @@ mod tests {
         );
     }
 
-    // The silent classifier heuristic is NEVER gated, regardless of the
-    // shape it picks — ordinary turns must stay byte-for-byte unchanged.
+    // Classifier decisions obey the same executor capability boundary.
     #[test]
-    fn classifier_decisions_are_never_unwired() {
+    fn classifier_multi_node_decisions_are_unwired() {
         // Real classifier path (plain task → Direct).
         let plain = select_graph_config("fix typo in README line 12", None, None);
         assert_eq!(plain.source, TemplateDecisionSource::Classifier);
         assert!(!decision_is_unwired_template(&plain));
 
-        // Even a synthesized classifier decision carrying a non-Direct
-        // shape must pass — the gate keys on `source`, not just shape.
+        // A classifier decision cannot grant unsupported independent agents.
         let synthetic = TemplateDecision {
             config: GraphConfig::multi_agent_consensus(vec!["a", "b"], "judge"),
             source: TemplateDecisionSource::Classifier,
             template: None,
         };
         assert!(!synthetic.config.is_direct());
-        assert!(!decision_is_unwired_template(&synthetic));
+        assert!(decision_is_unwired_template(&synthetic));
     }
 
     // Bonus: every Template variant maps to a constructable GraphConfig.

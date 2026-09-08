@@ -1502,6 +1502,8 @@ pub enum ProtocolEvent {
         child_id: String,
         mutation_kind: String,
         score: f64,
+        /// Provisional in-memory retention only; not final selection, persistence,
+        /// promotion, or consumption. Later candidates may displace this one.
         retained: bool,
     },
     /// W8c.1 E.14: browser-suite op event. Emitted by the engine once per

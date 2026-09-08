@@ -3586,3 +3586,81 @@ fn a_resolved_bash_is_downgraded_to_cmd_under_the_appcontainer_sandbox() {
     downgrade_unsupported_shell_for_sandbox(&mut cmd_argv, true);
     assert_eq!(cmd_argv, before);
 }
+
+// The counter observes scheduling on the caller thread, before spawn_blocking.
+// A current-thread runtime isolates it from concurrently running unit tests.
+async fn assert_precancelled_bash_schedules_no_manifest(streaming: bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let policy = std::sync::Arc::new(crate::workspace_policy::WorkspacePolicy::contained(&root));
+    let sink = crate::NullToolOutputSink;
+    let active = canned_ctx(policy.clone(), CannedBackend::enforcing());
+    UNSAVED_GUARD_SPAWNS.with(|count| count.set(0));
+    MANIFEST_BUILD_SPAWNS.with(|count| count.set(0));
+    let control = if streaming {
+        BashTool
+            .execute_streaming_with_ctx(json!({"command": "echo hi"}), &active, &sink)
+            .await
+    } else {
+        BashTool
+            .execute_with_ctx(json!({"command": "echo hi"}), &active)
+            .await
+    };
+    assert!(
+        !control.is_error,
+        "active control failed: {}",
+        control.content
+    );
+    assert_eq!(
+        MANIFEST_BUILD_SPAWNS.with(|count| count.get()),
+        1,
+        "active control must schedule a manifest"
+    );
+
+    assert_eq!(
+        UNSAVED_GUARD_SPAWNS.with(|count| count.get()),
+        1,
+        "active control must schedule the unsaved guard"
+    );
+    let cancelled = canned_ctx(policy, CannedBackend::enforcing());
+    cancelled.cancel.cancel();
+    UNSAVED_GUARD_SPAWNS.with(|count| count.set(0));
+    MANIFEST_BUILD_SPAWNS.with(|count| count.set(0));
+    // Exercise both ready-arm orders in the formerly unbiased guard select.
+    for _ in 0..64 {
+        let result = if streaming {
+            BashTool
+                .execute_streaming_with_ctx(json!({"command": "echo hi"}), &cancelled, &sink)
+                .await
+        } else {
+            BashTool
+                .execute_with_ctx(json!({"command": "echo hi"}), &cancelled)
+                .await
+        };
+        assert!(
+            result.is_error && result.content.contains("cancelled"),
+            "{}",
+            result.content
+        );
+    }
+    assert_eq!(
+        MANIFEST_BUILD_SPAWNS.with(|count| count.get()),
+        0,
+        "pre-cancelled calls must not schedule manifest work"
+    );
+    assert_eq!(
+        UNSAVED_GUARD_SPAWNS.with(|count| count.get()),
+        0,
+        "pre-cancelled calls must not schedule the unsaved guard"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn precancelled_bash_schedules_no_manifest() {
+    assert_precancelled_bash_schedules_no_manifest(false).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn precancelled_streaming_bash_schedules_no_manifest() {
+    assert_precancelled_bash_schedules_no_manifest(true).await;
+}

@@ -493,7 +493,13 @@ async fn twenty_concurrent_executions_have_unique_temp_roots() {
                         timeout: Some(Duration::from_secs(10)),
                         ..Default::default()
                     },
-                    echo_temp_and_hold(2),
+                    // Wait only until the parent has observed all twenty live identities.
+                    // A fixed CPU loop took ~7s alone on the native runner and
+                    // exhausted the unchanged 10s deadline with twenty children.
+                    cmd_script(
+                        "echo %TEMP% & for /L %i in (0,0,1) do @if exist \"%TEMP%\\wcore-release\" exit /b 0"
+                            .into(),
+                    ),
                 )
                 .await
         }));
@@ -509,6 +515,14 @@ async fn twenty_concurrent_executions_have_unique_temp_roots() {
         live_profiles.iter().all(|name| name.len() <= 64),
         "all AppContainer profile names must satisfy the Win32 limit"
     );
+
+    let packages =
+        PathBuf::from(std::env::var_os("LOCALAPPDATA").expect("LOCALAPPDATA")).join("Packages");
+    for profile in &live_profiles {
+        let temp = packages.join(profile).join("AC").join("Temp");
+        wait_until(|| temp.is_dir(), "execution TEMP directory").await;
+        std::fs::write(temp.join("wcore-release"), b"release").expect("release held execution");
+    }
 
     let mut temp_roots = BTreeSet::new();
     for task in tasks {
@@ -751,8 +765,10 @@ async fn overlapping_directory_denies_run_the_command_and_still_contain() {
     // runtime into `SHELLRAN` and cannot be produced by anything that merely
     // carried the command text (21-C3 §6 — a literal marker in the command is
     // satisfiable without the command ever running).
+    // Keep stderr on the captured pipe. NUL redirection can be denied before
+    // `type` runs, making the no-deny positive control falsely report failure.
     let script = format!(
-        "echo SHELL^RAN & type \"{}\" 2>nul & type \"{}\" 2>nul",
+        "echo SHELL^RAN & type \"{}\" & type \"{}\"",
         dir.join("secret.txt").display(),
         git_dir.join("config").display(),
     );

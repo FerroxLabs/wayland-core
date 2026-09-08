@@ -166,6 +166,10 @@ pub struct InboundPolicy {
     /// working directory is used as the jail root.
     #[serde(default)]
     pub tool_workspace_root: Option<String>,
+    /// Operator-only opt-in for ambient MCP in restricted remote sessions.
+    /// This grants Full-equivalent extension authority, not workspace confinement.
+    #[serde(default)]
+    pub ambient_mcp_full_authority_v1: bool,
     /// How the bot acknowledges inbound messages it's working on
     /// (reactions / typing). Defaults to [`AckMode::Off`].
     #[serde(default)]
@@ -281,6 +285,7 @@ impl Default for InboundPolicy {
             thread_sessions_per_user: false,
             tools: ChannelToolPosture::Conversational,
             tool_workspace_root: None,
+            ambient_mcp_full_authority_v1: false,
             ack: AckMode::Off,
             acknowledge_open_admission: Vec::new(),
         }
@@ -556,7 +561,7 @@ pub const ADMISSION_SHAPE_VERSION: &str = "admission-v2";
 /// offers, and the one thing that cannot fall behind the struct) and fails
 /// unless every field is either proven to move the token or named in that
 /// test's exclusion list. Those tests go red in the `..` world.
-pub const SHAPE_FIELDS: [&str; 13] = [
+pub const SHAPE_FIELDS: [&str; 14] = [
     "name",
     "platform",
     "enabled",
@@ -568,6 +573,7 @@ pub const SHAPE_FIELDS: [&str; 13] = [
     "require_mention",
     "tools",
     "tool_workspace_root",
+    "ambient_mcp_full_authority_v1",
     "group_sessions_per_user",
     "thread_sessions_per_user",
 ];
@@ -930,6 +936,7 @@ fn shape_fields(shape: &AdmissionShape<'_>) -> Vec<(String, String)> {
         thread_sessions_per_user,
         tools,
         tool_workspace_root,
+        ambient_mcp_full_authority_v1,
         // EXCLUDED — outbound presentation only. `ack` decides whether the bot
         // adds a reaction or a typing indicator to a message it is already
         // working on. It cannot change who is admitted, what an admitted turn
@@ -955,6 +962,10 @@ fn shape_fields(shape: &AdmissionShape<'_>) -> Vec<(String, String)> {
         (
             "tool_workspace_root".into(),
             canonical_opt(tool_workspace_root.as_deref()),
+        ),
+        (
+            "ambient_mcp_full_authority_v1".into(),
+            ambient_mcp_full_authority_v1.to_string(),
         ),
         (
             "group_sessions_per_user".into(),
@@ -3139,6 +3150,14 @@ mod tests {
                 },
             ),
             (
+                "ambient_mcp_full_authority_v1",
+                true,
+                InboundPolicy {
+                    ambient_mcp_full_authority_v1: true,
+                    ..base.clone()
+                },
+            ),
+            (
                 "group_sessions_per_user",
                 true,
                 InboundPolicy {
@@ -3272,6 +3291,10 @@ mod tests {
                 inbound(|p| p.tool_workspace_root = Some("/jail".into())),
             ),
             (
+                "ambient_mcp_full_authority_v1",
+                inbound(|p| p.ambient_mcp_full_authority_v1 = true),
+            ),
+            (
                 "group_sessions_per_user",
                 inbound(|p| p.group_sessions_per_user = !p.group_sessions_per_user),
             ),
@@ -3350,12 +3373,12 @@ mod tests {
         );
 
         // And the pair really is the whole exclusion set: everything else on
-        // the struct is load-bearing, which the sibling test proves field by
-        // field. Two excluded + `name`, `platform` and `enabled` coming from
+        // the struct (including ambient MCP delegation) is load-bearing.
+        // The sibling test proves this field by field. Two excluded + `name`, `platform` and `enabled` coming from
         // `ChannelConfig` rather than `InboundPolicy` is the arithmetic.
         assert_eq!(
             SHAPE_FIELDS.len(),
-            13,
+            14,
             "SHAPE_FIELDS changed size: re-decide the exclusions above rather than editing this \
              number"
         );

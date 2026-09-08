@@ -1,6 +1,6 @@
 use std::collections::HashMap;
-use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use serde_json::json;
@@ -49,7 +49,7 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// (or worse) for a server that has already been given up on. The transports
 /// bound their own internals too; this is the outer guarantee that no single
 /// misbehaving server can hold the connect phase past its own budget.
-const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+pub const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// `transport.close()` under [`CLOSE_TIMEOUT`], flattened to the same
 /// `Option<McpError>` shape the callers already handle. Elapsing is reported
@@ -69,7 +69,7 @@ async fn close_transport_bounded(transport: &dyn McpTransport) -> Option<McpErro
 struct McpServer {
     #[allow(dead_code)]
     name: String,
-    transport: Box<dyn McpTransport>,
+    transport: Arc<dyn McpTransport>,
     /// The tools this server advertises.
     ///
     /// Behind a lock because the set is NOT fixed at connect: a server that
@@ -200,8 +200,11 @@ impl McpToolEffectIdentity {
     }
 }
 
+type CleanupTransports = Arc<std::sync::Mutex<HashMap<String, Arc<dyn McpTransport>>>>;
+
 /// Manages connections to multiple MCP servers
 pub struct McpManager {
+    cleanup_transports: CleanupTransports,
     servers: HashMap<String, McpServer>,
     /// Per-server connect outcome (every attempted server, including failures).
     health: HashMap<String, McpServerHealth>,
@@ -257,11 +260,14 @@ impl McpManager {
         connect_timeout: Duration,
         egress_policy: wcore_egress::SharedPolicy,
     ) -> Result<Self, McpError> {
+        let cleanup_transports = CleanupTransports::default();
         let connect_futures = configs.iter().map(|(name, config)| {
             let policy = egress_policy.clone();
+            let cleanup = cleanup_transports.clone();
             async move {
                 let outcome =
-                    Self::connect_server_outcome(name, config, connect_timeout, policy).await;
+                    Self::connect_server_outcome(name, config, connect_timeout, policy, cleanup)
+                        .await;
                 (name.clone(), outcome)
             }
         });
@@ -327,6 +333,7 @@ impl McpManager {
         }
 
         Ok(Self {
+            cleanup_transports,
             servers,
             health,
             executable_readiness,
@@ -344,6 +351,7 @@ impl McpManager {
         config: &McpServerConfig,
         connect_timeout: Duration,
         egress_policy: wcore_egress::SharedPolicy,
+        cleanup: CleanupTransports,
     ) -> ConnectOutcome {
         let (stdio_context, executable_readiness) = if config.transport == TransportType::Stdio {
             let Some(command) = config.command.as_deref() else {
@@ -376,14 +384,28 @@ impl McpManager {
         } else {
             (None, None)
         };
-        let result = if config.transport == TransportType::Stdio {
-            Self::connect_server(name, config, egress_policy, stdio_context, connect_timeout)
-                .await
-                .map(Some)
+        let mut result = if config.transport == TransportType::Stdio {
+            Self::connect_server(
+                name,
+                config,
+                egress_policy,
+                stdio_context,
+                connect_timeout,
+                cleanup.clone(),
+            )
+            .await
+            .map(Some)
         } else {
             timeout(
                 connect_timeout,
-                Self::connect_server(name, config, egress_policy, stdio_context, connect_timeout),
+                Self::connect_server(
+                    name,
+                    config,
+                    egress_policy,
+                    stdio_context,
+                    connect_timeout,
+                    cleanup.clone(),
+                ),
             )
             .await
             .map_err(|_| McpError::ConnectTimedOut {
@@ -393,6 +415,25 @@ impl McpManager {
             .and_then(|result| result)
             .map(Some)
         };
+        // The outer HTTP connect deadline can interrupt handshake cleanup.
+        // The registry retains any constructed transport across that cut.
+        if config.transport != TransportType::Stdio
+            && let Err(McpError::ConnectTimedOut {
+                cleanup: detail, ..
+            }) = &mut result
+        {
+            let transport = cleanup
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .get(name)
+                .cloned();
+            if let Some(transport) = transport {
+                *detail = close_transport_bounded(transport.as_ref())
+                    .await
+                    .map(|error| format!("; cleanup failed: {error}"))
+                    .unwrap_or_default();
+            }
+        }
         match result {
             Ok(Some(server)) => ConnectOutcome::Ok {
                 server: Box::new(server),
@@ -437,11 +478,14 @@ impl McpManager {
                 .collect());
         }
 
+        // A new generation must not overwrite an earlier failed cleanup owner.
+        self.close_server(&name).await?;
         match Self::connect_server_outcome(
             &name,
             config,
             CONNECT_TIMEOUT,
             self.egress_policy.clone(),
+            self.cleanup_transports.clone(),
         )
         .await
         {
@@ -522,11 +566,12 @@ impl McpManager {
         egress_policy: wcore_egress::SharedPolicy,
         stdio_context: Option<McpStdioLaunchContext>,
         connect_timeout: Duration,
+        cleanup: CleanupTransports,
     ) -> Result<McpServer, McpError> {
         let empty_map = HashMap::new();
 
         // 1. Create transport
-        let transport: Box<dyn McpTransport> = match config.transport {
+        let transport: Arc<dyn McpTransport> = match config.transport {
             TransportType::Stdio => {
                 let command = config.command.as_deref().ok_or_else(|| {
                     McpError::InitFailed("stdio transport requires 'command'".into())
@@ -535,7 +580,7 @@ impl McpManager {
                 let context = stdio_context.ok_or_else(|| {
                     McpError::InitFailed("stdio launch context was not prepared".into())
                 })?;
-                Box::new(StdioTransport::spawn_with_context(command, args, context).await?)
+                Arc::new(StdioTransport::spawn_with_context(command, args, context).await?)
             }
             TransportType::Sse => {
                 let url = config
@@ -543,7 +588,7 @@ impl McpManager {
                     .as_deref()
                     .ok_or_else(|| McpError::InitFailed("SSE transport requires 'url'".into()))?;
                 let headers = config.headers.as_ref().unwrap_or(&empty_map);
-                Box::new(
+                Arc::new(
                     SseTransport::connect_with_policy(
                         url,
                         headers,
@@ -558,7 +603,7 @@ impl McpManager {
                     McpError::InitFailed("streamable-http transport requires 'url'".into())
                 })?;
                 let headers = config.headers.as_ref().unwrap_or(&empty_map);
-                Box::new(
+                Arc::new(
                     StreamableHttpTransport::connect_with_policy(
                         url,
                         headers,
@@ -570,6 +615,19 @@ impl McpManager {
             }
         };
 
+        Self::initialize_transport(name, transport, connect_timeout, cleanup).await
+    }
+
+    async fn initialize_transport(
+        name: &str,
+        transport: Arc<dyn McpTransport>,
+        connect_timeout: Duration,
+        cleanup: CleanupTransports,
+    ) -> Result<McpServer, McpError> {
+        cleanup
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(name.to_string(), transport.clone());
         let handshake = async {
             // 2. Initialize handshake
             let init_params = InitializeParams {
@@ -980,11 +1038,49 @@ impl McpManager {
     /// server reports `is_alive() == false`, so `all_tools()` stops
     /// advertising it and `call_tool` fast-fails.
     pub async fn close_server(&self, server_name: &str) -> Result<bool, McpError> {
-        let Some(server) = self.servers.get(server_name) else {
+        let retained = self
+            .cleanup_transports
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(server_name)
+            .cloned();
+        let Some(transport) = retained.or_else(|| {
+            self.servers
+                .get(server_name)
+                .map(|server| server.transport.clone())
+        }) else {
             return Ok(false);
         };
-        server.transport.close().await?;
+        if let Some(error) = close_transport_bounded(transport.as_ref()).await {
+            return Err(error);
+        }
+        let mut retained = self
+            .cleanup_transports
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if retained
+            .get(server_name)
+            .is_some_and(|saved| Arc::ptr_eq(saved, &transport))
+        {
+            retained.remove(server_name);
+        }
         Ok(true)
+    }
+
+    /// Includes failed connections whose cleanup authority is still retained.
+    /// `server_names` remains the ready-server discovery surface.
+    pub fn cleanup_server_names(&self) -> Vec<String> {
+        let mut names = self.server_names();
+        names.extend(
+            self.cleanup_transports
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .keys()
+                .cloned(),
+        );
+        names.sort();
+        names.dedup();
+        names
     }
 
     /// Test-only constructor: build a manager with an explicit health map
@@ -1002,6 +1098,7 @@ impl McpManager {
             executable_readiness: HashMap::new(),
             next_id: AtomicU64::new(10),
             egress_policy: wcore_egress::default_policy(),
+            cleanup_transports: CleanupTransports::default(),
         }
     }
 
@@ -1018,7 +1115,7 @@ impl McpManager {
                 name.to_string(),
                 McpServer {
                     name: name.to_string(),
-                    transport,
+                    transport: Arc::from(transport),
                     tools: RwLock::new(vec![]),
                     supports_resources,
                 },
@@ -1030,6 +1127,7 @@ impl McpManager {
             executable_readiness: HashMap::new(),
             next_id: AtomicU64::new(10),
             egress_policy: wcore_egress::default_policy(),
+            cleanup_transports: CleanupTransports::default(),
         }
     }
 
@@ -1051,7 +1149,7 @@ impl McpManager {
                 name.to_string(),
                 McpServer {
                     name: name.to_string(),
-                    transport,
+                    transport: Arc::from(transport),
                     tools: RwLock::new(tools),
                     supports_resources,
                 },
@@ -1063,6 +1161,7 @@ impl McpManager {
             executable_readiness: HashMap::new(),
             next_id: AtomicU64::new(10),
             egress_policy: wcore_egress::default_policy(),
+            cleanup_transports: CleanupTransports::default(),
         }
     }
 }
@@ -1151,6 +1250,49 @@ mod tests {
 
     struct CloseErrorTransport;
 
+    struct HungOnceClose(std::sync::atomic::AtomicBool);
+
+    #[async_trait]
+    impl McpTransport for HungOnceClose {
+        async fn request(&self, _: &JsonRpcRequest) -> Result<JsonRpcResponse, McpError> {
+            Err(McpError::Transport("unused request".into()))
+        }
+
+        async fn notify(&self, _: &JsonRpcRequest) -> Result<(), McpError> {
+            Ok(())
+        }
+
+        async fn close(&self) -> Result<(), McpError> {
+            if self.0.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                std::future::pending().await
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn close_server_timeout_retains_authority_for_retry() {
+        let manager = make_manager_with_servers(vec![(
+            "hung",
+            false,
+            Box::new(HungOnceClose(std::sync::atomic::AtomicBool::new(true))),
+        )]);
+        let error = manager
+            .close_server("hung")
+            .await
+            .expect_err("hung close must time out");
+        assert!(error.to_string().contains("transport close did not finish"));
+        assert!(manager.hosts_server("hung"));
+        assert!(manager.close_server("hung").await.expect("retry closes"));
+        assert!(
+            !manager
+                .close_server("missing")
+                .await
+                .expect("absent server")
+        );
+    }
+
     #[async_trait]
     impl McpTransport for CloseErrorTransport {
         async fn request(&self, _req: &JsonRpcRequest) -> Result<JsonRpcResponse, McpError> {
@@ -1172,6 +1314,58 @@ mod tests {
 
     fn make_manager_with_servers(entries: Vec<(&str, bool, Box<dyn McpTransport>)>) -> McpManager {
         McpManager::new_for_test(entries)
+    }
+
+    struct FailedInitRetainedClose(Arc<std::sync::atomic::AtomicUsize>);
+    #[async_trait]
+    impl McpTransport for FailedInitRetainedClose {
+        async fn request(&self, _: &JsonRpcRequest) -> Result<JsonRpcResponse, McpError> {
+            Err(McpError::InitFailed("fixture handshake failure".into()))
+        }
+        async fn notify(&self, _: &JsonRpcRequest) -> Result<(), McpError> {
+            Ok(())
+        }
+        async fn close(&self) -> Result<(), McpError> {
+            if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                Err(McpError::Transport("fixture cleanup incomplete".into()))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_handshake_retains_transport_for_manager_cleanup_retry() {
+        let manager = McpManager::new_for_test_with_health(vec![]);
+        let closes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let transport = Arc::new(FailedInitRetainedClose(closes.clone()));
+        let result = McpManager::initialize_transport(
+            "failed",
+            transport,
+            Duration::from_secs(1),
+            manager.cleanup_transports.clone(),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(McpError::InitFailed(ref reason)) if reason.contains("transport cleanup failed"))
+        );
+        assert_eq!(
+            closes.load(Ordering::SeqCst),
+            1,
+            "initial failure must attempt cleanup"
+        );
+        assert!(
+            manager.server_names().is_empty(),
+            "failed handshake must never advertise a ready server"
+        );
+        assert_eq!(manager.cleanup_server_names(), vec!["failed"]);
+        assert!(
+            manager.close_server("failed").await.expect("retry cleanup"),
+            "manager lost the failed transport owner"
+        );
+        assert_eq!(closes.load(Ordering::SeqCst), 2);
+        assert!(manager.cleanup_server_names().is_empty());
+        assert!(!manager.close_server("failed").await.unwrap());
     }
 
     #[tokio::test]

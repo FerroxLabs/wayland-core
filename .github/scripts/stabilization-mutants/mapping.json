@@ -1,0 +1,335 @@
+{
+  "schema": 1,
+  "definition_source": "3530199fb757f3fcefecf9e40ba820775b867d84",
+  "note": "Original W12 mutations and target commands; historical source is provenance for definitions, never new execution evidence. Failure signatures identify their original assertion witnesses; unrelated failures cannot count as caught.",
+  "mutants": [
+    {
+      "id": "remove-refresh-writer-ordering",
+      "patch": "remove-refresh-writer-ordering.patch",
+      "original_mutation_sha": "4c716eba943bdeebbb08ec6ca6c1d518713a571e",
+      "argv": [
+        "cargo",
+        "nextest",
+        "run",
+        "--locked",
+        "--retries",
+        "0",
+        "--no-tests=fail",
+        "--no-fail-fast",
+        "--test-threads",
+        "1",
+        "-p",
+        "wcore-agent",
+        "--test",
+        "refresh_cross_process",
+        "-E",
+        "test(w07_refresh_first_orders_logout_after_body_persist_and_allows_other_provider)"
+      ],
+      "patch_sha256": "e4cdb49fea602825fef718b0e4315942842566f3378e582065b9483b2f0d63af",
+      "expected_cases": [
+        {
+          "classname": "wcore-agent::refresh_cross_process",
+          "name": "w07_refresh_first_orders_logout_after_body_persist_and_allows_other_provider"
+        }
+      ],
+      "expected_failures": [
+        {
+          "classname": "wcore-agent::refresh_cross_process",
+          "name": "w07_refresh_first_orders_logout_after_body_persist_and_allows_other_provider",
+          "type": "test failure with exit code 101",
+          "contains": [
+            "logout must wait for the paused refresh"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "refund-uncertain-daily-claim",
+      "patch": "refund-uncertain-daily-claim.patch",
+      "original_mutation_sha": "a00f8e8152703727a3c28146ff63ee2dc0ee6ea8",
+      "argv": [
+        "cargo",
+        "nextest",
+        "run",
+        "--locked",
+        "--retries",
+        "0",
+        "--no-tests=fail",
+        "--no-fail-fast",
+        "--test-threads",
+        "1",
+        "-p",
+        "wcore-budget",
+        "--test",
+        "stabilization_daily_recovery",
+        "-E",
+        "test(sent_crashed_process_cannot_free_daily_capacity_without_reopening_its_session)"
+      ],
+      "patch_sha256": "4af124872e475de87083d8331517e4171b08e7431f2fbd8c9a2dae870c0e1b58",
+      "expected_cases": [
+        {
+          "classname": "wcore-budget::stabilization_daily_recovery",
+          "name": "sent_crashed_process_cannot_free_daily_capacity_without_reopening_its_session"
+        }
+      ],
+      "expected_failures": [
+        {
+          "classname": "wcore-budget::stabilization_daily_recovery",
+          "name": "sent_crashed_process_cannot_free_daily_capacity_without_reopening_its_session",
+          "type": "test failure with exit code 101",
+          "contains": [
+            "store.reserve(\"alice\", 0.2, 1.0",
+            "Err(DailySpendError::Exceeded"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "bypass-auxiliary-reservation",
+      "patch": "bypass-auxiliary-reservation.patch",
+      "original_mutation_sha": "40ed6a47e1cb9deb912bc240bcaa49f531a16636",
+      "argv": [
+        "cargo",
+        "nextest",
+        "run",
+        "--locked",
+        "--retries",
+        "0",
+        "--no-tests=fail",
+        "--no-fail-fast",
+        "--test-threads",
+        "1",
+        "-p",
+        "wcore-agent",
+        "--test",
+        "stabilization_auxiliary_budget",
+        "-E",
+        "test(=exhausted_compaction_cap_prevents_physical_post)"
+      ],
+      "patch_sha256": "f9e422b8df233f1857550718491f0a8f383e9cb2127c26b96283a34b52789ca7",
+      "expected_cases": [
+        {
+          "classname": "wcore-agent::stabilization_auxiliary_budget",
+          "name": "exhausted_compaction_cap_prevents_physical_post"
+        }
+      ],
+      "expected_failures": [
+        {
+          "classname": "wcore-agent::stabilization_auxiliary_budget",
+          "name": "exhausted_compaction_cap_prevents_physical_post",
+          "type": "test failure with exit code 101",
+          "contains": [
+            "unexpected physical dispatch"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "remove-close-admission",
+      "patch": "remove-close-admission.patch",
+      "original_mutation_sha": "87c8020d25fddc1a1d2e667e0121f3a59e2e9bbd",
+      "argv": [
+        "cargo",
+        "nextest",
+        "run",
+        "--locked",
+        "--retries",
+        "0",
+        "--no-tests=fail",
+        "--no-fail-fast",
+        "--test-threads",
+        "1",
+        "-p",
+        "wcore-acp",
+        "--test",
+        "stabilization_session_close",
+        "-E",
+        "test(=failed_close_keeps_admission_closed_and_retry_completes)"
+      ],
+      "patch_sha256": "ed39f146e756e4f9bc10f43fe86dfb93d4cf9a90c262339d1d8d6a35c8c31656",
+      "expected_cases": [
+        {
+          "classname": "wcore-acp::stabilization_session_close",
+          "name": "failed_close_keeps_admission_closed_and_retry_completes"
+        }
+      ],
+      "expected_failures": [
+        {
+          "classname": "wcore-acp::stabilization_session_close",
+          "name": "failed_close_keeps_admission_closed_and_retry_completes",
+          "type": "test failure with exit code 101",
+          "contains": [
+            "server.send_message(MessageSendRequest",
+            "Err(AcpError::Cleanup(_))"
+          ]
+        }
+      ],
+      "original_adaptation": "same two closing barriers removed at currentadmit helper +establishselect, turnpermit retained;parentauthorized"
+    },
+    {
+      "id": "drop-cancellation",
+      "patch": "drop-cancellation.patch",
+      "original_mutation_sha": "21737a36fae79449a3fc231332d60b14503c83c2",
+      "argv": [
+        "cargo",
+        "nextest",
+        "run",
+        "--locked",
+        "--retries",
+        "0",
+        "--no-tests=fail",
+        "--no-fail-fast",
+        "--test-threads",
+        "1",
+        "-p",
+        "wcore-cli",
+        "--test",
+        "stabilization_acp_lifecycle",
+        "-E",
+        "test(=delete_acknowledgement_waits_for_admitted_provider_cancellation) | test(=open_session_control_completes_the_same_held_provider)"
+      ],
+      "patch_sha256": "ea8577859d6703763f448e2120170a7582477025a22eb186bb3d2b8b4be1c69c",
+      "expected_cases": [
+        {
+          "classname": "wcore-cli::stabilization_acp_lifecycle",
+          "name": "delete_acknowledgement_waits_for_admitted_provider_cancellation"
+        },
+        {
+          "classname": "wcore-cli::stabilization_acp_lifecycle",
+          "name": "open_session_control_completes_the_same_held_provider"
+        }
+      ],
+      "expected_failures": [
+        {
+          "classname": "wcore-cli::stabilization_acp_lifecycle",
+          "name": "delete_acknowledgement_waits_for_admitted_provider_cancellation",
+          "type": "test failure with exit code 101",
+          "contains": [
+            "DELETE cleanup deadline: Elapsed(())"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ignore-host-tool-restrictions",
+      "patch": "ignore-host-tool-restrictions.patch",
+      "original_mutation_sha": "c3339b94439f82c3d769a9e7b2fbacf67311f1b7",
+      "argv": [
+        "cargo",
+        "nextest",
+        "run",
+        "--locked",
+        "--retries",
+        "0",
+        "--no-tests=fail",
+        "--no-fail-fast",
+        "--test-threads",
+        "1",
+        "-p",
+        "wcore-agent",
+        "--test",
+        "stabilization_remote_authority",
+        "-E",
+        "test(=operator_authority_controls_boot_deferred_refresh_dispatch_and_revocation)"
+      ],
+      "patch_sha256": "08f048dd91c007842f64b205f0ce5aa5a1f1daccb2eec4ff5bcdd9f63ce3d597",
+      "expected_cases": [
+        {
+          "classname": "wcore-agent::stabilization_remote_authority",
+          "name": "operator_authority_controls_boot_deferred_refresh_dispatch_and_revocation"
+        }
+      ],
+      "expected_failures": [
+        {
+          "classname": "wcore-agent::stabilization_remote_authority",
+          "name": "operator_authority_controls_boot_deferred_refresh_dispatch_and_revocation",
+          "type": "test failure with exit code 101",
+          "contains": [
+            "assertion `left == right` failed",
+            "left: true",
+            "right: false"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "retain-old-policy",
+      "patch": "retain-old-policy.patch",
+      "original_mutation_sha": "a0a0728789b1179d5e8afc7fe62ab7fc64731afc",
+      "argv": [
+        "cargo",
+        "nextest",
+        "run",
+        "--locked",
+        "--retries",
+        "0",
+        "--no-tests=fail",
+        "--no-fail-fast",
+        "--test-threads",
+        "1",
+        "-p",
+        "wcore-agent",
+        "--test",
+        "stabilization_channel_lifecycle",
+        "-E",
+        "test(=full_to_conversational_revokes_cached_read_and_preserves_history)"
+      ],
+      "patch_sha256": "bb135dd45e20915a9dc240241a54f6b39c19af59ffcf16b101d68543a2891de9",
+      "expected_cases": [
+        {
+          "classname": "wcore-agent::stabilization_channel_lifecycle",
+          "name": "full_to_conversational_revokes_cached_read_and_preserves_history"
+        }
+      ],
+      "expected_failures": [
+        {
+          "classname": "wcore-agent::stabilization_channel_lifecycle",
+          "name": "full_to_conversational_revokes_cached_read_and_preserves_history",
+          "type": "test failure with exit code 101",
+          "contains": [
+            "old Full authority survived reload"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "swallow-secure-delete-failure",
+      "patch": "swallow-secure-delete-failure.patch",
+      "original_mutation_sha": "cb2920419d23e50dd63f708ae7db0f7ea0640c58",
+      "argv": [
+        "cargo",
+        "nextest",
+        "run",
+        "--locked",
+        "--retries",
+        "0",
+        "--no-tests=fail",
+        "--no-fail-fast",
+        "--test-threads",
+        "1",
+        "-p",
+        "wcore-config",
+        "--lib",
+        "-E",
+        "test(=credentials::tests::ladder_delete_reports_secure_failure_and_attempts_every_tier)"
+      ],
+      "patch_sha256": "f987eafa3c60bf689a9fd867381bfdd28bfbd9e4371c3a915ec572aa305634e4",
+      "expected_cases": [
+        {
+          "classname": "wcore-config",
+          "name": "credentials::tests::ladder_delete_reports_secure_failure_and_attempts_every_tier"
+        }
+      ],
+      "expected_failures": [
+        {
+          "classname": "wcore-config",
+          "name": "credentials::tests::ladder_delete_reports_secure_failure_and_attempts_every_tier",
+          "type": "test failure with exit code 101",
+          "contains": [
+            "a retained secure credential must not be reported as successfully deleted"
+          ]
+        }
+      ]
+    }
+  ]
+}

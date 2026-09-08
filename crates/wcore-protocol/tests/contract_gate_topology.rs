@@ -162,6 +162,55 @@ fn job_level_keys(workflow: &str, job: &str) -> Vec<String> {
         .collect()
 }
 
+/// Only the controlled publication PR may reuse the corpus gate from its
+/// authenticated, same-head integration push. This is a closed exception, not
+/// general permission to condition the Linux job. The Python proof's behavioral
+/// negative controls remain part of preflight alongside this topology check.
+fn publication_delegation_is_bound(workflow: &str, proof: &str) -> bool {
+    let owners = owning_jobs(workflow);
+    let job = |name: &str| {
+        workflow
+            .lines()
+            .enumerate()
+            .filter(|(index, line)| {
+                owners[*index].as_deref() == Some(name) && !line.trim_start().starts_with('#')
+            })
+            .map(|(_, line)| line)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let linux = job("ci-linux");
+    let bridge = job("publication-push-proof");
+    let report = job("report");
+    let executable_proof = proof
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    linux.lines().filter(|line| line.starts_with("    if:")).collect::<Vec<_>>()
+        == ["    if: needs.admission.outputs.publication_pr != 'true'"]
+        && !job_level_keys(workflow, "ci-linux").iter().any(|key| key == "continue-on-error")
+        && job("admission").contains("publication_pr: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'stabilize/20260905-core' }}")
+        && bridge.contains("    needs: admission")
+        && bridge.contains("    if: needs.admission.outputs.publication_pr == 'true'")
+        && bridge.contains("        run: python3 .github/scripts/publication-push-proof.py")
+        && !bridge.contains("continue-on-error:")
+        && !bridge.lines().any(|line| line.starts_with("        if:") && !line.contains("!cancelled()"))
+        && report.lines().any(|line| line.starts_with("    needs:") && line.contains(", publication-push-proof]"))
+        && report.contains("    if: always()")
+        && report.contains("run: bash .github/scripts/assert-no-dependency-failed.sh")
+        && report.contains("run: bash .github/scripts/assert-test-evidence.sh")
+        && report.contains("run-id: ${{ needs.publication-push-proof.outputs.run_id || github.run_id }}")
+        && [
+            "\"CI (linux-containerized)\"",
+            "run[\"event\"] == \"push\" and run[\"head_sha\"] == head",
+            "run[\"status\"] == \"completed\" and run[\"conclusion\"] == \"success\"",
+            "rows[0][\"conclusion\"] == \"success\"",
+            "[\"git\", \"merge-base\", \"--is-ancestor\", base, head]",
+            "checked([\"git\", \"rev-parse\", \"HEAD^{tree}\"]) == checked([\"git\", \"rev-parse\", head + \"^{tree}\"])",
+        ].iter().all(|binding| executable_proof.contains(binding))
+}
+
 /// The lines of the `- name:` step containing `index`.
 fn step_body(lines: &[&str], index: usize) -> Vec<String> {
     let start = step_start(lines, index);
@@ -398,8 +447,9 @@ fn the_corpus_drift_step_is_a_gate_and_carries_nothing_that_could_silence_it() {
         );
     }
 
-    // Same silencers one level up: an `if:` or `continue-on-error:` on the JOB
-    // kills the gate just as quietly as one on the step.
+    // A job may delegate this one fact only through the exact authenticated
+    // publication path. Arbitrary conditions and advisory failures still silence
+    // the gate and remain forbidden.
     let job = owners[hits[0]]
         .clone()
         .expect("the gate must live inside a job");
@@ -409,12 +459,37 @@ fn the_corpus_drift_step_is_a_gate_and_carries_nothing_that_could_silence_it() {
         "control failed: every job declares `runs-on`, so parsing none from `{job}` means this \
          key scan is broken: {keys:?}"
     );
-    for silencer in ["if", "continue-on-error"] {
-        assert!(
-            !keys.iter().any(|key| key == silencer),
-            "job `{job}` carries a job-level `{silencer}:`, which silences the corpus gate as \
-             completely as one on the step itself: {keys:?}"
+    assert!(!keys.iter().any(|key| key == "continue-on-error"));
+    if keys.iter().any(|key| key == "if") {
+        assert_eq!(
+            job, "ci-linux",
+            "only the authenticated Linux corpus job may delegate"
         );
+        let proof = read(".github/scripts/publication-push-proof.py");
+        assert!(
+            publication_delegation_is_bound(&workflow, &proof),
+            "conditional corpus job must retain exact source/base-bound push proof and required report"
+        );
+        for changed in [
+            workflow.replace("    if: needs.admission.outputs.publication_pr != 'true'", "    if: false"),
+            workflow.replace("    if: needs.admission.outputs.publication_pr != 'true'", "    if: always()"),
+            workflow.replace("  publication-push-proof:", "  absent-proof:"),
+            workflow.replace(", publication-push-proof]", "]"),
+            workflow.replace("run-id: ${{ needs.publication-push-proof.outputs.run_id || github.run_id }}", "run-id: 123"),
+            workflow.replace("        run: python3 .github/scripts/publication-push-proof.py", "        continue-on-error: true\n        run: python3 .github/scripts/publication-push-proof.py"),
+        ] {
+            assert!(!publication_delegation_is_bound(&changed, &proof), "unapproved corpus skip accepted");
+        }
+        assert!(
+            !publication_delegation_is_bound(
+                &workflow,
+                &proof.replace("run[\"head_sha\"] == head", "True")
+            ),
+            "unbound push source accepted"
+        );
+        assert!(read("scripts/preflight.sh").contains(
+            "armed|cargo nextest run --locked -p wcore-protocol --test contract_gate_topology --no-tests=fail --retries 0"),
+            "topology must fail in lane preflight before full CI");
     }
 }
 

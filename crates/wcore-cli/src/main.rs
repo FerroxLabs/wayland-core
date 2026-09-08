@@ -1047,6 +1047,7 @@ where
 }
 
 fn main() -> anyhow::Result<ExitCode> {
+    wcore_config::allocator::configure_for_launch()?;
     // Resolve the active isolated profile ONCE, here at process entry, and
     // materialize it into WAYLAND_HOME (C2). This MUST precede
     // load_wayland_env_file() below — that reads $WAYLAND_HOME/.env, so the home
@@ -5337,10 +5338,9 @@ async fn run_json_stream_mode(
         || config.compat.cost_per_output_token.is_some();
     let advertised_for_sink = Arc::new(wcore_config::tools::AdvertisedCapabilitiesConfig {
         cost_attribution: pre_bootstrap_cost_attribution,
-        // F-092 (W7-N): mirror online_evolution into the sink's advertised
-        // capabilities so the Ready event reflects the flag before bootstrap
-        // runs (mirrors the cost_attribution pre-bootstrap pattern above).
-        online_evolution: config.observability.online_evolution,
+        // System-prompt evolution is unavailable, including before bootstrap.
+        // Keep the compatibility setting inert and the Ready capability false.
+        online_evolution: false,
         ..Default::default()
     });
 
@@ -6243,6 +6243,7 @@ async fn run_json_stream_mode(
                     }
                 };
 
+                let usage_before_run = engine.usage_snapshot().0;
                 let mut stopped = false;
                 // #1070: latched false once the host's command stream reaches
                 // EOF, so the select never polls a closed receiver again.
@@ -6263,7 +6264,19 @@ async fn run_json_stream_mode(
 
                     loop {
                         tokio::select! {
+                            // Install the new turn token on first poll before accepting Stop.
+                            // Otherwise the engine could renew an already-cancelled token.
+                            biased;
                             result = &mut engine_fut => {
+                                if stopped {
+                                    if let Err(error) = result
+                                        && !matches!(error, wcore_agent::engine::AgentError::UserAborted)
+                                    {
+                                        output.emit_error(&format!("{error:#}"), false, error.failure_category());
+                                        run_failed = true;
+                                    }
+                                    break;
+                                }
                                 match result {
                                     Ok(result) => {
                                         if result.finish_reason == FinishReason::Error {
@@ -6333,20 +6346,11 @@ async fn run_json_stream_mode(
                                         approval_manager.resolve(&call_id, ToolApprovalResult::Denied { reason });
                                     }
                                     ProtocolCommand::Stop => {
-                                        // wayland#403 fix-3: Stop CANCELS THE ACTIVE TURN — it must
-                                        // NOT end the session. Fire the engine-owned active-turn
-                                        // token before dropping `engine_fut`; we emit `stream_end`
-                                        // (FinishReason::Stop) for this msg_id so the host's turn-loop
-                                        // gets its terminator and doesn't hang. `stopped` then makes
-                                        // the outer loop `continue` (keep reading commands) instead of
-                                        // breaking — the pre-fix `break` stranded the session
-                                        // ("new chat required") after any mid-turn Stop. Only EOF and
-                                        // `/exit` end a json-stream session, matching the TUI (Esc
-                                        // cancels the turn, never closes the session).
+                                        // Let the cancelled engine future finish its durable
+                                        // cleanup before emitting the terminal event. Dropping
+                                        // it here leaves the next message journal-blocked.
                                         session_control.cancel_active_turn();
-                                        output.emit_stream_end(&msg_id, 0, 0, 0, 0, 0, FinishReason::Stop);
                                         stopped = true;
-                                        break;
                                     }
                                     ProtocolCommand::SetConfig { model, thinking, thinking_budget, effort, compaction } => {
                                         pending_config = Some((model, thinking, thinking_budget, effort, compaction));
@@ -6616,14 +6620,38 @@ async fn run_json_stream_mode(
                     }
                 }
 
-                if run_failed {
+                if run_failed || stopped {
                     // CORE-2: the failed run's terminal stream_end. When the
                     // run consumed provider round-trips before dying, report
                     // the cumulative usage + this run's delta from the
                     // engine's snapshot (the counters already grew and will
                     // be persisted); otherwise keep the legacy zero-usage
                     // emission byte-identical.
-                    let (total, delta) = engine.usage_snapshot();
+                    let (total, mut delta) = engine.usage_snapshot();
+                    let finish_reason = if stopped {
+                        // Stop may win before the future resets run_usage. Derive
+                        // its delta from the pre-run cumulative snapshot so an
+                        // unpolled turn cannot inherit the previous turn's usage.
+                        delta.input_tokens = total
+                            .input_tokens
+                            .saturating_sub(usage_before_run.input_tokens);
+                        delta.output_tokens = total
+                            .output_tokens
+                            .saturating_sub(usage_before_run.output_tokens);
+                        delta.cache_creation_tokens = total
+                            .cache_creation_tokens
+                            .saturating_sub(usage_before_run.cache_creation_tokens);
+                        delta.cache_read_tokens = total
+                            .cache_read_tokens
+                            .saturating_sub(usage_before_run.cache_read_tokens);
+                        if run_failed {
+                            FinishReason::Error
+                        } else {
+                            FinishReason::Stop
+                        }
+                    } else {
+                        FinishReason::Error
+                    };
                     let delta_nonzero = delta.input_tokens > 0
                         || delta.output_tokens > 0
                         || delta.cache_creation_tokens > 0
@@ -6636,13 +6664,13 @@ async fn run_json_stream_mode(
                             total.output_tokens,
                             total.cache_creation_tokens,
                             total.cache_read_tokens,
-                            FinishReason::Error,
+                            finish_reason,
                             None,
                             None,
                             Some(&delta),
                         );
                     } else {
-                        output.emit_stream_end(&msg_id, 0, 0, 0, 0, 0, FinishReason::Error);
+                        output.emit_stream_end(&msg_id, 0, 0, 0, 0, 0, finish_reason);
                     }
                 }
 
@@ -9453,13 +9481,30 @@ mod tests {
 
     #[cfg(windows)]
     fn raise_native_shutdown_signal(kind: &str) {
-        use windows_sys::Win32::System::Console::{CTRL_C_EVENT, GenerateConsoleCtrlEvent};
+        use windows_sys::Win32::System::Console::{
+            CTRL_C_EVENT, GenerateConsoleCtrlEvent, SetConsoleCtrlHandler,
+        };
 
         assert_eq!(kind, "ctrl-c");
+        // Ignore-Ctrl-C is inherited independently of the handler table.
+        // This isolated helper explicitly tests delivery, so restore normal
+        // processing without changing the parent runner's console policy.
+        // SAFETY: NULL/FALSE changes only this process's ignore attribute.
+        assert_ne!(
+            unsafe { SetConsoleCtrlHandler(None, 0) },
+            0,
+            "restore Ctrl-C processing: {}",
+            std::io::Error::last_os_error()
+        );
         // SAFETY: the parent launches this helper with CREATE_NEW_CONSOLE, so
         // group zero targets only this subprocess's console. Tokio's Ctrl+C
         // handler is installed before the extraction future signals ready.
-        assert_ne!(unsafe { GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0) }, 0);
+        assert_ne!(
+            unsafe { GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0) },
+            0,
+            "GenerateConsoleCtrlEvent failed: {}",
+            std::io::Error::last_os_error()
+        );
     }
 
     #[tokio::test]
@@ -9467,6 +9512,7 @@ mod tests {
     async fn signal_shutdown_native_subprocess() {
         let kind = std::env::var("WCORE_TEST_SHUTDOWN_SIGNAL")
             .expect("native signal kind supplied by parent test");
+        eprintln!("native shutdown helper: starting {kind}");
         let extracted_root = Arc::new(std::sync::Mutex::new(None::<PathBuf>));
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let session = pending_bundled_reference_session(extracted_root.clone(), ready_tx);
@@ -9475,14 +9521,17 @@ mod tests {
             ready_rx
                 .await
                 .expect("reference extraction reaches signal point");
+            eprintln!("native shutdown helper: references extracted; raising {raised}");
             tokio::task::yield_now().await;
             raise_native_shutdown_signal(&raised);
+            eprintln!("native shutdown helper: signal generation returned");
         });
 
         let cleanup = BundledSkillTmpCleanup;
         let status = run_until_shutdown(session, shutdown_signal())
             .await
             .expect("native signal shutdown must complete cleanly");
+        eprintln!("native shutdown helper: shutdown received");
         trigger.await.expect("native signal trigger task");
         // B3: a signalled shutdown reports 128+signal, not SUCCESS. This
         // assertion previously demanded `ExitCode::SUCCESS`, which is what let
@@ -9501,6 +9550,7 @@ mod tests {
             .expect("subprocess records extraction root");
         assert!(process_root.exists());
         drop(cleanup);
+        eprintln!("native shutdown helper: cleanup returned");
         assert!(
             !process_root.exists(),
             "native signal shutdown must remove the exact UUID root"
@@ -9528,6 +9578,16 @@ mod tests {
             );
             child.kill_on_drop(true);
             child.env("WCORE_TEST_SHUTDOWN_SIGNAL", signal);
+            // Preserve both streams without waiting for inherited pipe handles.
+            let diagnostics = tempfile::NamedTempFile::new().expect("signal diagnostic file");
+            let transcript = tempfile::NamedTempFile::new().expect("signal transcript file");
+            child.stdin(std::process::Stdio::null());
+            child.stdout(std::process::Stdio::from(
+                transcript.reopen().expect("signal transcript handle"),
+            ));
+            child.stderr(std::process::Stdio::from(
+                diagnostics.reopen().expect("signal diagnostic handle"),
+            ));
             #[cfg(windows)]
             {
                 use std::os::windows::process::CommandExt as _;
@@ -9535,15 +9595,20 @@ mod tests {
 
                 child.as_std_mut().creation_flags(CREATE_NEW_CONSOLE);
             }
-            let output = tokio::time::timeout(std::time::Duration::from_secs(60), child.output())
-                .await
-                .unwrap_or_else(|_| panic!("native {signal} cleanup subprocess timed out"))
+            let status =
+                tokio::time::timeout(std::time::Duration::from_secs(60), child.status()).await;
+            let stdout = std::fs::read_to_string(transcript.path())
+                .unwrap_or_else(|error| format!("cannot read child stdout: {error}"));
+            let stderr = std::fs::read_to_string(diagnostics.path())
+                .unwrap_or_else(|error| format!("cannot read child stderr: {error}"));
+            let status = status
+                .unwrap_or_else(|_| {
+                    panic!("native {signal} process timed out; stdout={stdout}; stderr={stderr}")
+                })
                 .expect("run native signal subprocess");
             assert!(
-                output.status.success(),
-                "native {signal} cleanup subprocess failed; stdout={} stderr={}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
+                status.success(),
+                "native {signal} cleanup subprocess failed; stdout={stdout} stderr={stderr}"
             );
         }
     }
@@ -11825,7 +11890,7 @@ mod tests {
     /// hold nothing but someone else's words, and c2 says those must keep
     /// saying `Unknown`.
     ///
-    /// RED ARM (re-runnable): swap any one of the four back to
+    /// RED ARM (re-runnable): swap any one of the five back to
     /// `wcore_protocol::events::FailureCategory::Unknown`, `touch` main.rs,
     /// rebuild — this test fails naming that function.
     #[test]
@@ -11869,7 +11934,8 @@ mod tests {
         // POSITIVE CONTROL on the SET AND THE COUNT. A walk that found
         // nothing, a splitter that returned nothing, or a rename that hid a
         // site would all pass the loop above vacuously. `run` legitimately
-        // holds two. A new site is fine — grade it and update this. One GOING
+        // holds two; JSON-stream now also grades cancelled-turn cleanup errors.
+        // A new site is fine — grade it and update this. One GOING
         // MISSING is the failure this control exists for.
         graded.sort();
         assert_eq!(
@@ -11877,10 +11943,10 @@ mod tests {
             vec![
                 "main.rs::repl_loop:1".to_string(),
                 "main.rs::run:2".to_string(),
-                "main.rs::run_json_stream_mode:1".to_string(),
+                "main.rs::run_json_stream_mode:2".to_string(),
             ],
             "the walk graded a different set of AgentError-rendering error \
-             sites than the four known ones"
+             sites than the five known ones"
         );
     }
 
@@ -12492,9 +12558,34 @@ mod tests {
              receiver test is not discriminating. Found: {associated:?}"
         );
 
+        // This private helper initializes one server, not a manager. Pin its
+        // entire signature so changing its visibility or return type cannot
+        // silently turn this exception into an uncounted factory.
+        let server_helper_signature = concat!(
+            "async fn initialize_transport( name: &str, ",
+            "transport: Arc<dyn McpTransport>, connect_timeout: Duration, ",
+            "cleanup: CleanupTransports, ) -> Result<McpServer, McpError> {"
+        );
+        let actual_helper_signature = manager_src
+            .lines()
+            .skip_while(|line| !line.contains("fn initialize_transport("))
+            .scan(false, |finished, line| {
+                if *finished {
+                    return None;
+                }
+                *finished = line.contains('{');
+                Some(line.trim())
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(actual_helper_signature, server_helper_signature);
+        assert!(associated.iter().any(|name| name == "initialize_transport"));
+
         for name in &associated {
             assert!(
-                name.starts_with(needle_suffix) || name.starts_with("new_for_test"),
+                name.starts_with(needle_suffix)
+                    || name.starts_with("new_for_test")
+                    || name == "initialize_transport",
                 "McpManager::{name} takes no self receiver, so it is a way to \
                  GET a manager, and it is not matched by the \
                  `McpManager::{needle_suffix}` needle that \

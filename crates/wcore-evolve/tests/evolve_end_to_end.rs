@@ -128,3 +128,69 @@ fn build_fixture_params() -> wcore_evolve::EvolveParams {
         trace_sink: Arc::new(NullTraceSink),
     }
 }
+
+/// A later sibling that beats the parent but loses to the current best must
+/// neither displace that best nor emit a provisional retained=true event.
+#[tokio::test]
+async fn lower_scoring_sibling_cannot_displace_retained_candidate() {
+    use std::sync::{Arc, Mutex};
+    use wcore_eval::corpus::Verdict;
+    use wcore_eval::{Candidate, ScoreDimensions, ScoreOutcome, Scorer};
+    use wcore_evolve::TraceSink;
+    use wcore_evolve::mutator::{Mutation, MutationError, MutationKind, MutationSeed, Mutator};
+    use wcore_observability::trace::EvolutionEventTrace;
+
+    struct OrderedMutator;
+    impl Mutator for OrderedMutator {
+        fn mutate(&self, _: &str, seed: MutationSeed) -> Result<Mutation, MutationError> {
+            Ok(Mutation {
+                body: if seed.child_index == 0 {
+                    "high"
+                } else {
+                    "lower"
+                }
+                .into(),
+                kind: MutationKind::Paraphrase,
+            })
+        }
+    }
+    struct Ranking;
+    impl Scorer for Ranking {
+        fn score(&self, candidate: &Candidate) -> ScoreOutcome {
+            let combined = match candidate.skill.content.as_str() {
+                "high" => 0.9,
+                "lower" => 0.8,
+                _ => 0.1,
+            };
+            ScoreOutcome {
+                dimensions: ScoreDimensions {
+                    outcome: combined,
+                    cost_penalty: 0.0,
+                    size_penalty: 0.0,
+                    combined,
+                },
+                predicted: Verdict::Good,
+            }
+        }
+    }
+    #[derive(Default)]
+    struct Events(Mutex<Vec<bool>>);
+    impl TraceSink for Events {
+        fn emit_evolution_event(&self, event: &EvolutionEventTrace) {
+            self.0.lock().unwrap().push(event.retained);
+        }
+    }
+    let root = tempfile::tempdir().unwrap();
+    let mut params = build_fixture_params();
+    std::fs::remove_dir_all(&params.graveyard_root).unwrap();
+    params.graveyard_root = root.path().into();
+    params.max_generations = 1;
+    params.fan_out = 2;
+    params.scorer = Arc::new(Ranking);
+    params.mutators = vec![Arc::new(OrderedMutator)];
+    let events = Arc::new(Events::default());
+    params.trace_sink = events.clone();
+    let outcome = wcore_evolve::evolve(params).await.unwrap();
+    assert_eq!(outcome.best_candidate.unwrap().mutation.body, "high");
+    assert_eq!(*events.0.lock().unwrap(), vec![true, false]);
+}

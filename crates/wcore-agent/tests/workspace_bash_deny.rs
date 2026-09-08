@@ -61,6 +61,7 @@ fn workspace_bash_retained_when_deny_enforced() {
     let scope = ChannelToolScope {
         posture: ChannelToolPosture::Workspace,
         workspace_root: tmp.path().to_path_buf(),
+        ambient_mcp_full_authority_v1: false,
     };
     apply_posture(&mut reg, &scope, /* read_deny_enforced= */ true);
 
@@ -83,6 +84,7 @@ fn workspace_bash_dropped_when_deny_not_enforced() {
     let scope = ChannelToolScope {
         posture: ChannelToolPosture::Workspace,
         workspace_root: tmp.path().to_path_buf(),
+        ambient_mcp_full_authority_v1: false,
     };
     apply_posture(&mut reg, &scope, /* read_deny_enforced= */ false);
 

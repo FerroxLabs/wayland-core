@@ -205,9 +205,14 @@ impl LearnedPolicy {
 
     /// Load from a specific path. Missing file = empty policy (not an error).
     pub fn load_from(path: &Path) -> Result<Self, LearningError> {
+        Ok(Self::load_optional_from(path)?.unwrap_or_default())
+    }
+
+    /// Load an optional policy without conflating absence with an unreadable file.
+    pub fn load_optional_from(path: &Path) -> Result<Option<Self>, LearningError> {
         let raw = match std::fs::read_to_string(path) {
             Ok(s) => s,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::new()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => {
                 return Err(LearningError::Read {
                     path: path.to_path_buf(),
@@ -216,10 +221,10 @@ impl LearnedPolicy {
             }
         };
         let stored: StoredPolicy = toml::from_str(&raw)?;
-        Ok(Self {
+        Ok(Some(Self {
             rules: stored.rules,
             prefix_rules: stored.prefix_rules,
-        })
+        }))
     }
 
     /// Persist to a specific path (creates parent dir if absent).

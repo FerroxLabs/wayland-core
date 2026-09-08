@@ -19,7 +19,7 @@ criteria:
   - id: c3
     text: "The measured wall time of `ci-linux` against its budget is recorded, so the next raise is a decision rather than a reaction."
     state: met
-    evidence: "file:.github/workflows/ci.yml:1255:Median 102.0 min"
+    evidence: "file:.github/workflows/ci.yml:1418:Median 102.0 min"
     owner: core
     note: "MET 2026-09-03 by measurement recorded IN THE TREE, at the timeout it governs, next to the table it extends. n=9 consecutive runs of this job, 2026-09-02/03: 87.0, 95.5, 97.0, 100.1, 102.0, 105.5, 116.1, 122.8, 123.3 min. Median 102.0 (68% of the 150 limit), max 123.3 (82%), min 87.0 (58%). CORRECTION MADE WHILE MEASURING, and it is the substance rather than a detail: the first pass graded these against 120 minutes because `timeout-minutes: 120` appears earlier in ci.yml -- that value belongs to the matrix job (`CI (Array)`/macOS/Windows), and ci-linux's own is 150 at ci.yml:1258. Grading a budget against the wrong budget is how a 82% reading becomes a 103% panic. THE FINDING IS THAT THE MEDIAN IS THE WRONG STATISTIC: the block's own '~50% over the measured figure' is true of the median and false of the maximum, which sits 18% under the wall -- the same 18% that block calls 'too thin for a job of this length' when it justified moving 90 to 150. The spread is 87.0-123.3, a 36-minute band. NOT RAISED, deliberately: no run in the sample was killed and the median has not moved (99-102 before, 102.0 now), and the block is explicit that widening the gap costs the timeout its ability to catch a hang. The trigger for the next raise is recorded with the table so it is a decision and not a reaction -- one KILLED run, or a median above 115 min (77%), whichever comes first."
 ---

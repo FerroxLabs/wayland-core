@@ -1,0 +1,18 @@
+diff --git a/crates/wcore-agent/src/channel_policy.rs b/crates/wcore-agent/src/channel_policy.rs
+index 9c035036d..17ebba632 100644
+--- a/crates/wcore-agent/src/channel_policy.rs
++++ b/crates/wcore-agent/src/channel_policy.rs
+@@ -287,10 +287,9 @@ impl ChannelPolicyRegistry {
+         configs: Vec<ChannelConfig>,
+         default_workspace_root: &Path,
+     ) -> Result<usize, OpenAdmissionRefusal> {
+-        Ok(self.replace(ChannelPolicySnapshot::from_configs(
+-            configs,
+-            default_workspace_root,
+-        )?))
++        let replacement = ChannelPolicySnapshot::from_configs(configs, default_workspace_root)?;
++        // W12 mutant: acknowledge reload but keep the previous policy and posture.
++        Ok(replacement.policies.len())
+     }
+ 
+     /// TEST-ONLY swap of a hand-built snapshot, for the unit tests that

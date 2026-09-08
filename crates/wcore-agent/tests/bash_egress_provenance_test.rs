@@ -236,6 +236,7 @@ async fn bootstrapped_policy(
         bootstrap = bootstrap.channel_tool_posture(ChannelToolScope {
             posture: ChannelToolPosture::Full,
             workspace_root: workdir.to_path_buf(),
+            ambient_mcp_full_authority_v1: false,
         });
     }
     let result = bootstrap.build().await.expect("bootstrap should succeed");

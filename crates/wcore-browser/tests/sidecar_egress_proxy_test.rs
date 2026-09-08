@@ -92,6 +92,39 @@ async fn read_head(stream: &mut TcpStream) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// Refusals are close-delimited: the proxy writes the head and body separately,
+/// then shuts down. A head-only read cannot grade the reason in the body.
+async fn read_error_response(stream: &mut (impl tokio::io::AsyncRead + Unpin)) -> String {
+    const MAX_RESPONSE_BYTES: usize = 16 * 1024;
+    let mut out = Vec::new();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        stream
+            .take((MAX_RESPONSE_BYTES + 1) as u64)
+            .read_to_end(&mut out),
+    )
+    .await
+    .expect("proxy refusal did not finish before the deadline")
+    .expect("read proxy refusal");
+    assert!(
+        out.len() <= MAX_RESPONSE_BYTES,
+        "proxy refusal is too large"
+    );
+    String::from_utf8(out).expect("proxy refusal is UTF-8")
+}
+
+#[tokio::test]
+async fn error_response_reader_waits_for_a_fragmented_body() {
+    // Chain guarantees the header and body arrive in separate reads, without
+    // scheduling assumptions, network packet timing, or sleeps.
+    let head = b"HTTP/1.1 403 Forbidden\r\nContent-Length: 10\r\nConnection: close\r\n\r\n";
+    let body = b"unresolved";
+    let mut stream = head.as_slice().chain(body.as_slice());
+    let response = read_error_response(&mut stream).await;
+    assert!(response.starts_with("HTTP/1.1 403"), "{response:?}");
+    assert!(response.ends_with("unresolved"), "{response:?}");
+}
+
 /// A minimal origin server on loopback that answers anything with `pong`.
 /// Deliberately not `wiremock`: the plain-HTTP arm forwards an ABSOLUTE-FORM
 /// request line, and the assertion is about Core's behaviour, not about which
@@ -215,7 +248,7 @@ async fn a_name_that_resolves_to_nothing_is_refused_at_the_proxy() {
         .write_all(b"CONNECT unresolvable-probe.invalid:443 HTTP/1.1\r\n\r\n")
         .await
         .unwrap();
-    let response = read_head(&mut client).await;
+    let response = read_error_response(&mut client).await;
 
     assert!(response.starts_with("HTTP/1.1 403"), "got: {response:?}");
     assert!(

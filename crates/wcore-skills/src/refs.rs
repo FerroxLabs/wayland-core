@@ -19,7 +19,7 @@ use tokio::sync::Mutex;
 
 use crate::types::{LoadedFrom, SkillMetadata, SkillSource};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillRef {
     pub name: String,
     pub display_name: Option<String>,
@@ -50,6 +50,10 @@ pub struct SkillRef {
 }
 
 pub struct SkillCatalog {
+    reload: Option<reload::LocalReload>,
+    inventory_changed: std::sync::atomic::AtomicBool,
+    invocations: std::sync::Mutex<std::collections::HashMap<String, bool>>,
+
     /// wayland#562 — interior-mutable so a config MCP server that connects in
     /// the BACKGROUND (json-stream `defer_config_mcp`) can merge its
     /// `skill://` resources into the catalog the engine, `SkillTool` and the
@@ -76,10 +80,15 @@ pub struct SkillCatalog {
     cross_project_root: Option<PathBuf>,
 }
 
+mod reload;
+
 impl SkillCatalog {
     pub fn from_refs(refs: Vec<SkillRef>) -> Self {
         Self {
             refs: std::sync::RwLock::new(refs),
+            reload: None,
+            inventory_changed: std::sync::atomic::AtomicBool::new(false),
+            invocations: std::sync::Mutex::new(std::collections::HashMap::new()),
             cache: Arc::new(Mutex::new(lru::LruCache::new(
                 // SAFETY: 32 is a non-zero compile-time constant.
                 std::num::NonZeroUsize::new(32).expect("32 is non-zero"),
@@ -130,6 +139,32 @@ impl SkillCatalog {
 
     fn write_refs(&self) -> std::sync::RwLockWriteGuard<'_, Vec<SkillRef>> {
         self.refs.write().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Clear only run-local attribution at the admitted user-turn boundary.
+    pub fn begin_turn(&self) {
+        self.invocations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+    }
+
+    /// Tool completion is invocation evidence, not a verified task outcome.
+    pub fn record_invocation(&self, name: &str, failed: bool) {
+        self.invocations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(name.trim_start_matches('/').to_owned())
+            .and_modify(|previous| *previous |= failed)
+            .or_insert(failed);
+    }
+
+    pub fn invocation_failed(&self, name: &str) -> Option<bool> {
+        self.invocations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(name)
+            .copied()
     }
 
     pub fn len(&self) -> usize {

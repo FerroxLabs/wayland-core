@@ -58,7 +58,7 @@ pub struct StreamableHttpTransport {
     /// The standalone `GET`-with-`Accept: text/event-stream` listener, started
     /// once the first response arrives (the session id is only known then).
     /// `std::sync::Mutex` rather than tokio's so `Drop` can abort it.
-    event_stream: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    event_stream: std::sync::Mutex<Option<Arc<super::task::RetainedTask>>>,
     /// Set by `close()`. Until FerroxLabs/wayland#1175 this transport had no
     /// notion of being closed at all and inherited `is_alive() -> true`, which
     /// was harmless only because it also inherited `take_tools_changed() ->
@@ -255,20 +255,14 @@ impl StreamableHttpTransport {
         }
         let tools_changed = Arc::clone(&self.tools_changed);
 
+        let mut guard = self.event_stream.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.is_some() || self.closed.load(Ordering::SeqCst) {
+            return;
+        }
         let handle = tokio::spawn(async move {
             listen_for_server_events(client, url, headers, tools_changed).await;
         });
-
-        let mut guard = match self.event_stream.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        if guard.is_some() {
-            // Another caller won the race; keep theirs and drop ours.
-            handle.abort();
-        } else {
-            *guard = Some(handle);
-        }
+        *guard = Some(Arc::new(handle.into()));
     }
 
     pub fn next_id(&self) -> u64 {
@@ -524,17 +518,20 @@ impl McpTransport for StreamableHttpTransport {
         // FerroxLabs/wayland#1175 — the standalone event stream IS a
         // persistent connection now, so it has to be torn down here as well as
         // in `Drop` (the manager closes transports it keeps alive in a map).
-        let handle = {
-            let mut guard = match self.event_stream.lock() {
-                Ok(guard) => guard,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            guard.take()
-        };
+        self.closed.store(true, Ordering::SeqCst);
+        let handle = self
+            .event_stream
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         if let Some(handle) = handle {
             handle.abort();
+            let _ = handle.join().await;
+            self.event_stream
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take();
         }
-        self.closed.store(true, Ordering::SeqCst);
         Ok(())
     }
 
@@ -671,6 +668,38 @@ fn sse_data_payload(event_block: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn close_joins_http_event_listener_before_reporting_success() {
+        struct Exited(Arc<AtomicBool>);
+        impl Drop for Exited {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let transport =
+            StreamableHttpTransport::connect("http://127.0.0.1:3456/mcp", &HashMap::new(), true)
+                .await
+                .expect("local transport construction does no I/O");
+        let exited = Arc::new(AtomicBool::new(false));
+        let started = Arc::new(tokio::sync::Notify::new());
+        let marker = exited.clone();
+        let signal = started.clone();
+        let task = tokio::spawn(async move {
+            let _exited = Exited(marker);
+            signal.notify_one();
+            std::future::pending::<()>().await;
+        });
+        *transport.event_stream.lock().unwrap() = Some(Arc::new(task.into()));
+        started.notified().await;
+        assert!(!exited.load(Ordering::SeqCst));
+        transport.close().await.expect("close");
+        assert!(
+            exited.load(Ordering::SeqCst),
+            "success must follow listener join"
+        );
+        assert!(transport.event_stream.lock().unwrap().is_none());
+    }
 
     /// M-13 — a configured URL pointing at the cloud metadata IP must be
     /// rejected at connect time, before any auth header is attached.

@@ -15,28 +15,23 @@
 //!
 //! Design note: an overnight run must COMPLETE and REPORT, not abort on the
 //! first failing persona. So we collect every result and emit the report
-//! (the real artifact); per-persona failures are DATA in that report, not
-//! test-aborting `assert!`s.
+//! before asserting the aggregate acceptance result. Failed or missing scenarios
+//! and report-write failures cannot certify successful behavior.
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use wcore_eval_scenarios::catalog;
 use wcore_eval_scenarios::providers::{ProviderConfig, ProviderId};
-use wcore_eval_scenarios::runner::{ScenarioResult, discover_binary};
+use wcore_eval_scenarios::runner::{Failure, ScenarioResult, discover_binary};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: drives the real wayland-core binary against the real DeepSeek API (costs money, needs DEEPSEEK_API_KEY + a pre-built binary)"]
 async fn overnight_personas() {
-    // 1. No key → skip cleanly (not a failure). Overnight harness should be a
-    //    no-op on machines without credentials rather than a red test.
-    if std::env::var("DEEPSEEK_API_KEY").is_err() {
-        eprintln!(
-            "SKIP overnight_personas: DEEPSEEK_API_KEY is not set. \
-             Set it (and pre-build the binary) to run the live persona suite."
-        );
-        return;
-    }
+    assert!(
+        std::env::var("DEEPSEEK_API_KEY").is_ok_and(|key| !key.trim().is_empty()),
+        "DEEPSEEK_API_KEY is required for explicitly selected persona acceptance"
+    );
 
     // 2. Resolve the binary. discover_binary() honours WCORE_EVAL_BIN and walks
     //    target/{release,debug}/wayland-core. Require it — a live run with no
@@ -69,6 +64,7 @@ async fn overnight_personas() {
     }
     let total = scenarios.len();
     let mut results: Vec<ScenarioResult> = Vec::with_capacity(total);
+    let mut runner_errors = Vec::new();
 
     for (idx, scenario) in scenarios.iter().enumerate() {
         eprintln!(
@@ -79,6 +75,15 @@ async fn overnight_personas() {
         );
         match scenario.run_with(&provider).await {
             Ok(result) => {
+                // The runner can return a completed result containing a
+                // startup/transport failure instead of returning Err itself.
+                runner_errors.extend(result.failures.iter().filter_map(|failure| {
+                    if let Failure::RunnerError(error) = failure {
+                        Some(format!("{}: {error}", result.name))
+                    } else {
+                        None
+                    }
+                }));
                 eprintln!(
                     "overnight_personas: [{}/{}] '{}' -> {} ({:.1}s, ${:.4})",
                     idx + 1,
@@ -104,6 +109,7 @@ async fn overnight_personas() {
                 }
             }
             Err(e) => {
+                runner_errors.push(format!("{}: {e}", scenario.name));
                 // run() itself returning Err is a harness/plumbing fault (not a
                 // scenario assertion failure). Record it loudly but keep going —
                 // unless it's the canary, in which case the run is misconfigured.
@@ -142,35 +148,52 @@ async fn overnight_personas() {
 
     // 5. Write the markdown report. `Date`/time is not available without an
     //    extra dep, so we use a fixed filename.
-    let report = render_report(&results);
+    let mut report = render_report(&results);
+    let _ = writeln!(
+        report,
+        "Selected: {total}; completed: {}; runner errors: {}.",
+        results.len(),
+        runner_errors.len()
+    );
+    for error in &runner_errors {
+        let _ = writeln!(report, "- RUNNER ERROR: {error}");
+    }
     let report_path = report_output_path();
-    if let Some(parent) = report_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    match std::fs::write(&report_path, &report) {
-        Ok(()) => println!(
-            "overnight_personas: report written to {}",
-            report_path.display()
-        ),
-        Err(e) => eprintln!(
-            "overnight_personas: failed to write report to {}: {e}",
-            report_path.display()
-        ),
-    }
-
-    // 6. Summary. The report is the artifact; failures are data, not aborts.
-    let passed = results.iter().filter(|r| r.passed).count();
-    let ran = results.len();
-    println!("overnight_personas: {passed}/{ran} personas passed");
+    // Emit all collected outcomes even if the durable report cannot be written.
     eprintln!("\n{report}");
-
-    // The test passes as long as it COMPLETED. Zero personas run (e.g. every
-    // run() errored) is still a completed overnight pass — the report carries
-    // the story. We deliberately do NOT assert all passed.
+    if let Some(parent) = report_path.parent() {
+        std::fs::create_dir_all(parent).expect("create persona report directory");
+    }
+    std::fs::write(&report_path, &report).expect("write persona acceptance report");
+    println!(
+        "overnight_personas: report written to {}",
+        report_path.display()
+    );
+    let passed = results.iter().filter(|r| r.passed).count();
+    assert!(total > 0, "persona acceptance selected zero scenarios");
+    assert!(
+        runner_errors.is_empty(),
+        "persona runner errors: {runner_errors:?}"
+    );
+    assert_eq!(
+        results.len(),
+        total,
+        "persona acceptance did not execute every selected scenario"
+    );
+    assert_eq!(
+        passed,
+        total,
+        "persona acceptance failed; collected report: {}",
+        report_path.display()
+    );
 }
 
 /// `target/persona-report.md`, resolved against the workspace target dir.
 fn report_output_path() -> PathBuf {
+    // Keep fixture runs and parallel live runs from overwriting one report.
+    if let Some(path) = std::env::var_os("WCORE_EVAL_REPORT_PATH") {
+        return PathBuf::from(path);
+    }
     // CARGO_MANIFEST_DIR = crates/wcore-eval-scenarios; workspace root is two
     // levels up. Mirrors discover_binary()'s target-dir resolution.
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

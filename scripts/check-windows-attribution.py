@@ -490,6 +490,14 @@ def eval_gha_if(block: str, ctx: dict) -> "bool | None":
     body = body.replace(">-", " ").replace("|-", " ").strip()
     if not body:
         return True
+    # The controlled publication PR delegates coverage to an authenticated
+    # integration push; ordinary push cases retain the original admission.
+    publication_atom = "needs.admission.outputs.publication_pr != 'true'"
+    if publication_atom in body:
+        publication_pr = ctx.get("publication_pr", False if ctx["event_name"] == "push" else None)
+        if not isinstance(publication_pr, bool):
+            return None
+        body = body.replace(publication_atom, str(not publication_pr))
     body = _MARKER_RE.sub(lambda m: str(m.group(1) in ctx["commit_messages"]), body)
     body = _STARTSWITH_RE.sub(lambda m: str(ctx["ref_name"].startswith(m.group(1))), body)
     body = _REF_EQ_RE.sub(lambda m: str(ctx["ref_name"] == m.group(1)), body)

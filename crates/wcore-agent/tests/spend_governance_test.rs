@@ -35,10 +35,13 @@ use wcore_types::message::{FinishReason, StopReason, TokenUsage};
 /// groups is a hole, and a site that appears in the tree without being here at
 /// all fails this test.
 ///
-/// **Group 1 — covered by the `SpendGuardProvider` decorator.** All three
+/// **Group 1 — covered by the `SpendGuardProvider` decorator.** These sites
 /// dispatch through a handle cloned from `AgentEngine::provider`, which
 /// `install_spend_guard` makes a `SpendGuardProvider`: the conversation turn,
 /// the autocompact summarization call, and the online-evolution paraphrase.
+/// `BudgetedCompactionProvider` also reserves each physical attempt before
+/// dispatch and scopes configured-fallback admission; its inner handle is
+/// the engine's guarded provider (optionally wrapped for journaling).
 ///
 /// **Group 2 — decorators and transports that cannot change provider OR
 /// model.** A journal wrapper, the guard's own pass-through, and the sixteen
@@ -59,6 +62,7 @@ const EXPECTED_DISPATCH_SITES: &[&str] = &[
     "wcore-agent/src/compact/auto.rs::provider",
     "wcore-agent/src/engine.rs::attempt_provider",
     "wcore-agent/src/engine.rs::provider",
+    "wcore-agent/src/engine.rs::physical",
     "wcore-evolve/src/mutator/llm_paraphrase_provider.rs::self.provider",
     // Group 2
     "wcore-agent/src/journal_provider.rs::self.inner",
@@ -83,6 +87,12 @@ const EXPECTED_DISPATCH_SITES: &[&str] = &[
     "wcore-providers/src/chain.rs::slot.provider",
     "wcore-providers/src/resilient.rs::fallback.provider",
 ];
+
+// The lexical census also sees this non-provider method. It only increments
+// the active recording count and returns RecordingGuard; it never dispatches
+// an LlmRequest. Require the exact site to remain observed so this exception
+// cannot silently become a stale or broad exclusion.
+const NON_PROVIDER_STREAM_SITES: &[&str] = &["wcore-acp/src/server.rs::lifecycle"];
 
 fn workspace_root() -> PathBuf {
     // CARGO_MANIFEST_DIR is `<root>/crates/wcore-agent`.
@@ -232,6 +242,17 @@ fn every_production_provider_dispatch_site_is_named_and_assigned_a_guard() {
         "census found nothing at the engine's own dispatch site; the walk is broken. \
          found = {found:#?}"
     );
+
+    for site in NON_PROVIDER_STREAM_SITES {
+        assert!(
+            !expected.contains(*site),
+            "non-provider site must not be assigned a provider spend guard: {site}"
+        );
+        assert!(
+            found.remove(*site),
+            "listed non-provider stream site is no longer observed: {site}"
+        );
+    }
 
     let unexpected: Vec<&String> = found.difference(&expected).collect();
     assert!(

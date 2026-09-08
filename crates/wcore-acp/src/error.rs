@@ -5,6 +5,9 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum AcpError {
+    /// Cleanup is incomplete; admission remains closed and retry is safe.
+    #[error("session cleanup incomplete: {0}")]
+    Cleanup(String),
     #[error("transport error: {0}")]
     Transport(String),
     #[error("protocol error: {0}")]

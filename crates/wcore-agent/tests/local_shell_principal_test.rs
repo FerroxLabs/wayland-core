@@ -132,6 +132,7 @@ async fn build_session(
         boot = boot.channel_tool_posture(ChannelToolScope {
             posture,
             workspace_root: workspace.to_path_buf(),
+            ambient_mcp_full_authority_v1: false,
         });
     }
     let result = boot.build().await.expect("bootstrap");

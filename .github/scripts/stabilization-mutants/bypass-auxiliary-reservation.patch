@@ -1,0 +1,13 @@
+diff --git a/crates/wcore-agent/src/engine.rs b/crates/wcore-agent/src/engine.rs
+index 40c770be7..6995e9cbb 100644
+--- a/crates/wcore-agent/src/engine.rs
++++ b/crates/wcore-agent/src/engine.rs
+@@ -798,7 +798,7 @@ impl LlmProvider for BudgetedCompactionProvider {
+         let reservation = if let Some(authority) = self.authority.as_ref() {
+             let reservation = authority
+                 .lock()
+-                .reserve_provider_dispatch(&dispatch_id, &self.session_id, input, output, bound.usd)
++                .reserve_provider_dispatch(&dispatch_id, &self.session_id, 0, 0, 0.0)
+                 .map_err(auxiliary_budget_error)?
+                 .map_err(auxiliary_budget_error)?;
+             Some(ProviderBudgetReservation::new(

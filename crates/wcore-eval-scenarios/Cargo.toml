@@ -96,6 +96,9 @@ rand         = { workspace = true }
 reqwest      = { workspace = true }
 # Correct HTTP parsing for the loopback-only scripted OpenAI fixture.
 axum         = "0.7"
+# Own inbound fixture connection tasks through the existing HTTP stack.
+hyper        = { workspace = true }
+hyper-util   = { workspace = true, features = ["service"] }
 futures      = { workspace = true }
 # D8 PTY TUI capture — drive wayland-core's ratatui TUI under a pseudo-terminal
 # and read the rendered screen. Direct deps (not in [workspace.dependencies])
@@ -108,6 +111,8 @@ vt100        = "0.15"
 # ProtocolCommand enums instead of redefining shapes that would drift.
 wcore-protocol = { workspace = true }
 wcore-config = { workspace = true }
+wcore-budget = { workspace = true }
+fd-lock = { workspace = true }
 # `wcore_types::process_liveness` — the single zombie-aware liveness probe.
 # wcore-types is the bottom layer with zero internal deps, so this edge cannot
 # create a cycle. See .planning/ZOMBIE-PROBE.md.

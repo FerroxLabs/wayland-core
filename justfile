@@ -682,3 +682,22 @@ plan:
 # Run: `just plan-check` — fails on an unrouted criterion or outstanding defect work
 plan-check:
     python3 scripts/render-plan.py --check
+
+# Explicit qualification planning; does not execute the generated commands.
+[script("python3")]
+[positional-arguments]
+qualification-plan base manifest metadata output="target/qualification/plan.json":
+    import pathlib, subprocess, sys
+    base, manifest, metadata, output = sys.argv[1:]
+    pathlib.Path(output).parent.mkdir(parents=True, exist_ok=True)
+    raise SystemExit(subprocess.call([sys.executable, "scripts/qualification-status.py", "plan", "--repo", ".", "--base", base, "--manifest", manifest, "--cargo-metadata", metadata, "--output", output]))
+
+# Render readiness and propagate the selected phase's refusal (verified by default).
+[script("python3")]
+[positional-arguments]
+qualification-status manifest state receipts output="target/qualification/readiness.json" markdown="target/qualification/readiness.md" phase="verified":
+    import pathlib, subprocess, sys
+    manifest, state, receipts, output, markdown, phase = sys.argv[1:]
+    for path in (output, markdown):
+        pathlib.Path(path).parent.mkdir(parents=True, exist_ok=True)
+    raise SystemExit(subprocess.call([sys.executable, "scripts/qualification-status.py", "status", "--repo", ".", "--manifest", manifest, "--state", state, "--receipts", receipts, "--output", output, "--markdown", markdown, "--require-phase", phase]))

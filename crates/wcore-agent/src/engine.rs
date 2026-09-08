@@ -487,6 +487,7 @@ struct ProviderBudgetReservation {
     conservative_input_tokens: u64,
     conservative_output_tokens: u64,
     conservative_cost_usd: f64,
+    auxiliary: Option<(AuxiliaryCharges, AuxiliaryCharge)>,
 }
 
 enum ProviderBudgetOwner {
@@ -518,6 +519,43 @@ impl ProviderBudgetReservation {
             conservative_input_tokens,
             conservative_output_tokens,
             conservative_cost_usd,
+            auxiliary: None,
+        }
+    }
+
+    fn with_auxiliary_charge(
+        mut self,
+        charges: AuxiliaryCharges,
+        provider: String,
+        model: String,
+    ) -> Self {
+        self.auxiliary = Some((
+            charges,
+            AuxiliaryCharge {
+                provider,
+                model,
+                usage: TokenUsage {
+                    input_tokens: self.conservative_input_tokens,
+                    output_tokens: self.conservative_output_tokens,
+                    ..Default::default()
+                },
+                // Admission bounds are estimates, never a provider bill.
+                cost: ResolvedTurnCost {
+                    usd: self.conservative_cost_usd,
+                    priced: false,
+                    bounded: true,
+                },
+            },
+        ));
+        self
+    }
+
+    fn record_auxiliary_charge(&mut self) {
+        if let Some((charges, charge)) = self.auxiliary.take() {
+            charges
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(charge);
         }
     }
 
@@ -531,6 +569,7 @@ impl ProviderBudgetReservation {
             .reservation
             .take()
             .expect("provider budget reservation settles exactly once");
+        self.record_auxiliary_charge();
         match &self.owner {
             ProviderBudgetOwner::Durable {
                 authority,
@@ -599,6 +638,7 @@ impl ProviderBudgetReservation {
 impl Drop for ProviderBudgetReservation {
     fn drop(&mut self) {
         if let Some(reservation) = self.reservation.take() {
+            self.record_auxiliary_charge();
             match &self.owner {
                 ProviderBudgetOwner::Durable {
                     authority,
@@ -672,6 +712,466 @@ impl ConfiguredFallbackBudgetState {
             failure: None,
         }
     }
+}
+
+/// Compaction shares the paid-call reservation with conversation dispatches.
+/// Receipts are drained by the engine even when summary validation fails.
+type AuxiliaryCharges = Arc<Mutex<Vec<AuxiliaryCharge>>>;
+
+struct AuxiliaryCharge {
+    provider: String,
+    model: String,
+    usage: TokenUsage,
+    cost: ResolvedTurnCost,
+}
+
+struct BudgetedCompactionProvider {
+    inner: Arc<dyn LlmProvider>,
+    journal: Option<(SessionJournal, String)>,
+    authority: Option<SharedBudgetAuthorityCoordinator>,
+    tracker: Option<Arc<parking_lot::Mutex<wcore_budget::BudgetTracker>>>,
+    execution: crate::budget::ExecutionBudgetView,
+    session_id: String,
+    compat: wcore_config::compat::ProviderCompat,
+    guard: Arc<crate::spend_guard::SpendGuard>,
+    strict_monetary_cap: bool,
+    charges: AuxiliaryCharges,
+    cancel: tokio_util::sync::CancellationToken,
+}
+
+fn auxiliary_budget_error(message: impl std::fmt::Display) -> ProviderError {
+    ProviderError::NotAttempted {
+        reason: format!("compaction budget authority: {message}"),
+        failure_code: Some("compaction_budget_refused".to_string()),
+    }
+}
+
+fn auxiliary_mutation_error(error: ProviderBudgetMutationError) -> ProviderError {
+    match error {
+        ProviderBudgetMutationError::Budget(error) => auxiliary_budget_error(error),
+        ProviderBudgetMutationError::Authority(error) => auxiliary_budget_error(error),
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for BudgetedCompactionProvider {
+    async fn stream(
+        &self,
+        request: &LlmRequest,
+    ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+        if self.cancel.is_cancelled() {
+            return Err(ProviderError::NotAttempted {
+                reason: "compaction cancelled before admission".into(),
+                failure_code: None,
+            });
+        }
+        let provider = self.compat.provider_type();
+        let input =
+            estimate::estimate_request_tokens(&request.messages, &request.system, &request.tools);
+        let output = u64::from(request.max_tokens);
+        let bound = resolve_conservative_reservation_cost(
+            provider,
+            &request.model,
+            input,
+            output,
+            &self.compat,
+        );
+        let monetary_cap = match self.authority.as_ref() {
+            Some(authority) => authority
+                .lock()
+                .inspect(|tracker, _| tracker.has_monetary_cap(&self.session_id))
+                .map_err(auxiliary_budget_error)?,
+            None => self
+                .tracker
+                .as_ref()
+                .is_some_and(|tracker| tracker.lock().has_monetary_cap(&self.session_id)),
+        };
+        if !bound.bounded && monetary_cap && self.strict_monetary_cap {
+            return Err(auxiliary_budget_error(format!(
+                "unpriced provider {provider}/{}",
+                request.model
+            )));
+        }
+        let dispatch_id = format!("compaction-budget-dispatch-{}", uuid::Uuid::new_v4());
+        // W09 admission: every PTL retry calls this boundary again. No provider
+        // stream is constructed until its reservation has been durably granted.
+        let reservation = if let Some(authority) = self.authority.as_ref() {
+            let reservation = authority
+                .lock()
+                .reserve_provider_dispatch(&dispatch_id, &self.session_id, input, output, bound.usd)
+                .map_err(auxiliary_budget_error)?
+                .map_err(auxiliary_budget_error)?;
+            Some(ProviderBudgetReservation::new(
+                ProviderBudgetOwner::Durable {
+                    authority: Arc::clone(authority),
+                    dispatch_id: dispatch_id.clone(),
+                },
+                self.execution.clone(),
+                reservation,
+                input,
+                output,
+                bound.usd,
+            ))
+        } else if let Some(tracker) = self.tracker.as_ref() {
+            let reservation = tracker
+                .lock()
+                .reserve_turn(&self.session_id, input, output, bound.usd)
+                .map_err(auxiliary_budget_error)?;
+            Some(ProviderBudgetReservation::new(
+                ProviderBudgetOwner::Legacy(Arc::clone(tracker)),
+                self.execution.clone(),
+                reservation,
+                input,
+                output,
+                bound.usd,
+            ))
+        } else {
+            None
+        };
+        let reservation = reservation.map(|r| {
+            r.with_auxiliary_charge(
+                Arc::clone(&self.charges),
+                provider.to_string(),
+                request.model.clone(),
+            )
+        });
+        let state = Arc::new(Mutex::new(ConfiguredFallbackBudgetState::new(
+            reservation,
+            provider.to_string(),
+            request.model.clone(),
+        )));
+        let admitter = configured_fallback_admitter(
+            &state,
+            self.tracker.clone(),
+            self.authority.clone(),
+            self.execution.clone(),
+            self.session_id.clone(),
+            dispatch_id.clone(),
+            self.compat.clone(),
+            Arc::clone(&self.guard),
+            input,
+            output,
+            monetary_cap,
+            self.strict_monetary_cap,
+            Some(Arc::clone(&self.charges)),
+        );
+        let physical: Arc<dyn LlmProvider> = match self.journal.as_ref() {
+            Some((journal, turn)) => Arc::new(
+                JournaledLlmProvider::new(
+                    Arc::clone(&self.inner),
+                    journal.clone(),
+                    turn.clone(),
+                    LifecyclePurpose::Compaction,
+                    provider,
+                    request.model.clone(),
+                )
+                .with_dispatch_id(dispatch_id),
+            ),
+            None => Arc::clone(&self.inner),
+        };
+        let result = tokio::select! {
+            biased;
+            _ = self.cancel.cancelled() => Err(ProviderError::Connection("compaction cancelled during dispatch".into())),
+            result = wcore_providers::retry::scope_configured_fallback_admitter(
+                admitter, wcore_providers::retry::scope_max_retries(0, physical.stream(request)),
+            ) => result,
+        };
+        let mut rx = match result {
+            Ok(rx) => rx,
+            Err(error) => {
+                let reservation = state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .current
+                    .take();
+                if let Some(reservation) = reservation {
+                    if error.was_not_attempted()
+                        || delivered_no_request_bytes(
+                            &wcore_providers::retry::provider_failure_code(&error),
+                        )
+                    {
+                        reservation.release().map_err(auxiliary_budget_error)?;
+                    } else {
+                        let (input, output, cost) = reservation.conservative_charge();
+                        reservation
+                            .settle(input, output, cost)
+                            .map_err(auxiliary_mutation_error)?;
+                    }
+                }
+                let failure = state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .failure
+                    .take();
+                if let Some(failure) = failure {
+                    return Err(match failure {
+                        ConfiguredFallbackAdmissionFailure::Budget(error) => {
+                            auxiliary_mutation_error(error)
+                        }
+                        ConfiguredFallbackAdmissionFailure::Unpriced { provider, model } => {
+                            auxiliary_budget_error(format!("unpriced fallback {provider}/{model}"))
+                        }
+                        ConfiguredFallbackAdmissionFailure::SpendGuard(refusal) => {
+                            auxiliary_budget_error(format!("fallback spend guard: {refusal:?}"))
+                        }
+                    });
+                }
+                return Err(error);
+            }
+        };
+        // The compactor already consumes the complete summary before using it.
+        // Buffer its events here so settlement precedes parsing, including an
+        // empty summary. A cancelled/partial stream retains the admitted bound.
+        let mut events = Vec::new();
+        let mut usage = None;
+        loop {
+            let event = tokio::select! {
+                _ = self.cancel.cancelled() => None,
+                event = rx.recv() => event,
+            };
+            let Some(event) = event else { break };
+            let terminal = matches!(event, LlmEvent::Done { .. } | LlmEvent::Error(_));
+            if let LlmEvent::Done { usage: actual, .. } = &event
+                && (actual.total_input_tokens() > 0 || actual.output_tokens > 0)
+            {
+                usage = Some(actual.clone());
+            }
+            events.push(event);
+            if terminal {
+                break;
+            }
+        }
+        let (reservation, provider, model) = {
+            let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+            (
+                state.current.take(),
+                state.current_provider.clone(),
+                state.current_model.clone(),
+            )
+        };
+        if let Some(mut reservation) = reservation {
+            let (input, output, cost) = match usage {
+                Some(usage) => {
+                    let cost = resolve_turn_cost(
+                        &provider,
+                        &model,
+                        usage.input_tokens,
+                        usage.output_tokens,
+                        usage.cache_read_tokens,
+                        usage.cache_creation_tokens,
+                        &self.compat,
+                    )
+                    .with_provider_reported(usage.reported_cost_usd);
+                    let input = usage.total_input_tokens();
+                    let output = usage.output_tokens;
+                    let usd = cost.usd;
+                    reservation.auxiliary = Some((
+                        Arc::clone(&self.charges),
+                        AuxiliaryCharge {
+                            provider,
+                            model,
+                            usage,
+                            cost,
+                        },
+                    ));
+                    (input, output, usd)
+                }
+                None => reservation.conservative_charge(),
+            };
+            reservation
+                .settle(input, output, cost)
+                .map_err(auxiliary_mutation_error)?;
+        } else if let Some(usage) = usage {
+            let cost = resolve_turn_cost(
+                &provider,
+                &model,
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.cache_read_tokens,
+                usage.cache_creation_tokens,
+                &self.compat,
+            )
+            .with_provider_reported(usage.reported_cost_usd);
+            self.charges
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(AuxiliaryCharge {
+                    provider,
+                    model,
+                    usage,
+                    cost,
+                });
+        }
+        let (tx, replay) = tokio::sync::mpsc::channel(events.len().max(1));
+        for event in events {
+            // The receiver is local and capacity equals the complete event set.
+            tx.try_send(event)
+                .expect("compaction replay capacity matches buffered events");
+        }
+        Ok(replay)
+    }
+}
+
+/// The configured fallback owns a replacement reservation, never a second grant.
+/// Conversation and compaction install the same admission callback.
+#[allow(clippy::too_many_arguments)]
+fn configured_fallback_admitter(
+    fallback_budget_state: &Arc<Mutex<ConfiguredFallbackBudgetState>>,
+    tracker_for_fallback: Option<Arc<parking_lot::Mutex<wcore_budget::BudgetTracker>>>,
+    authority_for_fallback: Option<SharedBudgetAuthorityCoordinator>,
+    execution_for_fallback: crate::budget::ExecutionBudgetView,
+    fallback_session_id: String,
+    fallback_dispatch_id: String,
+    fallback_compat: wcore_config::compat::ProviderCompat,
+    guard_for_fallback: Arc<crate::spend_guard::SpendGuard>,
+    reserved_input: u64,
+    reserved_output: u64,
+    monetary_cap_active: bool,
+    strict_monetary_cap: bool,
+    auxiliary_charges: Option<AuxiliaryCharges>,
+) -> wcore_providers::retry::ConfiguredFallbackAdmitter {
+    let fallback_state_for_admission = Arc::clone(fallback_budget_state);
+    Arc::new(move |_, _, next_provider, next_model, previous_attempted| {
+        let mut state = fallback_state_for_admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(reservation) = state.current.take() {
+            if previous_attempted {
+                let (input_tokens, output_tokens, cost_usd) = reservation.conservative_charge();
+                let settle_result = reservation.settle(input_tokens, output_tokens, cost_usd);
+                if let Err(error) = settle_result {
+                    state.failure = Some(ConfiguredFallbackAdmissionFailure::Budget(error));
+                    return Err(ProviderError::Api {
+                        status: 400,
+                        message: "configured fallback denied by budget".into(),
+                    });
+                }
+            } else {
+                if let Err(error) = reservation.release() {
+                    state.failure = Some(ConfiguredFallbackAdmissionFailure::Budget(
+                        ProviderBudgetMutationError::Authority(error),
+                    ));
+                    return Err(ProviderError::Api {
+                        status: 400,
+                        message: "configured fallback budget authority failed".into(),
+                    });
+                }
+            }
+        }
+
+        // #174 c3-c5 — the spend guard binds here, before any
+        // reservation is taken, because this is the one
+        // dispatch path that changes provider AND model below
+        // the guarded provider handle.
+        let next_profile =
+            crate::spend_guard::classify_model(next_provider, next_model, &fallback_compat);
+        if let Err(refusal) = guard_for_fallback.admit(&next_profile) {
+            state.failure = Some(ConfiguredFallbackAdmissionFailure::SpendGuard(refusal));
+            return Err(ProviderError::NotAttempted {
+                reason: "configured fallback refused by the spend guard".to_string(),
+                failure_code: Some("spend_guard_refused".to_string()),
+            });
+        }
+        let next_cost = resolve_conservative_reservation_cost(
+            next_provider,
+            next_model,
+            reserved_input,
+            reserved_output,
+            &fallback_compat,
+        );
+        if !next_cost.bounded && monetary_cap_active && strict_monetary_cap {
+            state.failure = Some(ConfiguredFallbackAdmissionFailure::Unpriced {
+                provider: next_provider.to_string(),
+                model: next_model.to_string(),
+            });
+            return Err(ProviderError::Api {
+                status: 400,
+                message: "configured fallback pricing is unavailable".into(),
+            });
+        }
+        let next_cost_usd = next_cost.usd;
+        let next_reservation = if let Some(authority) = authority_for_fallback.as_ref() {
+            match authority.lock().reserve_provider_dispatch(
+                &fallback_dispatch_id,
+                &fallback_session_id,
+                reserved_input,
+                reserved_output,
+                next_cost_usd,
+            ) {
+                Ok(Ok(reservation)) => Some(ProviderBudgetReservation::new(
+                    ProviderBudgetOwner::Durable {
+                        authority: Arc::clone(authority),
+                        dispatch_id: fallback_dispatch_id.clone(),
+                    },
+                    execution_for_fallback.clone(),
+                    reservation,
+                    reserved_input,
+                    reserved_output,
+                    next_cost_usd,
+                )),
+                Ok(Err(error)) => {
+                    state.failure = Some(ConfiguredFallbackAdmissionFailure::Budget(
+                        ProviderBudgetMutationError::Budget(error),
+                    ));
+                    return Err(ProviderError::Api {
+                        status: 400,
+                        message: "configured fallback denied by budget".into(),
+                    });
+                }
+                Err(error) => {
+                    state.failure = Some(ConfiguredFallbackAdmissionFailure::Budget(
+                        ProviderBudgetMutationError::Authority(error),
+                    ));
+                    return Err(ProviderError::Api {
+                        status: 400,
+                        message: "configured fallback budget authority failed".into(),
+                    });
+                }
+            }
+        } else if let Some(tracker) = tracker_for_fallback.clone() {
+            match tracker.lock().reserve_turn(
+                &fallback_session_id,
+                reserved_input,
+                reserved_output,
+                next_cost_usd,
+            ) {
+                Ok(reservation) => Some(ProviderBudgetReservation::new(
+                    ProviderBudgetOwner::Legacy(Arc::clone(&tracker)),
+                    execution_for_fallback.clone(),
+                    reservation,
+                    reserved_input,
+                    reserved_output,
+                    next_cost_usd,
+                )),
+                Err(error) => {
+                    state.failure = Some(ConfiguredFallbackAdmissionFailure::Budget(
+                        ProviderBudgetMutationError::Budget(error),
+                    ));
+                    return Err(ProviderError::Api {
+                        status: 400,
+                        message: "configured fallback denied by budget".into(),
+                    });
+                }
+            }
+        } else {
+            None
+        };
+        state.current = next_reservation.map(|reservation| match auxiliary_charges.as_ref() {
+            Some(charges) => reservation.with_auxiliary_charge(
+                Arc::clone(charges),
+                next_provider.to_string(),
+                next_model.to_string(),
+            ),
+            None => reservation,
+        });
+        state.current_provider = next_provider.to_string();
+        state.current_model = next_model.to_string();
+        Ok(wcore_providers::retry::ConfiguredFallbackAdmission {
+            estimated_microcents: next_cost.bounded.then(|| {
+                (next_cost.usd * wcore_types::crucible::MICROCENTS_PER_USD).round() as u64
+            }),
+        })
+    })
 }
 
 /// W7 (v0.6.3) — resolve the USD cost of one LLM turn from the
@@ -4795,6 +5295,7 @@ pub struct AgentEngine {
     /// `decay_handles_len()` exposes stays accurate. `Drop` aborts every
     /// handle so a recycled session leaks no background task.
     background_handles: Vec<tokio::task::JoinHandle<()>>,
+    bootstrap_cleanup: Option<Arc<crate::bootstrap_cleanup::BootstrapCleanup>>,
     /// Dynamic Workflows B3 — cached `observability.workflow_detection_enabled`
     /// gate. When `false` (the default), the per-turn `WorkflowCandidate`
     /// heuristic is not even computed at the intent-telemetry seam, so a
@@ -4966,17 +5467,16 @@ pub(crate) fn default_recovery_request_protection()
 impl Drop for AgentEngine {
     fn drop(&mut self) {
         self.cancel_token.cancel();
-        // M3.2 — abort every background decay scheduler task on shutdown.
-        // `JoinHandle::abort` is safe on already-finished tasks (no-op),
-        // so we don't need to inspect state.
-        for h in self.decay_handles.drain(..) {
-            h.abort();
-        }
-        // AUDIT B-2 / D-5 — abort background reliability tasks (the
-        // approval-manager TTL reaper) so a recycled session leaks no
-        // task.
-        for h in self.background_handles.drain(..) {
-            h.abort();
+        if let Some(cleanup) = self.bootstrap_cleanup.clone() {
+            self.retain_shutdown_tasks(&cleanup);
+        } else {
+            for handle in self
+                .decay_handles
+                .drain(..)
+                .chain(self.background_handles.drain(..))
+            {
+                handle.abort();
+            }
         }
     }
 }
@@ -5306,8 +5806,9 @@ impl AgentEngine {
             skills_lifecycle: skills_lifecycle_effective,
             // #170 — the advertised memory opt-out, cached for `fire_auto_memorize`.
             memory_enabled,
-            // F-092 (W7-N): cache online_evolution gate at construction.
-            online_evolution: config.observability.online_evolution,
+            // System-prompt evolution is unavailable until selection, persistence,
+            // cost and consumption are verified. Preserve the config as inert.
+            online_evolution: false,
             recent_turn_traces: VecDeque::new(),
             drafted_skill_signatures: HashSet::new(),
             file_watcher: Arc::new(std::sync::OnceLock::new()),
@@ -5356,6 +5857,7 @@ impl AgentEngine {
             // AUDIT B-2 / D-5 — reaper handle storage; populated by
             // `set_approval_manager`, aborted by `Drop`.
             background_handles: Vec::new(),
+            bootstrap_cleanup: None,
             // Dynamic Workflows B3 — cache the off-by-default detection
             // gate at construction; mirrors `skills_lifecycle` /
             // `online_evolution` above.
@@ -5616,8 +6118,9 @@ impl AgentEngine {
             skills_lifecycle: skills_lifecycle_effective,
             // #170 — the advertised memory opt-out, cached for `fire_auto_memorize`.
             memory_enabled,
-            // F-092 (W7-N): cache online_evolution gate at construction.
-            online_evolution: config.observability.online_evolution,
+            // System-prompt evolution is unavailable until selection, persistence,
+            // cost and consumption are verified. Preserve the config as inert.
+            online_evolution: false,
             recent_turn_traces: VecDeque::new(),
             drafted_skill_signatures: HashSet::new(),
             file_watcher: Arc::new(std::sync::OnceLock::new()),
@@ -5666,6 +6169,7 @@ impl AgentEngine {
             // AUDIT B-2 / D-5 — reaper handle storage; populated by
             // `set_approval_manager`, aborted by `Drop`.
             background_handles: Vec::new(),
+            bootstrap_cleanup: None,
             // Dynamic Workflows B3 — cache the off-by-default detection
             // gate from the resumed session's config (mirrors
             // `new_with_provider`).
@@ -6394,6 +6898,16 @@ impl AgentEngine {
         Ok(())
     }
 
+    /// Exercise the production child inheritance seam with real fixture engines.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[doc(hidden)]
+    pub fn inherit_test_budget_authority(
+        &mut self,
+        authority: SharedBudgetAuthorityCoordinator,
+    ) -> anyhow::Result<()> {
+        self.inherit_budget_authority(authority, None)
+    }
+
     fn durable_budget_authority(
         &self,
     ) -> Result<Option<&SharedBudgetAuthorityCoordinator>, AgentError> {
@@ -6900,10 +7414,43 @@ impl AgentEngine {
         &self.memory_api
     }
 
-    /// M3.2 — install a background-task handle on the engine (currently
-    /// used for the decay scheduler spawned by `AgentBootstrap::build`
-    /// when `cfg.memory.enabled = true`). `Drop` aborts every handle on
-    /// engine shutdown so no task is leaked across sessions or tests.
+    /// Bind the host-owned cleanup context before later fallible setup steps.
+    pub(crate) fn set_bootstrap_cleanup(
+        &mut self,
+        cleanup: Option<Arc<crate::bootstrap_cleanup::BootstrapCleanup>>,
+    ) {
+        self.bootstrap_cleanup = cleanup;
+    }
+
+    fn retain_shutdown_tasks(&mut self, cleanup: &crate::bootstrap_cleanup::BootstrapCleanup) {
+        cleanup.retain_tasks(
+            self.decay_handles
+                .drain(..)
+                .chain(self.background_handles.drain(..)),
+        );
+        if let Some(runtime) = self.session_runtime.as_mut() {
+            cleanup.retain_tasks(runtime.take_cleanup_tasks());
+        }
+    }
+
+    /// After admitted turns have joined, retain background handles for an
+    /// explicit, cancellation-safe cleanup wait outside the engine lock.
+    pub fn prepare_shutdown(&mut self) -> Arc<crate::bootstrap_cleanup::BootstrapCleanup> {
+        self.cancel_token.cancel();
+        let cleanup = self
+            .bootstrap_cleanup
+            .get_or_insert_with(|| {
+                let cleanup = Arc::new(crate::bootstrap_cleanup::BootstrapCleanup::default());
+                cleanup.begin();
+                cleanup
+            })
+            .clone();
+        self.retain_shutdown_tasks(&cleanup);
+        cleanup
+    }
+
+    /// Register a session-owned scheduler. Explicit close retains and joins
+    /// it; engine Drop requests cancellation as the fallback.
     pub fn push_decay_handle(&mut self, h: tokio::task::JoinHandle<()>) {
         self.decay_handles.push(h);
     }
@@ -8120,40 +8667,31 @@ impl AgentEngine {
             return None;
         }
         Some(format!(
-            "Skill hint: based on what has worked before, the \"{}\" skill may help with this request — use it only if genuinely relevant.",
+            "Experimental skill hint: the \"{}\" skill may help with this request — use it only if genuinely relevant.",
             skill.name
         ))
     }
 
-    /// v0.8.1 U1 — credit the turn's `SkillRouter` pick (if any) with a
-    /// success/failure observation based on the terminal `StopReason`.
-    /// `EndTurn` and `ToolUse` count as success; anything else (errors,
-    /// `MaxTurns`, refusals) counts as failure. `take()`-clears the
-    /// stashed pick so a subsequent `run()` invocation starts with a
-    /// clean slot. No-op when no router is installed OR no pick was
-    /// credited at the top of the turn.
+    /// Attribute only actual invocation failures. A normal completion has no
+    /// independent task verdict and therefore cannot earn success credit.
     fn observe_skill_router_outcome(&mut self, stop_reason: StopReason) {
         if let Some(picked) = self.current_skill_router_pick.take()
             && let Some(router) = self.skill_router.as_ref()
+            && let Some(failed) = self
+                .skill_catalog
+                .as_ref()
+                .and_then(|c| c.invocation_failed(&picked))
         {
-            let outcome = match stop_reason {
-                StopReason::EndTurn | StopReason::ToolUse => wcore_dispatch::TaskOutcome::Success,
-                _ => wcore_dispatch::TaskOutcome::Failure,
+            let outcome = if failed {
+                wcore_dispatch::TaskOutcome::Failure
+            } else {
+                wcore_dispatch::TaskOutcome::Neutral
             };
-            // `BetaScorer::record` is cheap (HashMap update); the std
-            // Mutex is uncontested between `choose` (top of run) and
-            // `observe` (end of run) on the same task, so locking here
-            // is fine.
             if let Ok(mut guard) = router.lock() {
                 use wcore_dispatch::DecisionRouter;
                 guard.observe(&picked, outcome);
-                tracing::debug!(
-                    target: "wcore_agent::engine",
-                    skill = %picked,
-                    ?stop_reason,
-                    ?outcome,
-                    "skill_router: observed turn outcome"
-                );
+                tracing::debug!(target: "wcore_agent::engine", skill = %picked, ?stop_reason, ?outcome,
+                    "skill invocation observed; task success remains unverified");
             }
         }
     }
@@ -13383,6 +13921,13 @@ impl AgentEngine {
                 det.observe(user_input);
             }
         }
+        if !resume_from_checkpoint {
+            self.current_skill_router_pick = None;
+            if let Some(catalog) = &self.skill_catalog {
+                catalog.begin_turn();
+                catalog.refresh_local().await;
+            }
+        }
         // v0.8.1 U1 — per-turn `SkillRouter` choose. Picks one skill
         // from the resolved catalog using a Thompson Beta scorer
         // seeded from GEPA winners + session-start prioritizer ranking
@@ -13396,7 +13941,8 @@ impl AgentEngine {
             && let Some(router) = self.skill_router.as_ref()
             && let Some(catalog) = self.skill_catalog.as_ref()
         {
-            let candidates: Vec<String> = catalog.visible().into_iter().map(|r| r.name).collect();
+            let candidates =
+                wcore_skills::SkillRouter::relevant_candidates(user_input, &catalog.visible());
             if !candidates.is_empty() {
                 // `choose` lives on the `DecisionRouter` trait, in the
                 // sibling `wcore-dispatch` crate. Importing it inline
@@ -14119,6 +14665,23 @@ impl AgentEngine {
                     // message it lands on must not become a prompt-cache write
                     // point — see the `mark_cache_boundaries` call below.
                     let mut transient_tail = false;
+                    if let Some(catalog) = &self.skill_catalog
+                        && catalog.inventory_changed()
+                    {
+                        let listing = crate::context::format_skills_section(
+                            &catalog.visible(),
+                            self.known_context_window(),
+                        );
+                        let update = format!(
+                            "Current skill inventory supersedes the initial listing. Removed or revoked skills are unavailable. Use Skill search for entries omitted by the listing budget.\n{listing}"
+                        );
+                        if let Some(last) =
+                            Self::transient_carrier(&mut request.messages, &self.compat)
+                        {
+                            Self::attach_transient_block(last, update);
+                            transient_tail = true;
+                        }
+                    }
                     if let Some(hint) = skill_hint
                         && let Some(last) =
                             Self::transient_carrier(&mut request.messages, &self.compat)
@@ -15125,165 +15688,21 @@ impl AgentEngine {
                         reservation_provider.to_string(),
                         effective_model.clone(),
                     )));
-                let fallback_state_for_admission = Arc::clone(&fallback_budget_state);
-                let tracker_for_fallback = self.budget_tracker.clone();
-                let authority_for_fallback = durable_authority.clone();
-                let execution_for_fallback = run_budget.clone();
-                let fallback_session_id = reservation_session_id.clone();
-                let fallback_dispatch_id = budget_dispatch_id.clone();
-                let fallback_compat = self.compat.clone();
-                let guard_for_fallback = Arc::clone(&self.spend_guard);
-                let fallback_admitter: wcore_providers::retry::ConfiguredFallbackAdmitter =
-                    Arc::new(move |_, _, next_provider, next_model, previous_attempted| {
-                        let mut state = fallback_state_for_admission
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        if let Some(reservation) = state.current.take() {
-                            if previous_attempted {
-                                let (input_tokens, output_tokens, cost_usd) =
-                                    reservation.conservative_charge();
-                                let settle_result =
-                                    reservation.settle(input_tokens, output_tokens, cost_usd);
-                                if let Err(error) = settle_result {
-                                    state.failure =
-                                        Some(ConfiguredFallbackAdmissionFailure::Budget(error));
-                                    return Err(ProviderError::Api {
-                                        status: 400,
-                                        message: "configured fallback denied by budget".into(),
-                                    });
-                                }
-                            } else {
-                                if let Err(error) = reservation.release() {
-                                    state.failure =
-                                        Some(ConfiguredFallbackAdmissionFailure::Budget(
-                                            ProviderBudgetMutationError::Authority(error),
-                                        ));
-                                    return Err(ProviderError::Api {
-                                        status: 400,
-                                        message: "configured fallback budget authority failed"
-                                            .into(),
-                                    });
-                                }
-                            }
-                        }
-
-                        // #174 c3-c5 — the spend guard binds here, before any
-                        // reservation is taken, because this is the one
-                        // dispatch path that changes provider AND model below
-                        // the guarded provider handle.
-                        let next_profile = crate::spend_guard::classify_model(
-                            next_provider,
-                            next_model,
-                            &fallback_compat,
-                        );
-                        if let Err(refusal) = guard_for_fallback.admit(&next_profile) {
-                            state.failure =
-                                Some(ConfiguredFallbackAdmissionFailure::SpendGuard(refusal));
-                            return Err(ProviderError::NotAttempted {
-                                reason: "configured fallback refused by the spend guard"
-                                    .to_string(),
-                                failure_code: Some("spend_guard_refused".to_string()),
-                            });
-                        }
-                        let next_cost = resolve_conservative_reservation_cost(
-                            next_provider,
-                            next_model,
-                            reserved_input,
-                            reserved_output,
-                            &fallback_compat,
-                        );
-                        if !next_cost.bounded && monetary_cap_active && strict_monetary_cap {
-                            state.failure = Some(ConfiguredFallbackAdmissionFailure::Unpriced {
-                                provider: next_provider.to_string(),
-                                model: next_model.to_string(),
-                            });
-                            return Err(ProviderError::Api {
-                                status: 400,
-                                message: "configured fallback pricing is unavailable".into(),
-                            });
-                        }
-                        let next_cost_usd = next_cost.usd;
-                        let next_reservation =
-                            if let Some(authority) = authority_for_fallback.as_ref() {
-                                match authority.lock().reserve_provider_dispatch(
-                                    &fallback_dispatch_id,
-                                    &fallback_session_id,
-                                    reserved_input,
-                                    reserved_output,
-                                    next_cost_usd,
-                                ) {
-                                    Ok(Ok(reservation)) => Some(ProviderBudgetReservation::new(
-                                        ProviderBudgetOwner::Durable {
-                                            authority: Arc::clone(authority),
-                                            dispatch_id: fallback_dispatch_id.clone(),
-                                        },
-                                        execution_for_fallback.clone(),
-                                        reservation,
-                                        reserved_input,
-                                        reserved_output,
-                                        next_cost_usd,
-                                    )),
-                                    Ok(Err(error)) => {
-                                        state.failure =
-                                            Some(ConfiguredFallbackAdmissionFailure::Budget(
-                                                ProviderBudgetMutationError::Budget(error),
-                                            ));
-                                        return Err(ProviderError::Api {
-                                            status: 400,
-                                            message: "configured fallback denied by budget".into(),
-                                        });
-                                    }
-                                    Err(error) => {
-                                        state.failure =
-                                            Some(ConfiguredFallbackAdmissionFailure::Budget(
-                                                ProviderBudgetMutationError::Authority(error),
-                                            ));
-                                        return Err(ProviderError::Api {
-                                            status: 400,
-                                            message: "configured fallback budget authority failed"
-                                                .into(),
-                                        });
-                                    }
-                                }
-                            } else if let Some(tracker) = tracker_for_fallback.clone() {
-                                match tracker.lock().reserve_turn(
-                                    &fallback_session_id,
-                                    reserved_input,
-                                    reserved_output,
-                                    next_cost_usd,
-                                ) {
-                                    Ok(reservation) => Some(ProviderBudgetReservation::new(
-                                        ProviderBudgetOwner::Legacy(Arc::clone(&tracker)),
-                                        execution_for_fallback.clone(),
-                                        reservation,
-                                        reserved_input,
-                                        reserved_output,
-                                        next_cost_usd,
-                                    )),
-                                    Err(error) => {
-                                        state.failure =
-                                            Some(ConfiguredFallbackAdmissionFailure::Budget(
-                                                ProviderBudgetMutationError::Budget(error),
-                                            ));
-                                        return Err(ProviderError::Api {
-                                            status: 400,
-                                            message: "configured fallback denied by budget".into(),
-                                        });
-                                    }
-                                }
-                            } else {
-                                None
-                            };
-                        state.current = next_reservation;
-                        state.current_provider = next_provider.to_string();
-                        state.current_model = next_model.to_string();
-                        Ok(wcore_providers::retry::ConfiguredFallbackAdmission {
-                            estimated_microcents: next_cost.bounded.then(|| {
-                                (next_cost.usd * wcore_types::crucible::MICROCENTS_PER_USD).round()
-                                    as u64
-                            }),
-                        })
-                    });
+                let fallback_admitter = configured_fallback_admitter(
+                    &fallback_budget_state,
+                    self.budget_tracker.clone(),
+                    durable_authority.clone(),
+                    run_budget.clone(),
+                    reservation_session_id.clone(),
+                    budget_dispatch_id.clone(),
+                    self.compat.clone(),
+                    Arc::clone(&self.spend_guard),
+                    reserved_input,
+                    reserved_output,
+                    monetary_cap_active,
+                    strict_monetary_cap,
+                    None,
+                );
 
                 // P1 Bug#3 — `stream()` can surface a *retryable*
                 // `ProviderError::Connection` (a connection reset/drop while
@@ -15885,7 +16304,9 @@ impl AgentEngine {
                             // does not delete reasoning, it captures it and
                             // renders a collapsed `Thought:` block. Only the
                             // durable copy is filtered (#908).
-                            self.output.emit_text_delta(&text, &self.current_msg_id);
+                            self.output
+                                .emit_text_delta_async(&text, &self.current_msg_id)
+                                .await;
                             raw_text_chars += text.chars().count();
                             assistant_text.push_str(&assistant_reasoning.process(&text));
                         }
@@ -17629,17 +18050,15 @@ impl AgentEngine {
             // to do multi-agent), run an honest single-node Direct turn. This
             // is behaviour-preserving — the net tool/answer result is already
             // Direct — but removes the fake-orchestration spans. The silent
-            // classifier heuristic is never coerced, so its (real) Sequential
-            // / Parallel shapes are untouched. ForgeFlows-Live Phase 3
+            // classifier shapes obey the same single-dispatch boundary.
+            // ForgeFlows-Live Phase 3
             // repoints these decisions at the real `WorkflowRunner` spawner
             // and retires this coercion. (See
             // `.planning/2026-06-13-FORGEFLOWS-LIVE-DESIGN.md`.)
             let graph_config = if decision_is_unwired_template(&template_decision) {
-                tracing::debug!(
-                    template = ?template_decision.template,
-                    source = ?template_decision.source,
-                    "rank5: non-Direct per-turn template is not wired to a real \
-                     multi-agent backend; executing an honest Direct turn"
+                self.output.emit_info(
+                    "Independent-agent per-turn strategies are unavailable; \
+                     executing one Direct tool batch. No independent agents were started.",
                 );
                 GraphConfig::direct("main", serde_json::json!({}))
             } else {
@@ -19448,24 +19867,36 @@ impl AgentEngine {
         let should_compact =
             smart_drove || self.should_autocompact_now(self.compact_state.last_real_input_tokens);
         if should_compact && !self.compact_state.is_circuit_broken(&self.compact_config) {
-            let provider: Arc<dyn LlmProvider> = match (
+            let journal = match (
                 self.session_journal.as_ref(),
                 self.active_journal_turn_id.as_ref(),
             ) {
-                (Some(journal), Some(turn_id)) => Arc::new(JournaledLlmProvider::new(
-                    Arc::clone(&self.provider),
-                    journal.clone(),
-                    turn_id.clone(),
-                    LifecyclePurpose::Compaction,
-                    self.compat.provider_type(),
-                    self.model.clone(),
-                )),
+                (Some(journal), Some(turn)) => Some((journal.clone(), turn.clone())),
                 (Some(_), None) => {
                     return Err(AgentError::SessionAuthority(
-                        "compaction has journal authority but no active durable turn".to_string(),
+                        "compaction has journal authority but no active durable turn".into(),
                     ));
                 }
-                (None, _) => Arc::clone(&self.provider),
+                (None, _) => None,
+            };
+            let charges: AuxiliaryCharges = Arc::new(Mutex::new(Vec::new()));
+            let provider = BudgetedCompactionProvider {
+                inner: Arc::clone(&self.provider),
+                journal,
+                authority: self.budget_authority.clone(),
+                tracker: self.budget_tracker.clone(),
+                execution: self.current_run_budget()?,
+                session_id: self.budget_session_id(),
+                compat: self.compat.clone(),
+                guard: Arc::clone(&self.spend_guard),
+                strict_monetary_cap: self.config.execution_policy.is_managed()
+                    || self.config.budget.max_cost_usd.is_some()
+                    || self.config.budget.max_daily_cost_usd.is_some()
+                    || self.config.session_cap.as_ref().is_some_and(|cap| {
+                        cap.max_cost_usd.is_some() || cap.max_daily_cost_usd.is_some()
+                    }),
+                charges: Arc::clone(&charges),
+                cancel: self.cancel_token.clone(),
             };
             // AUDIT A4 — `run_compaction` runs at the TOP of the turn
             // loop, AFTER `push_user_turn` appended the user's live
@@ -19516,7 +19947,7 @@ impl AgentEngine {
                 }),
             };
             let result = auto::autocompact(
-                provider.as_ref(),
+                &provider,
                 &self.messages,
                 &self.model,
                 &self.compact_config,
@@ -19524,6 +19955,47 @@ impl AgentEngine {
                 &compact_provenance,
             )
             .await;
+            // Each physical attempt is charged before summary validation. Drain
+            // once on both success and failure, using its actual provider/model.
+            let charged = std::mem::take(&mut *charges.lock().unwrap_or_else(|e| e.into_inner()));
+            for charge in charged {
+                for total in [&mut self.total_usage, &mut self.run_usage] {
+                    total.input_tokens =
+                        total.input_tokens.saturating_add(charge.usage.input_tokens);
+                    total.output_tokens = total
+                        .output_tokens
+                        .saturating_add(charge.usage.output_tokens);
+                    total.cache_read_tokens = total
+                        .cache_read_tokens
+                        .saturating_add(charge.usage.cache_read_tokens);
+                    total.cache_creation_tokens = total
+                        .cache_creation_tokens
+                        .saturating_add(charge.usage.cache_creation_tokens);
+                }
+                fold_reported_cost(
+                    &mut self.total_usage.reported_cost_usd,
+                    &mut self.total_reported_cost_complete,
+                    charge.usage.reported_cost_usd,
+                );
+                fold_reported_cost(
+                    &mut self.run_usage.reported_cost_usd,
+                    &mut self.run_reported_cost_complete,
+                    charge.usage.reported_cost_usd,
+                );
+                if let Some(state) = &self.session_state {
+                    state.add_token_usage(
+                        charge.usage.total_input_tokens(),
+                        charge.usage.output_tokens,
+                    );
+                }
+                self.per_turn_costs.push(wcore_protocol::events::TurnCost {
+                    turn: self.run_turns,
+                    model: charge.model,
+                    provider: charge.provider,
+                    cost_usd: charge.cost.reportable_usd(),
+                    priced: charge.cost.priced,
+                });
+            }
             // Restore the live turn regardless of the compaction
             // outcome — on failure the conversation must be left intact.
             match result {
@@ -19665,6 +20137,14 @@ impl AgentEngine {
                         result_messages_summarized,
                         None,
                     );
+                }
+                Err(error @ auto::CompactError::Provider(ProviderError::NotAttempted { .. }))
+                    if matches!(&error, auto::CompactError::Provider(ProviderError::NotAttempted { failure_code: Some(code), .. }) if code == "compaction_budget_refused") =>
+                {
+                    if let Some(turn) = live_user_turn {
+                        self.messages.push(turn);
+                    }
+                    return Err(AgentError::ApiError(error.to_string()));
                 }
                 Err(auto::CompactError::CircuitBroken { failures }) => {
                     // Already tripped; logged at circuit-breaker level.
@@ -20028,7 +20508,7 @@ impl AgentEngine {
             return;
         }
 
-        use wcore_memory::v2_types::{AccessToken, Partition, Query, Tier};
+        use wcore_memory::v2_types::{AccessToken, Query, Tier};
         // Clone the Arc so the search awaits don't hold a borrow of `self`
         // across the `self.messages.push` below.
         let memory_api = self.memory_api.clone();
@@ -20055,19 +20535,17 @@ impl AgentEngine {
             return;
         }
 
-        let mut previews: Vec<String> = Vec::new();
-        let mut activated: Vec<wcore_memory::ActivatedItem> = Vec::new();
+        let mut recalled = Vec::new();
         let mut exclusions: Vec<wcore_memory::RecallExclusion> = Vec::new();
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         for tier in [Tier::Project, Tier::Global] {
             let q = Query {
                 text: query.to_string(),
                 tier,
                 partition: None,
                 entities: None,
-                limit_per_modality: 5,
+                limit_per_modality: 6,
                 kg_depth: 1,
-                token_budget: None,
+                token_budget: Some(1024),
             };
             // `search_with_provenance` returns the SAME hits `search` does
             // (both run the episodic fusion then append the semantic-fact
@@ -20081,20 +20559,7 @@ impl AgentEngine {
             {
                 Ok((hits, report)) => {
                     exclusions.extend(report.exclusions);
-                    for h in hits {
-                        // Only durable facts are worth pre-injecting; episodic
-                        // previews are noisier and the model can still reach
-                        // them via `session_search` on demand.
-                        if h.partition == Partition::Semantic && seen.insert(h.preview.clone()) {
-                            activated.push(wcore_memory::ActivatedItem {
-                                id: h.id.clone(),
-                                partition: h.partition,
-                                tier: h.tier,
-                                preview: h.preview.clone(),
-                            });
-                            previews.push(h.preview);
-                        }
-                    }
+                    recalled.extend(hits);
                 }
                 Err(e) => tracing::debug!(
                     target: "wcore_agent::memory",
@@ -20104,26 +20569,8 @@ impl AgentEngine {
                 ),
             }
         }
-        if previews.is_empty() {
-            // Record the empty activation before returning. "This turn
-            // injected nothing, and here is what was excluded" is a different
-            // and more useful answer than the silence this path used to give,
-            // and it is the answer a user needs when a privacy scope is why.
-            if let Some(log) = activation.as_ref() {
-                log.record(wcore_memory::RecallActivation {
-                    at: chrono::Utc::now().timestamp(),
-                    query: query.to_string(),
-                    enabled: true,
-                    injected: Vec::new(),
-                    excluded: exclusions,
-                });
-            }
-            return;
-        }
-        // Cap to keep the injection tight; top hits are first (search returns
-        // facts ranked by embedding similarity to the query).
-        previews.truncate(6);
-        activated.truncate(6);
+        let (block, activated) = crate::recall_facts::render(recalled);
+        let count = activated.len();
         if let Some(log) = activation.as_ref() {
             log.record(wcore_memory::RecallActivation {
                 at: chrono::Utc::now().timestamp(),
@@ -20133,23 +20580,12 @@ impl AgentEngine {
                 excluded: exclusions,
             });
         }
-        // HIGH-3 / F1: recalled previews are untrusted memory content. Defang any
-        // host trust-tag delimiters so a stored fact can't forge or escape this
-        // <system-reminder> block. Same helper as the plugin-hook envelope (DRY).
-        let body = previews
-            .iter()
-            .map(|p| format!("- {}", wcore_config::hooks::neutralize_trust_delimiters(p)))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let block = format!(
-            "<system-reminder>\nRecalled from your durable cross-session memory \
-             (facts you stored in earlier sessions), potentially relevant to the \
-             user's message:\n{body}\nUse these if they answer the user's question; \
-             ignore any that are irrelevant.\n</system-reminder>"
-        );
+        if block.is_empty() {
+            return;
+        }
         tracing::debug!(
             target: "wcore_agent::memory",
-            facts = previews.len(),
+            facts = count,
             "session-start recall: injected durable facts into first turn"
         );
         self.messages.push(Message::now(
@@ -22422,6 +22858,7 @@ mod set_config_tests {
             // AUDIT B-2 / D-5 — reaper handle storage; populated by
             // `set_approval_manager`, aborted by `Drop`.
             background_handles: Vec::new(),
+            bootstrap_cleanup: None,
             // Dynamic Workflows B3 — detection gate (default off).
             workflow_detection_enabled: false,
             // Dynamic Workflows B6 — live confirm gate (default off) + a
@@ -24516,6 +24953,7 @@ mod phase6_tests {
             // AUDIT B-2 / D-5 — reaper handle storage; populated by
             // `set_approval_manager`, aborted by `Drop`.
             background_handles: Vec::new(),
+            bootstrap_cleanup: None,
             // Dynamic Workflows B3 — detection gate (default off).
             workflow_detection_enabled: false,
             // Dynamic Workflows B6 — live confirm gate (default off) + a
@@ -24848,6 +25286,7 @@ mod compact_tests {
             // AUDIT B-2 / D-5 — reaper handle storage; populated by
             // `set_approval_manager`, aborted by `Drop`.
             background_handles: Vec::new(),
+            bootstrap_cleanup: None,
             // Dynamic Workflows B3 — detection gate (default off).
             workflow_detection_enabled: false,
             // Dynamic Workflows B6 — live confirm gate (default off) + a
@@ -27529,6 +27968,7 @@ mod plan_mode_tests {
             // AUDIT B-2 / D-5 — reaper handle storage; populated by
             // `set_approval_manager`, aborted by `Drop`.
             background_handles: Vec::new(),
+            bootstrap_cleanup: None,
             // Dynamic Workflows B3 — detection gate (default off).
             workflow_detection_enabled: false,
             // Dynamic Workflows B6 — live confirm gate (default off) + a
@@ -27994,6 +28434,7 @@ mod hook_integration_tests {
             // AUDIT B-2 / D-5 — reaper handle storage; populated by
             // `set_approval_manager`, aborted by `Drop`.
             background_handles: Vec::new(),
+            bootstrap_cleanup: None,
             // Dynamic Workflows B3 — detection gate (default off).
             workflow_detection_enabled: false,
             // Dynamic Workflows B6 — live confirm gate (default off) + a
@@ -29170,6 +29611,7 @@ mod approval_bridge_engine_tests {
             // AUDIT B-2 / D-5 — reaper handle storage; populated by
             // `set_approval_manager`, aborted by `Drop`.
             background_handles: Vec::new(),
+            bootstrap_cleanup: None,
             // Dynamic Workflows B3 — detection gate (default off).
             workflow_detection_enabled: false,
             // Dynamic Workflows B6 — live confirm gate (default off) + a
@@ -30782,6 +31224,7 @@ mod user_model_writeback_tests {
             // AUDIT B-2 / D-5 — reaper handle storage; populated by
             // `set_approval_manager`, aborted by `Drop`.
             background_handles: Vec::new(),
+            bootstrap_cleanup: None,
             // Dynamic Workflows B3 — detection gate (default off).
             workflow_detection_enabled: false,
             // Dynamic Workflows B6 — live confirm gate (default off) + a
@@ -30956,8 +31399,7 @@ mod user_model_writeback_tests {
     // they exercise the `observe_skill_router_outcome` helper plus
     // the choose primitive the run loop wraps.
 
-    use wcore_dispatch::DecisionRouter as _;
-    use wcore_skills::{SkillRouter, SkillRouterInput};
+    use wcore_skills::SkillRouter;
     use wcore_types::message::StopReason;
 
     /// Bare engine (no router) must short-circuit
@@ -30981,109 +31423,70 @@ mod user_model_writeback_tests {
         );
     }
 
-    /// With a router installed, a Success observation on the stashed
-    /// pick biases subsequent `choose` calls toward that arm. Proves
-    /// the helper actually called `observe(..., Success)` — without
-    /// reaching into private scorer state.
     #[test]
-    fn observe_endturn_biases_router_toward_picked_arm() {
-        let mut engine = make_engine();
-        // Use a deterministic RNG seed so the post-bias `choose`
-        // calls are reproducible.
-        engine.set_skill_router(SkillRouter::with_seed(2026));
-        engine.current_skill_router_pick = Some("alpha".into());
-
-        // Fire one Success on "alpha" via the helper. Then fire a
-        // few more directly through the trait to amplify the bias
-        // past the cold-start prior of beta (no observations).
-        engine.observe_skill_router_outcome(StopReason::EndTurn);
-        assert!(
-            engine.current_skill_router_pick.is_none(),
-            "pick must be cleared after observe"
-        );
-        {
-            let router = engine.skill_router().expect("router installed");
-            let mut guard = router.lock().unwrap();
-            for _ in 0..30 {
-                guard.observe(&"alpha".to_string(), wcore_dispatch::TaskOutcome::Success);
-                guard.observe(&"beta".to_string(), wcore_dispatch::TaskOutcome::Failure);
-            }
-        }
-
-        // Sample the posterior. After heavy success on alpha and
-        // failure on beta, alpha must dominate over many trials.
-        let candidates = vec!["alpha".to_string(), "beta".to_string()];
-        let mut alpha_picks = 0;
-        for _ in 0..200 {
-            let router = engine.skill_router().expect("router installed");
-            let mut guard = router.lock().unwrap();
-            let pick = guard
-                .choose(SkillRouterInput {
-                    task: "any task",
-                    candidates: &candidates,
-                })
-                .expect("non-empty candidates");
-            if pick == "alpha" {
-                alpha_picks += 1;
-            }
-        }
-        assert!(
-            alpha_picks > 150,
-            "alpha should dominate after 30 success / 30 failure: got {alpha_picks}/200"
-        );
-    }
-
-    /// `StopReason::MaxTurns` is a failure verdict — observe must
-    /// shift the Beta posterior AWAY from the picked arm, not toward
-    /// it. We verify by stashing a pick on a router that already has
-    /// strong success priors on a competitor, then firing MaxTurns
-    /// observations and seeing the picked arm lose.
-    #[test]
-    fn observe_max_turns_credits_failure_not_success() {
+    fn stabilization_skill_outcomes_require_actual_invocation() {
         let mut engine = make_engine();
         engine.set_skill_router(SkillRouter::with_seed(2026));
-
-        // Pre-bias: 30 successes on "beta" (the competitor) and 0 on
-        // "alpha" so alpha starts COLD. Then fire a MaxTurns observe
-        // on alpha and verify it stays cold (no spurious success).
-        {
-            let router = engine.skill_router().expect("router installed");
-            let mut guard = router.lock().unwrap();
-            for _ in 0..30 {
-                guard.observe(&"beta".to_string(), wcore_dispatch::TaskOutcome::Success);
-            }
-        }
-
-        engine.current_skill_router_pick = Some("alpha".into());
-        engine.observe_skill_router_outcome(StopReason::MaxTurns);
-        // Fire it again a few times to amplify the failure signal.
-        for _ in 0..29 {
+        let catalog = Arc::new(wcore_skills::refs::SkillCatalog::from_refs(vec![]));
+        engine.set_skill_catalog(catalog.clone());
+        for reason in [
+            StopReason::EndTurn,
+            StopReason::ToolUse,
+            StopReason::MaxTurns,
+        ] {
             engine.current_skill_router_pick = Some("alpha".into());
-            engine.observe_skill_router_outcome(StopReason::MaxTurns);
+            engine.observe_skill_router_outcome(reason);
+            assert_eq!(
+                engine
+                    .skill_router()
+                    .unwrap()
+                    .lock()
+                    .unwrap()
+                    .stats("alpha")
+                    .total(),
+                0
+            );
         }
-
-        // After 30 failures on alpha vs 30 successes on beta, beta
-        // must dominate.
-        let candidates = vec!["alpha".to_string(), "beta".to_string()];
-        let mut beta_picks = 0;
-        for _ in 0..200 {
-            let router = engine.skill_router().expect("router installed");
-            let mut guard = router.lock().unwrap();
-            let pick = guard
-                .choose(SkillRouterInput {
-                    task: "any task",
-                    candidates: &candidates,
-                })
-                .expect("non-empty candidates");
-            if pick == "beta" {
-                beta_picks += 1;
-            }
-        }
-        assert!(
-            beta_picks > 150,
-            "MaxTurns must credit failure (not success); \
-             expected beta to dominate, got beta_picks={beta_picks}/200"
+        catalog.record_invocation("alpha", false);
+        engine.current_skill_router_pick = Some("alpha".into());
+        engine.observe_skill_router_outcome(StopReason::EndTurn);
+        assert_eq!(
+            engine
+                .skill_router()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .stats("alpha")
+                .success,
+            0
         );
+        catalog.record_invocation("alpha", true);
+        engine.current_skill_router_pick = Some("alpha".into());
+        engine.observe_skill_router_outcome(StopReason::EndTurn);
+        assert_eq!(
+            engine
+                .skill_router()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .stats("alpha")
+                .failure,
+            1
+        );
+        engine.observe_skill_router_outcome(StopReason::EndTurn);
+        assert_eq!(
+            engine
+                .skill_router()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .stats("alpha")
+                .failure,
+            1,
+            "outcome consumed once"
+        );
+        catalog.begin_turn();
+        assert_eq!(catalog.invocation_failed("alpha"), None);
     }
 
     // ── v0.8.1 U1 — skill-router HINT injection tests ────────────────────
@@ -31137,7 +31540,7 @@ mod user_model_writeback_tests {
             "hint must name the picked skill: {hint}"
         );
         assert!(
-            hint.starts_with("Skill hint:"),
+            hint.starts_with("Experimental skill hint:"),
             "hint must use the agreed non-binding prefix: {hint}"
         );
         assert!(

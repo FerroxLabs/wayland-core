@@ -116,12 +116,12 @@ pub struct ActiveSession {
     pub journal: SessionJournal,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionIndex {
     pub sessions: Vec<SessionMeta>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionMeta {
     pub id: String,
     pub created_at: DateTime<Utc>,
@@ -216,11 +216,25 @@ impl SessionManager {
     pub fn persist_first_message(&self, session: &Session) -> anyhow::Result<()> {
         std::fs::create_dir_all(&self.directory)?;
         self.save(session)?;
-        with_index_lock(&self.directory, |index| {
+        let needs_cleanup = with_index_lock(&self.directory, |index| {
             upsert_meta(index, session);
-            Ok(())
+            let now = SystemTime::now();
+            let needs_cleanup = index.sessions.len() > self.max_sessions
+                || index
+                    .sessions
+                    .iter()
+                    .any(|meta| is_expired_empty_session(meta, now));
+            if !needs_cleanup {
+                // Preserve cleanup's ordering without another lock and fsync.
+                index.sessions.sort_by_key(|meta| meta.created_at);
+            }
+            Ok(needs_cleanup)
         })?;
-        self.cleanup_old()?;
+        if needs_cleanup {
+            // Deletion retains its separate transaction: the upsert is durable
+            // before cleanup can fail, and cleanup keeps its storage leases.
+            self.cleanup_old()?;
+        }
         Ok(())
     }
 
@@ -776,26 +790,12 @@ impl SessionManager {
     fn cleanup_old(&self) -> anyhow::Result<()> {
         let _leases = with_index_lock(&self.directory, |index| {
             let now = SystemTime::now();
-            let five_min = Duration::from_secs(5 * 60);
             let mut leases = Vec::new();
             let mut retained = Vec::with_capacity(index.sessions.len());
 
             // F-034: remove empty sessions (message_count == 0) older than 5 min.
             for meta in std::mem::take(&mut index.sessions) {
-                let created = meta
-                    .created_at
-                    .signed_duration_since(DateTime::<Utc>::from(UNIX_EPOCH))
-                    .to_std()
-                    .ok();
-                let expired_empty = meta.message_count == 0
-                    && created
-                        .and_then(|created_secs| {
-                            now.duration_since(UNIX_EPOCH)
-                                .ok()
-                                .map(|now_secs| now_secs.saturating_sub(created_secs) >= five_min)
-                        })
-                        .unwrap_or(true);
-                if expired_empty {
+                if is_expired_empty_session(&meta, now) {
                     match self.remove_session_storage(&meta)? {
                         Some(lease) => leases.push(lease),
                         None => retained.push(meta),
@@ -903,6 +903,22 @@ impl SessionManager {
     }
 }
 
+fn is_expired_empty_session(meta: &SessionMeta, now: SystemTime) -> bool {
+    let created = meta
+        .created_at
+        .signed_duration_since(DateTime::<Utc>::from(UNIX_EPOCH))
+        .to_std()
+        .ok();
+    meta.message_count == 0
+        && created
+            .and_then(|created_secs| {
+                now.duration_since(UNIX_EPOCH).ok().map(|now_secs| {
+                    now_secs.saturating_sub(created_secs) >= Duration::from_secs(5 * 60)
+                })
+            })
+            .unwrap_or(true)
+}
+
 // ── Index locking (F-033) ────────────────────────────────────────────────────
 
 /// Execute `f(index)` with an exclusive advisory lock on the index file.
@@ -920,28 +936,49 @@ where
     let lock_path = directory.join("index.lock");
     let index_path = directory.join("index.json");
 
+    #[cfg(test)]
+    let waiting_since = std::time::Instant::now();
     // Acquire the sentinel lock with stale-lock timeout.
     acquire_sentinel_lock(&lock_path, Duration::from_secs(30))?;
 
+    #[cfg(test)]
+    let acquired_at = std::time::Instant::now();
+    #[cfg(test)]
+    let mut wrote_index = false;
     let result = (|| -> anyhow::Result<T> {
         // Read current index (inside the lock).
-        let mut index = match std::fs::read_to_string(&index_path) {
-            Ok(content) => serde_json::from_str::<SessionIndex>(&content)?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => SessionIndex {
-                sessions: Vec::new(),
-            },
+        let previous = match std::fs::read_to_string(&index_path) {
+            Ok(content) => Some(serde_json::from_str::<SessionIndex>(&content)?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(error.into()),
         };
+        let mut index = previous.clone().unwrap_or(SessionIndex {
+            sessions: Vec::new(),
+        });
 
         let value = f(&mut index)?;
 
-        let json = serde_json::to_string_pretty(&index)?;
-        wcore_config::atomic_write(&index_path, json.as_bytes())?;
+        // A no-op cleanup must not hold the lock through another durable write.
+        // Missing indexes and actual mutations (including order) still commit.
+        if previous.as_ref() != Some(&index) {
+            let json = serde_json::to_string_pretty(&index)?;
+            wcore_config::atomic_write(&index_path, json.as_bytes())?;
+            #[cfg(test)]
+            {
+                wrote_index = true;
+            }
+        }
         Ok(value)
     })();
 
     // Always release the lock, even on error.
     let _ = std::fs::remove_file(&lock_path);
+    #[cfg(test)]
+    tests::record_index_timing(
+        acquired_at.duration_since(waiting_since),
+        acquired_at.elapsed(),
+        wrote_index,
+    );
     result
 }
 
@@ -1113,6 +1150,137 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
     use wcore_types::message::{ContentBlock, Message, Role};
+
+    #[derive(Clone, Copy)]
+    struct IndexTiming {
+        wait: Duration,
+        held: Duration,
+        wrote: bool,
+    }
+
+    type IndexTimings = std::sync::Arc<std::sync::Mutex<Vec<IndexTiming>>>;
+    thread_local! {
+        static INDEX_TIMINGS: std::cell::RefCell<Option<IndexTimings>> = const { std::cell::RefCell::new(None) };
+    }
+
+    struct IndexTimingScope(Option<IndexTimings>);
+    impl IndexTimingScope {
+        fn new(timings: IndexTimings) -> Self {
+            Self(INDEX_TIMINGS.with(|slot| slot.replace(Some(timings))))
+        }
+    }
+    impl Drop for IndexTimingScope {
+        fn drop(&mut self) {
+            INDEX_TIMINGS.with(|slot| slot.replace(self.0.take()));
+        }
+    }
+
+    pub(super) fn record_index_timing(wait: Duration, held: Duration, wrote: bool) {
+        INDEX_TIMINGS.with(|slot| {
+            if let Some(timings) = slot.borrow().as_ref() {
+                timings
+                    .lock()
+                    .unwrap()
+                    .push(IndexTiming { wait, held, wrote });
+            }
+        });
+    }
+
+    #[test]
+    fn test_f033_expired_empty_predicate_preserves_boundaries() {
+        let now = UNIX_EPOCH + Duration::from_secs(1000);
+        let mut meta = SessionMeta {
+            id: "aabbcc".to_owned(),
+            created_at: DateTime::<Utc>::from(now - Duration::from_secs(300)),
+            updated_at: DateTime::<Utc>::from(now),
+            model: "gpt-4".to_owned(),
+            summary: String::new(),
+            message_count: 0,
+        };
+        assert!(is_expired_empty_session(&meta, now));
+        meta.created_at = DateTime::<Utc>::from(now - Duration::from_secs(299));
+        assert!(!is_expired_empty_session(&meta, now));
+        meta.created_at = DateTime::<Utc>::from(now - Duration::from_secs(600));
+        meta.message_count = 1;
+        assert!(!is_expired_empty_session(&meta, now));
+        meta.message_count = 0;
+        meta.created_at = DateTime::<Utc>::from(now + Duration::from_secs(1));
+        assert!(!is_expired_empty_session(&meta, now));
+    }
+
+    #[test]
+    fn test_f033_unchanged_index_has_no_durable_write() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("index.json");
+        let original = r#"{"sessions":[],"future_field":true}"#;
+        std::fs::write(&path, original).unwrap();
+        let timings = IndexTimings::default();
+        let _scope = IndexTimingScope::new(timings.clone());
+        with_index_lock(dir.path(), |_| Ok(())).unwrap();
+        assert_eq!(
+            timings.lock().unwrap().iter().filter(|t| t.wrote).count(),
+            0,
+            "an unchanged existing index must not incur a durable write"
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[test]
+    fn test_f033_index_creation_mutation_and_reordering_are_durable() {
+        let dir = tempdir().unwrap();
+        let timings = IndexTimings::default();
+        let _scope = IndexTimingScope::new(timings.clone());
+        with_index_lock(dir.path(), |_| Ok(())).unwrap();
+        assert!(dir.path().join("index.json").exists());
+        let manager = SessionManager::new(dir.path().to_path_buf(), 100);
+        let a = manager
+            .create("openai", "gpt-4", "/tmp", Some("aabbcc"))
+            .unwrap();
+        let b = manager
+            .create("openai", "gpt-4", "/tmp", Some("ddeeff"))
+            .unwrap();
+        with_index_lock(dir.path(), |index| {
+            upsert_meta(index, &a);
+            upsert_meta(index, &b);
+            Ok(())
+        })
+        .unwrap();
+        let before: Vec<_> = manager.list().unwrap().into_iter().map(|m| m.id).collect();
+        with_index_lock(dir.path(), |index| {
+            index.sessions.reverse();
+            Ok(())
+        })
+        .unwrap();
+        let after: Vec<_> = manager.list().unwrap().into_iter().map(|m| m.id).collect();
+        assert_eq!(after, before.into_iter().rev().collect::<Vec<_>>());
+        assert_eq!(
+            timings.lock().unwrap().iter().filter(|t| t.wrote).count(),
+            3
+        );
+    }
+
+    #[test]
+    fn test_f033_failed_mutation_retains_index_and_releases_lock() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("index.json");
+        let original = r#"{"sessions":[]}"#;
+        std::fs::write(&path, original).unwrap();
+        let timings = IndexTimings::default();
+        let _scope = IndexTimingScope::new(timings.clone());
+        let manager = SessionManager::new(dir.path().to_path_buf(), 100);
+        let session = manager.create("openai", "gpt-4", "/tmp", None).unwrap();
+        let result: anyhow::Result<()> = with_index_lock(dir.path(), |index| {
+            upsert_meta(index, &session);
+            anyhow::bail!("fixture closure failure")
+        });
+        assert!(result.is_err());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+        assert!(!dir.path().join("index.lock").exists());
+        assert_eq!(
+            timings.lock().unwrap().iter().filter(|t| t.wrote).count(),
+            0
+        );
+    }
 
     fn make_user_msg(text: &str) -> Message {
         Message::now(
@@ -1437,11 +1605,14 @@ mod tests {
         let dir = tempdir().unwrap();
         let dir_path = Arc::new(dir.path().to_path_buf());
         let n = 10;
+        let timings = IndexTimings::default();
 
         let handles: Vec<_> = (0..n)
             .map(|i| {
                 let d = Arc::clone(&dir_path);
+                let timings = Arc::clone(&timings);
                 thread::spawn(move || {
+                    let _scope = IndexTimingScope::new(timings);
                     let manager = SessionManager::new((*d).clone(), 100);
                     let mut s = manager.create("openai", "gpt-4", "/tmp", None).unwrap();
                     s.messages.push(Message::now(
@@ -1459,6 +1630,34 @@ mod tests {
             h.join().unwrap();
         }
 
+        let timings = timings.lock().unwrap();
+        eprintln!(
+            "F033_LOCK_TIMING acquisitions={} writes={} wait_total_us={} wait_max_us={} hold_total_us={} hold_max_us={}",
+            timings.len(),
+            timings.iter().filter(|t| t.wrote).count(),
+            timings.iter().map(|t| t.wait.as_micros()).sum::<u128>(),
+            timings
+                .iter()
+                .map(|t| t.wait.as_micros())
+                .max()
+                .unwrap_or(0),
+            timings.iter().map(|t| t.held.as_micros()).sum::<u128>(),
+            timings
+                .iter()
+                .map(|t| t.held.as_micros())
+                .max()
+                .unwrap_or(0)
+        );
+        assert_eq!(
+            timings.len(),
+            n,
+            "fresh sessions need one index acquisition each"
+        );
+        assert_eq!(
+            timings.iter().filter(|t| t.wrote).count(),
+            n,
+            "fresh sessions need one durable index commit each"
+        );
         let manager = SessionManager::new((*dir_path).clone(), 100);
         let list = manager.list().unwrap();
         assert_eq!(
@@ -1629,6 +1828,28 @@ mod tests {
             manager.list().unwrap().iter().any(|meta| meta.id == id),
             "any deletion error must retain index authority"
         );
+
+        let mut fresh = manager.create("openai", "gpt-4", "/tmp", None).unwrap();
+        fresh.messages.push(make_user_msg("fresh"));
+        let timings = IndexTimings::default();
+        let _scope = IndexTimingScope::new(timings.clone());
+        assert!(manager.persist_first_message(&fresh).is_err());
+        let list = manager.list().unwrap();
+        assert!(
+            list.iter().any(|meta| meta.id == fresh.id),
+            "upsert must commit before cleanup failure"
+        );
+        assert!(
+            list.iter().any(|meta| meta.id == id),
+            "failed cleanup must retain old authority"
+        );
+        let timings = timings.lock().unwrap();
+        assert_eq!(
+            timings.len(),
+            2,
+            "required cleanup keeps its separate transaction"
+        );
+        assert_eq!(timings.iter().filter(|t| t.wrote).count(), 1);
     }
 
     // F-030: WAL append + merge round-trip

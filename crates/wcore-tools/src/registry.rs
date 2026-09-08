@@ -4,6 +4,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use parking_lot::RwLock;
 use wcore_config::circuit_breaker::{BreakerState, CircuitBreaker, CircuitBreakerConfig};
+use wcore_protocol::events::ToolCategory;
 use wcore_types::tool::{ToolDef, ToolResult};
 
 use crate::Tool;
@@ -28,6 +29,8 @@ pub struct BreakerRestoreError {
 
 pub struct ToolRegistry {
     tools: Vec<Box<dyn Tool>>,
+    ambient_mcp_allowed: bool,
+    catalog_defer_cold: wcore_config::tools::DeferColdConfig,
     /// One circuit breaker per registered tool name. `Arc<RwLock<…>>`
     /// so the registry can be shared across async call sites without
     /// requiring `&mut self` at dispatch time.
@@ -99,6 +102,8 @@ impl ToolRegistry {
     pub fn new() -> Self {
         Self {
             tools: Vec::new(),
+            ambient_mcp_allowed: true,
+            catalog_defer_cold: Default::default(),
             breakers: Arc::new(RwLock::new(HashMap::new())),
             tool_vfs: None,
             workspace_policy: None,
@@ -213,7 +218,26 @@ impl ToolRegistry {
             .retain(|name, _| kept_names.contains(name));
     }
 
+    /// Operator-resolved session authority. Revocation removes existing MCP
+    /// tools before returning; future attach/refresh/reconnect cannot restore them.
+    pub fn set_ambient_mcp_allowed(&mut self, allowed: bool) {
+        self.ambient_mcp_allowed = allowed;
+        if !allowed {
+            self.retain(|tool| !matches!(tool.category(), ToolCategory::Mcp));
+        }
+        if self.get("ToolSearch").is_some() {
+            self.refresh_current_tool_search_catalog();
+        }
+    }
+
+    pub fn ambient_mcp_allowed(&self) -> bool {
+        self.ambient_mcp_allowed
+    }
+
     pub fn register(&mut self, tool: Box<dyn Tool>) {
+        if !self.ambient_mcp_allowed && matches!(tool.category(), ToolCategory::Mcp) {
+            return;
+        }
         // External-service tools (web, vision, transcription, gitlab,
         // notion, discord, …) ship a `Null*Backend` default and override
         // `is_available()` to return false until the host wires a real
@@ -246,6 +270,9 @@ impl ToolRegistry {
     /// later upgrades the implementation once host-side resources
     /// (channel managers, async runtimes) are available.
     pub fn replace_by_name(&mut self, tool: Box<dyn Tool>) {
+        if !self.ambient_mcp_allowed && matches!(tool.category(), ToolCategory::Mcp) {
+            return;
+        }
         let name = tool.name().to_string();
         self.tools.retain(|t| t.name() != name);
         self.breakers
@@ -270,10 +297,16 @@ impl ToolRegistry {
     /// bridge; without the shared handle each of those would forget what the
     /// engine had already admitted and hand the model back the stale
     /// pre-hydration answer, which is what it reads as "still not loaded".
+    pub fn refresh_current_tool_search_catalog(&mut self) {
+        let config = self.catalog_defer_cold.clone();
+        self.refresh_tool_search_catalog(&config);
+    }
+
     pub fn refresh_tool_search_catalog(
         &mut self,
         defer_cold: &wcore_config::tools::DeferColdConfig,
     ) {
+        self.catalog_defer_cold = defer_cold.clone();
         let mut snapshot = self.to_tool_defs();
         snapshot.retain(|def| def.name != "ToolSearch");
         if defer_cold.enabled {

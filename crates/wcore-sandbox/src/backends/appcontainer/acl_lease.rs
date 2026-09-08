@@ -776,27 +776,22 @@ fn same_windows_path(left: &Path, right: &Path) -> bool {
 }
 
 unsafe fn apply_intents(intents: &[AclIntent], sid: *mut core::ffi::c_void) -> Result<()> {
-    let mut applied: Vec<&AclIntent> = Vec::new();
-    for intent in intents {
-        let path = Path::new(&intent.path);
-        if !path.exists() {
-            continue;
-        }
-        let outcome = match intent.kind {
-            IntentKind::Allow => {
+    let applied: Vec<&AclIntent> = intents.iter().collect();
+    let outcome = (|| {
+        for intent in intents {
+            let path = Path::new(&intent.path);
+            if intent.kind == IntentKind::Allow && path.exists() {
                 let access = unsafe { explicit_access_for_sid(sid, intent.mask, GRANT_ACCESS) };
-                unsafe { apply_explicit_access(path, &access) }
+                unsafe { apply_explicit_access(path, &access)? };
             }
-            // AppContainer ignores a DENY ace against its own package SID, so a
-            // deny is enforced by REMOVING every package-SID ALLOW and
-            // protecting the DACL — never by adding an (inert) DENY ace.
-            IntentKind::Deny => unsafe { apply_protected_deny(path) },
-        };
-        if let Err(error) = outcome {
-            unsafe { revoke_intents(&applied, sid)? };
-            return Err(error);
         }
-        applied.push(intent);
+        // Denies affect a shared DACL. Publish the complete set of permitted
+        // live identities in one write, never a strip-then-regrant window.
+        unsafe { reconcile_denied_targets(intents.iter(), sid, true) }
+    })();
+    if let Err(error) = outcome {
+        unsafe { revoke_intents(&applied, sid)? };
+        return Err(error);
     }
     Ok(())
 }
@@ -1300,26 +1295,16 @@ fn owner_is_live(lease: &LeaseFile) -> Result<bool> {
 }
 
 /// Symmetric revoke for both intent kinds. Grants are removed first (their
-/// exact-SID ALLOW aces), then deny targets are un-protected — so a
-/// now-ungranted parent is not momentarily re-inherited onto a deny child
-/// before its protection is cleared. Denial was enforced by package-ALLOW
-/// removal + `PROTECTED_DACL_SECURITY_INFORMATION`, so revoke restores
-/// inheritance and leaves no residual protection or grant on the host,
-/// preserving the Phase-20 no-residual invariant.
+/// exact-SID ALLOW aces), then shared deny targets are reconciled against
+/// remaining active leases. Protection is cleared only when the last deny
+/// retires, after the outgoing parent grant has been removed.
 unsafe fn revoke_intents(intents: &[&AclIntent], sid: *mut core::ffi::c_void) -> Result<()> {
     let paths: Vec<&Path> = intents
         .iter()
         .map(|intent| Path::new(&intent.path))
         .collect();
     unsafe { remove_and_verify_exact_sid(&paths, sid)? };
-    for intent in intents {
-        if intent.kind == IntentKind::Deny {
-            let path = Path::new(&intent.path);
-            if path.exists() {
-                unsafe { restore_unprotected_dacl(path)? };
-            }
-        }
-    }
+    unsafe { reconcile_denied_targets(intents.iter().copied(), sid, false)? };
     Ok(())
 }
 
@@ -1521,39 +1506,94 @@ unsafe fn apply_explicit_access(path: &Path, access: &EXPLICIT_ACCESS_W) -> Resu
     Ok(())
 }
 
-/// Enforce an `fs_read_deny` intent the only way Windows AppContainer honors.
-///
-/// The lowbox access check ignores a DENY ace against the container's OWN
-/// package SID (hardware-proven at 20-53: a canonically ordered DENY→ALLOW
-/// DACL was read straight through, secret disclosed, exit 0), so a package
-/// DENY ace is INERT. Instead we strip every AppContainer-package
-/// (`S-1-15-2-…`) ALLOW ace from the target — both explicit and the one
-/// inherited from a granted parent — and set
-/// `PROTECTED_DACL_SECURITY_INFORMATION` so no inheritable package ALLOW can
-/// re-apply. AppContainer ignores normal SIDs when granting, so the child is
-/// denied by ABSENCE of a package grant (hardware-proven: exit 1, "Access is
-/// denied."). Denial never comes from re-enabling a deny-only SID — that path
-/// caused the "sandbox can read no file" regression an earlier native fix
-/// closed. A denied FILE and a denied DIRECTORY are each protected per-object.
-unsafe fn apply_protected_deny(path: &Path) -> Result<()> {
+/// Reconcile shared deny targets from the durable journal under MutationLock.
+/// Only the starting identity may use its Prepared record; failed/prepared peer
+/// records never confer access. On cleanup the retiring SID is excluded even
+/// before its durable state advances, so an interrupted cleanup is repeatable.
+unsafe fn reconcile_denied_targets<'a>(
+    own_intents: impl Iterator<Item = &'a AclIntent>,
+    own_sid: *mut core::ffi::c_void,
+    starting: bool,
+) -> Result<()> {
+    let own_hash = sha256_hex(&unsafe { sid_bytes(own_sid)? });
+    let mut targets: BTreeSet<String> = own_intents
+        .filter(|intent| intent.kind == IntentKind::Deny)
+        .map(|intent| intent.path.clone())
+        .collect();
+    let mut active = Vec::new();
+    for entry in fs::read_dir(lease_directory()?)
+        .map_err(|error| exec_error(format!("read ACL reconciliation leases: {error}")))?
+    {
+        let path = entry
+            .map_err(|error| exec_error(format!("read ACL reconciliation entry: {error}")))?
+            .path();
+        if path.extension().and_then(OsStr::to_str) != Some("toml") {
+            continue;
+        }
+        let lease = read_validated_lease(&path)?;
+        let own = constant_time_eq(lease.sid_sha256.as_bytes(), own_hash.as_bytes());
+        if matches!(
+            lease.state,
+            LeaseState::Prepared | LeaseState::GrantActive | LeaseState::ProcessExited
+        ) {
+            targets.extend(
+                lease
+                    .intents
+                    .iter()
+                    .filter(|intent| intent.kind == IntentKind::Deny)
+                    .map(|intent| intent.path.clone()),
+            );
+        }
+        if (own && starting) || (!own && lease.state == LeaseState::GrantActive) {
+            active.push(lease);
+        }
+    }
+    for target in targets {
+        let path = Path::new(&target);
+        if path.exists() {
+            unsafe { reconcile_target_dacl(path, &active)? };
+        }
+    }
+    Ok(())
+}
+
+fn intent_covers(intent: &AclIntent, path: &Path) -> bool {
+    Path::new(&path.to_string_lossy().to_lowercase())
+        .starts_with(Path::new(&intent.path.to_lowercase()))
+}
+
+fn allowed_mask(lease: &LeaseFile, path: &Path) -> u32 {
+    if lease
+        .intents
+        .iter()
+        .any(|intent| intent.kind == IntentKind::Deny && intent_covers(intent, path))
+    {
+        return 0;
+    }
+    lease
+        .intents
+        .iter()
+        .filter(|intent| intent.kind == IntentKind::Allow && intent_covers(intent, path))
+        .fold(0, |mask, intent| mask | intent.mask)
+}
+
+/// Construct the new ACL in memory and commit it atomically. Package DENY ACEs
+/// are not effective for lowbox access checks, so denial still uses absence of
+/// an ALLOW plus protection. Other live identities retain their allowed access.
+unsafe fn reconcile_target_dacl(path: &Path, active: &[LeaseFile]) -> Result<()> {
     let (mut path_w, dacl, _sd_guard) = unsafe { read_dacl(path)? };
     if dacl.is_null() {
-        // A NULL DACL grants everyone (including the package) full access and
-        // cannot be protected into a denial. Fail closed rather than leave the
-        // deny silently ineffective.
         return Err(exec_error(format!(
             "cannot enforce AppContainer deny on NULL-DACL target {}",
             path.display()
         )));
     }
-    let count = unsafe { ace_count(dacl)? };
-    for index in (0..count).rev() {
+    for index in (0..unsafe { ace_count(dacl)? }).rev() {
         let mut ace = ptr::null_mut();
         if unsafe { GetAce(dacl, index, &mut ace) } == 0 || ace.is_null() {
-            return Err(last_error("GetAce(AppContainer deny strip)"));
+            return Err(last_error("GetAce(AppContainer deny reconciliation)"));
         }
-        let header = unsafe { &*(ace as *const ACE_HEADER) };
-        if header.AceType != ACCESS_ALLOWED_ACE_TYPE {
+        if unsafe { (*(ace as *const ACE_HEADER)).AceType } != ACCESS_ALLOWED_ACE_TYPE {
             continue;
         }
         let ace_sid: *const core::ffi::c_void =
@@ -1568,58 +1608,68 @@ unsafe fn apply_protected_deny(path: &Path) -> Result<()> {
             return Err(last_error("DeleteAce(AppContainer package ALLOW)"));
         }
     }
-    // Always protect, even when no explicit package ALLOW was present: the
-    // protection is what severs an inheritable package ALLOW on the granted
-    // parent from re-applying to this target.
+    let protected = active.iter().any(|lease| {
+        lease
+            .intents
+            .iter()
+            .any(|intent| intent.kind == IntentKind::Deny && intent_covers(intent, path))
+    });
+    let mut sids = Vec::new();
+    let mut entries = Vec::new();
+    for lease in active {
+        let mask = allowed_mask(lease, path);
+        // A grant on this exact target has no parent to inherit from after
+        // unprotection. Retain it; ancestor grants are inherited normally.
+        let exact_allow = lease.intents.iter().any(|intent| {
+            intent.kind == IntentKind::Allow && same_windows_path(Path::new(&intent.path), path)
+        });
+        if mask == 0 || (!protected && !exact_allow) {
+            continue;
+        }
+        let mut sid = ptr::null_mut();
+        let rc = unsafe {
+            DeriveAppContainerSidFromAppContainerName(widen(&lease.profile_name).as_ptr(), &mut sid)
+        };
+        if rc != 0 || sid.is_null() {
+            return Err(exec_error(format!(
+                "derive ACL reconciliation SID: {rc:#x}"
+            )));
+        }
+        let guard = SidFreeGuard(sid);
+        let hash = sha256_hex(&unsafe { sid_bytes(sid)? });
+        if !constant_time_eq(hash.as_bytes(), lease.sid_sha256.as_bytes()) {
+            return Err(exec_error("ACL reconciliation SID digest mismatch".into()));
+        }
+        entries.push(unsafe { explicit_access_for_sid(sid, mask, GRANT_ACCESS) });
+        sids.push(guard);
+    }
+    // When the last deny retires, do not retain synthesized explicit package
+    // grants: unprotection derives current grants from their original parents.
+    let mut merged = ptr::null_mut();
+    let rc = unsafe { SetEntriesInAclW(entries.len() as u32, entries.as_ptr(), dacl, &mut merged) };
+    if rc != 0 {
+        return Err(exec_error(format!("merge reconciled ACL: {rc:#x}")));
+    }
+    let _merged_guard = LocalFreeGuard(merged as _);
+    let protection = if protected {
+        PROTECTED_DACL_SECURITY_INFORMATION
+    } else {
+        UNPROTECTED_DACL_SECURITY_INFORMATION
+    };
     let rc = unsafe {
         SetNamedSecurityInfoW(
             path_w.as_mut_ptr(),
             SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            DACL_SECURITY_INFORMATION | protection,
             ptr::null_mut(),
             ptr::null_mut(),
-            dacl,
+            merged,
             ptr::null_mut(),
         )
     };
     if rc != 0 {
         return Err(exec_error(format!(
-            "SetNamedSecurityInfoW protected deny for {}: {rc:#x}",
-            path.display()
-        )));
-    }
-    Ok(())
-}
-
-/// Symmetric revoke of [`apply_protected_deny`]: clear
-/// `PROTECTED_DACL_SECURITY_INFORMATION` so the target is governed by
-/// inheritance again. The current (normal-SID) DACL is written back with
-/// `UNPROTECTED_DACL_SECURITY_INFORMATION`; Windows drops the
-/// inheritance-flagged entries and re-propagates from the parent. Because the
-/// enclosing grant is removed earlier in the same revoke pass, the target ends
-/// with no package grant and no residual protection. A denied DIRECTORY is
-/// un-protected per-object, matching the per-object protection in apply.
-unsafe fn restore_unprotected_dacl(path: &Path) -> Result<()> {
-    let (mut path_w, dacl, _sd_guard) = unsafe { read_dacl(path)? };
-    if dacl.is_null() {
-        // Nothing was protected (a protected target always carries a non-null
-        // DACL); never write a NULL DACL, which would grant everyone access.
-        return Ok(());
-    }
-    let rc = unsafe {
-        SetNamedSecurityInfoW(
-            path_w.as_mut_ptr(),
-            SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
-            ptr::null_mut(),
-            ptr::null_mut(),
-            dacl,
-            ptr::null_mut(),
-        )
-    };
-    if rc != 0 {
-        return Err(exec_error(format!(
-            "SetNamedSecurityInfoW unprotect deny for {}: {rc:#x}",
+            "commit reconciled ACL for {}: {rc:#x}",
             path.display()
         )));
     }

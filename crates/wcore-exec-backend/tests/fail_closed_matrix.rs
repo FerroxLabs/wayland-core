@@ -24,6 +24,10 @@
 
 #![allow(clippy::panic, clippy::unwrap_used)]
 
+#[cfg(unix)]
+#[path = "../../wcore-cli/tests/support/owned_tree.rs"]
+mod owned_tree;
+
 use ed25519_dalek::{SigningKey, ed25519::signature::Signer};
 use tempfile::TempDir;
 
@@ -588,12 +592,14 @@ async fn the_local_scan_finds_an_orphan_that_no_registry_remembers() {
     // visible in the process table. With `exec` the nonce vanishes and the
     // scan finds nothing — which is how this class of test passes for the
     // wrong reason.
-    let mut child = wcore_config::shell::shell_command_argv(
-        "sh",
-        &["-c", &format!("while :; do sleep 1; done # {nonce}")],
-    )
-    .spawn()
-    .expect("plant a registryless orphan");
+    let mut child = owned_tree::OwnedTree::new(
+        wcore_config::shell::shell_command_argv(
+            "sh",
+            &["-c", &format!("while :; do sleep 1; done # {nonce}")],
+        )
+        .spawn()
+        .expect("plant a registryless orphan"),
+    );
     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
 
     let evidence = wcore_exec_backend::orphan::scan_one("local", &nonce, reference_budget())
@@ -604,11 +610,7 @@ async fn the_local_scan_finds_an_orphan_that_no_registry_remembers() {
     // Reap the plant AND its descendants. Killing only the direct child leaves
     // the `sleep` grandchild behind — nextest marks the test leaky, which is
     // this plan's own subject matter showing up in its own test.
-    let _ = child.kill().await;
-    let _ = child.wait().await;
-    let _ = wcore_config::shell::shell_command_argv("pkill", &["-f", &nonce])
-        .output()
-        .await;
+    child.reap();
 
     assert!(
         evidence.is_observed(),

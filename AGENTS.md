@@ -432,6 +432,8 @@ Key references in `docs/` (don't duplicate their content here):
 
 ## 11. Project Learnings
 
+- Cap verification at two rounds per change/package. Fix only critical and high-severity verification findings; record lower-severity findings in the backlog and proceed without additional review loops.
+
 **Accumulated corrections. This section is for the agent to maintain, not just the human.**
 
 When the user corrects your approach, append a one-line rule here before ending the session. Write it concretely ("Always use X for Y"), never abstractly ("be careful with Y"). If an existing line already covers the correction, tighten it instead of adding a new one. Remove lines when the underlying issue goes away (model upgrades, refactors, process changes).

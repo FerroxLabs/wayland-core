@@ -132,6 +132,7 @@ impl ChannelPolicySnapshot {
                     ChannelToolScope {
                         posture: c.inbound.tools,
                         workspace_root: root,
+                        ambient_mcp_full_authority_v1: c.inbound.ambient_mcp_full_authority_v1,
                     },
                 )
             })

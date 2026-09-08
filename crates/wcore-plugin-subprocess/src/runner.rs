@@ -167,7 +167,7 @@ pub struct ToolOutput {
 /// pipeline in `wcore-agent`) registers these tools into the engine's
 /// tool registry and keeps the runner alive for the plugin's lifetime.
 pub struct LoadedSubprocessPlugin {
-    pub runner: SubprocessPluginRunner,
+    pub runner: Arc<SubprocessPluginRunner>,
     pub manifest_version: String,
     pub capabilities: Vec<String>,
     pub tools: Vec<ToolDescriptor>,
@@ -231,6 +231,9 @@ pub struct SubprocessPluginRunner {
     /// Negotiated support for the optional durable-effect call verb. This is
     /// refreshed after every successful Init, including process restarts.
     supports_call_tool_v2: AtomicBool,
+    /// Shutdown is terminal. Retrying cleanup must not re-send Shutdown or
+    /// allow an in-flight tool failure to restart the worker afterward.
+    closing: AtomicBool,
 }
 
 /// Aud-18: resolve the binary path to spawn, binding execute to the
@@ -296,6 +299,17 @@ impl SubprocessPluginRunner {
         gate: Arc<PluginAccessGate>,
         verified_binary: Option<&Path>,
     ) -> Result<LoadedSubprocessPlugin> {
+        Self::load_with_cleanup_owner(manifest_path, manifest, gate, verified_binary, None).await
+    }
+
+    /// Register the host's cleanup ownership before initialization can fail.
+    pub async fn load_with_cleanup_owner(
+        manifest_path: &Path,
+        manifest: &PluginManifest,
+        gate: Arc<PluginAccessGate>,
+        verified_binary: Option<&Path>,
+        cleanup: Option<&dyn crate::RuntimeCleanupOwner>,
+    ) -> Result<LoadedSubprocessPlugin> {
         let binary_rel = manifest
             .runtime
             .as_ref()
@@ -343,6 +357,7 @@ impl SubprocessPluginRunner {
             &binary,
             Some(factory),
             manifest.plugin.name.clone(),
+            cleanup,
         )
         .await
     }
@@ -375,6 +390,7 @@ impl SubprocessPluginRunner {
             Path::new("<duplex>"),
             None,
             "<duplex>".to_string(),
+            None,
         )
         .await
     }
@@ -395,6 +411,7 @@ impl SubprocessPluginRunner {
             Path::new("<factory>"),
             Some(factory),
             plugin_name.into(),
+            None,
         )
         .await
     }
@@ -405,13 +422,14 @@ impl SubprocessPluginRunner {
         binary_for_logs: &Path,
         factory: Option<TransportFactory>,
         plugin_name: String,
+        cleanup: Option<&dyn crate::RuntimeCleanupOwner>,
     ) -> Result<LoadedSubprocessPlugin> {
         let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<SubprocessResponse>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let binary_display = binary_for_logs.display().to_string();
         let reader_task = spawn_reader(spawn.stdout, Arc::clone(&pending), binary_display);
 
-        let runner = SubprocessPluginRunner {
+        let runner = Arc::new(SubprocessPluginRunner {
             next_id: AtomicU64::new(1),
             pending,
             stdin: Mutex::new(spawn.stdin),
@@ -423,7 +441,11 @@ impl SubprocessPluginRunner {
             restart_lock: Mutex::new(()),
             plugin_name,
             supports_call_tool_v2: AtomicBool::new(false),
-        };
+            closing: AtomicBool::new(false),
+        });
+        if let Some(cleanup) = cleanup {
+            cleanup.sdk_started(runner.clone());
+        }
 
         let (manifest_version, capabilities, tools) = runner.handshake().await?;
 
@@ -479,6 +501,10 @@ impl SubprocessPluginRunner {
     /// Send a verb, await the matching response. Holds a slot in `pending`
     /// keyed by the monotonic request id.
     async fn request(&self, verb: SubprocessVerb) -> Result<SubprocessResponse> {
+        let shutdown = matches!(&verb, SubprocessVerb::Shutdown);
+        if self.closing.load(Ordering::Acquire) && !shutdown {
+            return Err(SubprocessPluginError::WorkerTerminated);
+        }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let req = SubprocessRequest::new(id, verb);
         let line = serde_json::to_string(&req)
@@ -493,6 +519,10 @@ impl SubprocessPluginRunner {
         // Write the request line + newline atomically under the stdin mutex.
         {
             let mut stdin = self.stdin.lock().await;
+            if self.closing.load(Ordering::Acquire) && !shutdown {
+                self.pending.lock().await.remove(&id);
+                return Err(SubprocessPluginError::WorkerTerminated);
+            }
             if let Err(e) = stdin.write_all(line.as_bytes()).await {
                 self.pending.lock().await.remove(&id);
                 return Err(map_io_err(e));
@@ -549,6 +579,9 @@ impl SubprocessPluginRunner {
         effect: Option<crate::rpc::SubprocessToolEffectIdentity>,
     ) -> Result<ToolOutput> {
         // Hard short-circuit: once disabled, every call fails fast.
+        if self.closing.load(Ordering::Acquire) {
+            return Err(SubprocessPluginError::WorkerTerminated);
+        }
         if self.crash_count.load(Ordering::Acquire) >= CRASH_THRESHOLD {
             return Err(SubprocessPluginError::PermissionDenied(format!(
                 "plugin {}: auto-disabled after {} crashes",
@@ -655,6 +688,9 @@ impl SubprocessPluginRunner {
         // Serialize concurrent restart attempts — only one respawn per
         // strike, regardless of how many in-flight calls trip simultaneously.
         let _restart_guard = self.restart_lock.lock().await;
+        if self.closing.load(Ordering::Acquire) {
+            return Err(original_err);
+        }
 
         // Backoff indexed by the new strike count (1 → 100ms, 2 → 500ms).
         let backoff_idx = (new as usize)
@@ -672,7 +708,11 @@ impl SubprocessPluginRunner {
         // Tear down the dead transport: kill old child + drain pending
         // senders so any racing in-flight requests get WorkerTerminated
         // instead of hanging.
-        self.tear_down_transport().await;
+        if let Err(error) = self.tear_down_transport().await {
+            self.closing.store(true, Ordering::Release);
+            warn!(plugin = %self.plugin_name, error = %error, "old subprocess cleanup incomplete; refusing replacement");
+            return Err(original_err);
+        }
 
         // Spawn a fresh transport. A respawn failure does NOT increment a
         // second strike (the strike was already taken for the underlying
@@ -722,24 +762,17 @@ impl SubprocessPluginRunner {
     /// Kill the current child + drain pending senders. Safe to call when
     /// the transport is already dead. Used by the restart path *before*
     /// swapping in a new transport.
-    async fn tear_down_transport(&self) {
-        {
-            let mut child_guard = self.child.lock().await;
-            if let Some(mut child) = child_guard.take() {
-                let _ = child.start_kill();
-                let _ = child.wait().await;
-            }
+    async fn tear_down_transport(&self) -> Result<()> {
+        let child = crate::shutdown::reap_child(&self.child, tokio::time::Instant::now()).await;
+        self.pending.lock().await.clear();
+        let reader = crate::shutdown::join_reader(&self.reader_task).await;
+        child?;
+        // A reader panic is an expected transport-crash cause here. It has
+        // already joined; the original call still returns its ambiguous error.
+        match reader {
+            Err(SubprocessPluginError::WorkerTerminated) => Ok(()),
+            other => other,
         }
-        // Drain any in-flight pending senders so racing requests fail with
-        // WorkerTerminated instead of hanging on a closed reader.
-        {
-            let mut pending = self.pending.lock().await;
-            pending.clear();
-        }
-        // The old reader task will exit naturally on stdout EOF; we don't
-        // need to await it here (would deadlock if it's already taken).
-        let mut reader_guard = self.reader_task.lock().await;
-        let _old = reader_guard.take();
     }
 
     /// v0.6.5 Task 3.3 — current consecutive-crash count. Exposed for
@@ -752,52 +785,37 @@ impl SubprocessPluginRunner {
     /// OS process to exit; SIGKILL on timeout. Idempotent — safe to call
     /// multiple times; second call is a no-op.
     pub async fn shutdown(&self) -> Result<()> {
-        // Best-effort Shutdown verb. If the plugin already died this errors,
-        // but we still need to reap the child and join the reader.
-        let shutdown_result = self.request(SubprocessVerb::Shutdown).await;
-        match &shutdown_result {
-            Ok(resp) => {
-                if !matches!(resp.body, SubprocessResponseBody::Ack) {
-                    warn!(
-                        body = ?resp.body,
-                        "subprocess plugin shutdown reply was not Ack — proceeding to kill"
-                    );
-                }
+        let first_attempt = !self.closing.swap(true, Ordering::AcqRel);
+        let deadline = tokio::time::Instant::now() + SHUTDOWN_GRACE;
+        // A restart already in flight must publish its child before cleanup
+        // can certify it gone. Later restart attempts see closing and refuse.
+        let _restart = self.restart_lock.lock().await;
+        let shutdown_result = if first_attempt {
+            let response =
+                tokio::time::timeout_at(deadline, self.request(SubprocessVerb::Shutdown))
+                    .await
+                    .unwrap_or(Err(SubprocessPluginError::Timeout));
+            if let Ok(response) = &response
+                && !matches!(response.body, SubprocessResponseBody::Ack)
+            {
+                warn!("subprocess shutdown reply was not Ack; proceeding with cleanup");
             }
-            Err(e) => {
-                warn!(error = %e, "subprocess plugin shutdown verb failed — proceeding to kill");
-            }
+            response.map(|_| ())
+        } else {
+            Ok(())
+        };
+        // Closing stdin is graceful where it is immediately available. A
+        // blocked writer must not prevent us from terminating the owned child.
+        if let Ok(mut stdin) = self.stdin.try_lock() {
+            *stdin = Box::new(tokio::io::sink());
         }
-
-        // Reap child with grace period.
-        let mut child_guard = self.child.lock().await;
-        if let Some(mut child) = child_guard.take() {
-            match timeout(SHUTDOWN_GRACE, child.wait()).await {
-                Ok(Ok(_status)) => {}
-                Ok(Err(e)) => {
-                    warn!(error = %e, "subprocess wait() failed after shutdown");
-                }
-                Err(_) => {
-                    warn!("subprocess did not exit within grace period — SIGKILL");
-                    let _ = child.kill().await;
-                    let _ = child.wait().await;
-                }
-            }
-        }
-
-        // Join the reader task; it should exit naturally on stdout close.
-        let mut reader_guard = self.reader_task.lock().await;
-        if let Some(handle) = reader_guard.take() {
-            match timeout(Duration::from_secs(1), handle).await {
-                Ok(Ok(_)) => {}
-                Ok(Err(e)) => warn!(error = %e, "subprocess reader task join error"),
-                Err(_) => warn!("subprocess reader task did not finish — leaking"),
-            }
-        }
-
-        // Propagate the original shutdown error AFTER cleanup so callers
-        // get diagnostic info but cleanup still happens.
-        shutdown_result.map(|_| ())
+        let child_result = crate::shutdown::reap_child(&self.child, deadline).await;
+        let reader_result = crate::shutdown::join_reader(&self.reader_task).await;
+        self.pending.lock().await.clear();
+        child_result?;
+        reader_result?;
+        *self.stdin.lock().await = Box::new(tokio::io::sink());
+        shutdown_result
     }
 }
 

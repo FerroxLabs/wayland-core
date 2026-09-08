@@ -49,6 +49,8 @@ fn run_isolated(args: &[&str], home: &Path) -> Output {
         .current_dir(home)
         .env("HOME", home)
         .env("WAYLAND_HOME", home)
+        .env_remove("WAYLAND_VAULT_PASSPHRASE")
+        .env_remove("WAYLAND_VAULT_PASSPHRASE_FD")
         // Keep the run hermetic: never pick up an ambient provider key.
         .env_remove("API_KEY")
         .env_remove("ANTHROPIC_API_KEY")
