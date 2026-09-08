@@ -461,6 +461,7 @@ fn the_corpus_drift_step_is_a_gate_and_carries_nothing_that_could_silence_it() {
     );
     assert!(!keys.iter().any(|key| key == "continue-on-error"));
     if keys.iter().any(|key| key == "if") {
+        assert_eq!(job, "ci-linux", "only the authenticated Linux corpus job may delegate");
         let proof = read(".github/scripts/publication-push-proof.py");
         assert!(
             publication_delegation_is_bound(&workflow, &proof),
