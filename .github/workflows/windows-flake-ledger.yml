@@ -18,9 +18,11 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
-      - name: Record identity
+      - name: Record which Windows executor served this job
         shell: bash
         run: |
+          if [ -z "${RUNNER_NAME:-}" ]; then exit 1; fi
+          echo "runner_name=${RUNNER_NAME}" >> "$GITHUB_STEP_SUMMARY"
           mkdir -p diagnostic-evidence
           git rev-parse HEAD > diagnostic-evidence/source.txt
           vx rustc -vV > diagnostic-evidence/toolchain.txt
