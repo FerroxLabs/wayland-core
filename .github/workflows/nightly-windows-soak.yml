@@ -181,7 +181,7 @@ jobs:
           tool: cargo-mutants
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -192,7 +192,7 @@ jobs:
             cargo-reg-windows-
 
       - name: Cache cargo build
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: target
           key: cargo-target-windows-soak-${{ hashFiles('Cargo.lock') }}
@@ -295,7 +295,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
