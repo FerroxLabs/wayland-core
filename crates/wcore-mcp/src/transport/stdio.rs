@@ -1994,6 +1994,86 @@ mod windows_tests {
         let _ = transport.close().await;
     }
 
+    /// Re-executed by the test below, using the same self-contained fixture
+    /// pattern as `test_utils::mute_server`. No installed shell/runtime is needed.
+    #[test]
+    fn absolute_exe_stdio_fixture() {
+        use std::io::Write;
+
+        if std::env::var("WCORE_MCP_EXE_FIXTURE").as_deref() != Ok("1") {
+            return;
+        }
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line).unwrap();
+        let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+        // Start on a new line because libtest prints its test name before us.
+        println!(
+            "\n{}",
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": request["id"],
+                "result": {
+                    "args": std::env::args().skip(1).collect::<Vec<_>>(),
+                    "pid": std::process::id(),
+                },
+            })
+        );
+        std::io::stdout().flush().unwrap();
+        // Stay alive until the transport reaps us, with a bounded leak fallback.
+        std::thread::sleep(Duration::from_secs(60));
+        std::process::exit(2);
+    }
+
+    #[tokio::test]
+    async fn absolute_exe_with_spaced_path_round_trips_literal_args() {
+        let dir = tempfile::tempdir().unwrap();
+        let spaced = dir.path().join("Program Files fixture");
+        std::fs::create_dir(&spaced).unwrap();
+        let executable = spaced.join("mcp server.EXE");
+        std::fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
+        // --skip accepts arbitrary filter strings, letting the libtest fixture
+        // report real argv containing spaces and shell metacharacters unchanged.
+        let args: Vec<String> = [
+            "--exact",
+            "transport::stdio::windows_tests::absolute_exe_stdio_fixture",
+            "--nocapture",
+            "--test-threads",
+            "1",
+            "--skip",
+            r"C:\path with spaces\server.js",
+            "--skip",
+            "literal & | < > ^ % ! ( )",
+            "--skip",
+            "embedded\"quote and trailing\\",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        let environment = HashMap::from([("WCORE_MCP_EXE_FIXTURE".into(), "1".into())]);
+        let transport = StdioTransport::spawn_with_timeout(
+            executable.to_str().unwrap(),
+            &args,
+            &environment,
+            Duration::from_secs(10),
+        )
+        .await
+        .expect("spawn absolute executable in spaced directory");
+        let response = transport
+            .request(&JsonRpcRequest::new(99, "ping", None))
+            .await;
+        // Always close before asserting the response, including the red control.
+        transport.close().await.expect("close owned transport");
+        let response = response.expect("absolute executable must answer over stdio");
+        assert_eq!(response.id, Some(1));
+        let result = response.result.unwrap();
+        assert_eq!(result["args"], serde_json::json!(args));
+        let pid = u32::try_from(result["pid"].as_u64().unwrap()).unwrap();
+        assert!(crate::test_utils::mute_server::wait_until_gone(
+            pid,
+            Duration::from_secs(5)
+        ));
+    }
+
     // ── #262 / #263: the production `else` branch builds `cmd /C <token>
     // <args...>` and now hands it to cmd verbatim via `mcp_stdio_command_builder`
     // (raw_arg). These spawn the SAME helper directly (full env inherited, so a
