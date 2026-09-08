@@ -81,6 +81,9 @@ DEGRADED_RC=3
 #                        gate's own interface defines as disarming; <flag> must
 #                        appear in the invocation or the entry FAILS as stale.
 GATES=(
+  # Rust topology is cheap and must catch workflow incompatibility before CI.
+  # Run this preflight on the build host, like the existing corpus gate below.
+  "armed|cargo nextest run --locked -p wcore-protocol --test contract_gate_topology --no-tests=fail --retries 0"
   "armed|python3 scripts/check-no-vacuous-cargo-test.py --self-test"
   "armed|python3 scripts/check-no-vacuous-cargo-test.py"
   "armed|python3 scripts/check-model-limits-freshness.py --self-test"
