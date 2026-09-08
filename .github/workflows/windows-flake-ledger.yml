@@ -1,4 +1,4 @@
-name: windows-flake-ledger
+name: macos-osv-fixture-confirmation
 
 # Re-measure the tests CI reported as `FLAKY` on the Windows leg, with nextest
 # RETRIES DISABLED, on the same self-hosted Windows box that produced the
@@ -82,6 +82,7 @@ concurrency:
 
 jobs:
   ledger:
+    if: false # Task-owned macOS diagnostic; private Windows fleet untouched.
     name: Windows flake ledger (self-hosted msvc, retries=0)
     runs-on:
       - self-hosted
@@ -225,8 +226,8 @@ jobs:
   # hours is a measurement that does not happen. This leg starts immediately.
   # --------------------------------------------------------------------------
   ledger-hosted:
-    name: Windows flake ledger (hosted server SKU, retries=0)
-    runs-on: windows-latest
+    name: macOS OSV fixture confirmation (retries=0)
+    runs-on: macos-latest
     timeout-minutes: 240
 
     steps:
@@ -273,12 +274,12 @@ jobs:
           if [ -n "${LEDGER_TESTS}" ]; then
             extra=(--tests "$LEDGER_TESTS")
           fi
-          python scripts/flake-ledger.py \
+          python3 scripts/flake-ledger.py \
             "${extra[@]}" \
             --runs "$LEDGER_RUNS" \
             --conditions "$LEDGER_CONDITIONS" \
             --profile ci \
-            --out windows-hosted-flake-ledger.json \
+            --out macos-osv-fixture-flake-ledger.json \
             --logdir flake-ledger-logs-hosted \
             | tee flake-ledger-hosted.txt
 
@@ -286,9 +287,9 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-hosted-flake-ledger-${{ github.run_id }}
+          name: macos-osv-fixture-flake-ledger-${{ github.run_id }}
           path: |
-            windows-hosted-flake-ledger.json
+            macos-osv-fixture-flake-ledger.json
             flake-ledger-hosted.txt
             flake-ledger-logs-hosted/
             target/swarm-delegated-skips.txt
