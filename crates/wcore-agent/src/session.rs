@@ -116,12 +116,12 @@ pub struct ActiveSession {
     pub journal: SessionJournal,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionIndex {
     pub sessions: Vec<SessionMeta>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionMeta {
     pub id: String,
     pub created_at: DateTime<Utc>,
@@ -931,21 +931,26 @@ where
     let mut wrote_index = false;
     let result = (|| -> anyhow::Result<T> {
         // Read current index (inside the lock).
-        let mut index = match std::fs::read_to_string(&index_path) {
-            Ok(content) => serde_json::from_str::<SessionIndex>(&content)?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => SessionIndex {
-                sessions: Vec::new(),
-            },
+        let previous = match std::fs::read_to_string(&index_path) {
+            Ok(content) => Some(serde_json::from_str::<SessionIndex>(&content)?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(error.into()),
         };
+        let mut index = previous.clone().unwrap_or(SessionIndex {
+            sessions: Vec::new(),
+        });
 
         let value = f(&mut index)?;
 
-        let json = serde_json::to_string_pretty(&index)?;
-        wcore_config::atomic_write(&index_path, json.as_bytes())?;
-        #[cfg(test)]
-        {
-            wrote_index = true;
+        // A no-op cleanup must not hold the lock through another durable write.
+        // Missing indexes and actual mutations (including order) still commit.
+        if previous.as_ref() != Some(&index) {
+            let json = serde_json::to_string_pretty(&index)?;
+            wcore_config::atomic_write(&index_path, json.as_bytes())?;
+            #[cfg(test)]
+            {
+                wrote_index = true;
+            }
         }
         Ok(value)
     })();
@@ -1191,10 +1196,10 @@ mod tests {
         assert!(dir.path().join("index.json").exists());
         let manager = SessionManager::new(dir.path().to_path_buf(), 100);
         let a = manager
-            .create("openai", "gpt-4", "/tmp", Some("index-a"))
+            .create("openai", "gpt-4", "/tmp", Some("aabbcc"))
             .unwrap();
         let b = manager
-            .create("openai", "gpt-4", "/tmp", Some("index-b"))
+            .create("openai", "gpt-4", "/tmp", Some("ddeeff"))
             .unwrap();
         with_index_lock(dir.path(), |index| {
             upsert_meta(index, &a);
