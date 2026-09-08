@@ -95,6 +95,8 @@ jobs:
     name: Fast qualification admission
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    outputs:
+      publication_pr: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'stabilize/20260905-core' }}
     steps:
       - uses: actions/checkout@v6
       - name: Set up qualification Python
@@ -108,6 +110,7 @@ jobs:
           python3 .github/scripts/tests/qualification-prerequisites.test.py
           python3 scripts/test-ci-build-artifact.py
           python3 .github/scripts/tests/qualification-status.test.py
+          python3 .github/scripts/tests/publication-push-proof.test.py
           python3 .github/scripts/tests/release-workflow-contract.test.py
           python3 .github/scripts/tests/release-collection.test.py
           python3 .github/scripts/tests/collect-stabilization-mutants.test.py
@@ -196,7 +199,9 @@ jobs:
   # completely untouched by that job and keep the full hermetic hosted matrix.
 
   ci:
-    needs: [admission, build]
+    # Compile while the six release builds run; the reuse helper gates only
+    # this native target before smoke. No other build output is consumed here.
+    needs: admission
     name: CI (${{ matrix.os }})
     # A PR from a FORK must never land on a self-hosted runner. That runner is a
     # personal Windows machine, and `pull_request` executes the fork's code on
@@ -228,20 +233,23 @@ jobs:
     # runs the slowest arm was CI (macos-latest) at 65 min and CI (Array) at
     # 42 min. 120 gives ~1.8x headroom over the worst observed, and sits
     # between the sibling `ci-linux` (90) and `ci-windows-hosted` (180).
-    timeout-minutes: 120
+    # The former 75-minute producer dependency now overlaps this job. Preserve
+    # the former end-to-end envelope (75 + 120); individual test limits stay fixed.
+    timeout-minutes: 195
     # 2026-08-02. Skip this job entirely on a `lane/**` push that opted into
     # neither platform. See the matrix note below for why the self-hosted
     # Windows entry stopped being unconditional. Lanes keep `Lint`, the
     # containerized Linux job, the `Build (…)` artifacts that the `lane/**`
     # trigger exists to provide, and their own lane-scoped proof workflows.
     if: >-
-      github.event_name == 'pull_request'
-      || github.ref_name == 'main'
-      || startsWith(github.ref_name, 'integ/')
-      || github.ref_name == 'plan/f20-unified-audit-repair'
-      || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]')
-      || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')
-      || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-windows]')
+      needs.admission.outputs.publication_pr != 'true'
+      && (github.event_name == 'pull_request'
+          || github.ref_name == 'main'
+          || startsWith(github.ref_name, 'integ/')
+          || github.ref_name == 'plan/f20-unified-audit-repair'
+          || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]')
+          || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')
+          || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-windows]'))
     # Shrink debug info + disable incremental compile across the matrix.
     # The Windows runner has ~14GB free disk and the default Rust dev
     # profile + full PDB debug info blew past it on CI run 26396718138
@@ -610,7 +618,7 @@ jobs:
             --target "$native_target" --profile release --features default \
             --abi-contract "native-${RUNNER_OS}-v1" \
             --producer-job "Build ($native_target)" --artifact "wayland-core-$native_target" \
-            --binary "$binary" --wait-seconds 1800
+            --binary "$binary" --wait-seconds 4500
 
       # Affected native admission runs before the expensive workspace suite.
       # V1 C2 — release-binary smoke. Catches the v0.2.0 BLOCKER #1 class
@@ -985,7 +993,9 @@ jobs:
   # nextest command silently lost `--no-fail-fast`, which made every historical
   # CI failure count a lower bound rather than a total.
   ci-windows-hosted:
-    needs: [admission, build]
+    # Compile while the six release builds run; the reuse helper gates only
+    # this native target before smoke. No other build output is consumed here.
+    needs: admission
     name: CI (windows-latest, hosted)
     runs-on: windows-latest
     # OPT-IN ONLY as of 2026-08-04. This used to mirror the `ci` job's `if:`,
@@ -1056,15 +1066,17 @@ jobs:
     # and asserts a Windows leg that actually runs tests is admitted — and, so
     # the gate can still fail, asserts an unrelated markerless branch is NOT.
     if: >-
-      startsWith(github.ref_name, 'lane/')
-      || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-windows]')
+      needs.admission.outputs.publication_pr != 'true'
+      && (startsWith(github.ref_name, 'lane/') || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-windows]'))
     # Bounded on purpose. The matrix job is unbounded (GHA default 6h), which is
     # tolerable on a box whose target/ is warm; a cold hosted compile that wedges
     # would otherwise burn six hours of hosted minutes per run. Sized from the
     # measured parts: ~30 min for the release pre-build (Build
     # (x86_64-pc-windows-msvc) measures 32 min cold on this same image), plus a
     # debug workspace compile, plus the 12.8k-test run.
-    timeout-minutes: 180
+    # The former 75-minute producer dependency now overlaps this job. Preserve
+    # the former end-to-end envelope (75 + 180); individual test limits stay fixed.
+    timeout-minutes: 255
     env:
       # Identical to the matrix job's. These two are the reason the v0.8.6
       # LNK1318/"Free space left: 4 MB" verdict no longer applies.
@@ -1204,7 +1216,7 @@ jobs:
             --target "$native_target" --profile release --features default \
             --abi-contract "native-${RUNNER_OS}-v1" \
             --producer-job "Build ($native_target)" --artifact "wayland-core-$native_target" \
-            --binary "$binary" --wait-seconds 1800
+            --binary "$binary" --wait-seconds 4500
 
       - name: Release binary smoke (catches plugin dead-code-strip)
         shell: bash
@@ -1380,6 +1392,7 @@ jobs:
   # mount across steps so each step's compile is incremental.
   ci-linux:
     needs: admission
+    if: needs.admission.outputs.publication_pr != 'true'
     name: CI (linux-containerized)
     runs-on: ubuntu-latest
     # 90 was already marginal and this branch pushed it over. MEASURED: on
@@ -2698,6 +2711,7 @@ jobs:
   # rust:1.95-slim-bookworm image.
   eval-gate-linux:
     needs: admission
+    if: needs.admission.outputs.publication_pr != 'true'
     name: Eval acceptance gate (Linux, containerized)
     runs-on: ubuntu-latest
     container:
@@ -2723,6 +2737,7 @@ jobs:
   # before they reach the release workflow.
   build:
     needs: admission
+    if: needs.admission.outputs.publication_pr != 'true'
     name: Build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     # gh#1072. Slowest measured arm is Build (aarch64-pc-windows-msvc) at
@@ -2946,10 +2961,9 @@ jobs:
     #      `gh run download -n wayland-core-aarch64-apple-darwin` works on every
     #      lane run whether or not the token was used.
     if: >-
-      github.event_name == 'push'
-      && startsWith(github.ref_name, 'lane/')
-      && !(contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]')
-      || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]'))
+      needs.admission.outputs.publication_pr != 'true'
+      && (github.event_name == 'push' && startsWith(github.ref_name, 'lane/') && !(contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]')
+          || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')))
     runs-on: [self-hosted, macOS, ARM64]
     # ONE runner, ONE job at a time, on a machine its owner also works on. Without
     # coalescing, a 5-8-wide lane fan-out pushing ~7.2 times/hour against a
@@ -3075,6 +3089,7 @@ jobs:
 
   all-features-check:
     needs: admission
+    if: needs.admission.outputs.publication_pr != 'true'
     name: All-features check (Linux)
     runs-on: ubuntu-latest
     # Measured cold on a comparable Linux box at ~7 min for the full union
@@ -3112,6 +3127,37 @@ jobs:
         run: vx cargo check --workspace --all-targets --all-features --locked
 
   # ── Annotate PR / commit with test results ────────────────────────────
+  publication-push-proof:
+    name: Publication source and base qualification proof
+    needs: admission
+    if: needs.admission.outputs.publication_pr == 'true'
+    runs-on: ubuntu-latest
+    # Observe the longest existing producer/consumer envelope plus report;
+    # this waiter runs no tests and never retries the qualification.
+    timeout-minutes: 275
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    outputs:
+      run_id: ${{ steps.proof.outputs.run_id }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Authenticate full push qualification and matching PR integration
+        id: proof
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/publication-push-proof.py
+      - name: Preserve delegated qualification provenance
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: publication-push-proof
+          path: ${{ runner.temp }}/publication-push-proof.json
+          if-no-files-found: error
+
   report:
     # EXPLICIT, because `report` is a required status context on main and a job
     # id doubles as the check name only until someone renames the job. e2e.yml
@@ -3155,7 +3201,7 @@ jobs:
     #
     # No signal is lost: the job publishes its own check,
     # `Build (aarch64-apple-darwin) [self-hosted]`, which is visible on the run.
-    needs: [admission, ci, ci-windows-hosted, ci-linux, eval-gate-linux, build, all-features-check]
+    needs: [admission, ci, ci-windows-hosted, ci-linux, eval-gate-linux, build, all-features-check, publication-push-proof]
     if: always()
     runs-on: ubuntu-latest
     # gh#1072. Pure aggregation — measures under a minute in every sampled
@@ -3171,6 +3217,7 @@ jobs:
       # the token just can't see it). Cost us multiple weeks of red
       # `report` jobs before getting tracked down.
       contents: read
+      actions: read
       checks: write
       pull-requests: write
     steps:
@@ -3253,6 +3300,10 @@ jobs:
         with:
           pattern: nextest-junit-*
           path: junit-reports
+          # Only the controlled publication PR imports another run. The proof
+          # dependency authenticated its source, base, jobs and artifact IDs.
+          run-id: ${{ needs.publication-push-proof.outputs.run_id || github.run_id }}
+          github-token: ${{ github.token }}
         continue-on-error: true
 
       # A SKIPPED WINDOWS LEG MUST NOT READ AS WINDOWS COVERAGE (gh#1146).

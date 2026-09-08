@@ -27,8 +27,11 @@ def audit(text):
         job = jobs.get(name, "")
         if not re.search(r"(?m)^    needs: (?:admission|\[[^\n]*\badmission\b[^\n]*\])$", job):
             errors.append(f"{name}: missing fast admission dependency")
-        if name in ("ci", "ci-windows-hosted") and not re.search(r"(?m)^    needs: \[[^\n]*\bbuild\b[^\n]*\]$", job):
-            errors.append(f"{name}: consumer can reserve a native runner before its producer finishes")
+        if name in ("ci", "ci-windows-hosted"):
+            if not re.search(r"(?m)^    needs: admission$", job):
+                errors.append(f"{name}: native compilation waits for unrelated build targets")
+            if "--producer-job \"Build ($native_target)\"" not in job or "--wait-seconds 4500" not in job:
+                errors.append(f"{name}: missing bounded own-target build dependency")
     for name in ("ci", "ci-windows-hosted", "ci-linux"):
         job = jobs.get(name, "")
         steps = blocks(job, r"^      - name: (.+)\n")
@@ -145,9 +148,9 @@ class Contract(unittest.TestCase):
         self.assertIn("(primary Windows route) | $SELF_HOSTED_STATE", text)
         self.assertNotIn("(self-hosted) | $SELF_HOSTED_STATE", text)
 
-    def test_consumer_must_wait_before_reserving_native_runner(self):
-        changed = self.source.replace("needs: [admission, build]", "needs: admission", 1)
-        self.assertTrue(any("before its producer" in error for error in audit(changed)))
+    def test_consumer_must_wait_for_its_own_bounded_producer(self):
+        changed = self.source.replace("--wait-seconds 4500", "--wait-seconds 1", 1)
+        self.assertTrue(any("own-target build dependency" in error for error in audit(changed)))
 
 
 if __name__ == "__main__":
