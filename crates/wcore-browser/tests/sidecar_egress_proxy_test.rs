@@ -76,7 +76,7 @@ fn probe_policy() -> BrowserPolicy {
 }
 
 /// Read until the response head terminator, or EOF.
-async fn read_head(stream: &mut TcpStream) -> String {
+async fn read_head(stream: &mut (impl tokio::io::AsyncRead + Unpin)) -> String {
     let mut out = Vec::new();
     let mut buf = [0u8; 1024];
     loop {
@@ -90,6 +90,22 @@ async fn read_head(stream: &mut TcpStream) -> String {
         }
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+async fn read_error_response(stream: &mut (impl tokio::io::AsyncRead + Unpin)) -> String {
+    read_head(stream).await
+}
+
+#[tokio::test]
+async fn error_response_reader_waits_for_a_fragmented_body() {
+    // Chain guarantees the header and body arrive in separate reads, without
+    // scheduling assumptions, network packet timing, or sleeps.
+    let head = b"HTTP/1.1 403 Forbidden\r\nContent-Length: 10\r\nConnection: close\r\n\r\n";
+    let body = b"unresolved";
+    let mut stream = head.as_slice().chain(body.as_slice());
+    let response = read_error_response(&mut stream).await;
+    assert!(response.starts_with("HTTP/1.1 403"), "{response:?}");
+    assert!(response.ends_with("unresolved"), "{response:?}");
 }
 
 /// A minimal origin server on loopback that answers anything with `pong`.
@@ -215,7 +231,7 @@ async fn a_name_that_resolves_to_nothing_is_refused_at_the_proxy() {
         .write_all(b"CONNECT unresolvable-probe.invalid:443 HTTP/1.1\r\n\r\n")
         .await
         .unwrap();
-    let response = read_head(&mut client).await;
+    let response = read_error_response(&mut client).await;
 
     assert!(response.starts_with("HTTP/1.1 403"), "got: {response:?}");
     assert!(
