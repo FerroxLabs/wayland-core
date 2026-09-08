@@ -1610,6 +1610,16 @@ mod tests {
                 .max()
                 .unwrap_or(0)
         );
+        assert_eq!(
+            timings.len(),
+            n,
+            "fresh sessions need one index acquisition each"
+        );
+        assert_eq!(
+            timings.iter().filter(|t| t.wrote).count(),
+            n,
+            "fresh sessions need one durable index commit each"
+        );
         let manager = SessionManager::new((*dir_path).clone(), 100);
         let list = manager.list().unwrap();
         assert_eq!(
