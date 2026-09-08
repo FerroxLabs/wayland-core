@@ -216,11 +216,25 @@ impl SessionManager {
     pub fn persist_first_message(&self, session: &Session) -> anyhow::Result<()> {
         std::fs::create_dir_all(&self.directory)?;
         self.save(session)?;
-        with_index_lock(&self.directory, |index| {
+        let needs_cleanup = with_index_lock(&self.directory, |index| {
             upsert_meta(index, session);
-            Ok(())
+            let now = SystemTime::now();
+            let needs_cleanup = index.sessions.len() > self.max_sessions
+                || index
+                    .sessions
+                    .iter()
+                    .any(|meta| is_expired_empty_session(meta, now));
+            if !needs_cleanup {
+                // Preserve cleanup's ordering without another lock and fsync.
+                index.sessions.sort_by_key(|meta| meta.created_at);
+            }
+            Ok(needs_cleanup)
         })?;
-        self.cleanup_old()?;
+        if needs_cleanup {
+            // Deletion retains its separate transaction: the upsert is durable
+            // before cleanup can fail, and cleanup keeps its storage leases.
+            self.cleanup_old()?;
+        }
         Ok(())
     }
 
@@ -776,26 +790,12 @@ impl SessionManager {
     fn cleanup_old(&self) -> anyhow::Result<()> {
         let _leases = with_index_lock(&self.directory, |index| {
             let now = SystemTime::now();
-            let five_min = Duration::from_secs(5 * 60);
             let mut leases = Vec::new();
             let mut retained = Vec::with_capacity(index.sessions.len());
 
             // F-034: remove empty sessions (message_count == 0) older than 5 min.
             for meta in std::mem::take(&mut index.sessions) {
-                let created = meta
-                    .created_at
-                    .signed_duration_since(DateTime::<Utc>::from(UNIX_EPOCH))
-                    .to_std()
-                    .ok();
-                let expired_empty = meta.message_count == 0
-                    && created
-                        .and_then(|created_secs| {
-                            now.duration_since(UNIX_EPOCH)
-                                .ok()
-                                .map(|now_secs| now_secs.saturating_sub(created_secs) >= five_min)
-                        })
-                        .unwrap_or(true);
-                if expired_empty {
+                if is_expired_empty_session(&meta, now) {
                     match self.remove_session_storage(&meta)? {
                         Some(lease) => leases.push(lease),
                         None => retained.push(meta),
@@ -901,6 +901,22 @@ impl SessionManager {
         self.directory
             .join(format!("{session_id}.journal.snapshot"))
     }
+}
+
+fn is_expired_empty_session(meta: &SessionMeta, now: SystemTime) -> bool {
+    let created = meta
+        .created_at
+        .signed_duration_since(DateTime::<Utc>::from(UNIX_EPOCH))
+        .to_std()
+        .ok();
+    meta.message_count == 0
+        && created
+            .and_then(|created_secs| {
+                now.duration_since(UNIX_EPOCH).ok().map(|now_secs| {
+                    now_secs.saturating_sub(created_secs) >= Duration::from_secs(5 * 60)
+                })
+            })
+            .unwrap_or(true)
 }
 
 // ── Index locking (F-033) ────────────────────────────────────────────────────
@@ -1168,6 +1184,28 @@ mod tests {
                     .push(IndexTiming { wait, held, wrote });
             }
         });
+    }
+
+    #[test]
+    fn test_f033_expired_empty_predicate_preserves_boundaries() {
+        let now = UNIX_EPOCH + Duration::from_secs(1000);
+        let mut meta = SessionMeta {
+            id: "aabbcc".to_owned(),
+            created_at: DateTime::<Utc>::from(now - Duration::from_secs(300)),
+            updated_at: DateTime::<Utc>::from(now),
+            model: "gpt-4".to_owned(),
+            summary: String::new(),
+            message_count: 0,
+        };
+        assert!(is_expired_empty_session(&meta, now));
+        meta.created_at = DateTime::<Utc>::from(now - Duration::from_secs(299));
+        assert!(!is_expired_empty_session(&meta, now));
+        meta.created_at = DateTime::<Utc>::from(now - Duration::from_secs(600));
+        meta.message_count = 1;
+        assert!(!is_expired_empty_session(&meta, now));
+        meta.message_count = 0;
+        meta.created_at = DateTime::<Utc>::from(now + Duration::from_secs(1));
+        assert!(!is_expired_empty_session(&meta, now));
     }
 
     #[test]
@@ -1790,6 +1828,28 @@ mod tests {
             manager.list().unwrap().iter().any(|meta| meta.id == id),
             "any deletion error must retain index authority"
         );
+
+        let mut fresh = manager.create("openai", "gpt-4", "/tmp", None).unwrap();
+        fresh.messages.push(make_user_msg("fresh"));
+        let timings = IndexTimings::default();
+        let _scope = IndexTimingScope::new(timings.clone());
+        assert!(manager.persist_first_message(&fresh).is_err());
+        let list = manager.list().unwrap();
+        assert!(
+            list.iter().any(|meta| meta.id == fresh.id),
+            "upsert must commit before cleanup failure"
+        );
+        assert!(
+            list.iter().any(|meta| meta.id == id),
+            "failed cleanup must retain old authority"
+        );
+        let timings = timings.lock().unwrap();
+        assert_eq!(
+            timings.len(),
+            2,
+            "required cleanup keeps its separate transaction"
+        );
+        assert_eq!(timings.iter().filter(|t| t.wrote).count(), 1);
     }
 
     // F-030: WAL append + merge round-trip
