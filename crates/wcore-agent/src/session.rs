@@ -920,9 +920,15 @@ where
     let lock_path = directory.join("index.lock");
     let index_path = directory.join("index.json");
 
+    #[cfg(test)]
+    let waiting_since = std::time::Instant::now();
     // Acquire the sentinel lock with stale-lock timeout.
     acquire_sentinel_lock(&lock_path, Duration::from_secs(30))?;
 
+    #[cfg(test)]
+    let acquired_at = std::time::Instant::now();
+    #[cfg(test)]
+    let mut wrote_index = false;
     let result = (|| -> anyhow::Result<T> {
         // Read current index (inside the lock).
         let mut index = match std::fs::read_to_string(&index_path) {
@@ -937,11 +943,21 @@ where
 
         let json = serde_json::to_string_pretty(&index)?;
         wcore_config::atomic_write(&index_path, json.as_bytes())?;
+        #[cfg(test)]
+        {
+            wrote_index = true;
+        }
         Ok(value)
     })();
 
     // Always release the lock, even on error.
     let _ = std::fs::remove_file(&lock_path);
+    #[cfg(test)]
+    tests::record_index_timing(
+        acquired_at.duration_since(waiting_since),
+        acquired_at.elapsed(),
+        wrote_index,
+    );
     result
 }
 
@@ -1113,6 +1129,115 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
     use wcore_types::message::{ContentBlock, Message, Role};
+
+    #[derive(Clone, Copy)]
+    struct IndexTiming {
+        wait: Duration,
+        held: Duration,
+        wrote: bool,
+    }
+
+    type IndexTimings = std::sync::Arc<std::sync::Mutex<Vec<IndexTiming>>>;
+    thread_local! {
+        static INDEX_TIMINGS: std::cell::RefCell<Option<IndexTimings>> = const { std::cell::RefCell::new(None) };
+    }
+
+    struct IndexTimingScope(Option<IndexTimings>);
+    impl IndexTimingScope {
+        fn new(timings: IndexTimings) -> Self {
+            Self(INDEX_TIMINGS.with(|slot| slot.replace(Some(timings))))
+        }
+    }
+    impl Drop for IndexTimingScope {
+        fn drop(&mut self) {
+            INDEX_TIMINGS.with(|slot| slot.replace(self.0.take()));
+        }
+    }
+
+    pub(super) fn record_index_timing(wait: Duration, held: Duration, wrote: bool) {
+        INDEX_TIMINGS.with(|slot| {
+            if let Some(timings) = slot.borrow().as_ref() {
+                timings
+                    .lock()
+                    .unwrap()
+                    .push(IndexTiming { wait, held, wrote });
+            }
+        });
+    }
+
+    #[test]
+    fn test_f033_unchanged_index_has_no_durable_write() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("index.json");
+        let original = r#"{"sessions":[],"future_field":true}"#;
+        std::fs::write(&path, original).unwrap();
+        let timings = IndexTimings::default();
+        let _scope = IndexTimingScope::new(timings.clone());
+        with_index_lock(dir.path(), |_| Ok(())).unwrap();
+        assert_eq!(
+            timings.lock().unwrap().iter().filter(|t| t.wrote).count(),
+            0,
+            "an unchanged existing index must not incur a durable write"
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[test]
+    fn test_f033_index_creation_mutation_and_reordering_are_durable() {
+        let dir = tempdir().unwrap();
+        let timings = IndexTimings::default();
+        let _scope = IndexTimingScope::new(timings.clone());
+        with_index_lock(dir.path(), |_| Ok(())).unwrap();
+        assert!(dir.path().join("index.json").exists());
+        let manager = SessionManager::new(dir.path().to_path_buf(), 100);
+        let a = manager
+            .create("openai", "gpt-4", "/tmp", Some("index-a"))
+            .unwrap();
+        let b = manager
+            .create("openai", "gpt-4", "/tmp", Some("index-b"))
+            .unwrap();
+        with_index_lock(dir.path(), |index| {
+            upsert_meta(index, &a);
+            upsert_meta(index, &b);
+            Ok(())
+        })
+        .unwrap();
+        let before: Vec<_> = manager.list().unwrap().into_iter().map(|m| m.id).collect();
+        with_index_lock(dir.path(), |index| {
+            index.sessions.reverse();
+            Ok(())
+        })
+        .unwrap();
+        let after: Vec<_> = manager.list().unwrap().into_iter().map(|m| m.id).collect();
+        assert_eq!(after, before.into_iter().rev().collect::<Vec<_>>());
+        assert_eq!(
+            timings.lock().unwrap().iter().filter(|t| t.wrote).count(),
+            3
+        );
+    }
+
+    #[test]
+    fn test_f033_failed_mutation_retains_index_and_releases_lock() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("index.json");
+        let original = r#"{"sessions":[]}"#;
+        std::fs::write(&path, original).unwrap();
+        let timings = IndexTimings::default();
+        let _scope = IndexTimingScope::new(timings.clone());
+        let manager = SessionManager::new(dir.path().to_path_buf(), 100);
+        let session = manager.create("openai", "gpt-4", "/tmp", None).unwrap();
+        let result: anyhow::Result<()> = with_index_lock(dir.path(), |index| {
+            upsert_meta(index, &session);
+            anyhow::bail!("fixture closure failure")
+        });
+        assert!(result.is_err());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+        assert!(!dir.path().join("index.lock").exists());
+        assert_eq!(
+            timings.lock().unwrap().iter().filter(|t| t.wrote).count(),
+            0
+        );
+    }
 
     fn make_user_msg(text: &str) -> Message {
         Message::now(
@@ -1437,11 +1562,14 @@ mod tests {
         let dir = tempdir().unwrap();
         let dir_path = Arc::new(dir.path().to_path_buf());
         let n = 10;
+        let timings = IndexTimings::default();
 
         let handles: Vec<_> = (0..n)
             .map(|i| {
                 let d = Arc::clone(&dir_path);
+                let timings = Arc::clone(&timings);
                 thread::spawn(move || {
+                    let _scope = IndexTimingScope::new(timings);
                     let manager = SessionManager::new((*d).clone(), 100);
                     let mut s = manager.create("openai", "gpt-4", "/tmp", None).unwrap();
                     s.messages.push(Message::now(
@@ -1459,6 +1587,24 @@ mod tests {
             h.join().unwrap();
         }
 
+        let timings = timings.lock().unwrap();
+        eprintln!(
+            "F033_LOCK_TIMING acquisitions={} writes={} wait_total_us={} wait_max_us={} hold_total_us={} hold_max_us={}",
+            timings.len(),
+            timings.iter().filter(|t| t.wrote).count(),
+            timings.iter().map(|t| t.wait.as_micros()).sum::<u128>(),
+            timings
+                .iter()
+                .map(|t| t.wait.as_micros())
+                .max()
+                .unwrap_or(0),
+            timings.iter().map(|t| t.held.as_micros()).sum::<u128>(),
+            timings
+                .iter()
+                .map(|t| t.held.as_micros())
+                .max()
+                .unwrap_or(0)
+        );
         let manager = SessionManager::new((*dir_path).clone(), 100);
         let list = manager.list().unwrap();
         assert_eq!(
