@@ -108,6 +108,7 @@ GATES=(
   "armed|python3 .github/scripts/tests/qualification-prerequisites.test.py"
   "armed|python3 scripts/test-ci-build-artifact.py"
   "armed|python3 .github/scripts/tests/qualification-status.test.py"
+  "armed|python3 .github/scripts/tests/publication-push-proof.test.py"
   "armed|python3 .github/scripts/tests/release-workflow-contract.test.py"
   "armed|python3 .github/scripts/tests/release-collection.test.py"
   "armed|python3 .github/scripts/tests/collect-stabilization-mutants.test.py"
