@@ -1,296 +1,55 @@
 name: windows-flake-ledger
-
-# Re-measure the tests CI reported as `FLAKY` on the Windows leg, with nextest
-# RETRIES DISABLED, on the same self-hosted Windows box that produced the
-# original reports.
-#
-# Why this workflow exists
-# ------------------------
-# `.config/nextest.toml` sets `retries = 2` for the `ci` profile. A test that
-# fails twice and passes on the third attempt is reported as `FLAKY 3/3` and
-# counted in the PASSED total. Two consecutive CI runs on the Windows leg:
-#
-#   run 30698794888 (job 91366049013) -- 2 flaky
-#   run 30699019736 (job 91372229704) -- 6 flaky
-#
-# and `wcore-swarm::worker_runtime_limits
-# multi_worker_output_exhaustion_fails_without_retaining_buffers` was
-# `FLAKY 3/3` in BOTH. That is four consecutive failed attempts retried into
-# two green-looking runs.
-#
-# Worse, the diagnostic is gone: job 91372229704's log holds 6 `FLAKY` lines and
-# 66 `TRY 3 FAIL` lines and ZERO `TRY 1` / `TRY 2` lines, so not one of those
-# failed attempts left any output behind to triage.
-#
-# `scripts/flake-ledger.py` runs each named test `--runs` times with
-# `--retries 0`, under three conditions (isolated / batch / batch-under-CPU-load),
-# and prints a pass/fail count per test per condition. A test that needs a retry
-# is graded as what it is: a failure.
-#
-# This is a MEASUREMENT job, not a gate. It never fails the build on a red test
-# -- the ledger is the artifact. It is dispatched by hand or by pushing the lane
-# branch that owns it.
-
 on:
   workflow_dispatch:
-    inputs:
-      runs:
-        description: "Repetitions per test per condition"
-        type: string
-        required: false
-        default: "10"
-      conditions:
-        description: "Comma-separated subset of isolated,batch,loaded"
-        type: string
-        required: false
-        default: "isolated,batch,loaded"
-      tests:
-        # gh#1146. The harness's built-in target table was a ceiling: the three
-        # tests #1146 measured failing on all three tries were not in it and
-        # there was no way to add them, so the red arm the issue asks for
-        # (same tree, same box, N runs, retries off) could not be run at all.
-        # Empty keeps the built-in list. Example, the #1146 set:
-        #   wcore-cli::mcp_assistant_scoping_e2e::matching_assistant_dials_scoped_deferred_server,
-        #   wcore-tools::wcore-tools::bash::tests::the_bash_timeout_bounds_the_secret_deny_walk,
-        #   wcore-tools::wcore-tools::bash::tests::the_streaming_bash_timeout_bounds_the_secret_deny_walk
-        description: "PKG::BINARY::TEST triples, comma separated (empty = default set)"
-        type: string
-        required: false
-        default: ""
-  push:
-    branches:
-      - lane/win-hidden-fails
-    # Committing the evidence this job produces must not re-queue the job that
-    # produced it. The Windows pool is two boxes and the queue is hours deep, so
-    # a self-retriggering measurement is not merely wasteful — it displaces the
-    # run that would answer the question.
-    paths-ignore:
-      - '.planning/**'
-      - '**/*.md'
-
 permissions:
   contents: read
-
-concurrency:
-  group: windows-flake-ledger-${{ github.ref }}
-  # NOT `true`. The Windows runner pool is two boxes deep and the queue in front
-  # of this job has been hours long; cancelling the pending run on every push
-  # sends the measurement back to the end of that queue, so it never runs at
-  # all. Serialize instead — the box only ever executes one of these at a time,
-  # which is also what makes the `isolated` condition mean anything.
-  cancel-in-progress: false
-
 jobs:
-  ledger:
-    name: Windows flake ledger (self-hosted msvc, retries=0)
-    runs-on:
-      - self-hosted
-      - Windows
-      - X64
-      - msvc
-    timeout-minutes: 300
-
+  keyring-roundtrip:
+    name: Windows keyring roundtrip diagnostic
+    runs-on: windows-latest
+    timeout-minutes: 120
     steps:
-      # Which Windows executor served this job (gh#1146). Fails closed: a job
-      # that cannot name the box that served it reports nothing rather than
-      # reporting anonymously. Why, and what enforces it:
-      # `scripts/check-windows-attribution.py`.
-      - name: Record which Windows executor served this job
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -z "${RUNNER_NAME:-}" ]; then
-            echo "::error title=Executor not recorded::RUNNER_NAME is unset, so this job cannot say which Windows executor served it (gh#1146)."
-            exit 1
-          fi
-          echo "runner_name=${RUNNER_NAME}"
-          echo "computername=${COMPUTERNAME:-<unset>} workspace=${RUNNER_WORKSPACE:-<unset>}"
-          {
-            echo "### Windows executor"
-            echo "- runner_name: \`${RUNNER_NAME}\`"
-            echo "- computername: \`${COMPUTERNAME:-<unset>}\`"
-            echo "- workspace: \`${RUNNER_WORKSPACE:-<unset>}\`"
-          } >> "$GITHUB_STEP_SUMMARY"
-
       - uses: actions/checkout@v4
-
-      # The self-hosted checkout dir is owned by BUILTIN\Administrators while
-      # the runner service is NT AUTHORITY\NETWORK SERVICE, so git aborts on
-      # "dubious ownership". Same treatment as nightly-windows-soak.yml.
-      - name: Trust the checkout for git
-        shell: pwsh
-        run: git config --global --add safe.directory '*'
-
-      # Python is installed PER-USER in Sean's profile on this box and is NOT on
-      # the NetworkService account's PATH, so the harness has to provision its
-      # own. Lifted from ci.yml's `Ensure a Python interpreter` step, including
-      # the bsdtar detail: PATH `tar` on this runner is GNU tar 1.35, which
-      # cannot read a zip at all.
-      - name: Ensure a Python interpreter
-        shell: bash
-        run: |
-          set -euo pipefail
-          if command -v python3 >/dev/null 2>&1; then
-            echo "python already present: $(command -v python3)"; python3 --version; exit 0
-          fi
-          if command -v python >/dev/null 2>&1; then
-            echo "python already present: $(command -v python)"; python --version; exit 0
-          fi
-          ver=3.12.10
-          dest="$RUNNER_TEMP/py-embed"
-          mkdir -p "$dest"
-          curl -fsSL -o "$dest/py.zip" \
-            "https://www.python.org/ftp/python/${ver}/python-${ver}-embed-amd64.zip"
-          bsdtar=/c/Windows/System32/tar.exe
-          if [ ! -x "$bsdtar" ]; then
-            echo "::error title=No bsdtar::$bsdtar is missing; PATH tar is GNU tar and cannot read zip."
-            exit 1
-          fi
-          ( cd "$dest" && "$bsdtar" -xf py.zip )
-          echo "$dest" >> "$GITHUB_PATH"
-          "$dest/python.exe" --version
-
-      - name: Setup vx (installs Rust + just from vx.toml)
+      - name: Setup vx
         uses: loonghao/vx@v0.9.17
         with:
           setup: 'true'
           cache: 'true'
-
-      - name: Clear stale install-action state (partner-runner-images#169)
-        shell: bash
-        run: |
-          for base in "$USERPROFILE" "/c/Users/$USERNAME" \
-                      "/c/WINDOWS/ServiceProfiles/NetworkService" \
-                      "/c/WINDOWS/system32/config/systemprofile"; do
-            [ -n "$base" ] && rm -rf "$base/.install-action/tmp" "$base/.install-action/init" 2>/dev/null || true
-          done
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
-
-      # Compile the three test binaries BEFORE measuring, so the first
-      # repetition of the first test is not the one that pays for the build and
-      # blows its own wall-clock budget.
-      - name: Measure with retries disabled
-        shell: bash
-        env:
-          LEDGER_RUNS: ${{ github.event.inputs.runs || '10' }}
-          LEDGER_CONDITIONS: ${{ github.event.inputs.conditions || 'isolated,batch,loaded' }}
-          LEDGER_TESTS: ${{ github.event.inputs.tests || '' }}
-        run: |
-          set -euo pipefail
-          py=python3
-          command -v python3 >/dev/null 2>&1 || py=python
-          extra=()
-          if [ -n "${LEDGER_TESTS}" ]; then
-            extra=(--tests "$LEDGER_TESTS")
-          fi
-          "$py" scripts/flake-ledger.py \
-            "${extra[@]}" \
-            --runs "$LEDGER_RUNS" \
-            --conditions "$LEDGER_CONDITIONS" \
-            --profile ci \
-            --out windows-flake-ledger.json \
-            --logdir flake-ledger-logs \
-            | tee flake-ledger.txt
-
-      - name: Upload the ledger
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-flake-ledger-${{ github.run_id }}
-          path: |
-            windows-flake-ledger.json
-            flake-ledger.txt
-            flake-ledger-logs/
-            target/swarm-delegated-skips.txt
-          retention-days: 14
-          # A measurement job that uploaded nothing measured nothing.
-          if-no-files-found: error
-
-  # --------------------------------------------------------------------------
-  # Hosted-Windows companion.
-  #
-  # NOT a substitute for the self-hosted leg, and it must not be read as one.
-  # The hosted `windows-latest` image is a SERVER SKU on which
-  # `AppContainerBackend::is_available()` is false, so the four delegated-swarm
-  # targets cannot execute there — they will record a delegated-backend skip.
-  # That is the point: the harness grades those SKIPPED, never GREEN, so this
-  # leg answers honestly for the targets it CAN run and says so for the rest.
-  #
-  # It exists because the self-hosted Windows pool is two boxes deep behind a
-  # queue that has run hours long, and a measurement that cannot be taken for
-  # hours is a measurement that does not happen. This leg starts immediately.
-  # --------------------------------------------------------------------------
-  ledger-hosted:
-    name: Windows flake ledger (hosted server SKU, retries=0)
-    runs-on: windows-latest
-    timeout-minutes: 240
-
-    steps:
-      # Which Windows executor served this job (gh#1146). Fails closed: a job
-      # that cannot name the box that served it reports nothing rather than
-      # reporting anonymously. Why, and what enforces it:
-      # `scripts/check-windows-attribution.py`.
       - name: Record which Windows executor served this job
         shell: bash
         run: |
-          set -euo pipefail
-          if [ -z "${RUNNER_NAME:-}" ]; then
-            echo "::error title=Executor not recorded::RUNNER_NAME is unset, so this job cannot say which Windows executor served it (gh#1146)."
-            exit 1
-          fi
-          echo "runner_name=${RUNNER_NAME}"
-          echo "computername=${COMPUTERNAME:-<unset>} workspace=${RUNNER_WORKSPACE:-<unset>}"
-          {
-            echo "### Windows executor"
-            echo "- runner_name: \`${RUNNER_NAME}\`"
-            echo "- computername: \`${COMPUTERNAME:-<unset>}\`"
-            echo "- workspace: \`${RUNNER_WORKSPACE:-<unset>}\`"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - uses: actions/checkout@v4
-
-      - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest
-
-      - name: Measure with retries disabled
+          if [ -z "${RUNNER_NAME:-}" ]; then exit 1; fi
+          echo "runner_name=${RUNNER_NAME}" >> "$GITHUB_STEP_SUMMARY"
+          mkdir -p diagnostic-evidence
+          git rev-parse HEAD > diagnostic-evidence/source.txt
+          vx rustc -vV > diagnostic-evidence/toolchain.txt
+          printf 'compile_profile=test\nnextest_profile=ci\nrunner=%s\nimage=%s\n' "$RUNNER_NAME" "$ImageVersion" > diagnostic-evidence/environment.txt
+      - name: Original keyring roundtrip
         shell: bash
         env:
-          LEDGER_RUNS: ${{ github.event.inputs.runs || '10' }}
-          LEDGER_CONDITIONS: ${{ github.event.inputs.conditions || 'isolated,batch,loaded' }}
-          LEDGER_TESTS: ${{ github.event.inputs.tests || '' }}
+          ATTEMPT_DIR: diagnostic-evidence/keyring-original
         run: |
-          set -euo pipefail
-          extra=()
-          if [ -n "${LEDGER_TESTS}" ]; then
-            extra=(--tests "$LEDGER_TESTS")
-          fi
-          python scripts/flake-ledger.py \
-            "${extra[@]}" \
-            --runs "$LEDGER_RUNS" \
-            --conditions "$LEDGER_CONDITIONS" \
-            --profile ci \
-            --out windows-hosted-flake-ledger.json \
-            --logdir flake-ledger-logs-hosted \
-            | tee flake-ledger-hosted.txt
-
-      - name: Upload the hosted ledger
+          bash .github/scripts/run-tests-with-attempt-evidence.sh \
+            vx cargo nextest run --locked -p wcore-config --test credential_storage_test \
+            --profile ci --retries 0 --no-tests=fail --test-threads 1 \
+            -E 'test(=keyring_backend_round_trip_when_available)'
+      - name: Raw and public immediate read discriminator
+        if: always()
+        shell: bash
+        env:
+          ATTEMPT_DIR: diagnostic-evidence/keyring-discriminator
+        run: |
+          bash .github/scripts/run-tests-with-attempt-evidence.sh \
+            vx cargo nextest run --locked -p wcore-config --test keyring_windows_diagnostic \
+            --profile ci --retries 0 --no-tests=fail --test-threads 1
+      - name: Upload raw evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-hosted-flake-ledger-${{ github.run_id }}
-          path: |
-            windows-hosted-flake-ledger.json
-            flake-ledger-hosted.txt
-            flake-ledger-logs-hosted/
-            target/swarm-delegated-skips.txt
-          retention-days: 14
+          name: windows-keyring-roundtrip-${{ github.run_id }}
+          path: diagnostic-evidence/
           if-no-files-found: error
+          retention-days: 14
