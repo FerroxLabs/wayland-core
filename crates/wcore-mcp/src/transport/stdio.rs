@@ -9,7 +9,7 @@ use tokio::sync::{Mutex, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, timeout};
 use tracing::{debug, error, warn};
-use wcore_config::shell::{McpStdioLaunchContext, mcp_stdio_command_builder};
+use wcore_config::shell::{McpStdioLaunchContext, mcp_stdio_command_builder, shell_command_argv};
 
 use super::{McpError, McpTransport};
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse};
@@ -517,7 +517,22 @@ impl StdioTransport {
                 || command.eq_ignore_ascii_case("pwsh.exe")
                 || command.eq_ignore_ascii_case("pwsh"));
 
-        let mut cmd = if is_windows_cmd {
+        // Absolute executables need no PATHEXT shim lookup. Passing a quoted
+        // Program Files executable plus quoted arguments through cmd /C can
+        // split the program at its first space before the server ever starts.
+        // Keep .cmd/.bat and bare commands on the existing shell path.
+        let program_path = std::path::Path::new(command);
+        let is_windows_executable = cfg!(windows)
+            && program_path.is_absolute()
+            && program_path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"));
+        let mut cmd = if is_windows_executable {
+            shell_command_argv(
+                command,
+                &args.iter().map(String::as_str).collect::<Vec<_>>(),
+            )
+        } else if is_windows_cmd {
             let mut c = tokio::process::Command::new(command);
             c.args(args.iter().map(|s| s.as_str()));
             c.kill_on_drop(true);
