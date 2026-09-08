@@ -76,7 +76,7 @@ fn probe_policy() -> BrowserPolicy {
 }
 
 /// Read until the response head terminator, or EOF.
-async fn read_head(stream: &mut (impl tokio::io::AsyncRead + Unpin)) -> String {
+async fn read_head(stream: &mut TcpStream) -> String {
     let mut out = Vec::new();
     let mut buf = [0u8; 1024];
     loop {
@@ -92,8 +92,25 @@ async fn read_head(stream: &mut (impl tokio::io::AsyncRead + Unpin)) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// Refusals are close-delimited: the proxy writes the head and body separately,
+/// then shuts down. A head-only read cannot grade the reason in the body.
 async fn read_error_response(stream: &mut (impl tokio::io::AsyncRead + Unpin)) -> String {
-    read_head(stream).await
+    const MAX_RESPONSE_BYTES: usize = 16 * 1024;
+    let mut out = Vec::new();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        stream
+            .take((MAX_RESPONSE_BYTES + 1) as u64)
+            .read_to_end(&mut out),
+    )
+    .await
+    .expect("proxy refusal did not finish before the deadline")
+    .expect("read proxy refusal");
+    assert!(
+        out.len() <= MAX_RESPONSE_BYTES,
+        "proxy refusal is too large"
+    );
+    String::from_utf8(out).expect("proxy refusal is UTF-8")
 }
 
 #[tokio::test]
