@@ -334,7 +334,7 @@ jobs:
       # .cargo/config.toml ever selected it as the linker.
       - name: Setup vx (installs Rust from vx.toml)
         if: runner.os != 'Linux'
-        uses: loonghao/vx@v0.9.17
+        uses: loonghao/vx@v0.9.31
         with:
           setup: 'true'
           cache: 'true'
@@ -556,7 +556,7 @@ jobs:
       # by `secret` mode below).
       - name: Azure login (OIDC federation, no stored secret)
         if: steps.winsign.outputs.mode == 'oidc'
-        uses: azure/login@v3.0.1
+        uses: azure/login@v3.0.2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
@@ -765,7 +765,7 @@ jobs:
 
       - name: Setup vx (installs Rust from vx.toml)
         if: steps.manifest_guard.outputs.skip == 'false' && steps.resume.outputs.found != 'true'
-        uses: loonghao/vx@v0.9.17
+        uses: loonghao/vx@v0.9.31
         with:
           setup: 'true'
           cache: 'true'
@@ -1264,7 +1264,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config libdbus-1-dev libseccomp-dev libasound2-dev libssl-dev mold
-      - uses: loonghao/vx@v0.9.17
+      - uses: loonghao/vx@v0.9.31
         with:
           setup: 'true'
           cache: 'true'
@@ -1318,7 +1318,7 @@ jobs:
         with:
           name: private-release-candidate
           path: ${{ runner.temp }}/private-release-candidate
-      - uses: loonghao/vx@v0.9.17
+      - uses: loonghao/vx@v0.9.31
         with:
           setup: 'true'
           cache: 'true'
