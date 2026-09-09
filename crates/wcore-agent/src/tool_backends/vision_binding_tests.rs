@@ -2,6 +2,61 @@ use super::*;
 use wiremock::matchers::{body_partial_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+#[test]
+fn selected_vision_key_preserves_custom_and_default_destinations() {
+    for (provider, base, expected) in [
+        (
+            ProviderType::OpenAI,
+            "https://router.example.invalid/v1",
+            "https://router.example.invalid/v1/chat/completions",
+        ),
+        (
+            ProviderType::FluxRouter,
+            "https://router.example.invalid/v1",
+            "https://router.example.invalid/v1/chat/completions",
+        ),
+        (
+            ProviderType::OpenAI,
+            "",
+            "https://api.openai.com/v1/chat/completions",
+        ),
+        (
+            ProviderType::FluxRouter,
+            "",
+            "https://api.fluxrouter.ai/v1/chat/completions",
+        ),
+    ] {
+        let config = Config {
+            provider,
+            base_url: base.into(),
+            api_key: "fake-selected-key".into(),
+            ..Config::default()
+        };
+        let backend =
+            vision_backend_from_openai_env_key(&config, "fake-selected-key".into()).unwrap();
+        assert_eq!(backend.endpoint(), expected);
+    }
+}
+
+#[test]
+fn independent_openai_vision_key_preserves_native_destination() {
+    for selected_key in ["fake-selected-key", "", "   "] {
+        let config = Config {
+            provider: ProviderType::FluxRouter,
+            base_url: "https://router.example.invalid/v1".into(),
+            api_key: selected_key.into(),
+            ..Config::default()
+        };
+        let backend =
+            vision_backend_from_openai_env_key(&config, "fake-independent-key".into()).unwrap();
+        assert_eq!(
+            backend.endpoint(),
+            "https://api.openai.com/v1/chat/completions"
+        );
+        assert_eq!(backend.backend_id(), "openai");
+    }
+}
+
 /// Exercise the production resolver with process-isolated credentials. Even a
 /// regression to a native host goes to the fixture proxy, never the Internet.
 #[tokio::test]
