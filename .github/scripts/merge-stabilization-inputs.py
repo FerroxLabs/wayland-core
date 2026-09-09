@@ -3,16 +3,17 @@
 import argparse
 import importlib.util
 import json
+import os
 from pathlib import Path
 import shutil
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(os.environ.get("RELEASE_SOURCE_ROOT", Path(__file__).resolve().parents[2]))
 spec = importlib.util.spec_from_file_location("release_gate", ROOT / "scripts/stabilization_release_gate.py")
 gate = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gate)
 
 
-def merge(sources, output, sha, repository, run_id, ci_run_id, artifacts, tag):
+def merge(sources, output, sha, repository, run_id, ci_run_id, artifacts, tag, mutants_run_id=None):
     output.mkdir(parents=True, exist_ok=False)
     result = {"schema": 1, "source_sha": sha, "tag": tag, "tests": [], "mutants": [], "native": [],
               "deferred_risks": [], "provenance": []}
@@ -24,8 +25,10 @@ def merge(sources, output, sha, repository, run_id, ci_run_id, artifacts, tag):
         gate.require(isinstance(rows, list) and rows, f"{label}: missing {kind}")
         if label != "ci":
             origin = index.get("provenance", {})
+            expected_run = mutants_run_id or run_id if label == "mutants" else run_id
             gate.require(origin.get("source_sha") == sha and origin.get("repository") == repository
-                         and str(origin.get("run_id")) == str(run_id) and origin.get("job") == job,
+                         and str(origin.get("run_id")) == str(expected_run)
+                         and str(origin_run) == str(expected_run) and origin.get("job") == job,
                          f"{label}: producer provenance mismatch")
         def rebase(value):
             if isinstance(value, dict):
@@ -62,8 +65,9 @@ if __name__ == "__main__":
         parser.add_argument("--" + name, type=Path, required=True)
     for name in ("sha", "tag", "repository", "run-id", "ci-run-id"):
         parser.add_argument("--" + name, required=True)
+    parser.add_argument("--mutants-run-id", help="Authenticated original mutation producer run; preserve provenance")
     args = parser.parse_args()
     merge([("ci", args.ci, "tests", "ci-linux", args.ci_run_id),
-           ("mutants", args.mutants, "mutants", "collect-release-mutants", args.run_id),
+           ("mutants", args.mutants, "mutants", "collect-release-mutants", args.mutants_run_id or args.run_id),
            ("native", args.native, "native", "collect-release-native", args.run_id)],
-          args.output, args.sha, args.repository, args.run_id, args.ci_run_id, args.artifacts, args.tag)
+          args.output, args.sha, args.repository, args.run_id, args.ci_run_id, args.artifacts, args.tag, args.mutants_run_id)

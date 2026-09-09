@@ -109,6 +109,19 @@ class Collection(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "provenance mismatch"):
             self.run_merge()
 
+    def test_authenticated_prior_mutants_retain_original_run_identity(self):
+        self.mutate_index("mutants", lambda d: d["provenance"].update(run_id="9"))
+        self.sources[1] = (*self.sources[1][:-1], "9")
+        result = merge.merge(self.sources, self.root / "merged", SHA, REPO, "5", "4", self.assets, TAG,
+                             mutants_run_id="9")
+        self.assertEqual(result["provenance"][1]["run_id"], "9")
+        self.assertEqual(result["provenance"][2]["run_id"], "5")
+
+    def test_prior_mutants_cannot_be_relabelled_to_requested_origin(self):
+        with self.assertRaisesRegex(ValueError, "provenance mismatch"):
+            merge.merge(self.sources, self.root / "merged", SHA, REPO, "5", "4", self.assets, TAG,
+                        mutants_run_id="9")
+
     def test_missing_mutant_refused(self):
         self.mutate_index("mutants", lambda d: d["mutants"].pop())
         with self.assertRaisesRegex(ValueError, "missing mutants"):
@@ -150,7 +163,7 @@ class Collection(unittest.TestCase):
     def test_workflow_requires_same_run_producers_and_keeps_ci_authentication(self):
         text = (ROOT / ".github/workflows/release.yml").read_text()
         produce = text.split("  produce-release-evidence:\n", 1)[1].split("  promote-release:\n", 1)[0]
-        self.assertIn("post-tag-smoke, collect-release-mutants, collect-release-native]", produce)
+        self.assertIn("post-tag-smoke, collect-release-mutants, collect-release-native, recover-candidate]", produce)
         self.assertIn('run["conclusion"] == "success"', produce)
         self.assertIn('run["head_sha"] == sys.argv[1]', produce)
         self.assertIn('run["event"] in ("push", "workflow_dispatch")', produce)

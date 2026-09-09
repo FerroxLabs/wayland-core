@@ -24,6 +24,10 @@ on:
         description: "Optional full commit SHA: only approved ledger corrections directly on the release tag"
         required: false
         type: string
+      prior_candidate_run:
+        description: "Optional approved recovery run 34300869306: reuse signed candidate and original mutations"
+        required: false
+        type: string
   workflow_dispatch:
     inputs:
       tag_name:
@@ -36,6 +40,10 @@ on:
         type: string
       release_metadata_ref:
         description: "Optional full commit SHA: only approved ledger corrections directly on the release tag"
+        required: false
+        type: string
+      prior_candidate_run:
+        description: "Optional approved recovery run 34300869306: reuse signed candidate and original mutations"
         required: false
         type: string
 
@@ -299,6 +307,7 @@ jobs:
           if-no-files-found: error
 
   build:
+    if: inputs.prior_candidate_run == ''
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     needs: prepare-release
@@ -700,12 +709,66 @@ jobs:
           path: dist/${{ env.ARCHIVE }}
           if-no-files-found: error
 
+  recover-candidate:
+    name: Recover verified signed candidate and original mutations
+    if: inputs.prior_candidate_run != ''
+    runs-on: ubuntu-latest
+    needs: prepare-release
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: refs/tags/${{ inputs.tag_name || github.ref_name }}
+          fetch-depth: 0
+      - name: Authenticate prior producers and select exact signed assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PRIOR_RUN: ${{ inputs.prior_candidate_run }}
+          WORKFLOW_CONTROL_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$WORKFLOW_CONTROL_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git fetch --no-tags origin "$WORKFLOW_CONTROL_SHA"
+          git show "$WORKFLOW_CONTROL_SHA:.github/scripts/recover-release-candidate.py" \
+            > "$RUNNER_TEMP/recover-release-candidate.py"
+          python3 -B "$RUNNER_TEMP/recover-release-candidate.py" \
+            --prior-run "$PRIOR_RUN" --source "$GITHUB_WORKSPACE" \
+            --output "$RUNNER_TEMP/recovered-release"
+      - name: Preserve recovered exact private candidate
+        uses: actions/upload-artifact@v7
+        with:
+          name: private-release-candidate
+          path: ${{ runner.temp }}/recovered-release/candidate/*
+          if-no-files-found: error
+      - name: Preserve unchanged original mutation receipts
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-mutants-raw
+          path: ${{ runner.temp }}/recovered-release/mutants/
+          if-no-files-found: error
+      - name: Preserve authenticated recovery receipt
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-recovery-receipt
+          path: ${{ runner.temp }}/recovered-release/receipt.json
+          if-no-files-found: error
+
   github-release:
+    # Recovery deliberately skips build; an explicit success dependency keeps
+    # that skip from suppressing staging, without accepting failed recovery.
+    if: >-
+      ${{ !cancelled() && needs.prepare-release.result == 'success' &&
+          ((inputs.prior_candidate_run == '' && needs.build.result == 'success') ||
+           (inputs.prior_candidate_run != '' && needs.recover-candidate.result == 'success')) }}
     name: Upload GitHub Release assets
     runs-on: ubuntu-latest
     needs:
       - prepare-release
       - build
+      - recover-candidate
     # A job-level block REPLACES the workflow-level `contents: write`, so it must
     # be restated. `id-token: write` + `attestations: write` let
     # attest-build-provenance mint keyless Sigstore SLSA provenance for each
@@ -738,12 +801,54 @@ jobs:
           if [ "$candidate" = true ]; then
             gh run download "$RUN_ID" --repo "$REPOSITORY" --name private-release-candidate --dir artifacts
           fi
-      - name: Download build artifacts
+      - name: Download release asset x86_64-unknown-linux-gnu
         if: steps.resume.outputs.found != 'true'
         uses: actions/download-artifact@v8
         with:
+          name: x86_64-unknown-linux-gnu
           path: artifacts
-          merge-multiple: true
+
+      - name: Download release asset aarch64-unknown-linux-gnu
+        if: steps.resume.outputs.found != 'true'
+        uses: actions/download-artifact@v8
+        with:
+          name: aarch64-unknown-linux-gnu
+          path: artifacts
+
+      - name: Download release asset x86_64-apple-darwin
+        if: steps.resume.outputs.found != 'true'
+        uses: actions/download-artifact@v8
+        with:
+          name: x86_64-apple-darwin
+          path: artifacts
+
+      - name: Download release asset aarch64-apple-darwin
+        if: steps.resume.outputs.found != 'true'
+        uses: actions/download-artifact@v8
+        with:
+          name: aarch64-apple-darwin
+          path: artifacts
+
+      - name: Download release asset x86_64-pc-windows-msvc
+        if: steps.resume.outputs.found != 'true'
+        uses: actions/download-artifact@v8
+        with:
+          name: x86_64-pc-windows-msvc
+          path: artifacts
+
+      - name: Download release asset aarch64-pc-windows-msvc
+        if: steps.resume.outputs.found != 'true'
+        uses: actions/download-artifact@v8
+        with:
+          name: aarch64-pc-windows-msvc
+          path: artifacts
+
+      - name: Download release asset desktop-contract-v1
+        if: steps.resume.outputs.found != 'true'
+        uses: actions/download-artifact@v8
+        with:
+          name: desktop-contract-v1
+          path: artifacts
 
       - name: Attest build provenance (keyless, Sigstore-backed)
         if: steps.resume.outputs.found != 'true'
@@ -1290,6 +1395,7 @@ jobs:
   # They run once, against the checked-out tag; completed same-run producer
   # jobs authenticate their artifacts without waiting for this run to finish.
   collect-release-mutants:
+    if: inputs.prior_candidate_run == ''
     name: Collect original release mutation receipts
     runs-on: ubuntu-latest
     # Mutations need source only; run alongside the six artifact builds.
@@ -1389,9 +1495,15 @@ jobs:
           if-no-files-found: error
 
   produce-release-evidence:
+    if: >-
+      ${{ !cancelled() && needs.prepare-release.result == 'success' &&
+          needs.github-release.result == 'success' && needs.post-tag-smoke.result == 'success' &&
+          needs.collect-release-native.result == 'success' &&
+          ((inputs.prior_candidate_run == '' && needs.collect-release-mutants.result == 'success') ||
+           (inputs.prior_candidate_run != '' && needs.recover-candidate.result == 'success')) }}
     name: Produce source-bound behavioral admission receipt
     runs-on: ubuntu-latest
-    needs: [prepare-release, github-release, post-tag-smoke, collect-release-mutants, collect-release-native]
+    needs: [prepare-release, github-release, post-tag-smoke, collect-release-mutants, collect-release-native, recover-candidate]
     outputs:
       sha: ${{ steps.source.outputs.sha }}
     permissions:
@@ -1441,14 +1553,33 @@ jobs:
         with:
           name: release-native-raw
           path: native-evidence
+      - name: Load recovery merge control without changing tagged source
+        if: inputs.prior_candidate_run != ''
+        shell: bash
+        env:
+          WORKFLOW_CONTROL_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$WORKFLOW_CONTROL_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git fetch --no-tags origin "$WORKFLOW_CONTROL_SHA"
+          git show "$WORKFLOW_CONTROL_SHA:.github/scripts/merge-stabilization-inputs.py" \
+            > "$RUNNER_TEMP/merge-stabilization-inputs.py"
       - name: Merge authenticated source-bound producer receipts
         shell: bash
         env:
           RELEASE_TAG: ${{ inputs.tag_name || github.ref_name }}
           EVIDENCE_RUN_ID: ${{ inputs.evidence_run_id }}
+          PRIOR_RUN: ${{ inputs.prior_candidate_run }}
+          RELEASE_SOURCE_ROOT: ${{ github.workspace }}
         run: |
           set -euo pipefail
-          python3 .github/scripts/merge-stabilization-inputs.py \
+          merge_script=.github/scripts/merge-stabilization-inputs.py
+          recovery_args=()
+          if [ -n "$PRIOR_RUN" ]; then
+            merge_script="$RUNNER_TEMP/merge-stabilization-inputs.py"
+            recovery_args=(--mutants-run-id "$PRIOR_RUN")
+          fi
+          python3 -B "$merge_script" "${recovery_args[@]}" \
             --ci raw-evidence --mutants mutant-evidence --native native-evidence \
             --output merged-evidence --artifacts artifacts --sha "$(git rev-parse HEAD)" \
             --tag "$RELEASE_TAG" --repository "$GITHUB_REPOSITORY" \
