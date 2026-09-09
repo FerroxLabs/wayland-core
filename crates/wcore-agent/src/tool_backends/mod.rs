@@ -429,6 +429,9 @@ pub const FLUX_ROUTER_VISION_MODEL: &str = "flux-auto";
 /// Vision arm for native OpenAI (and the `OPENAI_API_KEY` fallback).
 pub const OPENAI_VISION_MODEL: &str = "gpt-4o";
 
+#[cfg(test)]
+mod vision_binding_tests;
+
 /// Pick the best available vision backend.
 ///
 /// Order (first match wins):
