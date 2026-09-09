@@ -20,6 +20,10 @@ on:
         description: "Successful current-SHA CI/collector run carrying stabilization-raw-<SHA>; required for promotion"
         required: false
         type: string
+      release_metadata_ref:
+        description: "Optional full commit SHA: only approved ledger corrections directly on the release tag"
+        required: false
+        type: string
   workflow_dispatch:
     inputs:
       tag_name:
@@ -28,6 +32,10 @@ on:
         type: string
       evidence_run_id:
         description: "Successful current-SHA CI/collector run carrying stabilization-raw-<SHA>; required for promotion"
+        required: false
+        type: string
+      release_metadata_ref:
+        description: "Optional full commit SHA: only approved ledger corrections directly on the release tag"
         required: false
         type: string
 
@@ -125,6 +133,7 @@ jobs:
       # the repo-scoped GITHUB_TOKEN cannot see the second tracker, and if it
       # is what ends up being used this step will say so by failing.
       - name: Criteria ledger covers both trackers
+        if: inputs.release_metadata_ref == ''
         env:
           GH_TOKEN: ${{ secrets.LEDGER_ISSUES_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
@@ -161,11 +170,45 @@ jobs:
       # second tracker, and if it is what ends up being used this step says
       # so by failing rather than by quietly corroborating nothing.
       - name: No in-scope defect still owes core work
+        if: inputs.release_metadata_ref == ''
         env:
           GH_TOKEN: ${{ secrets.LEDGER_ISSUES_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
           python3 scripts/check-release-readiness.py --self-test
           python3 scripts/check-release-readiness.py
+
+      # The workflow control commit supplies only the overlay validator. Both
+      # live gates still execute the immutable tag's scripts and Cargo version.
+      # A temporary tag worktree receives the two approved ledger files; no
+      # metadata or control-branch source can enter the packaging checkout.
+      - name: Admit committed release metadata with unchanged live tag gates
+        if: inputs.release_metadata_ref != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.LEDGER_ISSUES_TOKEN || secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag_name || github.ref_name }}
+          RELEASE_METADATA_SHA: ${{ inputs.release_metadata_ref }}
+          WORKFLOW_CONTROL_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_METADATA_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$WORKFLOW_CONTROL_SHA" =~ ^[0-9a-f]{40}$ ]]
+          source_sha="$(git rev-parse HEAD)"
+          git fetch --no-tags origin "$RELEASE_METADATA_SHA" "$WORKFLOW_CONTROL_SHA"
+          git show "$WORKFLOW_CONTROL_SHA:.github/scripts/release-metadata-overlay.py" \
+            > "$RUNNER_TEMP/release-metadata-overlay.py"
+          python3 -B "$RUNNER_TEMP/release-metadata-overlay.py" \
+            --source "$GITHUB_WORKSPACE" --tag "$RELEASE_TAG" \
+            --source-sha "$source_sha" --metadata-sha "$RELEASE_METADATA_SHA" \
+            --receipt "$RUNNER_TEMP/release-metadata-receipt.json"
+
+      - name: Preserve source-bound metadata gate receipt
+        if: ${{ !cancelled() && inputs.release_metadata_ref != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-metadata-receipt
+          path: ${{ runner.temp }}/release-metadata-receipt.json
+          if-no-files-found: error
 
       - name: Extract version from tag
         id: metadata
@@ -922,7 +965,7 @@ jobs:
             --artifacts artifacts \
             --output "${RUNNER_TEMP}/manifest.json" \
             --release-id "${RELEASE_TAG}" \
-            --source-commit "${GITHUB_SHA}" \
+            --source-commit "$(git -C source rev-parse HEAD)" \
             --sequence "${SEQUENCE}" \
             --issued-at "$(date -u +%s)" \
             --sbom "artifacts/wayland-core-${RELEASE_TAG}-sbom.json"
