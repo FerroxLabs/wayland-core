@@ -57,6 +57,11 @@ impl NoSandboxBackend {
         for (k, v) in &manifest.env {
             builder.env(k, v);
         }
+        // These commands have no stdin payload. On Windows, inheriting the
+        // host's actively-read protocol pipe can block MSYS initialization in
+        // NtQueryObject before Bash executes even a noninteractive command.
+        #[cfg(windows)]
+        builder.stdin(Stdio::null());
         builder.stdout(Stdio::piped()).stderr(Stdio::piped());
         Ok(builder)
     }

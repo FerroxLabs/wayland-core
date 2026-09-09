@@ -429,11 +429,15 @@ pub const FLUX_ROUTER_VISION_MODEL: &str = "flux-auto";
 /// Vision arm for native OpenAI (and the `OPENAI_API_KEY` fallback).
 pub const OPENAI_VISION_MODEL: &str = "gpt-4o";
 
+#[cfg(test)]
+mod vision_binding_tests;
+
 /// Pick the best available vision backend.
 ///
 /// Order (first match wins):
 /// 1. `ANTHROPIC_API_KEY` → Claude vision
-/// 2. `OPENAI_API_KEY` → GPT-4o vision
+/// 2. `OPENAI_API_KEY` → active configured route when it is the same credential;
+///    otherwise native GPT-4o vision. An invalid matching binding fails closed.
 /// 3. `GEMINI_API_KEY` → Gemini 2.5 Flash vision
 /// 4. **Active OpenAI-wire provider** (native OpenAI or FluxRouter) — resolved
 ///    key + `base_url` from `Config`, so a configured
@@ -456,8 +460,8 @@ pub const OPENAI_VISION_MODEL: &str = "gpt-4o";
 /// [`build_transcription_backend`] exactly: arms 1-3 are the pre-existing
 /// resolution order, and putting the active provider first would silently move
 /// every existing Anthropic/OpenAI/Gemini vision user onto a different (and
-/// possibly billed) arm. **Arms 4 and 5 are strictly additive — no
-/// previously-resolving configuration changes backend.**
+/// possibly billed) arm. Independent provider keys retain that precedence;
+/// an active key mirrored into `OPENAI_API_KEY` retains its configured host.
 pub fn build_vision_backend(config: &Config) -> Option<Arc<dyn VisionBackend>> {
     build_vision_backend_with_accounting(config, &MediaAccounting::default())
 }
@@ -480,10 +484,12 @@ pub fn build_vision_backend_with_accounting(
         ));
     }
     if let Some(key) = read_env_key("OPENAI_API_KEY") {
-        tracing::info!("vision: using OpenAI (OPENAI_API_KEY found)");
-        return Some(Arc::new(
-            OpenAiVisionBackend::new(key).with_accounting(accounting.clone()),
-        ));
+        let backend = vision_backend_from_openai_env_key(config, key)?;
+        tracing::info!(
+            "vision: using {} (OPENAI_API_KEY binding)",
+            backend.backend_id()
+        );
+        return Some(Arc::new(backend.with_accounting(accounting.clone())));
     }
     if let Some(key) = read_env_key("GEMINI_API_KEY") {
         tracing::info!("vision: using Gemini (GEMINI_API_KEY found)");
@@ -523,7 +529,16 @@ pub fn build_vision_backend_with_accounting(
     None
 }
 
-/// Arm 4 of [`build_vision_backend`] — the active OpenAI-wire provider (native
+/// A selected credential mirrored into the OpenAI environment variable must
+/// retain its selected destination. Distinct native credentials keep precedence.
+fn vision_backend_from_openai_env_key(config: &Config, key: String) -> Option<OpenAiVisionBackend> {
+    if !config.api_key.trim().is_empty() && key.trim() == config.api_key.trim() {
+        return vision_backend_from_config(config);
+    }
+    Some(OpenAiVisionBackend::new(key))
+}
+
+/// Active OpenAI-wire provider (native
 /// OpenAI or FluxRouter), resolved from `Config`.
 ///
 /// Returns the concrete backend (not a trait object) so the resolved endpoint
