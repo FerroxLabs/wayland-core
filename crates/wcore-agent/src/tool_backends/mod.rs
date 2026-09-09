@@ -532,7 +532,7 @@ pub fn build_vision_backend_with_accounting(
 /// A selected credential mirrored into the OpenAI environment variable must
 /// retain its selected destination. Distinct native credentials keep precedence.
 fn vision_backend_from_openai_env_key(config: &Config, key: String) -> Option<OpenAiVisionBackend> {
-    if !config.api_key.trim().is_empty() && key == config.api_key.trim() {
+    if !config.api_key.trim().is_empty() && key.trim() == config.api_key.trim() {
         return vision_backend_from_config(config);
     }
     Some(OpenAiVisionBackend::new(key))

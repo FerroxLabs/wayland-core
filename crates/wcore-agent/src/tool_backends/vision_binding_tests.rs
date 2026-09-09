@@ -57,6 +57,29 @@ fn independent_openai_vision_key_preserves_native_destination() {
     }
 }
 
+#[test]
+fn mirrored_vision_key_whitespace_never_changes_destination() {
+    for key in [
+        "fake-selected-key ",
+        " fake-selected-key",
+        "\tfake-selected-key\n",
+    ] {
+        let config = Config {
+            provider: ProviderType::OpenAI,
+            api_key: key.into(),
+            base_url: "https://router.example.invalid/v1".into(),
+            ..Config::default()
+        };
+        for env_key in [key, key.trim()] {
+            let backend = vision_backend_from_openai_env_key(&config, env_key.into()).unwrap();
+            assert_eq!(
+                backend.endpoint(),
+                "https://router.example.invalid/v1/chat/completions"
+            );
+        }
+    }
+}
+
 /// Exercise the production resolver with process-isolated credentials. Even a
 /// regression to a native host goes to the fixture proxy, never the Internet.
 #[tokio::test]
