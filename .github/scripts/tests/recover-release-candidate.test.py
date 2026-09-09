@@ -178,8 +178,9 @@ class Topology(unittest.TestCase):
         self.jobs = {m.group(1): self.text[m.end():matches[i + 1].start() if i + 1 < len(matches) else len(self.text)]
                      for i, m in enumerate(matches) if m.group(1) not in ("push", "workflow-call", "workflow-dispatch")}
 
-    def simulate(self, prior, fail=None):
+    def simulate(self, prior, fail=None, cancelled=False):
         results = {}
+        ancestors = {}
         for name, text in self.jobs.items():
             match = re.search(r"^    needs: (.+)$", text, re.M)
             if match:
@@ -187,20 +188,21 @@ class Topology(unittest.TestCase):
             else:
                 match = re.search(r"^    needs:\n((?:      - .+\n)+)", text, re.M)
                 needs = re.findall(r"      - (.+)", match.group(1)) if match else []
+            ancestors[name] = set(needs).union(*(ancestors[need] for need in needs))
             expression = re.search(r"^    if: (.+)(?:\n((?:      .+\n)+))?", text, re.M)
             if expression:
                 condition = expression.group(1)
                 if condition == ">-":
                     condition = expression.group(2).strip()
-                condition = condition.replace("${{", "").replace("}}", "").replace("!cancelled()", "True")
+                condition = condition.replace("${{", "").replace("}}", "").replace("!cancelled()", repr(not cancelled))
                 condition = condition.replace("inputs.prior_candidate_run", repr(prior))
                 condition = re.sub(r"needs.([a-z-]+).result", lambda m: repr(results[m.group(1)]), condition)
                 condition = " ".join(condition.replace("&&", " and ").replace("||", " or ").split())
                 allowed = eval(condition, {"__builtins__": {}}, {})
-                if "True" not in condition:
-                    allowed = allowed and all(results[need] == "success" for need in needs)
+                if "!cancelled()" not in expression.group(0):
+                    allowed = allowed and not cancelled and all(results[need] == "success" for need in ancestors[name])
             else:
-                allowed = all(results[need] == "success" for need in needs)
+                allowed = not cancelled and all(results[need] == "success" for need in ancestors[name])
             results[name] = ("failure" if name == fail else "success") if allowed else "skipped"
         return results
 
@@ -221,6 +223,38 @@ class Topology(unittest.TestCase):
                 self.assertNotEqual(self.simulate(recover.PRIOR_RUN, fail)["promote-release"], "success")
         for fail in ("build", "collect-release-mutants"):
             self.assertNotEqual(self.simulate("", fail)["promote-release"], "success")
+
+    def test_transitive_skips_require_explicit_status_on_every_consumer(self):
+        for job in ("post-tag-smoke", "collect-release-native", "promote-release", "publish-npm"):
+            with self.subTest(job=job):
+                original = self.jobs[job]
+                self.jobs[job] = re.sub(r"^    if: >-\n(?:      .+\n)+", "", original, flags=re.M)
+                self.assertNotEqual(self.jobs[job], original)
+                self.assertEqual(self.simulate(recover.PRIOR_RUN)[job], "skipped")
+                self.jobs[job] = original
+
+    def test_cancelled_run_cannot_admit_any_job(self):
+        self.assertTrue(all(status == "skipped" for status in
+                            self.simulate(recover.PRIOR_RUN, cancelled=True).values()))
+
+    def test_every_explicit_consumer_requires_all_direct_parents(self):
+        parents = {
+            "post-tag-smoke": ("prepare-release", "github-release"),
+            "collect-release-native": ("prepare-release", "github-release"),
+            "promote-release": ("prepare-release", "github-release", "post-tag-smoke", "produce-release-evidence"),
+            "publish-npm": ("prepare-release", "promote-release"),
+        }
+        for job, needs in parents.items():
+            expression = re.search(r"^    if: >-\n((?:      .+\n)+)", self.jobs[job], re.M).group(1)
+            self.assertIn("!cancelled()", expression)
+            for parent in needs:
+                self.assertIn(f"needs.{parent}.result == 'success'", expression)
+                for status in ("failure", "skipped", "cancelled"):
+                    condition = expression.replace("${{", "").replace("}}", "").replace("!cancelled()", "True")
+                    condition = re.sub(r"needs.([a-z-]+).result",
+                                       lambda m: repr(status if m.group(1) == parent else "success"), condition)
+                    condition = " ".join(condition.replace("&&", " and ").split())
+                    self.assertFalse(eval(condition, {"__builtins__": {}}, {}), (job, parent, status))
 
     def test_ordinary_downloads_only_named_distributed_assets(self):
         job = self.jobs["github-release"]
