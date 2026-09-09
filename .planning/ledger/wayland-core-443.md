@@ -29,3 +29,5 @@ record retains the original log and the W14 JUnit/source receipts separately.
 
 The final-tag native collector remains required; this historical triage does
 not replace current release qualification.
+
+Release metadata refresh 2026-09-09: issue #443 was reopened on 2026-09-08 against old pre-repair source 0cdd998a, then automatically closed at 2026-09-09T06:24:59Z after run34315645505 on merged source1780b3164c6973279fd49d4dda17e8605f51d047. Its three gating jobs (Windows soak, live acceptance, Credential Manager) passed; the separately scoped F20 candidates were skipped and are not claimed here. The closed/met disposition combines the accepted W14 repair evidence above with the verified current closure; it is not a claim that automation alone proves absence of flakes. Final tagged release-native admission remains required. Prior open metadata1f1cc3d is retained unchanged as historical evidence.
