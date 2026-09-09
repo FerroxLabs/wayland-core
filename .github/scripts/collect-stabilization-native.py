@@ -72,7 +72,8 @@ def collect(output, archive, sha):
                 "--action", "capture", "--junit", str(junit), "--output", str(directory / "proof.json"),
                 "--archive", str(archive), "--", *command]
         env = {**os.environ, "CAPTURE_DIR": str(directory / "raw"), "EVIDENCE_SOURCE_SHA": sha}
-        code = subprocess.run(["bash", str(ROOT / ".github/scripts/capture-test-command.sh"), *argv], env=env).returncode
+        code = subprocess.run([os.environ.get("RELEASE_CAPTURE_BASH", "bash"),
+                               str(ROOT / ".github/scripts/capture-test-command.sh"), *argv], env=env).returncode
         if junit.is_file():
             shutil.copyfile(junit, directory / "junit.xml")
         try:

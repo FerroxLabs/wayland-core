@@ -129,6 +129,26 @@ class Collection(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Windows x64"):
                 native.collect(self.root / "new", self.assets / "x", SHA)
 
+    def test_native_capture_uses_the_explicit_git_bash_executable(self):
+        bash = r"C:\Program Files\Git\bin\bash.exe"
+        with patch.object(native.platform, "system", return_value="Windows"), \
+             patch.object(native.platform, "machine", return_value="AMD64"), \
+             patch.object(native.subprocess, "check_output", return_value=SHA), \
+             patch.dict(native.os.environ, {"RELEASE_CAPTURE_BASH": bash}), \
+             patch.object(native.subprocess, "run") as run:
+            run.return_value.returncode = 1
+            # No receipts are fabricated: all four captures remain blocking.
+            self.assertEqual(native.collect(self.root / "native-shell", self.assets / "x", SHA), 1)
+            self.assertEqual(run.call_count, 4)
+            for call in run.call_args_list:
+                self.assertEqual(call.args[0][0], bash)
+                self.assertTrue(call.args[0][1].endswith("capture-test-command.sh"))
+        text = (ROOT / ".github/workflows/release.yml").read_text()
+        job = text.split("  collect-release-native:\n", 1)[1].split("  produce-release-evidence:\n", 1)[0]
+        self.assertIn('export RELEASE_CAPTURE_BASH="$(cygpath -w "$BASH")"', job)
+        self.assertLess(job.index('subprocess.run([bash,'),
+                        job.index('python .github/scripts/collect-stabilization-native.py'))
+
     def test_any_current_native_failure_is_blocking(self):
         passing = {"selected": 18, "passed": 18, "failed": 0, "skipped": 0, "retries": 0}
         native.require_passing(0, passing, 18)
@@ -146,6 +166,32 @@ class Collection(unittest.TestCase):
         for name in native.LEASE_TESTS:
             self.assertIn(name, args[-1])
         self.assertEqual(dict((check, count) for _, check, count in native.CHECKS)["live_fs_acl"], 18)
+
+    def test_staging_downloads_only_the_seven_release_inputs(self):
+        text = (ROOT / ".github/workflows/release.yml").read_text()
+        staging = text.split("  github-release:\n", 1)[1].split("  post-tag-smoke:\n", 1)[0]
+        downloads = staging.split("uses: actions/download-artifact@v8")[1:]
+        expected = {"x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu",
+                    "x86_64-apple-darwin", "aarch64-apple-darwin",
+                    "x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc",
+                    "desktop-contract-v1"}
+        self.assertEqual(len(downloads), len(expected))
+        names = set()
+        for download in downloads:
+            config = download.split("\n      - ", 1)[0]
+            self.assertIn("path: artifacts", config)
+            self.assertNotIn("merge-multiple", config)
+            self.assertNotIn("pattern:", config)
+            names.add(config.split("name: ", 1)[1].splitlines()[0])
+        self.assertEqual(names, expected)
+
+    def test_manifest_binds_tag_checkout_when_dispatch_source_differs(self):
+        text = (ROOT / ".github/workflows/release.yml").read_text()
+        staging = text.split("  github-release:\n", 1)[1].split("  post-tag-smoke:\n", 1)[0]
+        self.assertIn('ref: refs/tags/${{ inputs.tag_name || github.ref_name }}', staging)
+        self.assertIn('path: source', staging)
+        self.assertIn('--source-commit "$(git -C source rev-parse HEAD)"', staging)
+        self.assertNotIn('--source-commit "${GITHUB_SHA}"', staging)
 
     def test_workflow_requires_same_run_producers_and_keeps_ci_authentication(self):
         text = (ROOT / ".github/workflows/release.yml").read_text()

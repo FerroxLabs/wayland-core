@@ -695,12 +695,54 @@ jobs:
           if [ "$candidate" = true ]; then
             gh run download "$RUN_ID" --repo "$REPOSITORY" --name private-release-candidate --dir artifacts
           fi
-      - name: Download build artifacts
+      - name: Download release asset x86_64-unknown-linux-gnu
         if: steps.resume.outputs.found != 'true'
         uses: actions/download-artifact@v8
         with:
+          name: x86_64-unknown-linux-gnu
           path: artifacts
-          merge-multiple: true
+
+      - name: Download release asset aarch64-unknown-linux-gnu
+        if: steps.resume.outputs.found != 'true'
+        uses: actions/download-artifact@v8
+        with:
+          name: aarch64-unknown-linux-gnu
+          path: artifacts
+
+      - name: Download release asset x86_64-apple-darwin
+        if: steps.resume.outputs.found != 'true'
+        uses: actions/download-artifact@v8
+        with:
+          name: x86_64-apple-darwin
+          path: artifacts
+
+      - name: Download release asset aarch64-apple-darwin
+        if: steps.resume.outputs.found != 'true'
+        uses: actions/download-artifact@v8
+        with:
+          name: aarch64-apple-darwin
+          path: artifacts
+
+      - name: Download release asset x86_64-pc-windows-msvc
+        if: steps.resume.outputs.found != 'true'
+        uses: actions/download-artifact@v8
+        with:
+          name: x86_64-pc-windows-msvc
+          path: artifacts
+
+      - name: Download release asset aarch64-pc-windows-msvc
+        if: steps.resume.outputs.found != 'true'
+        uses: actions/download-artifact@v8
+        with:
+          name: aarch64-pc-windows-msvc
+          path: artifacts
+
+      - name: Download release asset desktop-contract-v1
+        if: steps.resume.outputs.found != 'true'
+        uses: actions/download-artifact@v8
+        with:
+          name: desktop-contract-v1
+          path: artifacts
 
       - name: Attest build provenance (keyless, Sigstore-backed)
         if: steps.resume.outputs.found != 'true'
@@ -922,7 +964,7 @@ jobs:
             --artifacts artifacts \
             --output "${RUNNER_TEMP}/manifest.json" \
             --release-id "${RELEASE_TAG}" \
-            --source-commit "${GITHUB_SHA}" \
+            --source-commit "$(git -C source rev-parse HEAD)" \
             --sequence "${SEQUENCE}" \
             --issued-at "$(date -u +%s)" \
             --sbom "artifacts/wayland-core-${RELEASE_TAG}-sbom.json"
@@ -1334,6 +1376,16 @@ jobs:
           CARGO_PROFILE_TEST_DEBUG: '0'
         run: |
           set -euo pipefail
+          # Python's Windows process search can select System32's WSL bash.
+          # Bind capture to the same Git Bash executable running this step.
+          export RELEASE_CAPTURE_BASH="$(cygpath -w "$BASH")"
+          python - <<'PYTHON'
+          import os, pathlib, subprocess
+          bash = os.environ["RELEASE_CAPTURE_BASH"]
+          assert pathlib.Path(bash).is_absolute() and pathlib.Path(bash).is_file(), bash
+          subprocess.run([bash, "-c", '[[ "$(uname -s)" == MINGW* ]]'], check=True)
+          print("Native capture shell:", bash)
+          PYTHON
           python .github/scripts/collect-stabilization-native.py \
             --output "$RUNNER_TEMP/stabilization-native" --sha "$(git rev-parse HEAD)" \
             --archive "$RUNNER_TEMP/private-release-candidate/wayland-core-${RELEASE_TAG}-x86_64-pc-windows-msvc.zip"
