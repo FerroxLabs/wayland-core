@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "Desktop drops the MCP per-tool allowlist on the ACP session/create wire, so switched-off tools stay live (wayland#998 c5)"
 status: closed
-last_verified_commit: 3d2089b45
+last_verified_commit: 1780b3164c6973279fd49d4dda17e8605f51d047
 criteria:
   - id: c1
     text: "Desktop's ACP session/create request carries the per-tool selection for every narrowed MCP server as mcp_servers[].allowed_tools or the accepted allowedTools alias, with sent JSON captured and attached."
@@ -33,3 +33,10 @@ criteria:
 ---
 
 Recorded from live #1225 body/comments and #1323 body/comments on 2026-09-06. #1225 stays CLOSED; #1323 is OPEN in milestone 0.13.14. The explicit c2/c4 residual moves are preserved. Sean authorized transferring c1/c3 to the existing Desktop successor #1323 on 2026-09-07. Both remain unproven there; the original acceptance and contradictory route evidence are preserved. This can keep release-readiness red and is not a new waiver. Parent #998 c5 remains pointed at this closed carrier, whose residual is now recorded.
+
+Squash provenance reconciliation: PR #455 head `28634521b854d58672819843865f6ab7dd16d72c` and integrated
+commit `1780b3164c6973279fd49d4dda17e8605f51d047` have identical tree
+`90e028ae6de0537c60c1d86450ceb3083ae4610b`. Original anchor `3d2089b45`
+is an ancestor of the PR head; squash integration removed that ancestry. This
+repin preserves the recorded grading and does not establish new runtime or
+release acceptance. Exact-head CI `34242741624` passed before that squash.

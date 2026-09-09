@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: feature
 title: "Core contract: expose effective tool approvals and preserve per-tool default inheritance (#1188)"
 status: open
-last_verified_commit: 3d2089b45
+last_verified_commit: 1780b3164c6973279fd49d4dda17e8605f51d047
 criteria:
   - id: c1
     text: "Publish a typed, session-scoped effective tool-policy/inventory snapshot with canonical tool IDs, registration state, effective approval disposition, and source/provenance. Re-emit or revise it after mode/config/registry changes."
@@ -31,3 +31,10 @@ criteria:
 Recorded from live #1328 on 2026-09-06. Tracker is OPEN, area:core, needs:core, with no milestone. Dependency for Desktop #1188; no implementation or milestone change is authorized by recording this issue. Classified defect conservatively because the body names duplicated authority and accidental materialization of inherited configuration.
 
 Classification: the tracker requests a new typed producer policy/inventory and inheritance-preserving mutation contract. This is a feature dependency; the motivating Desktop defects and every unmet criterion above remain unresolved.
+
+Squash provenance reconciliation: PR #455 head `28634521b854d58672819843865f6ab7dd16d72c` and integrated
+commit `1780b3164c6973279fd49d4dda17e8605f51d047` have identical tree
+`90e028ae6de0537c60c1d86450ceb3083ae4610b`. Original anchor `3d2089b45`
+is an ancestor of the PR head; squash integration removed that ancestry. This
+repin preserves the recorded grading and does not establish new runtime or
+release acceptance. Exact-head CI `34242741624` passed before that squash.
