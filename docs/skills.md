@@ -100,7 +100,7 @@ Skill body goes here.
 | Field | Type | Description |
 |-------|------|-------------|
 | `name` | string | **Required.** Unique skill name. |
-| `description` | string | **Required.** Shown in system prompt skill list. |
+| `description` | string | **Required.** Matched by `Skill { query }` and shown when the skill is listed. |
 | `paths` | string[] | Glob patterns; skill is dormant unless the current path matches at least one. |
 | `model` | string | Override active model for the duration of the skill. |
 | `effort` | string | Override reasoning effort: `low`, `medium`, or `high`. |
@@ -240,16 +240,24 @@ Project: /path/to/repo/.wayland-core/skills                 (exists)
 Legacy:  /path/to/repo/.wayland-core/commands                (not found)
 ```
 
-## Progressive loading (W4)
+## Progressive loading (W4), and the discovery gate (#1283)
 
-Skill listings injected into the system prompt no longer include body
-content. Each skill is represented as a `SkillRef` (name, description,
-when-to-use, paths conditional, source) plus the file path on disk.
-The agent activates a skill via the `Skill` tool; the body is read
+The boot system prompt carries NO per-skill listing at all. It carries a
+fixed discovery section naming the `Skill` tool and its `query` and
+`skill` parameters; an ordinary turn is billed for that constant and
+nothing else, however many skills are installed. Nothing is withheld:
+the full installed registry is searchable with `Skill { query }` and
+invocable by exact name with `Skill { skill }`.
+
+When a listing IS rendered — late-loading MCP skills, and an
+inventory change mid-session — it never includes body content. Each
+skill is represented as a `SkillRef` (name, description, when-to-use,
+paths conditional, source) plus the file path on disk. The body is read
 from disk on demand and cached in a session-bounded 32-entry LRU.
 
-This means: adding 50 skills to a project no longer adds 50× body-length
-tokens to the prompt — only 50 rows of (name + ~250-char description).
+This means: adding 50 skills to a project adds nothing to an ordinary
+turn's prompt, and adds only 50 rows of (name + ~250-char description)
+on the paths that still list.
 
 ## The listing budget is a ceiling
 

@@ -374,15 +374,13 @@ async fn a_folded_out_tool_becomes_callable_on_explicit_activation() {
 /// The skills half of c5, now CLOSED — and the assertion is the inverse of the
 /// one this function was written to make.
 ///
-/// THE NAME IS DELIBERATELY UNCHANGED, and it no longer describes what the body
-/// does. `.planning/ledger/wayland-1150.md` cites this function by name as c5's
-/// evidence token (`test:...::the_skills_listing_is_unconditional_on_an_ordinary_turn`),
-/// the ledger gate resolves every such token to a declared `fn`, and that file
-/// belongs to a different issue than the lane that closed this gap
-/// (FerroxLabs/wayland#1283). Renaming here would break the gate on a file this
-/// lane must not edit. Whoever next touches wayland-1150.md should repoint c5's
-/// evidence at `issue_1283_skill_activation_gate_test.rs` and rename this to
-/// `an_ordinary_turn_carries_no_skills_listing`.
+/// RENAMED 2026-09-10 during integration, which is the act the #1283 lane could
+/// not perform from its own worktree. The old name asserted the INVERSE of what
+/// this body now checks, and it was cited by name as `wayland-1150.md` c5's
+/// evidence token -- so a reader grading c5 off the token would have read the
+/// defect as still live. c5's evidence is repointed at
+/// `issue_1283_skill_activation_gate_test.rs::an_ordinary_turn_names_no_installed_skill`
+/// in the same commit, so the token and the assertion agree again.
 ///
 /// WHAT IT USED TO ASSERT, kept because it is the record of the defect: a turn
 /// whose text has nothing to do with any planted skill still got a listing
@@ -406,7 +404,7 @@ async fn a_folded_out_tool_becomes_callable_on_explicit_activation() {
 /// late-MCP and inventory-change paths.
 #[tokio::test]
 #[serial_test::serial]
-async fn the_skills_listing_is_unconditional_on_an_ordinary_turn() {
+async fn an_ordinary_turn_carries_no_skills_listing() {
     let reqs = session(
         10,
         config(),

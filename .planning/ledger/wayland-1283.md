@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "Skills are still injected on every ordinary turn, with no relevance or activation gate (#1280 c3/c4/c5, #1150 c5 skills half)"
 status: open
-last_verified_commit: 6488f9762
+last_verified_commit: dd7d1ad46
 criteria:
   - id: c1
     text: "Skills are injected only when relevant or explicitly activated (#1150 c5's text for the skills half), on a turn whose text relates to none of them, measured on the real bootstrap path"
@@ -77,7 +77,7 @@ them was weakened silently and none of their evidence tokens was renamed:
   is no listing there to cover. **wayland-1199.md's notes should be amended by whoever
   owns it.**
 - **`FerroxLabs/wayland#1150` c5** (superseded) cites
-  `the_skills_listing_is_unconditional_on_an_ordinary_turn`. That function now asserts the
+  `an_ordinary_turn_carries_no_skills_listing` (renamed at integration from a name that asserted the inverse). That function now asserts the
   INVERSE of what its name says. The name is kept because the ledger gate resolves every
   `test:` token to a declared `fn` and that file is not this lane's to edit; the body
   carries a loud comment saying so and naming the rename to make
