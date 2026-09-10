@@ -43,7 +43,20 @@ build-release:
 # so there is nothing for the guard to do there anyway.
 [unix]
 test:
-    scripts/fd-budget.sh vx cargo nextest run --workspace --profile default
+    #!/usr/bin/env bash
+    # Hermetic home: the same isolation CI's clean container and
+    # tools/remote-proof.py already give the suite. Without it the suite runs
+    # against the real $HOME, and production code reached through
+    # AgentBootstrap WRITES into it -- stabilization_skill_memory's turns were
+    # auto-drafted into ~/.config/wayland-core/skills/auto-telemetry-zorbulate
+    # on the push host, which then outranked the test's own project-tier skill
+    # in the budget-clamped listing and failed `just push` 3/3 against the real
+    # home while passing 3/3 isolated. See .planning/evidence/just-test-real-home/.
+    set -euo pipefail
+    home="$(mktemp -d "${TMPDIR:-/tmp}/wcore-test-home.XXXXXX")"
+    trap 'rm -rf "$home"' EXIT
+    mkdir -p "$home/wayland-core"
+    WAYLAND_HOME="$home/wayland-core" scripts/fd-budget.sh vx cargo nextest run --workspace --profile default
 
 [windows]
 test:
