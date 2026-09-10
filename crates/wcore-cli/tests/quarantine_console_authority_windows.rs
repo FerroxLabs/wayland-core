@@ -44,11 +44,11 @@
 //! * liveness — hardening does not simply break `git`;
 //! * and the RESIDUAL, pinned as an assertion rather than as prose, so that
 //!   the day it stops holding this test says so instead of quietly agreeing.
-//!    That pin is anchored on the EXPLICIT-PID arm, not the parent-donated
-//!    one, and every message it can print quotes BOTH -- core#434: the
-//!    parent-donated field went quiet in CI run 33713740549 while the
-//!    explicit-pid field in the same report still showed the child on the
-//!    operator console, and the old message read that as the escape closing.
+//!   That pin is anchored on the EXPLICIT-PID arm, not the parent-donated
+//!   one, and every message it can print quotes BOTH -- core#434: the
+//!   parent-donated field went quiet in CI run 33713740549 while the
+//!   explicit-pid field in the same report still showed the child on the
+//!   operator console, and the old message read that as the escape closing.
 //!
 //! The residual is tracked as FerroxLabs/wayland-core#389 (core#380 asked
 //! for this measurement and is answered by it); see the ledger entry for
