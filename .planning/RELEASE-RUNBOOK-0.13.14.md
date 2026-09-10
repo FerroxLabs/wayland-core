@@ -130,3 +130,65 @@ same `ALTER TABLE`, the loser gets `duplicate column name: last_latency_ms`,
 `Memory::open` returns `Err`, and bootstrap silently degrades to `NullMemory` —
 which accepts every write and returns a fresh id, so one root cause surfaced as
 several unrelated-looking assertion failures.
+
+## The merge, step by step (written before it is needed, on purpose)
+
+Six lanes are in flight. This is the order to land them in and the two traps
+that have already cost this release time.
+
+### Order
+Land in dependency order, `check-criteria-ledger.py --offline` green before
+EVERY commit, and `check-release-board.py --write` only at the very end:
+
+1. `w15/lease` — isolation fixes + the wire-test remedy. **Drop its corpus
+   commit `a43b64ac5`** (see below). Land first: it is what unblocks the push.
+2. `w15/mac`, `w15/leak`, `w15/win-cred`, `w15/cron449`, `w15/skills401` — no
+   known overlap, but run `git log --oneline HEAD..<lane>` and diff the touched
+   paths against the already-landed set before each cherry-pick.
+3. Re-anchor every `last_verified_commit` a cherry-pick orphaned. Cherry-picking
+   orphans them EVERY time; the gate names each file, so let it.
+
+### Trap 1 — `cargo fmt` FIRST, corpus SECOND. Never the other way.
+`SOURCE_INPUTS` (`crates/wcore-protocol/src/contract/spec.rs:1330`) hashes files
+BY PATH, and three of them are files a merge routinely reformats:
+
+    crates/wcore-agent/src/bootstrap.rs   (spec.rs:1355)
+    crates/wcore-agent/src/engine.rs      (spec.rs:1356)
+    crates/wcore-cli/src/main.rs          (spec.rs:1361)
+
+Regenerating the corpus and THEN running `cargo fmt` reformats a hashed input
+and re-breaks the corpus you just fixed. So: `cargo fmt --all` (the one
+Mac-safe cargo command), THEN regenerate.
+
+### Trap 2 — regenerate ONCE, over the MERGED tree
+Not once per lane. A lane that regenerates in its own worktree produces a digest
+for a tree that will never ship, and its commit must be dropped on integration.
+`w15/lease` already did this and its `a43b64ac5` is to be dropped.
+
+    # on hetzner, in the merged worktree, under the slot flock
+    cargo run -p wcore-protocol --bin wcore-contract -- generate
+    cargo run -p wcore-protocol --bin wcore-contract -- diff
+    cargo run -p wcore-protocol --bin wcore-contract -- digest
+
+### The check that decides whether the regen was legitimate
+`schema_digest` must be an **IDENTICAL SET** across the diff. Only
+`fixture_digest` and `source_inputs_digest` may move. A moved `schema_digest`
+means a WIRE SCHEMA changed — that is a Desktop-breaking change, not a
+formatting artifact, and it must be understood before it is committed, never
+blessed to make a gate green.
+
+Expected value carried forward from the lease lane, which touched `bootstrap.rs`
+(its only SOURCE_INPUTS file): `schema_digest` held at
+`sha256:8497e92e…83fc6e33`. If the merged tree shows that value, the regen moved
+only fixtures and inputs, as it should.
+
+Then replay the checked corpus rather than trusting the generator:
+
+    just desktop-contract-check
+
+### Pushing the result
+`just push` = `lint-fix fmt _auto-commit-fixes preflight test` and is FORBIDDEN
+on the Mac. Run it on hetzner through the adapter: assert HEAD, take
+`flock build.lock`, `vx just push`, write a `.status` receipt.
+**READ THE `.status` RECEIPT, NEVER THE SSH EXIT CODE.** The ssh wrapper has
+already reported 0 over a push whose receipt said `EXIT_CODE=1`.
