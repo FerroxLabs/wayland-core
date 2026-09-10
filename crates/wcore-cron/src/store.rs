@@ -707,4 +707,111 @@ mod tests {
         assert!(!constant_time_eq(b"abc", b"abd"));
         assert!(!constant_time_eq(b"abc", b"abcd"));
     }
+
+    // ----- wayland-core#449: mutants that only a same-module test can reach -----
+    //
+    // The rest of the `store.rs` survivors are graded through the public API
+    // in `tests/store_hardening.rs`. These three sit behind private items, so
+    // an integration test cannot see them at all.
+
+    /// Kills `store.rs:251:23` — the `e.kind() == NotFound` match guard in
+    /// `check_ownership_and_perms` replaced with `true`.
+    ///
+    /// With the guard always true, EVERY metadata failure is read as "the file
+    /// isn't there, so there is nothing to trust" and the gate returns
+    /// `Ok(())`. A permission or path failure would then be reported as a
+    /// clean absence. This has to call the gate directly: through `list()` the
+    /// subsequent read fails on the same path with the same error kind, so the
+    /// two outcomes are indistinguishable from outside.
+    #[cfg(unix)]
+    #[test]
+    fn the_ownership_gate_does_not_swallow_a_non_missing_io_error() {
+        let dir = tempdir().unwrap();
+
+        // Control: a genuinely absent file is NOT an error — there is nothing
+        // to trust, which is the case the guard exists to allow.
+        let absent = dir.path().join("absent").join("jobs.json");
+        assert!(
+            FileCronStore::check_ownership_and_perms(&absent).is_ok(),
+            "a missing jobs.json must not be an error"
+        );
+
+        // A regular file standing where a directory component belongs. The
+        // metadata call fails with ENOTDIR, which is not NotFound.
+        let blocker = dir.path().join("not-a-directory");
+        std::fs::write(&blocker, b"x").unwrap();
+        let through_a_file = blocker.join("jobs.json");
+        assert!(
+            FileCronStore::check_ownership_and_perms(&through_a_file).is_err(),
+            "an I/O failure that is not a missing file must surface, not be \
+             reported as a clean absence"
+        );
+    }
+
+    /// Kills `store.rs:362:23` — the `e.kind() == NotFound` match guard in
+    /// `read_file` replaced with `true`, which turns any read failure into an
+    /// empty job set. `insert`/`update`/`remove` all call `read_file`
+    /// directly, so a swallowed error there is a read-modify-write over a job
+    /// set the process never actually managed to read.
+    #[cfg(unix)]
+    #[test]
+    fn a_read_failure_that_is_not_a_missing_file_is_not_reported_as_empty() {
+        let dir = tempdir().unwrap();
+
+        // Control: a missing file really does read back as an empty job set.
+        let absent = FileCronStore::new(dir.path().join("absent").join("jobs.json"));
+        assert!(
+            absent.read_file().unwrap().jobs.is_empty(),
+            "a missing jobs.json reads as an empty job set"
+        );
+
+        let blocker = dir.path().join("not-a-directory");
+        std::fs::write(&blocker, b"x").unwrap();
+        let broken = FileCronStore::new(blocker.join("jobs.json"));
+        assert!(
+            broken.read_file().is_err(),
+            "a real read failure must surface; reporting it as an empty set \
+             makes the next write drop every persisted job"
+        );
+    }
+
+    /// Kills `store.rs:171:19` — `h ^= b` replaced with `h |= b` inside
+    /// `keyed_hash_hex::fnv1a`.
+    ///
+    /// The XOR fold is what makes FNV-1a injective in each byte. An OR in its
+    /// place stops distinguishing payload bytes whose set bits the running
+    /// state already carries, which is a collision an offline tamperer can
+    /// search for — and this hash is the whole tamper check on `jobs.json`.
+    ///
+    /// The first assertion is exact rather than statistical. Against an empty
+    /// key no bytes are folded in before the payload, so the running state is
+    /// exactly the two FNV offset bases (`..2325` and `..7c15`). `0x00` and
+    /// `0x05` differ only in bits 0 and 2, which BOTH bases already set, so an
+    /// OR maps them to the same state in both streams and the digests collide.
+    /// XOR separates them.
+    #[test]
+    fn the_keyed_hash_folds_each_byte_in_with_xor_not_or() {
+        assert_ne!(
+            keyed_hash_hex(b"", &[0x00]),
+            keyed_hash_hex(b"", &[0x05]),
+            "0x00 and 0x05 differ only in bits both FNV offset bases already \
+             set; if they hash alike the fold is an OR and the digest is not \
+             injective"
+        );
+
+        // The same property stated as the general one, under real keys: no two
+        // single-byte payloads may share a digest.
+        for key in [
+            b"k".as_slice(),
+            b"a-32-byte-ish-host-integrity-key".as_slice(),
+        ] {
+            let mut seen = std::collections::HashSet::new();
+            for b in 0u8..=255 {
+                assert!(
+                    seen.insert(keyed_hash_hex(key, &[b])),
+                    "two single-byte payloads collided at {b:#04x}"
+                );
+            }
+        }
+    }
 }
