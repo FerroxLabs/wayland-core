@@ -7913,6 +7913,96 @@ mod chunk_crash_injection {
     }
 }
 
+/// wayland#1300 c4: the two arms that used to collapse into `false`.
+///
+/// The measurement on Windows showed both arms firing ZERO times, which is
+/// the c3 result but is not evidence that they WORK. These drive each arm
+/// directly, so the observability claim is graded in-tree rather than resting
+/// on a run that happened not to hit them.
+#[cfg(test)]
+mod staleness_observation_tests {
+    use super::{ExclusiveFileLock, Staleness, staleness_census};
+    use std::time::Duration;
+
+    #[test]
+    fn a_recent_lock_is_fresh_and_an_old_one_is_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credential.lock");
+        std::fs::write(&path, "nonce").unwrap();
+
+        staleness_census::reset();
+        assert!(matches!(
+            ExclusiveFileLock::observe_staleness(&path, Duration::from_secs(60)),
+            Staleness::Fresh { .. }
+        ));
+        assert!(matches!(
+            ExclusiveFileLock::observe_staleness(&path, Duration::ZERO),
+            Staleness::Stale { .. }
+        ));
+    }
+
+    #[test]
+    fn an_unreadable_lock_is_reported_rather_than_called_alive() {
+        let dir = tempfile::tempdir().unwrap();
+        let absent = dir.path().join("never-created.lock");
+
+        let observed = ExclusiveFileLock::observe_staleness(&absent, Duration::from_secs(1));
+
+        // The pre-fix body returned `false` here, which is the same value it
+        // returned for a live holder. That is the whole defect.
+        match observed {
+            Staleness::Unreadable { kind } => {
+                assert_eq!(kind, std::io::ErrorKind::NotFound)
+            }
+            other => panic!("an absent lock must be Unreadable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_future_dated_lock_is_reported_rather_than_called_alive() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("skewed.lock");
+        let file = std::fs::File::create(&path).unwrap();
+
+        let ahead = std::time::SystemTime::now() + Duration::from_secs(3600);
+        file.set_times(std::fs::FileTimes::new().set_modified(ahead))
+            .unwrap();
+        drop(file);
+
+        match ExclusiveFileLock::observe_staleness(&path, Duration::from_secs(1)) {
+            Staleness::FutureDated { ahead } => {
+                assert!(
+                    ahead >= Duration::from_secs(3000),
+                    "the skew must be carried, got {ahead:?}"
+                )
+            }
+            other => panic!("a future-dated lock must be FutureDated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn every_arm_is_counted_so_a_timeout_can_name_which_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let present = dir.path().join("present.lock");
+        std::fs::write(&present, "nonce").unwrap();
+        let absent = dir.path().join("absent.lock");
+
+        staleness_census::reset();
+        ExclusiveFileLock::is_stale(&present, Duration::from_secs(60));
+        ExclusiveFileLock::is_stale(&absent, Duration::from_secs(60));
+
+        let snapshot = staleness_census::snapshot();
+        assert!(
+            snapshot.contains("fresh=1"),
+            "the readable lock must be counted: {snapshot}"
+        );
+        assert!(
+            snapshot.contains("unreadable=1"),
+            "the unreadable lock must be counted rather than silently false: {snapshot}"
+        );
+    }
+}
+
 #[cfg(test)]
 mod oauth_lock_deadline_tests {
     use super::*;
