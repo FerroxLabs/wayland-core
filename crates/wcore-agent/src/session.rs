@@ -944,6 +944,8 @@ where
     #[cfg(test)]
     let acquired_at = std::time::Instant::now();
     #[cfg(test)]
+    tests::enter_index_holder();
+    #[cfg(test)]
     let mut wrote_index = false;
     let result = (|| -> anyhow::Result<T> {
         // Read current index (inside the lock).
@@ -972,6 +974,8 @@ where
     })();
 
     // Always release the lock, even on error.
+    #[cfg(test)]
+    tests::leave_index_holder();
     let _ = std::fs::remove_file(&lock_path);
     #[cfg(test)]
     tests::record_index_timing(
@@ -986,6 +990,8 @@ where
 /// than `stale_timeout`, spin-wait up to 1 s then steal the lock.
 fn acquire_sentinel_lock(lock_path: &Path, stale_timeout: Duration) -> anyhow::Result<()> {
     let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    #[cfg(test)]
+    let started = std::time::Instant::now();
     loop {
         // Try to create the lock file exclusively (fails if it exists).
         match OpenOptions::new()
@@ -999,6 +1005,8 @@ fn acquire_sentinel_lock(lock_path: &Path, stale_timeout: Duration) -> anyhow::R
                 return Ok(());
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                #[cfg(test)]
+                tests::record_index_lock_contention(started.elapsed());
                 // Check for stale lock: steal if older than stale_timeout.
                 if let Ok(meta) = std::fs::metadata(lock_path)
                     && let Ok(modified) = meta.modified()
@@ -1184,6 +1192,139 @@ mod tests {
                     .push(IndexTiming { wait, held, wrote });
             }
         });
+    }
+
+    /// Every contended look at the index lock, as the time since that acquire
+    /// began (#1355). Thread-local, so a test observes only its own waiter.
+    type LockContention = std::sync::Arc<std::sync::Mutex<Vec<Duration>>>;
+    thread_local! {
+        static INDEX_LOCK_CONTENTION: std::cell::RefCell<Option<LockContention>> = const { std::cell::RefCell::new(None) };
+    }
+
+    struct ContentionScope(Option<LockContention>);
+    impl ContentionScope {
+        fn new(contention: LockContention) -> Self {
+            Self(INDEX_LOCK_CONTENTION.with(|slot| slot.replace(Some(contention))))
+        }
+    }
+    impl Drop for ContentionScope {
+        fn drop(&mut self) {
+            INDEX_LOCK_CONTENTION.with(|slot| slot.replace(self.0.take()));
+        }
+    }
+
+    pub(super) fn record_index_lock_contention(waited: Duration) {
+        INDEX_LOCK_CONTENTION.with(|slot| {
+            if let Some(contention) = slot.borrow().as_ref() {
+                contention.lock().unwrap().push(waited);
+            }
+        });
+    }
+
+    /// How many threads are inside the index critical section right now, and
+    /// the most ever seen at once (#1355). Mutual exclusion means at most 1.
+    #[derive(Default)]
+    struct HolderGauge {
+        inside: std::sync::atomic::AtomicUsize,
+        most: std::sync::atomic::AtomicUsize,
+    }
+    thread_local! {
+        static INDEX_HOLDERS: std::cell::RefCell<Option<std::sync::Arc<HolderGauge>>> = const { std::cell::RefCell::new(None) };
+    }
+
+    struct HolderScope(Option<std::sync::Arc<HolderGauge>>);
+    impl HolderScope {
+        fn new(gauge: std::sync::Arc<HolderGauge>) -> Self {
+            Self(INDEX_HOLDERS.with(|slot| slot.replace(Some(gauge))))
+        }
+    }
+    impl Drop for HolderScope {
+        fn drop(&mut self) {
+            INDEX_HOLDERS.with(|slot| slot.replace(self.0.take()));
+        }
+    }
+
+    pub(super) fn enter_index_holder() {
+        use std::sync::atomic::Ordering::SeqCst;
+        INDEX_HOLDERS.with(|slot| {
+            if let Some(gauge) = slot.borrow().as_ref() {
+                let inside = gauge.inside.fetch_add(1, SeqCst) + 1;
+                gauge.most.fetch_max(inside, SeqCst);
+            }
+        });
+    }
+
+    pub(super) fn leave_index_holder() {
+        INDEX_HOLDERS.with(|slot| {
+            if let Some(gauge) = slot.borrow().as_ref() {
+                gauge
+                    .inside
+                    .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+    }
+
+    /// Poll `ready` until it holds, failing loudly instead of hanging.
+    fn wait_until(what: &str, ready: impl Fn() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while !ready() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for {what}"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// Hold `directory`'s index lock on another thread until `release` fires
+    /// or is dropped. Returns once the lock is held.
+    fn hold_index_lock(
+        directory: PathBuf,
+    ) -> (
+        std::sync::mpsc::Sender<()>,
+        std::thread::JoinHandle<anyhow::Result<()>>,
+    ) {
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            with_index_lock(&directory, |_| {
+                held_tx.send(()).unwrap();
+                // Bounded, so a failed test cannot park this thread forever.
+                let _ = release_rx.recv_timeout(Duration::from_secs(30));
+                Ok(())
+            })
+        });
+        held_rx
+            .recv_timeout(Duration::from_secs(20))
+            .expect("the holder must acquire the index lock");
+        (release_tx, holder)
+    }
+
+    /// Join EVERY writer before judging any of them (#1355).
+    ///
+    /// The old shape, `h.join().unwrap()` in spawn order, turned the first
+    /// failed writer into a panic of the test thread while later writers were
+    /// still running. Unwinding dropped the `TempDir`, which deleted the store
+    /// under them, and a writer parked on the index lock then failed with a
+    /// bare `No such file or directory (os error 2)`. That error described the
+    /// teardown, not the lock. Every outcome comes back; the caller judges.
+    fn join_every_writer<T>(
+        handles: Vec<std::thread::JoinHandle<anyhow::Result<T>>>,
+    ) -> Vec<Result<T, String>> {
+        handles
+            .into_iter()
+            .map(|handle| match handle.join() {
+                Ok(outcome) => outcome.map_err(|error| format!("{error:#}")),
+                Err(panic) => Err(format!(
+                    "writer panicked: {}",
+                    panic
+                        .downcast_ref::<String>()
+                        .cloned()
+                        .or_else(|| panic.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+                        .unwrap_or_default()
+                )),
+            })
+            .collect()
     }
 
     #[test]
@@ -1606,29 +1747,44 @@ mod tests {
         let dir_path = Arc::new(dir.path().to_path_buf());
         let n = 10;
         let timings = IndexTimings::default();
+        let holders = Arc::new(HolderGauge::default());
 
         let handles: Vec<_> = (0..n)
             .map(|i| {
                 let d = Arc::clone(&dir_path);
                 let timings = Arc::clone(&timings);
-                thread::spawn(move || {
+                let holders = Arc::clone(&holders);
+                thread::spawn(move || -> anyhow::Result<String> {
                     let _scope = IndexTimingScope::new(timings);
+                    let _holders = HolderScope::new(holders);
                     let manager = SessionManager::new((*d).clone(), 100);
-                    let mut s = manager.create("openai", "gpt-4", "/tmp", None).unwrap();
+                    let mut s = manager.create("openai", "gpt-4", "/tmp", None)?;
                     s.messages.push(Message::now(
                         Role::User,
                         vec![ContentBlock::Text {
                             text: format!("msg {i}"),
                         }],
                     ));
-                    manager.persist_first_message(&s).unwrap();
+                    manager.persist_first_message(&s)?;
+                    Ok(s.id)
                 })
             })
             .collect();
 
-        for h in handles {
-            h.join().unwrap();
-        }
+        // Every writer is joined before any is judged, so the store outlives
+        // all of them and each failure reports its own cause.
+        let outcomes = join_every_writer(handles);
+        let failures: Vec<_> = outcomes.iter().filter_map(|o| o.as_ref().err()).collect();
+        assert!(
+            failures.is_empty(),
+            "every writer must commit: {failures:?}"
+        );
+        let mut written: Vec<String> = outcomes.into_iter().map(Result::unwrap).collect();
+        assert_eq!(
+            holders.most.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "two writers were inside the index lock at once"
+        );
 
         let timings = timings.lock().unwrap();
         eprintln!(
@@ -1666,6 +1822,242 @@ mod tests {
             "all {n} sessions must appear in the index; got {}",
             list.len()
         );
+        let mut listed: Vec<String> = list.into_iter().map(|meta| meta.id).collect();
+        listed.sort();
+        written.sort();
+        assert_eq!(listed, written, "no committed index entry may be lost");
+    }
+
+    /// #1355 c1/c2: the fixed 1 s give-up. A writer that finds the index lock
+    /// held by another writer in this process must wait for it, not fail
+    /// because the hold outlasted a fixed 1 s.
+    ///
+    /// Deterministic, not load-dependent: the holder is released only once the
+    /// waiter has been SEEN still contending 1.5 s into its acquire, or has
+    /// already returned. The old spin loop bails on its first contended look
+    /// past 1 s, so it can never reach the release with the lock in hand.
+    #[test]
+    fn test_1355_writer_waits_out_an_in_process_hold_past_one_second() {
+        let dir = tempdir().unwrap();
+        let manager = SessionManager::new(dir.path().to_path_buf(), 100);
+        let session = manager
+            .create("openai", "gpt-4", "/tmp", Some("aabbcc"))
+            .unwrap();
+        let contention = LockContention::default();
+        let (release, holder) = hold_index_lock(dir.path().to_path_buf());
+
+        let waiter = {
+            let contention = contention.clone();
+            let directory = dir.path().to_path_buf();
+            std::thread::spawn(move || {
+                let _scope = ContentionScope::new(contention);
+                SessionManager::new(directory, 100).update_index_for(&session)
+            })
+        };
+        let past_budget = Duration::from_millis(1500);
+        wait_until("the waiter to return or contend past 1.5 s", || {
+            waiter.is_finished()
+                || contention
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|waited| *waited >= past_budget)
+        });
+        let _ = release.send(());
+        let waited = waiter.join().unwrap();
+        holder.join().unwrap().unwrap();
+
+        waited.expect(
+            "an index write must not give up while another in-process writer holds the lock past 1 s",
+        );
+        let listed: Vec<_> = manager.list().unwrap().into_iter().map(|m| m.id).collect();
+        assert_eq!(listed, vec!["aabbcc".to_owned()]);
+    }
+
+    /// #1355 c1: where CI's `No such file or directory (os error 2)` came
+    /// from. A writer parked on the index lock fails with exactly that bare
+    /// error when its store directory is removed under it, because its next
+    /// `create_new` of the sentinel has no parent. No production path removes
+    /// a live sessions directory; the old parallel harness did, by unwinding
+    /// through its `TempDir` (see `join_every_writer`).
+    #[test]
+    fn test_1355_a_parked_writer_reports_enoent_when_its_store_is_removed() {
+        let root = tempdir().unwrap();
+        let store = root.path().join("sessions");
+        std::fs::create_dir_all(&store).unwrap();
+        let session = SessionManager::new(store.clone(), 100)
+            .create("openai", "gpt-4", "/tmp", Some("aabbcc"))
+            .unwrap();
+        let contention = LockContention::default();
+        let (release, holder) = hold_index_lock(store.clone());
+
+        let waiter = {
+            let contention = contention.clone();
+            let store = store.clone();
+            std::thread::spawn(move || {
+                let _scope = ContentionScope::new(contention);
+                SessionManager::new(store, 100).update_index_for(&session)
+            })
+        };
+        wait_until("the waiter to park on the index lock", || {
+            !contention.lock().unwrap().is_empty()
+        });
+        std::fs::remove_dir_all(&store).unwrap();
+        let _ = release.send(());
+        // The holder's own publish also lost its directory; only the waiter
+        // is under test here.
+        let _ = holder.join().unwrap();
+
+        let error = waiter
+            .join()
+            .unwrap()
+            .expect_err("a writer whose store vanished cannot commit");
+        let io = error
+            .downcast_ref::<std::io::Error>()
+            .expect("the bare io error, exactly as CI printed it");
+        assert_eq!(io.kind(), std::io::ErrorKind::NotFound, "{error:#}");
+        #[cfg(unix)]
+        assert_eq!(io.raw_os_error(), Some(2), "{error:#}");
+        assert!(!store.exists());
+    }
+
+    /// #1355 c1/c3: the red test for CI's ENOENT, which was a teardown
+    /// artifact of the parallel test rather than a lock defect. One writer
+    /// fails while a sibling is parked on the index lock. Every writer's own
+    /// outcome must come back and the parked sibling must still commit. With
+    /// the old join shape the first failure unwinds the test thread before the
+    /// sibling is joined, so it never gets that far.
+    #[test]
+    fn test_1355_a_failed_writer_does_not_remove_the_store_under_a_parked_sibling() {
+        let dir = tempdir().unwrap();
+        let directory = dir.path().to_path_buf();
+        let session = SessionManager::new(directory.clone(), 100)
+            .create("openai", "gpt-4", "/tmp", Some("ddeeff"))
+            .unwrap();
+        let contention = LockContention::default();
+        let (release, holder) = hold_index_lock(directory.clone());
+
+        let parked = {
+            let (contention, directory) = (contention.clone(), directory.clone());
+            std::thread::spawn(move || -> anyhow::Result<()> {
+                let _scope = ContentionScope::new(contention);
+                SessionManager::new(directory, 100).update_index_for(&session)
+            })
+        };
+        let failing = {
+            let contention = contention.clone();
+            std::thread::spawn(move || -> anyhow::Result<()> {
+                wait_until("the sibling to park on the index lock", || {
+                    !contention.lock().unwrap().is_empty()
+                });
+                let _ = release.send(());
+                anyhow::bail!("injected writer failure")
+            })
+        };
+
+        let outcomes = join_every_writer(vec![failing, parked]);
+        holder.join().unwrap().unwrap();
+        assert_eq!(
+            outcomes,
+            vec![Err("injected writer failure".to_owned()), Ok(())],
+            "the failed writer reports its own cause and the parked sibling commits"
+        );
+        let listed: Vec<_> = SessionManager::new(directory, 100)
+            .list()
+            .unwrap()
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(listed, vec!["ddeeff".to_owned()]);
+    }
+
+    const HOLD_INDEX_LOCK_CHILD: &str = "WCORE_1355_HOLD_INDEX_LOCK_IN";
+
+    /// #1355 c2: a writer KILLED while it holds the index lock leaves its
+    /// sentinel behind, and the next writer recovers it.
+    ///
+    /// The holder is a real child process: this test binary, re-entered, takes
+    /// the lock and is killed inside it (SIGKILL / TerminateProcess). Only the
+    /// sentinel's AGE is then moved past the 30 s stale threshold, so the test
+    /// does not sleep 30 s; the sentinel itself is the one the kill left.
+    #[test]
+    fn test_1355_a_killed_writers_index_lock_is_recovered() {
+        if let Some(root) = std::env::var_os(HOLD_INDEX_LOCK_CHILD) {
+            let root = PathBuf::from(root);
+            let outcome = with_index_lock(&root.join("store"), |_| -> anyhow::Result<()> {
+                std::fs::write(root.join("holding"), b"").unwrap();
+                loop {
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+            });
+            panic!("the child could not take the index lock: {outcome:?}");
+        }
+
+        let root = tempdir().unwrap();
+        let store = root.path().join("store");
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "session::tests::test_1355_a_killed_writers_index_lock_is_recovered",
+                "--nocapture",
+            ])
+            .env(HOLD_INDEX_LOCK_CHILD, root.path())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        wait_until("the child to hold the index lock", || {
+            root.path().join("holding").exists()
+        });
+        child.kill().unwrap();
+        child.wait().unwrap();
+
+        let sentinel = store.join("index.lock");
+        let recorded =
+            std::fs::read_to_string(&sentinel).expect("a killed holder leaves its sentinel");
+        assert_eq!(recorded.trim(), child.id().to_string());
+        std::fs::File::options()
+            .write(true)
+            .open(&sentinel)
+            .unwrap()
+            .set_modified(SystemTime::now() - Duration::from_secs(31))
+            .unwrap();
+
+        let manager = SessionManager::new(store.clone(), 100);
+        let session = manager
+            .create("openai", "gpt-4", "/tmp", Some("aabbcc"))
+            .unwrap();
+        manager
+            .update_index_for(&session)
+            .expect("the killed writer's stale sentinel must be recovered");
+        assert!(!sentinel.exists());
+        let listed: Vec<_> = manager.list().unwrap().into_iter().map(|m| m.id).collect();
+        assert_eq!(listed, vec!["aabbcc".to_owned()]);
+    }
+
+    /// #1355 c2: the other half of the stale rule. A FRESH sentinel, a live
+    /// holder in another process, is never stolen or deleted: the writer gives
+    /// up on the cross-process budget and leaves both the sentinel and the
+    /// index exactly as they were.
+    #[test]
+    fn test_1355_a_live_foreign_holders_sentinel_is_never_stolen() {
+        let dir = tempdir().unwrap();
+        let sentinel = dir.path().join("index.lock");
+        std::fs::write(&sentinel, "4242\n").unwrap();
+        let manager = SessionManager::new(dir.path().to_path_buf(), 100);
+        let session = manager
+            .create("openai", "gpt-4", "/tmp", Some("aabbcc"))
+            .unwrap();
+
+        let error = manager
+            .update_index_for(&session)
+            .expect_err("a live holder's index lock must not be taken");
+        assert!(
+            error.to_string().contains("Could not acquire index lock"),
+            "{error:#}"
+        );
+        assert_eq!(std::fs::read_to_string(&sentinel).unwrap(), "4242\n");
+        assert!(!dir.path().join("index.json").exists());
     }
 
     // F-034: empty sessions older than 5 min are GC'd by cleanup_old
