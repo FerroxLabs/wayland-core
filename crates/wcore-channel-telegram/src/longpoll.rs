@@ -655,6 +655,11 @@ mod tests {
             api_base: server.url(),
             bot_token: "111:TOKEN".to_string(),
             channel_name: "auth-test".to_string(),
+            // Stated, so this arm never resolves a path through the
+            // process-global WAYLAND_HOME (FerroxLabs/wayland#1233).
+            state_dir: Some(
+                std::env::temp_dir().join(format!("wcore-tg-longpoll-{}", std::process::id())),
+            ),
             timeout_secs: 0,
             allowed_chat_ids: HashSet::new(),
             inbox: Arc::clone(&inbox),
