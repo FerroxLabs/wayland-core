@@ -5589,6 +5589,66 @@ mod fault_tests {
         }
     }
 
+    /// wayland#1357 follow-up: many concurrent stores into one large checkpoint
+    /// directory. Every store's quota scan lists hundreds of entries while other
+    /// stores' temporaries appear and vanish, so an entry vanishing between listing
+    /// and stat is routine rather than rare. No store may fail, and the directory
+    /// must stay within the session quota after every round.
+    #[test]
+    fn many_concurrent_stores_into_a_large_checkpoint_directory_never_fail() {
+        const THREADS: usize = 16;
+        const STORES_PER_THREAD: usize = 2;
+        const ROUNDS: usize = 50;
+        const PREFILLED: usize = 400;
+
+        let dir = tempfile::tempdir().unwrap();
+        let journal = SessionJournal::open(dir.path().join("session.journal"), "session").unwrap();
+        let directory = seeded_checkpoint_directory(&journal);
+        for index in 0..PREFILLED {
+            let bytes = format!("prefilled checkpoint {index}");
+            std::fs::write(directory.join(sha256_hex(bytes.as_bytes())), bytes).unwrap();
+        }
+
+        let mut failures = Vec::new();
+        for round in 0..ROUNDS {
+            let barrier = Arc::new(std::sync::Barrier::new(THREADS));
+            let handles: Vec<_> = (0..THREADS)
+                .map(|thread| {
+                    let journal = journal.clone();
+                    let barrier = Arc::clone(&barrier);
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        (0..STORES_PER_THREAD)
+                            .filter_map(|store| {
+                                let payload =
+                                    format!("round {round} thread {thread} store {store}")
+                                        .into_bytes();
+                                journal
+                                    .store_effect_checkpoint(&sha256_hex(&payload), &payload)
+                                    .err()
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            for handle in handles {
+                failures.extend(handle.join().unwrap());
+            }
+            assert!(
+                checkpoint_directory_bytes(&directory).unwrap()
+                    <= MAX_EFFECT_CHECKPOINT_SESSION_BYTES,
+                "round {round}: the session quota was exceeded"
+            );
+        }
+        assert!(
+            failures.is_empty(),
+            "{} of {} concurrent stores failed; first: {:?}",
+            failures.len(),
+            ROUNDS * THREADS * STORES_PER_THREAD,
+            failures.first()
+        );
+    }
+
     #[test]
     fn append_io_failure_permanently_faults_writer() {
         let dir = tempfile::tempdir().unwrap();
