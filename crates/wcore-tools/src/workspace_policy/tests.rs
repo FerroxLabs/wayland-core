@@ -3362,3 +3362,159 @@ pub fn unclaimed_and_uncalled(&self) -> bool { true }
          is_session_write_granted: {orphans:?}"
     );
 }
+
+// ── core#413 — the DENY_CACHE_MAX_DIRS branch of `deny_cache` ────────────────
+
+/// A tree with one committed secret and `dirs` project directories under it,
+/// so the walk has a positive result AND a directory count the caller chose.
+fn tree_with_a_secret_and_dirs(root: &Path, dirs: usize) {
+    std::fs::write(root.join(".env"), b"TOKEN=hunter2\n").unwrap();
+    for d in 0..dirs {
+        let dir = root.join(format!("d{d}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("f.txt"), b"x").unwrap();
+    }
+}
+
+/// True when this policy is currently holding a memoised deny set.
+fn deny_cache_is_populated(policy: &WorkspacePolicy) -> bool {
+    policy.deny_cache.read().is_some()
+}
+
+/// core#413 c2 — the cap branch, graded AT the boundary in both directions,
+/// with the deny answer itself checked on both sides.
+///
+/// The cap is read from `deny_cache_max_dirs` (core#413 c1) rather than from
+/// `DENY_CACHE_MAX_DIRS` at the branch, which is the only reason this test can
+/// exist: reaching `100_000` for real means creating 100,001 directories on
+/// every run of the unit suite, on three platforms. The choice was the seam
+/// rather than deleting the branch, because the branch is NOT dead — it is the
+/// only thing bounding this memo's memory on a large checkout, and `dirs` is
+/// one `PathBuf` plus one `SystemTime` per directory retained for the life of
+/// the session.
+///
+/// The boundary is MEASURED, not assumed: `stamped` is the count of directories
+/// the walk really stamped for this fixture, established in the same run by a
+/// first call under an unreachable cap. Pinning a literal here would grade a
+/// tree-shape assumption instead of the branch.
+///
+/// RED ARM (core#413 c2): inverting the branch to `dirs.len() > cap` fails both
+/// halves — the at-cap policy stops caching and the above-cap policy starts.
+///
+/// WHAT THIS DELIBERATELY DOES NOT ASSERT, so nobody reads more into it: that a
+/// later call AT the cap is served from the memo. That is `deny_cache_hit`'s
+/// behaviour, not this branch's, and it additionally requires the fixture's
+/// directory mtimes to have SETTLED past `stamp_is_settled`'s granularity
+/// window — which a tree created microseconds earlier has not. Asserting it
+/// here would have made this test decide a timing question it is not about, and
+/// it is already graded by `tests/secret_walk_call_count_test.rs`. Retention is
+/// the branch; the hit is downstream of it.
+#[test]
+fn the_deny_cache_is_retained_at_the_cap_and_dropped_above_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    tree_with_a_secret_and_dirs(&root, 8);
+
+    // How many directories this fixture's walk actually stamps. Taken under a
+    // cap nothing can exceed, so this call is the measurement and not yet the
+    // subject.
+    let measured = WorkspacePolicy::contained(&root).with_deny_cache_max_dirs(usize::MAX);
+    let expected = measured.secret_deny_paths_for_backend(true);
+    assert!(
+        expected.iter().any(|p| p.ends_with(".env")),
+        "instrument control: the walk must find the planted .env, or every \
+         assertion below passes for the wrong reason; got {expected:?}"
+    );
+    let stamped = measured
+        .deny_cache
+        .read()
+        .as_ref()
+        .expect("a walk under an unreachable cap must memoise")
+        .dirs
+        .len();
+    assert!(
+        stamped >= 8,
+        "instrument control: the fixture must stamp at least its own 8 \
+         directories; stamped {stamped}"
+    );
+
+    // AT the cap: `dirs.len() <= cap` holds by equality, so the memo is kept
+    // and the next call is a hit rather than a second walk.
+    let at_cap = WorkspacePolicy::contained(&root).with_deny_cache_max_dirs(stamped);
+    assert_eq!(at_cap.secret_deny_paths_for_backend(true), expected);
+    assert!(
+        deny_cache_is_populated(&at_cap),
+        "a walk that stamped exactly the cap ({stamped}) must be memoised"
+    );
+    assert_eq!(
+        at_cap.secret_deny_walk_count(),
+        1,
+        "instrument control: exactly one walk must have run"
+    );
+
+    // ONE directory above the cap: the memo is dropped — and the answer is
+    // still the correct one, computed the slow way. A cap that changed the deny
+    // SET rather than only its retention would be a security change, so both
+    // halves are asserted.
+    let above_cap = WorkspacePolicy::contained(&root).with_deny_cache_max_dirs(stamped - 1);
+    assert_eq!(
+        above_cap.secret_deny_paths_for_backend(true),
+        expected,
+        "above the cap the deny list must still be correct; only its retention \
+         changes"
+    );
+    assert!(
+        !deny_cache_is_populated(&above_cap),
+        "a walk that stamped {stamped} directories against a cap of {} must \
+         NOT be memoised",
+        stamped - 1
+    );
+    assert_eq!(
+        above_cap.secret_deny_walk_count(),
+        1,
+        "instrument control: exactly one walk must have run"
+    );
+    assert_eq!(
+        above_cap.secret_deny_paths_for_backend(true),
+        expected,
+        "above the cap a later call must still compute the right answer"
+    );
+}
+
+/// core#413 c3 — the seam cannot silently change what ships.
+///
+/// Two ways the shipped bound could move without anyone noticing, and both are
+/// pinned: the constant itself changing, and a production constructor passing
+/// something other than the constant. `with_deny_cache_max_dirs` is
+/// `#[cfg(test)]`, so no shipped binary can reach it at all; this asserts the
+/// remaining half, which is that every constructor a shipped binary DOES reach
+/// starts at the production value.
+#[test]
+fn every_production_constructor_ships_the_production_deny_cache_cap() {
+    assert_eq!(
+        DENY_CACHE_MAX_DIRS, 100_000,
+        "the shipped deny-cache directory cap changed; this is the memory bound \
+         on a large checkout, not a tuning knob"
+    );
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let checkout = root.join("checkout");
+    let scratch = root.join("scratch");
+    std::fs::create_dir_all(&checkout).unwrap();
+    std::fs::create_dir_all(&scratch).unwrap();
+
+    for (name, policy) in [
+        ("contained", WorkspacePolicy::contained(&root)),
+        ("trusted_local", WorkspacePolicy::trusted_local(&root)),
+        (
+            "delegated_mutation",
+            WorkspacePolicy::delegated_mutation(&checkout, &scratch, []).unwrap(),
+        ),
+    ] {
+        assert_eq!(
+            policy.deny_cache_max_dirs, DENY_CACHE_MAX_DIRS,
+            "{name} does not ship the production deny-cache cap"
+        );
+    }
+}

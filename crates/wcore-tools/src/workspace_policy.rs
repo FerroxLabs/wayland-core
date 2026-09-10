@@ -264,6 +264,20 @@ pub struct WorkspacePolicy {
     /// `Arc` for the same reason `session_path_grants` is: `bash.rs` holds the
     /// policy behind an `Arc` and cannot replace it between executions.
     deny_cache: Arc<RwLock<Option<DenyCache>>>,
+    /// FerroxLabs/wayland-core#413 — the value of [`DENY_CACHE_MAX_DIRS`] this
+    /// policy applies.
+    ///
+    /// A FIELD rather than the constant read at the branch, for ONE reason: the
+    /// branch is otherwise unreachable from a test without a 100,001-directory
+    /// fixture, and a bound nobody can grade is a bound nobody can be sure
+    /// still holds. Every production constructor sets it from
+    /// [`DENY_CACHE_MAX_DIRS`] and nothing outside `#[cfg(test)]` can change it
+    /// — there is no setter, no builder and no config key — so this is a test
+    /// seam, not policy configurability. That every shipped constructor really
+    /// does pass the constant is asserted by
+    /// `tests::every_production_constructor_ships_the_production_deny_cache_cap`,
+    /// which is the half that keeps the seam from silently changing what ships.
+    deny_cache_max_dirs: usize,
     /// #1111 — how many times this policy has actually recomputed the dynamic
     /// deny set from the filesystem. Read by
     /// [`secret_deny_walk_count`](Self::secret_deny_walk_count); it is the
@@ -378,6 +392,12 @@ struct DenyCache {
 /// rather than growing an unbounded stamp. Remembering a directory costs a
 /// `PathBuf` and revalidating it costs one `stat`, so past some size the memo
 /// stops paying for itself and starts costing memory instead.
+///
+/// core#413: read through
+/// [`WorkspacePolicy::deny_cache_max_dirs`](WorkspacePolicy#structfield.deny_cache_max_dirs)
+/// rather than at the branch, so the branch is reachable from a test. The
+/// SHIPPED value is this literal and is pinned by
+/// `tests::every_production_constructor_ships_the_production_deny_cache_cap`.
 const DENY_CACHE_MAX_DIRS: usize = 100_000;
 
 /// #1145 - how far a directory mtime must lag the instant a walk started before
@@ -619,6 +639,7 @@ impl WorkspacePolicy {
             session_path_grants: Arc::new(RwLock::new(Vec::new())),
             fs_confinement_backend: None,
             deny_cache: Arc::new(RwLock::new(None)),
+            deny_cache_max_dirs: DENY_CACHE_MAX_DIRS,
             deny_walks: Arc::new(AtomicU64::new(0)),
             vcs_store_cache: Arc::new(RwLock::new(None)),
             guard_counters: Arc::new(GuardCounters::default()),
@@ -675,6 +696,7 @@ impl WorkspacePolicy {
             session_path_grants: Arc::new(RwLock::new(Vec::new())),
             fs_confinement_backend: None,
             deny_cache: Arc::new(RwLock::new(None)),
+            deny_cache_max_dirs: DENY_CACHE_MAX_DIRS,
             deny_walks: Arc::new(AtomicU64::new(0)),
             vcs_store_cache: Arc::new(RwLock::new(None)),
             guard_counters: Arc::new(GuardCounters::default()),
@@ -784,6 +806,7 @@ impl WorkspacePolicy {
             session_path_grants: Arc::new(RwLock::new(Vec::new())),
             fs_confinement_backend: None,
             deny_cache: Arc::new(RwLock::new(None)),
+            deny_cache_max_dirs: DENY_CACHE_MAX_DIRS,
             deny_walks: Arc::new(AtomicU64::new(0)),
             vcs_store_cache: Arc::new(RwLock::new(None)),
             guard_counters: Arc::new(GuardCounters::default()),
@@ -1793,6 +1816,19 @@ impl WorkspacePolicy {
         self.deny_walks.load(Ordering::Relaxed)
     }
 
+    /// FerroxLabs/wayland-core#413 — apply a smaller [`DENY_CACHE_MAX_DIRS`] so
+    /// the cap branch is reachable at a fixture size a test can actually build.
+    ///
+    /// `#[cfg(test)]`, and deliberately not `pub`: the shipped cap is not
+    /// configurable and this cannot lower it in any binary that ships. It
+    /// exists because the alternative was a 100,001-directory fixture, i.e. an
+    /// ungraded branch for ever.
+    #[cfg(test)]
+    pub(crate) fn with_deny_cache_max_dirs(mut self, max_dirs: usize) -> Self {
+        self.deny_cache_max_dirs = max_dirs;
+        self
+    }
+
     /// [`secret_deny_paths_dynamic`](Self::secret_deny_paths_dynamic) plus the
     /// stamp a later call needs to decide whether that answer is still current.
     ///
@@ -1995,8 +2031,8 @@ impl WorkspacePolicy {
         // project-secret denial), so there is nothing to memoise and nothing
         // that could go stale; storing it would be a cache that can only ever
         // be wrong.
-        *self.deny_cache.write() =
-            (!dirs.is_empty() && dirs.len() <= DENY_CACHE_MAX_DIRS).then(|| DenyCache {
+        *self.deny_cache.write() = (!dirs.is_empty() && dirs.len() <= self.deny_cache_max_dirs)
+            .then(|| DenyCache {
                 key,
                 stamped_at,
                 dirs,
