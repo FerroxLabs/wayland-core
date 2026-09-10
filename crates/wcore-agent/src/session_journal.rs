@@ -763,6 +763,8 @@ impl SessionJournal {
             return Ok(());
         }
         let session_bytes = checkpoint_directory_bytes(directory)?;
+        #[cfg(test)]
+        quota_race_gate::after_quota_scan(directory);
         if session_bytes.saturating_add(contents.len() as u64) > MAX_EFFECT_CHECKPOINT_SESSION_BYTES
         {
             return Err(JournalError::InvalidTransition(format!(
@@ -1229,6 +1231,101 @@ impl CapturedRetirementFile {
                 })?;
                 snapshot::sync_parent_directory(path)
             }
+        }
+    }
+}
+
+/// TEST-ONLY rendezvous between a checkpoint store's session-quota scan and the
+/// quota decision that uses it (wayland#1353).
+///
+/// While armed, a store into one of the armed checkpoint directories that has
+/// just finished its scan waits until `expected` stores (across every armed
+/// directory) have reached this point, so all of them scan before any of them is
+/// decided. A waiter that gives up after the timeout is counted, so a test can
+/// tell a real rendezvous from stores that something else serialized. Stores in
+/// any other directory are never gated, and one test at a time may arm it.
+#[cfg(test)]
+pub(crate) mod quota_race_gate {
+    use std::path::{Path, PathBuf};
+    use std::sync::{Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
+    use std::time::Duration;
+
+    #[derive(Default)]
+    struct Gate {
+        armed_for: Vec<PathBuf>,
+        expected: usize,
+        passed: usize,
+        timed_out: usize,
+    }
+
+    /// What one armed window observed.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) struct Rendezvous {
+        pub(crate) passed: usize,
+        pub(crate) timed_out: usize,
+    }
+
+    /// Exclusive use of the gate for one test; dropping it disarms.
+    pub(crate) struct Armed {
+        _serial: MutexGuard<'static, ()>,
+    }
+
+    fn gate() -> &'static (Mutex<Gate>, Condvar) {
+        static GATE: OnceLock<(Mutex<Gate>, Condvar)> = OnceLock::new();
+        GATE.get_or_init(|| (Mutex::new(Gate::default()), Condvar::new()))
+    }
+
+    pub(crate) fn arm(directories: &[&Path], expected: usize) -> Armed {
+        static SERIAL: Mutex<()> = Mutex::new(());
+        let serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+        let (lock, _) = gate();
+        *lock.lock().unwrap_or_else(PoisonError::into_inner) = Gate {
+            armed_for: directories.iter().map(|path| path.to_path_buf()).collect(),
+            expected,
+            passed: 0,
+            timed_out: 0,
+        };
+        Armed { _serial: serial }
+    }
+
+    impl Armed {
+        pub(crate) fn disarm(self) -> Rendezvous {
+            let (lock, _) = gate();
+            let state = lock.lock().unwrap_or_else(PoisonError::into_inner);
+            Rendezvous {
+                passed: state.passed,
+                timed_out: state.timed_out,
+            }
+        }
+    }
+
+    impl Drop for Armed {
+        fn drop(&mut self) {
+            let (lock, condvar) = gate();
+            *lock.lock().unwrap_or_else(PoisonError::into_inner) = Gate::default();
+            condvar.notify_all();
+        }
+    }
+
+    pub(crate) fn after_quota_scan(directory: &Path) {
+        let (lock, condvar) = gate();
+        let mut state = lock.lock().unwrap_or_else(PoisonError::into_inner);
+        if !state
+            .armed_for
+            .iter()
+            .any(|armed| armed.as_path() == directory)
+        {
+            return;
+        }
+        state.passed += 1;
+        condvar.notify_all();
+        let (mut state, wait) = condvar
+            .wait_timeout_while(state, Duration::from_secs(5), |state| {
+                !state.armed_for.is_empty() && state.passed < state.expected
+            })
+            .unwrap_or_else(PoisonError::into_inner);
+        if wait.timed_out() {
+            state.timed_out += 1;
         }
     }
 }
@@ -4364,6 +4461,113 @@ mod fault_tests {
             journal.store_effect_checkpoint(&sha256_hex(next), next),
             Err(JournalError::InvalidTransition(message)) if message.contains("session quota")
         ));
+    }
+
+    /// Store a small seed checkpoint and return the session's checkpoint
+    /// directory, which the seed creates.
+    fn seeded_checkpoint_directory(journal: &SessionJournal) -> PathBuf {
+        let seed = b"seed";
+        let seed_digest = sha256_hex(seed);
+        journal.store_effect_checkpoint(&seed_digest, seed).unwrap();
+        journal
+            .effect_checkpoint_path(&seed_digest)
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf()
+    }
+
+    /// Fill the checkpoint directory with an ordinary regular file, which the
+    /// quota scan counts, until exactly `room` bytes of quota remain. `set_len`
+    /// keeps the filler sparse where the filesystem can.
+    fn leave_checkpoint_quota_room(directory: &Path, room: u64) {
+        let used = checkpoint_directory_bytes(directory).unwrap();
+        File::create(directory.join("filler"))
+            .unwrap()
+            .set_len(MAX_EFFECT_CHECKPOINT_SESSION_BYTES - used - room)
+            .unwrap();
+    }
+
+    fn is_session_quota_refusal(result: &Result<(), JournalError>) -> bool {
+        matches!(result, Err(JournalError::InvalidTransition(message)) if message.contains("session quota"))
+    }
+
+    /// wayland#1353: the session-quota scan and the write it admits must be one
+    /// decision. Two stores into one checkpoint directory both finish the scan
+    /// before either is decided, with room for exactly ONE maximum-size
+    /// checkpoint: the directory must stay within the quota, one store must be
+    /// accepted and the other refused by the quota.
+    #[test]
+    fn concurrent_checkpoint_stores_cannot_jointly_exceed_the_session_quota() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = SessionJournal::open(dir.path().join("session.journal"), "session").unwrap();
+        let directory = seeded_checkpoint_directory(&journal);
+        leave_checkpoint_quota_room(
+            &directory,
+            MAX_EFFECT_CHECKPOINT_BYTES + MAX_EFFECT_CHECKPOINT_BYTES / 2,
+        );
+
+        let payload_len = usize::try_from(MAX_EFFECT_CHECKPOINT_BYTES).unwrap();
+        let payloads = [vec![0x11_u8; payload_len], vec![0x22_u8; payload_len]];
+        let digests: Vec<String> = payloads.iter().map(|payload| sha256_hex(payload)).collect();
+
+        let gate = quota_race_gate::arm(&[&directory], 2);
+        let handles: Vec<_> = payloads
+            .into_iter()
+            .map(|payload| {
+                let journal = journal.clone();
+                std::thread::spawn(move || {
+                    let digest = sha256_hex(&payload);
+                    journal.store_effect_checkpoint(&digest, &payload)
+                })
+            })
+            .collect();
+        let results: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+        let rendezvous = gate.disarm();
+
+        let total = checkpoint_directory_bytes(&directory).unwrap();
+        eprintln!(
+            "QUOTA_RACE rendezvous={rendezvous:?} total_bytes={total} \
+             quota={MAX_EFFECT_CHECKPOINT_SESSION_BYTES} results={results:?}"
+        );
+        assert!(
+            total <= MAX_EFFECT_CHECKPOINT_SESSION_BYTES,
+            "two concurrent stores jointly exceeded the session quota: {total} > \
+             {MAX_EFFECT_CHECKPOINT_SESSION_BYTES} bytes ({rendezvous:?}, {results:?})"
+        );
+        assert_eq!(
+            rendezvous,
+            quota_race_gate::Rendezvous {
+                passed: 2,
+                timed_out: 0
+            },
+            "both stores must finish the scan before either is decided, or this test proves nothing"
+        );
+        let accepted: Vec<usize> = (0..results.len())
+            .filter(|index| results[*index].is_ok())
+            .collect();
+        assert_eq!(accepted.len(), 1, "exactly one store fits: {results:?}");
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| is_session_quota_refusal(result))
+                .count(),
+            1,
+            "the other store must be refused by the session quota: {results:?}"
+        );
+        let winner = &digests[accepted[0]];
+        assert_eq!(
+            journal.load_effect_checkpoint(winner).unwrap().len(),
+            payload_len
+        );
+        let loser = &digests[1 - accepted[0]];
+        assert!(
+            !directory.join(loser).exists(),
+            "a refused store must leave no published checkpoint"
+        );
     }
 
     #[test]
