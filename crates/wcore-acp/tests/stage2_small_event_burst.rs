@@ -116,3 +116,62 @@ async fn a_reader_inside_its_budget_and_replay_window_is_not_detached_by_small_e
     assert!(matches!(frames.last(), Some(MessageEvent::Done { .. })));
     server.delete_session(id).await.unwrap();
 }
+
+/// wayland#1356 guard, and the evidence against treating this detach as free
+/// (criterion c3). A 2,065-event, 16 MiB turn read at one virtual millisecond
+/// per frame falls out of one log's replay window (1,024 events, 8 MiB),
+/// because recording never waits for a reader. That reader IS still detached,
+/// and a host cannot recover what it missed by resuming: the events after its
+/// last frame are already evicted.
+#[tokio::test(start_paused = true)]
+async fn a_reader_that_falls_out_of_the_replay_window_is_detached_and_cannot_resume() {
+    use wcore_acp::cursor::{Cursor, CursorError, ResumeError};
+    let server = AcpServer::new().with_turn_engine(Arc::new(LargeThenSmall {
+        large: 16,
+        small: 2048,
+    }));
+    let id = server.create_session(create()).await.unwrap().session_id;
+    let genesis = server.event_tip(&id).await.unwrap();
+    let mut response = server
+        .send_message(MessageSendRequest {
+            session_id: id.clone(),
+            text: "go".into(),
+            tools: vec![],
+        })
+        .await
+        .unwrap();
+    let mut frames = Vec::new();
+    while let Some(frame) = tokio::time::timeout(Duration::from_secs(60), response.next())
+        .await
+        .expect("the stream keeps making progress")
+    {
+        frames.push(frame);
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+
+    assert!(
+        matches!(frames.last(), Some(MessageEvent::Error { .. })),
+        "a reader outside the replay window is still detached: {} frames",
+        frames.len()
+    );
+    // Every frame before the terminal is one logged event, in order.
+    let last_delivered = genesis.position + (frames.len() as u64 - 1);
+    let resume = server
+        .events_since(
+            &id,
+            &Cursor {
+                stream_id: genesis.stream_id.clone(),
+                position: last_delivered,
+            },
+        )
+        .await;
+    assert!(
+        matches!(resume, Err(ResumeError::Cursor(CursorError::TooOld { .. }))),
+        "resuming after the last delivered frame must be refused as evicted: {}",
+        match &resume {
+            Ok(served) => format!("served {} events", served.events.len()),
+            Err(error) => error.to_string(),
+        }
+    );
+    server.delete_session(id).await.unwrap();
+}

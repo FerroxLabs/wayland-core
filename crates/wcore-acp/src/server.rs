@@ -465,18 +465,30 @@ impl AcpServer {
             },
             turn_id: turn_id.clone(),
         };
-        #[derive(serde::Serialize)]
-        enum DeliveryPosition {
-            Event(Cursor),
-            Overload,
+        // wayland#1356: delivery follows this turn in the session's own log.
+        // The recorder publishes where the turn starts, then signals once per
+        // event it records; delivery reads each event from the log itself.
+        // Nothing is queued per event, so no count of events recorded ahead of
+        // the reader can detach it. A reader is detached only by its one-second
+        // wait budget, or by falling out of the log's replay window.
+        #[derive(Clone)]
+        enum TurnStart {
+            /// The recorder has not looked this session's log up yet.
+            Pending,
+            /// The log position just before this turn's first event.
+            At(Cursor),
+            /// The recorder found no log for this session.
+            Lost,
+        }
+        enum NextEvent {
+            Ready(Option<(u64, MessageEvent, crate::bounded::Retained)>),
+            CaughtUp,
+            Evicted,
         }
         let budget = self.delivery_budget;
-        let channels = budget
-            .channel(overflow.clone())
-            .ok()
-            .zip(budget.channel(DeliveryPosition::Overload).ok());
-        let (mut positions_tx, rx) = match channels {
-            Some(((tx, rx), (positions_tx, mut positions_rx))) => {
+        let (progress_tx, mut progress) = tokio::sync::watch::channel(TurnStart::Pending);
+        let rx = match budget.channel(overflow.clone()) {
+            Ok((tx, rx)) => {
                 let events = Arc::clone(&self.events);
                 let session_id = session_id.to_string();
                 let delivery = lifecycle.stream();
@@ -487,41 +499,67 @@ impl AcpServer {
                     // never takes the process-wide map lock, so another
                     // session's recording or delivery cannot stall it (#1352).
                     let log = events.read().await.get(&session_id).cloned();
+                    let mut cursor = loop {
+                        let start = progress.borrow_and_update().clone();
+                        match start {
+                            TurnStart::At(cursor) => break cursor,
+                            TurnStart::Lost => {
+                                tx.overload();
+                                return;
+                            }
+                            TurnStart::Pending => {
+                                if progress.changed().await.is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                    };
+                    let mut recorder_done = false;
                     loop {
                         // Close cancels the engine, whose terminal must follow
                         // already-recorded frames. Only real delivery pressure
-                        // detaches this queue; it retains the one-second bound.
-                        let position = positions_rx.recv().await;
-                        let Some(position) = position else {
-                            break;
-                        };
-                        let DeliveryPosition::Event(cursor) = position else {
-                            tx.overload();
-                            break;
-                        };
-                        let Ok(position_charge) = budget.retain(&cursor) else {
-                            tx.overload();
-                            break;
-                        };
-                        let event = log.as_ref().and_then(|log| {
+                        // detaches this reader: its one-second budget, or a
+                        // position the log no longer retains.
+                        let next = log.as_ref().map(|log| {
                             let log = lock_log(log);
-                            let (event, size) = log.next_after(&cursor).ok().flatten()?;
-                            // Charge before cloning, from the size the recorder
-                            // measured for this exact event, so nothing is
-                            // encoded while this session's log is locked.
-                            let charge = if size == 0 {
-                                budget.retain(&event.event)
-                            } else {
-                                budget.retain_encoded(size)
-                            };
-                            charge.ok().map(|charge| (event.event.clone(), charge))
+                            match log.next_after(&cursor) {
+                                Ok(Some((event, size))) => {
+                                    // Charge before cloning, from the size the
+                                    // recorder measured for this exact event, so
+                                    // nothing is encoded under this log's lock.
+                                    let charge = if size == 0 {
+                                        budget.retain(&event.event)
+                                    } else {
+                                        budget.retain_encoded(size)
+                                    };
+                                    NextEvent::Ready(charge.ok().map(|charge| {
+                                        (event.position, event.event.clone(), charge)
+                                    }))
+                                }
+                                Ok(None) => NextEvent::CaughtUp,
+                                Err(_) => NextEvent::Evicted,
+                            }
                         });
-                        drop(cursor);
-                        drop(position_charge);
-                        let Some((event, charge)) = event else {
-                            tx.overload();
-                            break;
+                        let (position, event, charge) = match next {
+                            Some(NextEvent::Ready(Some(ready))) => ready,
+                            Some(NextEvent::CaughtUp) => {
+                                if recorder_done {
+                                    break;
+                                }
+                                if progress.changed().await.is_err() {
+                                    // Everything the recorder wrote is already
+                                    // in the log; one more pass delivers it.
+                                    recorder_done = true;
+                                }
+                                continue;
+                            }
+                            // No log, a refused charge, or a replay gap.
+                            None | Some(NextEvent::Ready(None)) | Some(NextEvent::Evicted) => {
+                                tx.overload();
+                                break;
+                            }
                         };
+                        cursor.position = position;
                         let terminal = matches!(
                             &event,
                             MessageEvent::Done { .. } | MessageEvent::Error { .. }
@@ -538,9 +576,9 @@ impl AcpServer {
                         }
                     }
                 });
-                (Some(positions_tx), Some(rx))
+                Some(rx)
             }
-            None => (None, None),
+            Err(_) => None,
         };
         let events = Arc::clone(&self.events);
         let retained = Arc::clone(&self.retained);
@@ -555,6 +593,11 @@ impl AcpServer {
             // only this session's lock, never a process-wide one that every
             // other session's recorder and delivery task also needs.
             let log = events.read().await.get(&session_id).cloned();
+            // Tell delivery where this turn starts, before recording anything.
+            progress_tx.send_replace(match &log {
+                Some(log) => TurnStart::At(lock_log(log).tip()),
+                None => TurnStart::Lost,
+            });
             while let Some(ev) = upstream.next().await {
                 if oversized {
                     continue;
@@ -579,33 +622,25 @@ impl AcpServer {
                 } else {
                     (ev, encoded)
                 };
-                let cursor = log.as_ref().map(|log| {
+                if let Some(log) = &log {
                     log.mutate(&retained, |log| {
-                        let position = log.append_encoded(ev, size);
-                        Cursor {
-                            stream_id: log.stream_id().to_string(),
-                            position: position - 1,
-                        }
-                    })
-                });
+                        log.append_encoded(ev, size);
+                    });
+                }
                 if retained.over_cap() {
                     evict_for_append(&events, &retained, size).await;
                 }
-                // Only tiny bounded positions cross this handoff. Never wait
-                // for live delivery while draining the real protocol relay.
-                if let Some(sender) = &positions_tx {
-                    let position =
-                        cursor.map_or(DeliveryPosition::Overload, DeliveryPosition::Event);
-                    if sender.send(position).is_err() {
-                        positions_tx = None;
-                    } else {
-                        // Ready upstream/log futures need not yield. Give the
-                        // independent delivery and HTTP tasks a scheduling turn
-                        // before this producer fills their retained cursor window.
-                        // This never waits for reader capacity; detached replay
-                        // recording continues without this cooperation point.
-                        tokio::task::yield_now().await;
-                    }
+                // Wake delivery. A signal, not a queue: it carries no position
+                // and cannot overflow however many events are recorded ahead
+                // of the reader. Never wait for live delivery while draining
+                // the real protocol relay.
+                if !progress_tx.is_closed() {
+                    progress_tx.send_modify(|_| {});
+                    // Ready upstream/log futures need not yield. Give the
+                    // independent delivery and HTTP tasks a scheduling turn.
+                    // This never waits for reader capacity; recording with no
+                    // delivery left to wake skips this cooperation point.
+                    tokio::task::yield_now().await;
                 }
             }
         });
