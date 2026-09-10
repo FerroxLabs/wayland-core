@@ -1,0 +1,28 @@
+What still survives on the graded tree, verbatim from run A.
+===========================================================
+
+target/mutants-final-449/mutants.out/missed.txt, source dafb3cc7c,
+cargo mutants -p wcore-cron ... -j 1 on the Linux proof host.
+
+15 lines. 12 of them are rows this disposition records as not worth
+killing (the 9 cfg-gated + release + the flock flag identity + the
+unreachable errno arm). The 13th, lease.rs:448:56, is NOT one of the 64:
+it is the errno mirror, caught on macOS and equivalent on Linux. The last
+two, runner.rs:592:9 and 606:9, are the red arm for tests/runner_lifecycle.rs,
+which landed after this run and turns both caught -- see run B.
+
+crates/wcore-cron/src/lease.rs:365:9: replace ScheduleLease::release with ()
+crates/wcore-cron/src/lease.rs:442:64: replace | with ^ in sys::try_lock_exclusive
+crates/wcore-cron/src/lease.rs:448:27: replace match guard code == EAGAIN_LINUX || code == EWOULDBLOCK_BSD with true in sys::try_lock_exclusive
+crates/wcore-cron/src/lease.rs:448:56: replace == with != in sys::try_lock_exclusive
+crates/wcore-cron/src/lease.rs:503:9: replace sys::try_lock_exclusive -> std::io::Result<bool> with Ok(true)
+crates/wcore-cron/src/lease.rs:503:9: replace sys::try_lock_exclusive -> std::io::Result<bool> with Ok(false)
+crates/wcore-cron/src/lease.rs:521:41: replace | with & in sys::try_lock_exclusive
+crates/wcore-cron/src/lease.rs:521:41: replace | with ^ in sys::try_lock_exclusive
+crates/wcore-cron/src/lease.rs:528:15: replace != with == in sys::try_lock_exclusive
+crates/wcore-cron/src/lease.rs:533:13: delete match arm Some(ERROR_LOCK_VIOLATION) | Some(ERROR_IO_PENDING) in sys::try_lock_exclusive
+crates/wcore-cron/src/lease.rs:540:9: replace sys::unlock with ()
+crates/wcore-cron/src/lease.rs:564:9: replace sys::try_lock_exclusive -> std::io::Result<bool> with Ok(true)
+crates/wcore-cron/src/lease.rs:564:9: replace sys::try_lock_exclusive -> std::io::Result<bool> with Ok(false)
+crates/wcore-cron/src/runner.rs:592:9: replace CronRunner::shutdown with ()
+crates/wcore-cron/src/runner.rs:606:9: replace <impl Drop for CronRunner>::drop with ()

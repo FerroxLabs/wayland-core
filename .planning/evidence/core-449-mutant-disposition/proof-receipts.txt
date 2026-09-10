@@ -1,0 +1,32 @@
+Proof receipts for core#449 c1
+==============================
+
+Every entry below is a tools/remote-proof.py receipt from the Linux proof
+host, slot parallel-2. A run counts only when the receipt carries the
+expected remote_exit AND "complete": true; cargo-mutants exits 3 when any
+mutant survived and 0 when none did, so run A's 3 and run B's 0 are both
+the expected code.
+
+-- GREEN ARM: the whole cron suite, source dafb3cc7c
+{"slot": "parallel-2", "remote_root": "/root/waylandcore-stabilization-20260905/slots/parallel-2", "source": "dafb3cc7c42e7f5962bafc48a7502bf52b752a8b", "tree": "38f0f9e5ba028582d99c1dda977d240d55c7bc79", "bundle_import_anchor": "0cdd998adb1cd2ab13966a40b1b98c6136fd72d0", "cargo_args": ["test", "--locked", "-p", "wcore-cron"], "core_binary_profile": null, "ssh_exit": 0, "remote_exit": 0, "complete": true, "duration_seconds": 10.166759967803955, "status_sha256": "503a8bf1142106c17ca57ac987147723134c74d73f4181bb4e2545be7b11f7cb"}
+
+   158 tests, 0 failures across 10 targets (92 lib + 4 diagnostic_warnings
+   + 4 event_drain_bounds + 11 event_producer + 3 history_bounds
+   + 6 in_flight_bound + 11 single_owner + 7 store_hardening
+   + 7 trigger_arithmetic + 13 trigger_matrix).
+
+-- RED ARMS, run A: the full mutant set, source dafb3cc7c
+{"slot": "parallel-2", "remote_root": "/root/waylandcore-stabilization-20260905/slots/parallel-2", "source": "dafb3cc7c42e7f5962bafc48a7502bf52b752a8b", "tree": "38f0f9e5ba028582d99c1dda977d240d55c7bc79", "bundle_import_anchor": "0cdd998adb1cd2ab13966a40b1b98c6136fd72d0", "cargo_args": ["mutants", "-p", "wcore-cron", "--no-shuffle", "--timeout-multiplier", "5", "--minimum-test-timeout", "90", "--output", "target/mutants-final-449", "-j", "1"], "core_binary_profile": null, "ssh_exit": 3, "remote_exit": 3, "complete": true, "duration_seconds": 966.3774297237396, "status_sha256": "803a47b5255fd19bd785ddadc35958aaadbff0506ef700cf9b72cc6382b9eb2b"}
+
+   339 mutants tested in 16m: 15 missed, 245 caught, 77 unviable, 2 timeouts
+
+-- RED ARMS, run B: the two rows tests/runner_lifecycle.rs grades,
+   source 7f808e952
+{"slot": "parallel-2", "remote_root": "/root/waylandcore-stabilization-20260905/slots/parallel-2", "source": "7f808e9521456208419b96d174f41786843af3d5", "tree": "8f9346a416119291227df6474e1f636d86521405", "bundle_import_anchor": "0cdd998adb1cd2ab13966a40b1b98c6136fd72d0", "cargo_args": ["mutants", "-p", "wcore-cron", "--no-shuffle", "--timeout-multiplier", "5", "--minimum-test-timeout", "90", "--output", "target/mutants-runb-449", "-j", "1", "--re", "runner\\.rs:(592|606):"], "core_binary_profile": null, "ssh_exit": 0, "remote_exit": 0, "complete": true, "duration_seconds": 23.66891598701477, "status_sha256": "37f162422ce080787bbffd8e39852e93c2215a885f1c8027b64c2d7b5b9984cc"}
+
+   2 mutants tested in 17s: 2 caught
+
+The green arm predates tests/runner_lifecycle.rs. Run B's own unmutated
+baseline -- "ok  Unmutated baseline in 1s build + 3s test" -- is the green
+arm for that file: cargo-mutants refuses to grade anything until the
+unmutated tree passes.

@@ -1,0 +1,77 @@
+The 64 mutants reported MISSED for wcore-cron, verbatim.
+=======================================================
+
+Source  FerroxLabs/wayland-core actions run 34438249721, leg 'mutants /
+        wcore-cron', headSha fdf4b1e1c, host macos-latest.
+Artifact  mutants-log-wcore-cron, id 10138518656.
+File      target/mutants-wcore-cron/mutants.out/missed.txt, 64 lines.
+Summary   339 mutants tested in 28m: 64 missed, 196 caught, 77 unviable,
+          2 timeouts.
+
+Copied byte-for-byte from the artifact. This is the list core#449 c1
+dispositions; disposition.md carries one entry per line below.
+
+crates/wcore-cron/src/events.rs:202:5: replace restrict_permissions with ()
+crates/wcore-cron/src/history.rs:122:19: replace match guard e.kind() == std::io::ErrorKind::NotFound with true in read_lines
+crates/wcore-cron/src/lease.rs:147:9: replace LeaseAttempt::is_owner -> bool with true
+crates/wcore-cron/src/lease.rs:205:9: replace LeaseHandle::owner_pid -> u32 with 0
+crates/wcore-cron/src/lease.rs:205:9: replace LeaseHandle::owner_pid -> u32 with 1
+crates/wcore-cron/src/lease.rs:365:9: replace ScheduleLease::release with ()
+crates/wcore-cron/src/lease.rs:442:64: replace | with ^ in sys::try_lock_exclusive
+crates/wcore-cron/src/lease.rs:448:27: replace match guard code == EAGAIN_LINUX || code == EWOULDBLOCK_BSD with true in sys::try_lock_exclusive
+crates/wcore-cron/src/lease.rs:448:32: replace == with != in sys::try_lock_exclusive
+crates/wcore-cron/src/lease.rs:455:9: replace sys::unlock with ()
+crates/wcore-cron/src/lease.rs:503:9: replace sys::try_lock_exclusive -> std::io::Result<bool> with Ok(true)
+crates/wcore-cron/src/lease.rs:503:9: replace sys::try_lock_exclusive -> std::io::Result<bool> with Ok(false)
+crates/wcore-cron/src/lease.rs:521:41: replace | with & in sys::try_lock_exclusive
+crates/wcore-cron/src/lease.rs:521:41: replace | with ^ in sys::try_lock_exclusive
+crates/wcore-cron/src/lease.rs:528:15: replace != with == in sys::try_lock_exclusive
+crates/wcore-cron/src/lease.rs:533:13: delete match arm Some(ERROR_LOCK_VIOLATION) | Some(ERROR_IO_PENDING) in sys::try_lock_exclusive
+crates/wcore-cron/src/lease.rs:540:9: replace sys::unlock with ()
+crates/wcore-cron/src/lease.rs:564:9: replace sys::try_lock_exclusive -> std::io::Result<bool> with Ok(true)
+crates/wcore-cron/src/lease.rs:564:9: replace sys::try_lock_exclusive -> std::io::Result<bool> with Ok(false)
+crates/wcore-cron/src/lease.rs:579:5: replace default_lease_dir -> Option<PathBuf> with None
+crates/wcore-cron/src/lease.rs:579:5: replace default_lease_dir -> Option<PathBuf> with Some(Default::default())
+crates/wcore-cron/src/retry.rs:71:25: replace * with + in RetryPolicy::clamped
+crates/wcore-cron/src/runner.rs:73:9: replace TestClock::advance with ()
+crates/wcore-cron/src/runner.rs:78:12: replace += with -= in TestClock::advance
+crates/wcore-cron/src/runner.rs:82:9: replace TestClock::set with ()
+crates/wcore-cron/src/runner.rs:286:9: replace && with || in scan_target_text
+crates/wcore-cron/src/runner.rs:359:9: replace JobHandler::dispatch_is_idempotent -> bool with true
+crates/wcore-cron/src/runner.rs:592:9: replace CronRunner::shutdown with ()
+crates/wcore-cron/src/runner.rs:606:9: replace <impl Drop for CronRunner>::drop with ()
+crates/wcore-cron/src/runner.rs:1068:31: replace > with >= in drain_published_events
+crates/wcore-cron/src/runner.rs:1086:31: replace < with <= in drain_published_events
+crates/wcore-cron/src/runner.rs:1101:20: delete ! in drain_published_events
+crates/wcore-cron/src/runner.rs:1118:19: replace += with *= in drain_published_events
+crates/wcore-cron/src/store.rs:35:5: replace default_store_path -> Option<PathBuf> with None
+crates/wcore-cron/src/store.rs:35:5: replace default_store_path -> Option<PathBuf> with Some(Default::default())
+crates/wcore-cron/src/store.rs:44:5: replace default_history_path -> Option<PathBuf> with None
+crates/wcore-cron/src/store.rs:44:5: replace default_history_path -> Option<PathBuf> with Some(Default::default())
+crates/wcore-cron/src/store.rs:68:9: replace CronStore::list_for_run -> Result<Vec<CronJob>> with Ok(vec![])
+crates/wcore-cron/src/store.rs:79:9: replace CronStore::cron_dir -> Option<PathBuf> with Some(Default::default())
+crates/wcore-cron/src/store.rs:145:5: replace set_owner_only_perms with ()
+crates/wcore-cron/src/store.rs:171:19: replace ^= with |= in keyed_hash_hex::fnv1a
+crates/wcore-cron/src/store.rs:219:9: replace FileCronStore::integrity_key -> Option<Vec<u8>> with Some(vec![])
+crates/wcore-cron/src/store.rs:219:9: replace FileCronStore::integrity_key -> Option<Vec<u8>> with Some(vec![0])
+crates/wcore-cron/src/store.rs:219:9: replace FileCronStore::integrity_key -> Option<Vec<u8>> with Some(vec![1])
+crates/wcore-cron/src/store.rs:246:9: replace FileCronStore::check_ownership_and_perms -> Result<()> with Ok(())
+crates/wcore-cron/src/store.rs:251:23: replace match guard e.kind() == std::io::ErrorKind::NotFound with true in FileCronStore::check_ownership_and_perms
+crates/wcore-cron/src/store.rs:264:46: replace & with | in FileCronStore::check_ownership_and_perms
+crates/wcore-cron/src/store.rs:264:46: replace & with ^ in FileCronStore::check_ownership_and_perms
+crates/wcore-cron/src/store.rs:265:25: replace != with == in FileCronStore::check_ownership_and_perms
+crates/wcore-cron/src/store.rs:265:17: replace & with | in FileCronStore::check_ownership_and_perms
+crates/wcore-cron/src/store.rs:265:17: replace & with ^ in FileCronStore::check_ownership_and_perms
+crates/wcore-cron/src/store.rs:274:57: replace != with == in FileCronStore::check_ownership_and_perms
+crates/wcore-cron/src/store.rs:274:49: replace & with | in FileCronStore::check_ownership_and_perms
+crates/wcore-cron/src/store.rs:274:49: replace & with ^ in FileCronStore::check_ownership_and_perms
+crates/wcore-cron/src/store.rs:362:23: replace match guard e.kind() == std::io::ErrorKind::NotFound with true in FileCronStore::read_file
+crates/wcore-cron/src/store.rs:430:20: delete ! in <impl CronStore for FileCronStore>::list_for_run
+crates/wcore-cron/src/trigger.rs:285:57: replace < with == in Trigger::validate
+crates/wcore-cron/src/trigger.rs:285:57: replace < with <= in Trigger::validate
+crates/wcore-cron/src/trigger.rs:332:24: replace > with >= in Trigger::next_after
+crates/wcore-cron/src/trigger.rs:339:28: replace + with - in Trigger::next_after
+crates/wcore-cron/src/trigger.rs:359:28: replace + with - in Trigger::next_after
+crates/wcore-cron/src/trigger.rs:370:24: replace match guard bound.is_spent(t) with false in Trigger::next_after
+crates/wcore-cron/src/trigger.rs:378:9: replace Trigger::is_clock_driven -> bool with false
+crates/wcore-cron/src/trigger.rs:453:12: replace > with >= in heartbeat_state
