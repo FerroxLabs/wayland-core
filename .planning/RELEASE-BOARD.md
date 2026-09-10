@@ -49,7 +49,7 @@ Blocking issues: 40   Outstanding criteria: 97
 | FerroxLabs/wayland-core#404 | core | 2 | A ci-linux cancellation at the 120-minute budget destroys the JUnit evidence the run already produced |
 | FerroxLabs/wayland-core#413 | core | 3 | The DENY_CACHE_MAX_DIRS branch of deny_cache is ungraded and needs 100,001 directories to reach (split from #398 c5) |
 | FerroxLabs/wayland-core#415 | core | 2 | Close the quarantine console bypass with a restricting-SID token, without removing the feature (from #389 c1) |
-| FerroxLabs/wayland-core#424 | core | 1 | mutants-nightly has produced zero data in 87 runs: every leg dies in ~30s on a missing target/ parent, and the step exits 0 so it can never go red |
+| FerroxLabs/wayland-core#424 | core | 2 | mutants-nightly has produced zero data in 87 runs: every leg dies in ~30s on a missing target/ parent, and the step exits 0 so it can never go red |
 | FerroxLabs/wayland-core#434 | core | 3 | The #338 c2 Windows residual pin reports the escape CLOSED while the same report shows it open |
-| FerroxLabs/wayland-core#449 | core | 2 | [mutants-nightly] wcore-cron — surviving mutants (2026-09-04) |
+| FerroxLabs/wayland-core#449 | core | 1 | [mutants-nightly] wcore-cron — surviving mutants (2026-09-04) |
 | FerroxLabs/wayland-core#451 | core | 2 | Four of five mutation legs cannot run their unmutated test suite inside the per-crate timeout, so they test zero mutants |

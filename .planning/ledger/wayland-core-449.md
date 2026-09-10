@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "[mutants-nightly] wcore-cron — surviving mutants (2026-09-04)"
 status: open
-last_verified_commit: ad3cdb2ce
+last_verified_commit: da51d7a59
 criteria:
   - id: c1
     text: "The surviving mutants reported for wcore-cron are dispositioned: each is either killed by a new or strengthened test, or recorded with a reason it is not worth killing."
@@ -17,7 +17,7 @@ criteria:
     state: met
     evidence: "file:.planning/ledger/wayland-core-424.md:20:0 of 94 mutants-nightly runs have event=workflow_dispatch"
     owner: core
-    note: "MET at ad3cdb2ce. core#424 has now been re-graded against run 33844721279 TWICE, and the second pass moved a criterion DOWN, which is what distinguishes a re-grade from a re-quote. FIRST PASS (2026-09-04) graded c3 and c4 met from that run`s artifacts and left c5 not-met. SECOND PASS (2026-09-10, this one) read wayland-core#424`s acceptance section back off the tracker and found that this ledger`s copy of c2 had been broadened: the issue says `one workflow_dispatch run`, the ledger said `a run`, and the run it was graded against is event=schedule. c2 is therefore REGRADED not-met, with the owed run stated exactly. So the re-grade is real in both directions: the premise `zero data across 87 runs` IS refuted -- 339 mutants, 64 missed, read from the artifact and re-confirmed today against a 64-line missed.txt -- and producing data still does not satisfy every criterion core#424 carries. That was the caution this criterion was written with (`producing data is necessary for its criteria, not obviously sufficient`) and it turned out to be the right one. Re-graded FROM THE ARTIFACT, as this criterion requires: `gh run download 33844721279` then read .blackboard/E2E-MUTATION-BASELINE/wcore-cron.log and mutants.out/. The job log was not used for any part of it; core#424`s own c4 records why -- it returns 10 hits for the summary line where the truth is 0, because it echoes the workflow`s format comment once per leg. ANCHOR: the fragment below is the measurement that forced the downgrade, and it lives in core#424`s ledger, not this one; delete it and this criterion reds."
+    note: "MET at da51d7a59. core#424 has now been re-graded against run 33844721279 TWICE, and the second pass moved a criterion DOWN, which is what distinguishes a re-grade from a re-quote. FIRST PASS (2026-09-04) graded c3 and c4 met from that run`s artifacts and left c5 not-met. SECOND PASS (2026-09-10, this one) read wayland-core#424`s acceptance section back off the tracker and found that this ledger`s copy of c2 had been broadened: the issue says `one workflow_dispatch run`, the ledger said `a run`, and the run it was graded against is event=schedule. c2 is therefore REGRADED not-met, with the owed run stated exactly. So the re-grade is real in both directions: the premise `zero data across 87 runs` IS refuted -- 339 mutants, 64 missed, read from the artifact and re-confirmed today against a 64-line missed.txt -- and producing data still does not satisfy every criterion core#424 carries. That was the caution this criterion was written with (`producing data is necessary for its criteria, not obviously sufficient`) and it turned out to be the right one. Re-graded FROM THE ARTIFACT, as this criterion requires: `gh run download 33844721279` then read .blackboard/E2E-MUTATION-BASELINE/wcore-cron.log and mutants.out/. The job log was not used for any part of it; core#424`s own c4 records why -- it returns 10 hits for the summary line where the truth is 0, because it echoes the workflow`s format comment once per leg. ANCHOR: the fragment below is the measurement that forced the downgrade, and it lives in core#424`s ledger, not this one; delete it and this criterion reds."
 ---
 
 # The complete 64, from the artifact -- not the 20 the issue body shows
@@ -116,7 +116,7 @@ builds, so no nightly on any host can grade them. The honest disposition is
 
 Both hit the per-mutant test timeout at 90.03s and 90.07s against a 5s baseline,
 so they are harness outcomes, not test-quality outcomes. Under the derived
-timeout that replaced `--timeout 90` (core#451, ad3cdb2ce) their bound becomes
+timeout that replaced `--timeout 90` (core#451, da51d7a59) their bound becomes
 `max(90, 5 x measured baseline)`, so if they were near-misses they should resolve
 one way or the other on the next nightly.
 

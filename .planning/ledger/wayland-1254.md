@@ -15,7 +15,7 @@ criteria:
   - id: c2
     text: "On any tree where check-criteria-ledger.py --offline exits 0, the string THIS IS NOT A PASS appears in bash scripts/preflight.sh's own stdout"
     state: met
-    evidence: "file:scripts/preflight.sh:159:printf '%s\n' "$gate_out" | sed 's/^/        | /'"
+    evidence: "file:scripts/preflight.sh:181:printf '%s\n' "$gate_out" | sed 's/^/        | /'"
     owner: core
     note: "MET 2026-09-04 on bc9288da5. BOTH ARMS ON THE SAME TREE, /root/L2-1254 at this commit, where `check-criteria-ledger.py --offline` EXIT=0. RED: today's preflight.sh -> `grep -c 'THIS IS NOT A PASS'` over its full stdout = 0; the operator is shown the bare line `ok    python3 scripts/check-criteria-ledger.py --offline` and the banner PRE-FLIGHT PASSED. GREEN: this commit -> count = 1, the entry renders `DEGRADED`, and the gate's OWN six lines are echoed under it, including 'OFFLINE: tracker coverage and ledger/GitHub divergence were NOT checked. THIS IS NOT A PASS for coverage'. The words are the gate's, quoted, not preflight's paraphrase -- which matters, because a paraphrase is a second implementation of the disclosure and drifts from the first. The degraded rendering is the only place a gate's stdout now reaches stdout on a non-failing run; that is the whole of the fix for this criterion."
   - id: c3
@@ -27,7 +27,7 @@ criteria:
   - id: c4
     text: "A self-test carries both directions -- a fully-armed gate still renders ok and preflight still exits 0, AND a degraded gate is rendered distinguishably from ok -- shown RED against today's scripts/preflight.sh"
     state: met
-    evidence: "file:scripts/preflight.sh:202:armed gate printing THIS IS NOT A PASS, exit 0 -> ok"
+    evidence: "file:scripts/preflight.sh:224:armed gate printing THIS IS NOT A PASS, exit 0 -> ok"
     owner: core
     note: "MET 2026-09-04 on bc9288da5. `bash scripts/preflight.sh --self-test` -> 9 arms, all ok, 'self-test: both directions proven', EXIT=0. It drives the REAL `run_gate`/`render_gate` against synthetic gates, not a reimplementation of the rule. Positive half: 'armed gate, exit 0 -> ok'; the real run also still exits 0 (green arm on this tree: EXIT=0). Negative half: reserved exit 3 -> degraded; exit 1 -> fail; ok and degraded render differently; a degraded rendering carries the gate's own words; an ok gate is never labelled DEGRADED. RED AGAINST TODAY: `bash <origin/main preflight.sh> --self-test` ignores the flag entirely, runs the real gates and prints PRE-FLIGHT PASSED -- `grep -c 'both directions proven'` = 0. NOT VACUOUS, three mutations of this commit's own script, each run through the same self-test: (A) collapse the reserved degraded code into ok -> RED on 2 arms; (B) render everything degraded, the failure mode this criterion is written to catch -> RED on 3 arms including 'armed gate, exit 0 -> ok'; (C) decide status by substring search over gate stdout -> RED on the prose control. All three EXIT=1 with 'self-test: BROKEN -- the pre-flight cannot be trusted'. Mutations were made on scratch copies under /root/scratch-L2-1254, never in the worktree; `git status --porcelain` empty throughout."
   - id: c5
