@@ -143,6 +143,19 @@ pub fn begin(target: &Path, kind: &str) -> Result<OpGuard, BackupError> {
 /// comparison is still available to a caller or a proof harness through
 /// [`target_digest`], and it is the stronger claim precisely because it also
 /// catches a write OUTSIDE the declared scope.
+/// Mint the id that names an operation's intent record and undo directory.
+///
+/// A millisecond stamp plus the pid is NOT unique: two operations begun in the
+/// same millisecond by the same process got one id, so the second record
+/// overwrote the first and both shared one undo directory. The process-wide
+/// sequence makes every id this process mints distinct; it is zero-padded so
+/// ids from one process in one millisecond still sort in the order begun.
+fn mint_op_id(stamp_millis: i64, pid: u32) -> String {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{stamp_millis}-{pid}-{seq:06}")
+}
+
 pub fn begin_scoped(target: &Path, kind: &str, scope: &[&str]) -> Result<OpGuard, BackupError> {
     for rel in scope {
         reject_escaping_scope(rel)?;
@@ -151,8 +164,7 @@ pub fn begin_scoped(target: &Path, kind: &str, scope: &[&str]) -> Result<OpGuard
     std::fs::create_dir_all(&root).map_err(BackupError::io("create journal dir"))?;
 
     let pid = std::process::id();
-    let stamp = chrono::Utc::now().timestamp_millis();
-    let op_id = format!("{stamp}-{pid}");
+    let op_id = mint_op_id(chrono::Utc::now().timestamp_millis(), pid);
     let record_path = root.join(format!("{op_id}.{pid}.json"));
     let undo_dir = root.join(format!("undo-{op_id}"));
 
@@ -891,6 +903,22 @@ mod tests {
         assert!(
             names.iter().all(|n| n.contains(&format!(".{pid}.json"))),
             "record names must carry the owning pid: {names:?}"
+        );
+    }
+
+    /// The deterministic form of the race above: CI's shared-process lib leg
+    /// reddened `a_record_is_scoped_per_operation_and_per_process` whenever its
+    /// two `begin` calls landed in one millisecond, because the id was only the
+    /// stamp and the pid. Pinning the stamp removes the timing from the question.
+    #[test]
+    fn two_operations_begun_in_one_millisecond_by_one_process_get_distinct_ids() {
+        let pid = std::process::id();
+        let first = mint_op_id(1_757_500_000_000, pid);
+        let second = mint_op_id(1_757_500_000_000, pid);
+        assert_ne!(first, second, "one millisecond minted one id twice");
+        assert!(
+            first < second,
+            "ids from one process in one millisecond must sort in the order begun: {first} {second}"
         );
     }
 
