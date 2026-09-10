@@ -171,16 +171,49 @@ fn drive_a_model_switch() -> Run {
     }
 }
 
+/// The `session_id` of every record.
+///
+/// The sink writes an ENVELOPE — `{"kind":"task_spend_audit","payload":{…}}` —
+/// so the field is one level down. Read here rather than in each test, and
+/// PANICKING when it is absent rather than substituting a placeholder: the
+/// first run of this file did substitute one, every record then carried the
+/// same `"<missing>"`, and `all ids are equal` passed while measuring nothing.
+/// A missing key is a broken instrument, not a passing property.
 fn session_ids(run: &Run) -> Vec<String> {
     run.records
         .iter()
         .map(|r| {
-            r.get("session_id")
+            r.get("payload")
+                .and_then(|p| p.get("session_id"))
                 .and_then(|v| v.as_str())
-                .unwrap_or("<missing>")
+                .unwrap_or_else(|| {
+                    panic!(
+                        "an audit record carries no payload.session_id, so nothing in this \
+                         file can be graded. Lines:\n{}",
+                        run.lines.join("\n")
+                    )
+                })
                 .to_owned()
         })
         .collect()
+}
+
+/// The provider models each record's dispatches actually ran on.
+///
+/// The audit trail's own account of the switch, independent of what the mock
+/// server saw. Two instruments for one fact: a run where `/model` silently did
+/// nothing has to defeat both.
+fn dispatch_models(record: &serde_json::Value) -> Vec<String> {
+    record
+        .get("payload")
+        .and_then(|p| p.get("dispatches"))
+        .and_then(|d| d.as_array())
+        .map(|d| {
+            d.iter()
+                .filter_map(|x| x.get("model").and_then(|m| m.as_str()).map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn looks_like_a_uuid(s: &str) -> bool {
@@ -235,8 +268,32 @@ fn the_spend_audit_key_survives_an_in_session_model_switch() {
         run.screen
     );
 
+    // The audit trail's OWN account of the switch: the first record's
+    // dispatches ran on the boot model and the last record's on the switched-to
+    // one. Without this the equality below is satisfied by a run where nothing
+    // was ever switched.
+    let first_models = dispatch_models(&run.records[0]);
+    let last_models = dispatch_models(run.records.last().expect("records is non-empty"));
+    assert!(
+        first_models.iter().any(|m| m == MODEL_A),
+        "the first audit record's dispatches did not run on {MODEL_A}: {first_models:?}\n{}",
+        run.lines.join("\n")
+    );
+    assert!(
+        last_models.iter().any(|m| m == MODEL_B),
+        "the last audit record's dispatches did not run on {MODEL_B}, so the two records \
+         do not straddle a model switch: {last_models:?}\n{}",
+        run.lines.join("\n")
+    );
+
     let ids = session_ids(&run);
     let first = &ids[0];
+    assert!(
+        !first.is_empty() && first != "session-unknown",
+        "the run is keyed {first:?}, which is not a session identity — so `all ids are \
+         equal` below would hold while measuring nothing:\n{}",
+        run.lines.join("\n")
+    );
     assert!(
         ids.iter().all(|id| id == first),
         "the model switch split one conversation into {} distinct audit keys \
