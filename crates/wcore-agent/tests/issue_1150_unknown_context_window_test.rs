@@ -216,6 +216,29 @@ async fn boot(model: &str, context_window: Option<usize>) -> (Vec<String>, Strin
     (infos, prompt, listing)
 }
 
+/// The body the budget actually bounds, with `format_skills_section`'s
+/// `<system-reminder>` wrapper removed.
+///
+/// `format_skills_within_budget` guarantees `listing_width(entries) <= budget`;
+/// the wrapper is added afterwards and is a constant that does not scale with
+/// the catalogue, so a ceiling assertion has to measure what the renderer
+/// measured rather than the wrapped string.
+fn listing_body(listing: &str) -> &str {
+    const HEAD: &str =
+        "<system-reminder>\nThe following skills are available for use with the Skill tool:\n\n";
+    const TAIL: &str = "\n</system-reminder>";
+    listing
+        .strip_prefix(HEAD)
+        .and_then(|s| s.strip_suffix(TAIL))
+        .unwrap_or(listing)
+}
+
+/// The character budget a window buys, named once so the assertions below
+/// compare against the product's own formula instead of a copied constant.
+fn budget_for(window: usize) -> usize {
+    wcore_skills::prompt::get_char_budget(Some(window))
+}
+
 // -- Bug 1: the fabricated window -------------------------------------------
 
 /// The user running an unlisted model must be told the window is a guess, and
@@ -465,9 +488,52 @@ async fn an_unknown_window_sizes_the_skill_listing_like_the_window_it_assumes() 
     )
     .await;
 
+    // PRECONDITION. This used to read `unknown.contains("issue-1150")` -- the
+    // fixture's own skill must reach the 1,310-character arm -- and that is not
+    // a property of the product, it is an accident of how much the HOST
+    // installed. `loader.rs` documents the priority order (bundled -> MCP ->
+    // user -> project -> additional -> legacy) and the fixture binds its
+    // catalogue through `extra_skill_dirs`, which is `additional`: fifth of six.
+    // `clamp_to_budget` keeps entries in that order and stops at the budget, so
+    // a host carrying more user-tier NAMES than the budget holds pushes the
+    // fixture out -- correctly, by the documented model. Measured on hetzner's
+    // real catalogue (84 skills, 3,397 characters of names against a 1,310
+    // -character budget) the old form fired, while every relation this test
+    // actually grades was intact. The proxy was fragile; the property was not.
+    //
+    // Replaced by the two halves that survive competition and still say
+    // something the product could get wrong:
+    //
+    //   (a) the fixture is genuinely in play, asserted where the fixture has
+    //       room to land -- the 8,000-character arm, six times the tight one;
+    //   (b) each arm renders INSIDE the budget its own window buys, which is
+    //       the derivation claim this file exists for and the one a renderer
+    //       that ignores the window breaks immediately.
+    //
+    // Neither replaces the NON-VACUITY guard: that is the third assertion
+    // below, and it is the one that reds when the catalogue renders nothing
+    // (FerroxLabs/wayland-core#401 c2).
     assert!(
-        unknown.contains("issue-1150"),
-        "precondition: the planted skill never reached the unknown-window prompt"
+        old_fabrication.contains("issue-1150"),
+        "precondition: the fixture's own skill did not reach even the 8,000 \
+         -character arm, so this comparison is grading the host's catalogue \
+         rather than the planted one: {old_fabrication}"
+    );
+    assert!(
+        listing_body(&unknown).chars().count()
+            <= budget_for(wcore_config::compact::UNVERIFIED_CONTEXT_WINDOW),
+        "the unknown-window listing overran the budget its own assumed window \
+         buys ({} chars rendered against a {}-char budget)",
+        listing_body(&unknown).chars().count(),
+        budget_for(wcore_config::compact::UNVERIFIED_CONTEXT_WINDOW),
+    );
+    assert!(
+        listing_body(&old_fabrication).chars().count()
+            <= budget_for(wcore_config::compact::DEFAULT_CONTEXT_WINDOW),
+        "the 200,000-token listing overran its own budget ({} chars against \
+         {})",
+        listing_body(&old_fabrication).chars().count(),
+        budget_for(wcore_config::compact::DEFAULT_CONTEXT_WINDOW),
     );
     assert_eq!(
         unknown.len(),
@@ -639,10 +705,27 @@ async fn the_verdict_does_not_move_when_the_host_catalogue_grows() {
     )
     .await;
 
+    // PRECONDITION -- same repair as the sibling test, and it matters more
+    // here: this arm exists precisely to hold under competition, so a
+    // precondition that assumes the fixture outranks whatever the host
+    // installed is the one thing it cannot afford. The fixture's tier is
+    // `additional`, below `user`, by the documented order in `loader.rs`; on a
+    // host with more user-tier names than the tight budget holds it is dropped
+    // by design. Asserted where the fixture has room instead, plus the budget
+    // ceiling that is the actual claim.
     assert!(
-        unknown.contains("issue-1150"),
-        "precondition: the fixture's own skill must still reach the prompt when a \
-         host catalogue is competing with it, or this arm grades the host instead"
+        old_fabrication.contains("issue-1150"),
+        "precondition: the fixture's own skill did not reach the 8,000-character \
+         arm even there, so this arm is grading the host's catalogue rather than \
+         the planted one: {old_fabrication}"
+    );
+    assert!(
+        listing_body(&unknown).chars().count()
+            <= budget_for(wcore_config::compact::UNVERIFIED_CONTEXT_WINDOW),
+        "with a populated catalogue in play the unknown-window listing overran \
+         the budget its assumed window buys ({} chars against {})",
+        listing_body(&unknown).chars().count(),
+        budget_for(wcore_config::compact::UNVERIFIED_CONTEXT_WINDOW),
     );
     assert_eq!(
         unknown.len(),
