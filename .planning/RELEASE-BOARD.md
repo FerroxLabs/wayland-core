@@ -9,7 +9,7 @@ Owners come from each ledger's `owner:` on its UNMET criteria — the
 owner is read, not assigned, so a row cannot claim an owner the
 ledger does not.
 
-Blocking issues: 35   Outstanding criteria: 72
+Blocking issues: 32   Outstanding criteria: 65
 
 | Issue | Owner | Outstanding | Title |
 |---|---|---:|---|
@@ -37,12 +37,9 @@ Blocking issues: 35   Outstanding criteria: 72
 | FerroxLabs/wayland#1303 | core | 1 | Windows: a racing chunked credential write fails outright with ACCESS_DENIED (os error 5), and the caller loses a single-use refresh token |
 | FerroxLabs/wayland#1308 | core | 4 | Windows: four wcore-skills watcher_tests fail together with ERROR_PATH_NOT_FOUND, and the bare unwrap hides which path |
 | FerroxLabs/wayland#1349 | core | 3 | W16 mixed soak fails RSS acceptance twice (41.5x, then 1.83x) with no carrier |
-| FerroxLabs/wayland-core#373 | core | 1 | cargo test --workspace --lib --no-fail-fast cannot be run 10x consecutively: osv_check::tests::ssrf_refusal_is_visible_at_default_log_levels fails ~5% of runs |
 | FerroxLabs/wayland-core#386 | core | 3 | core#325 c2 remainder: one real nightly-windows-soak run with a red sibling |
 | FerroxLabs/wayland-core#401 | core | 1 | an_unknown_window_sizes_the_skill_listing precondition cannot pass in a clean container, so every integ/f13 CI run is red |
-| FerroxLabs/wayland-core#403 | core | 3 | The workspace --lib suite is not ten-times-clean: an ephemeral-port race and three single-sample wall-clock ratios (core#373 c5 remainder) |
 | FerroxLabs/wayland-core#404 | core | 1 | A ci-linux cancellation at the 120-minute budget destroys the JUnit evidence the run already produced |
-| FerroxLabs/wayland-core#413 | core | 3 | The DENY_CACHE_MAX_DIRS branch of deny_cache is ungraded and needs 100,001 directories to reach (split from #398 c5) |
 | FerroxLabs/wayland-core#415 | core | 2 | Close the quarantine console bypass with a restricting-SID token, without removing the feature (from #389 c1) |
 | FerroxLabs/wayland-core#424 | core | 2 | mutants-nightly has produced zero data in 87 runs: every leg dies in ~30s on a missing target/ parent, and the step exits 0 so it can never go red |
 | FerroxLabs/wayland-core#434 | core | 3 | The #338 c2 Windows residual pin reports the escape CLOSED while the same report shows it open |
