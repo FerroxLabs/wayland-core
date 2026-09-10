@@ -15,6 +15,7 @@ criteria:
     text: "External/unmeasured criteria remain visibly incomplete with their owning carriers."
     state: not-met
     owner: core
+    handoff: "FerroxLabs/wayland#1349"
     note: "External disposition and final reconciliation remain incomplete. Desktop residual is #1323; AppContainer #368 remains under Q-368-honesty and maintainer #410. No closure or publication authorized."
 ---
 
