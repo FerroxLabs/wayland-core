@@ -291,7 +291,7 @@ async fn a_thousand_project_skills_still_fit_the_window_budget() {
             skill_ref(
                 &format!("m-skill-{i:03}"),
                 &(format!("skill {i:03} ")
-                    + &"does a distinct thing worth describing at some length so                         the listing is realistic "
+                    + &"does a distinct thing worth describing at some length so the listing is realistic "
                         .repeat(3)),
                 SkillSource::User,
             )

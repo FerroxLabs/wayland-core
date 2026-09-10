@@ -3204,7 +3204,7 @@ async fn a_manifest_build_that_returns_after_the_deadline_still_names_the_scan()
 
         let path = if streaming { "streaming" } else { "buffered" };
         let context = format!(
-            "{path} path, a {timeout_ms}ms timeout against a walk measured at {walk:?},              stalled {stall_ms}ms before the first poll"
+            "{path} path, a {timeout_ms}ms timeout against a walk measured at {walk:?}, stalled {stall_ms}ms before the first poll"
         );
 
         // INSTRUMENT CONTROL, not an absorbed confound: if the P2b guard spent
@@ -3215,7 +3215,7 @@ async fn a_manifest_build_that_returns_after_the_deadline_still_names_the_scan()
             !result
                 .content
                 .contains(super::UNSAVED_GUARD_UNANSWERED_PREFIX),
-            "instrument: the P2b unsaved-work guard spent this call's budget before              the manifest build was reached, so nothing about #1111 acceptance 3              was exercised; got: {} ({context})",
+            "instrument: the P2b unsaved-work guard spent this call's budget before the manifest build was reached, so nothing about #1111 acceptance 3 was exercised; got: {} ({context})",
             result.content
         );
         assert!(
@@ -3225,7 +3225,7 @@ async fn a_manifest_build_that_returns_after_the_deadline_still_names_the_scan()
         );
         assert!(
             result.content.contains("timed out") && result.content.contains("manifest"),
-            "the caller must be told the sandbox manifest build stopped this, not              the command; got: {} ({context})",
+            "the caller must be told the sandbox manifest build stopped this, not the command; got: {} ({context})",
             result.content
         );
         // The load-bearing one. Both post-build expiries and the pre-deadline

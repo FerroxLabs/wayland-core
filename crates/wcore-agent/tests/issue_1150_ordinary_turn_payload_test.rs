@@ -419,7 +419,7 @@ async fn an_ordinary_turn_carries_no_skills_listing() {
         .collect();
     assert!(
         named.is_empty(),
-        "{} of the 10 installed skills are listed on a turn about arithmetic;          none of them is relevant to it and none was activated. Named: {named:?}",
+        "{} of the 10 installed skills are listed on a turn about arithmetic; none of them is relevant to it and none was activated. Named: {named:?}",
         named.len()
     );
     assert!(
