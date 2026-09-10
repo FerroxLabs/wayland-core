@@ -1,0 +1,478 @@
+# THROWAWAY MEASUREMENT WORKFLOW — lane w15/mac2, release 0.13.14.
+#
+# This file must NEVER reach `main` or the release branch. It exists to buy
+# three measurements that only a real macOS host can produce, and it is
+# deliberately scoped to `measure/**` branches so it cannot fire anywhere else.
+# `ci.yml` does not list `measure/**`, so pushing here costs one macOS runner
+# and nothing else — no Windows self-hosted leg, no full CI matrix.
+#
+# WHAT IT MEASURES, and which ticket each arm settles
+# ---------------------------------------------------
+#  * wayland#1285 / f016_real_spawn_uses_sanitized_launch_context — a `--retries 0`
+#    rate on native macOS, GREEN arm (settle present) against RED arm (settle
+#    budget mutated to 0ms, which restores the exact single-sample behaviour the
+#    flake came from). Plus a C probe that measures the underlying kernel
+#    disagreement directly.
+#  * wayland#1285 / resume_repaints_prior_conversation_into_the_transcript — the
+#    macOS window the repair is owed. n=20 of the whole `harness_tui_flow`
+#    binary at `--retries 0` under parallel nextest, i.e. the condition the
+#    criterion names, not an isolated single-test run.
+#  * wayland#1289 — the macOS arm for the 5s credential-store budget, AND the
+#    A/B of `--profile ci` (where `threads-required = 4` for this binary lives)
+#    against `--profile default` (which every previous measurement of this
+#    failure actually used, so the remedy has never once been in effect).
+#
+# WHY A HOSTED macos-latest RUNNER IS THE RIGHT INSTRUMENT
+# --------------------------------------------------------
+# wayland#1289 established that the failing regime is a 3-4 vCPU host already
+# oversubscribed at nominal `num-cpus`, not a thread-count flag. A hosted macOS
+# runner IS that host. The 96-core Linux box could not summon the regime
+# without degrading other lanes' builds, which is why the previous lane's
+# 5/5 green there distinguished nothing.
+#
+# EVERY ARM IS `--retries 0`. A census can only ever produce a per-execution
+# incidence under `retries = 2`; turning incidence into a rate needs this.
+
+name: w15-mac2 bounded macOS flake measurement (THROWAWAY)
+
+on:
+  push:
+    branches:
+      - 'measure/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: never
+
+jobs:
+  # -------------------------------------------------------------------------
+  # wayland#1285, half one: the kernel disagreement, measured directly.
+  #
+  # No cargo at all, so this reports in about a minute and does not depend on
+  # any of the build jobs below. It asks the exact question the ledger says was
+  # never asserted because nobody had a macOS host: when `killpg` answers
+  # EPERM, does the census that `classify_group_kill_failure` consults still
+  # count a member? And if so, how long until that member reaches SZOMB — which
+  # is the number the 500ms settle budget has to cover.
+  # -------------------------------------------------------------------------
+  kernel-probe:
+    name: macOS killpg-vs-census disagreement probe
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Host facts
+        run: |
+          set -euo pipefail
+          sw_vers
+          uname -a
+          echo "logical cpus: $(sysctl -n hw.logicalcpu)"
+          echo "physical cpus: $(sysctl -n hw.physicalcpu)"
+          echo "memsize: $(sysctl -n hw.memsize)"
+
+      - name: Build and run the probe
+        run: |
+          set -euo pipefail
+          cat > /tmp/pgprobe.c <<'CEOF'
+          #include <errno.h>
+          #include <signal.h>
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <string.h>
+          #include <sys/proc.h>
+          #include <sys/sysctl.h>
+          #include <sys/time.h>
+          #include <sys/types.h>
+          #include <sys/wait.h>
+          #include <unistd.h>
+
+          /* Count the members of `pgid` the way wcore_types::process_liveness
+           * counts them: anything whose p_stat is not SZOMB is "live".
+           * Returns 0 on success, -1 if the group could not be enumerated. */
+          static int census(pid_t pgid, int *live, int *total, int *flags_or, int *stat_first) {
+              int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PGRP, (int)pgid};
+              size_t len = 0;
+              if (sysctl(mib, 4, NULL, &len, NULL, 0) < 0) return -1;
+              *live = 0; *total = 0; *flags_or = 0; *stat_first = -1;
+              if (len == 0) return 0;
+              struct kinfo_proc *buf = malloc(len);
+              if (!buf) return -1;
+              if (sysctl(mib, 4, buf, &len, NULL, 0) < 0) { free(buf); return -1; }
+              int n = (int)(len / sizeof(struct kinfo_proc));
+              *total = n;
+              for (int i = 0; i < n; i++) {
+                  if (*stat_first < 0) *stat_first = buf[i].kp_proc.p_stat;
+                  if (buf[i].kp_proc.p_stat != SZOMB) {
+                      (*live)++;
+                      *flags_or |= buf[i].kp_proc.p_flag;
+                  }
+              }
+              free(buf);
+              return 0;
+          }
+
+          static long usec_since(struct timeval *t0) {
+              struct timeval now;
+              gettimeofday(&now, NULL);
+              return (now.tv_sec - t0->tv_sec) * 1000000L + (now.tv_usec - t0->tv_usec);
+          }
+
+          int main(int argc, char **argv) {
+              int iters = (argc > 1) ? atoi(argv[1]) : 400;
+              int eperm_with_live = 0, eperm_clean = 0, esrch = 0, other = 0, spin_bailed = 0;
+              long max_settle = 0, sum_settle = 0;
+              int wexit_seen = 0, wexit_missing = 0;
+              /* P_WEXIT from <sys/proc.h> is 0x00002000. Recorded as DATA, not
+               * relied on: the repair depends only on the two observations
+               * being separated in time. */
+              const int P_WEXIT_BIT = 0x00002000;
+
+              for (int i = 0; i < iters; i++) {
+                  pid_t pid = fork();
+                  if (pid < 0) { perror("fork"); return 2; }
+                  if (pid == 0) { setpgid(0, 0); _exit(0); }
+                  setpgid(pid, pid); /* races the child's own call; either wins */
+
+                  /* Spin the REAL killpg until it stops succeeding. Each success
+                   * means the kernel still had a member it was willing to
+                   * signal, so the interesting instant is the first failure. */
+                  int err = 0, spins = 0;
+                  for (;;) {
+                      if (killpg(pid, SIGKILL) == 0) {
+                          if (++spins > 20000000) { err = -1; spin_bailed++; break; }
+                          continue;
+                      }
+                      err = errno;
+                      break;
+                  }
+
+                  if (err == EPERM) {
+                      int live, total, flags, stat0;
+                      if (census(pid, &live, &total, &flags, &stat0) < 0) {
+                          other++;
+                      } else if (live > 0) {
+                          eperm_with_live++;
+                          if (flags & P_WEXIT_BIT) wexit_seen++; else wexit_missing++;
+                          if (eperm_with_live <= 3) {
+                              printf("  sample: pgid=%d total=%d live=%d p_stat=%d p_flag=0x%08x\n",
+                                     (int)pid, total, live, stat0, flags);
+                          }
+                          /* How long until the census agrees with killpg? This
+                           * is the window the settle budget must cover. */
+                          struct timeval t0; gettimeofday(&t0, NULL);
+                          for (;;) {
+                              if (census(pid, &live, &total, &flags, &stat0) < 0) break;
+                              if (live == 0) break;
+                              if (usec_since(&t0) > 5000000L) break; /* 5s hard stop */
+                          }
+                          long settle = usec_since(&t0);
+                          sum_settle += settle;
+                          if (settle > max_settle) max_settle = settle;
+                      } else {
+                          eperm_clean++;
+                      }
+                  } else if (err == ESRCH) {
+                      esrch++;
+                  } else if (err != -1) {
+                      other++;
+                  }
+
+                  int status; waitpid(pid, &status, 0);
+              }
+
+              printf("PROBE_ITERATIONS=%d\n", iters);
+              printf("PROBE_EPERM_WITH_LIVE_CENSUS=%d\n", eperm_with_live);
+              printf("PROBE_EPERM_CLEAN_CENSUS=%d\n", eperm_clean);
+              printf("PROBE_ESRCH=%d\n", esrch);
+              printf("PROBE_OTHER=%d\n", other);
+              printf("PROBE_SPIN_BAILED=%d\n", spin_bailed);
+              printf("PROBE_MAX_SETTLE_US=%ld\n", max_settle);
+              if (eperm_with_live > 0) {
+                  printf("PROBE_MEAN_SETTLE_US=%ld\n", sum_settle / eperm_with_live);
+                  printf("PROBE_P_WEXIT_SET=%d\n", wexit_seen);
+                  printf("PROBE_P_WEXIT_CLEAR=%d\n", wexit_missing);
+              }
+              return 0;
+          }
+          CEOF
+          clang -O2 -Wall -o /tmp/pgprobe /tmp/pgprobe.c
+          # Run it twice: idle, then against a CPU load roughly matching a
+          # saturated hosted runner, because the whole cluster's lesson is that
+          # a green from an idle host is a green from the wrong host.
+          echo "===== PROBE: idle ====="
+          /tmp/pgprobe 400
+          echo "===== PROBE: under load (2x logical cpus of spinners) ====="
+          n=$(( $(sysctl -n hw.logicalcpu) * 2 ))
+          for _ in $(seq 1 "$n"); do ( while :; do :; done ) & done
+          loadpids=$(jobs -p)
+          /tmp/pgprobe 400
+          # shellcheck disable=SC2086
+          kill $loadpids 2>/dev/null || true
+
+  # -------------------------------------------------------------------------
+  # wayland#1285, half two: the f016 rate on native macOS, green against red.
+  #
+  # The RED arm mutates ONE constant — the settle budget — to 0ms. With a zero
+  # budget the deadline has already passed by the time it is first read, so the
+  # very first `Live(n>0)` becomes an error: that is bit-for-bit the behaviour
+  # this repair replaced, and it is a truer red arm than reverting the commit
+  # because everything else about the tree is identical.
+  #
+  # The mutation is VERIFIED TO HAVE LANDED ON CODE before the build. A search
+  # that silently matches nothing (or matches a doc comment quoting the call)
+  # produces a red arm that is really a second green arm.
+  # -------------------------------------------------------------------------
+  mcp-f016:
+    name: "f016 @ --retries 0 (${{ matrix.arm }})"
+    runs-on: macos-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        arm: [green, red]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup vx (installs Rust from vx.toml)
+        uses: loonghao/vx@v0.9.17
+        with:
+          setup: 'true'
+          cache: 'true'
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Mutate the settle budget to 0ms (RED ARM ONLY) and prove it landed
+        if: matrix.arm == 'red'
+        run: |
+          set -euo pipefail
+          f=crates/wcore-mcp/src/transport/stdio.rs
+          before=$(/usr/bin/grep -c '^const GROUP_TEARDOWN_SETTLE_BUDGET: Duration = Duration::from_millis(500);' "$f" || true)
+          if [ "$before" != "1" ]; then
+            echo "FAIL: expected exactly 1 code-line match for the budget constant, got ${before}."
+            echo "      A mutation that matches 0 lines, or matches a comment, is not a red arm."
+            /usr/bin/grep -n 'GROUP_TEARDOWN_SETTLE_BUDGET' "$f" || true
+            exit 1
+          fi
+          /usr/bin/sed -i '' \
+            's|^const GROUP_TEARDOWN_SETTLE_BUDGET: Duration = Duration::from_millis(500);|const GROUP_TEARDOWN_SETTLE_BUDGET: Duration = Duration::from_millis(0);|' "$f"
+          after=$(/usr/bin/grep -c '^const GROUP_TEARDOWN_SETTLE_BUDGET: Duration = Duration::from_millis(0);' "$f")
+          [ "$after" = "1" ] || { echo "FAIL: mutation did not land"; exit 1; }
+          # mtime discipline: a restored/mutated file with an older mtime makes
+          # cargo skip the rebuild and the run measures the WRONG binary.
+          touch "$f"
+          echo "RED ARM ACTIVE:"
+          /usr/bin/grep -n 'GROUP_TEARDOWN_SETTLE_BUDGET: Duration' "$f"
+
+      - name: Build the wcore-mcp test binary
+        run: vx cargo nextest run --locked -p wcore-mcp --lib --no-run
+
+      - name: "Report the unsettled-census window count (non-vacuity)"
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          vx cargo nextest run --locked -p wcore-mcp --lib --retries 0 --no-capture \
+            -E 'test(eperm_over_a_group_that_has_not_yet_settled)' 2>&1 | tee /tmp/window.log
+          echo "rc=${PIPESTATUS[0]}"
+
+      # The whole lib binary, not an isolated `-E` filter: f016's failure is a
+      # teardown race, and running it alone changes the parallel condition the
+      # criterion names. Failures are counted per INVOCATION and the f016
+      # payload is grepped separately, so an unrelated sibling flake cannot be
+      # miscounted as an f016 occurrence.
+      - name: "wcore-mcp lib suite x 30 @ --retries 0"
+        run: |
+          set -uo pipefail
+          N=30
+          pass=0; fail=0
+          mkdir -p /tmp/runs
+          for i in $(seq 1 "$N"); do
+            vx cargo nextest run --locked -p wcore-mcp --lib \
+              --profile ci --retries 0 --no-fail-fast --no-tests=fail \
+              > "/tmp/runs/run-${i}.log" 2>&1
+            rc=$?
+            if [ "$rc" = "0" ]; then pass=$((pass+1)); else fail=$((fail+1)); fi
+            echo "invocation ${i}: rc=${rc}"
+          done
+          echo "SUITE_INVOCATIONS=${N}"
+          echo "SUITE_PASS=${pass}"
+          echo "SUITE_FAIL=${fail}"
+
+      - name: Grade the f016 occurrences specifically
+        if: always()
+        run: |
+          set -uo pipefail
+          echo "=== invocations whose FAIL line names f016 ==="
+          f016=$(/usr/bin/grep -l 'FAIL .*f016_real_spawn_uses_sanitized_launch_context' /tmp/runs/*.log 2>/dev/null | /usr/bin/wc -l | tr -d ' ')
+          echo "F016_FAILED_INVOCATIONS=${f016}"
+          echo "=== invocations carrying the containment-failure payload ==="
+          eperm=$(/usr/bin/grep -l 'containment has failed, not completed' /tmp/runs/*.log 2>/dev/null | /usr/bin/wc -l | tr -d ' ')
+          echo "CONTAINMENT_PAYLOAD_INVOCATIONS=${eperm}"
+          echo "=== POSITIVE CONTROL: f016 must be present as an executed test ==="
+          present=$(/usr/bin/grep -l 'f016_real_spawn_uses_sanitized_launch_context' /tmp/runs/*.log 2>/dev/null | /usr/bin/wc -l | tr -d ' ')
+          echo "F016_PRESENT_INVOCATIONS=${present}"
+          echo "(a zero here means the test never executed and every other zero above is a report of ABSENCE, not of health)"
+          echo "=== first failing payload, verbatim ==="
+          /usr/bin/grep -h -A 12 'containment has failed, not completed' /tmp/runs/*.log 2>/dev/null | head -30 || echo "(none)"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mcp-f016-${{ matrix.arm }}-logs
+          path: /tmp/runs
+          retention-days: 7
+
+  # -------------------------------------------------------------------------
+  # wayland#1285: the macOS window the repaired resume_repaints is owed.
+  #
+  # The WHOLE harness_tui_flow binary, so the parallel-nextest condition in the
+  # criterion is the real one, and so the sibling
+  # `tui_renders_the_chrome_and_every_tab_on_boot` (gh#1288, 5.3% on Linux) is
+  # measured on macOS at --retries 0 for free.
+  # -------------------------------------------------------------------------
+  cli-tui:
+    name: "harness_tui_flow x 20 @ --retries 0"
+    runs-on: macos-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v6
+      - uses: loonghao/vx@v0.9.17
+        with:
+          setup: 'true'
+          cache: 'true'
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Build
+        run: vx cargo nextest run --locked -p wcore-cli --test harness_tui_flow --no-run
+
+      - name: Run
+        run: |
+          set -uo pipefail
+          N=20
+          pass=0; fail=0
+          mkdir -p /tmp/tui
+          for i in $(seq 1 "$N"); do
+            vx cargo nextest run --locked -p wcore-cli --test harness_tui_flow \
+              --profile ci --retries 0 --no-fail-fast --no-tests=fail \
+              > "/tmp/tui/run-${i}.log" 2>&1
+            rc=$?
+            if [ "$rc" = "0" ]; then pass=$((pass+1)); else fail=$((fail+1)); fi
+            echo "invocation ${i}: rc=${rc}"
+          done
+          echo "TUI_INVOCATIONS=${N}"
+          echo "TUI_PASS=${pass}"
+          echo "TUI_FAIL=${fail}"
+
+      - name: Grade
+        if: always()
+        run: |
+          set -uo pipefail
+          for t in resume_repaints_prior_conversation_into_the_transcript \
+                   tui_renders_the_chrome_and_every_tab_on_boot; do
+            failed=$(/usr/bin/grep -l "FAIL .*${t}" /tmp/tui/*.log 2>/dev/null | /usr/bin/wc -l | tr -d ' ')
+            present=$(/usr/bin/grep -l "${t}" /tmp/tui/*.log 2>/dev/null | /usr/bin/wc -l | tr -d ' ')
+            echo "${t}: FAILED=${failed} PRESENT=${present}"
+          done
+          echo "=== the edit-notice assertion the repair added must never fire ==="
+          /usr/bin/grep -h -c 'while I was thinking' /tmp/tui/*.log 2>/dev/null | paste -sd, - || echo "0"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cli-tui-logs
+          path: /tmp/tui
+          retention-days: 7
+
+  # -------------------------------------------------------------------------
+  # wayland#1289: the macOS arm AND the profile A/B.
+  #
+  # `threads-required = 4` for this binary sits under `[[profile.ci.overrides]]`
+  # in .config/nextest.toml. nextest applies a profile's overrides only when
+  # that profile is selected, and `profile.ci` inherits from `profile.default`
+  # rather than the reverse — so every measurement anyone has taken of this
+  # failure, including wayland#1290's n=20 hetzner census, ran with the remedy
+  # NOT IN EFFECT. This job is the first time the two are compared.
+  #
+  # Arms are INTERLEAVED, not run in two blocks. A hosted runner's own load and
+  # thermal state drift over a long job, and two consecutive blocks would
+  # confound that drift with the profile. (An instrument that warms its own
+  # measurement has already cost this release one wrong reproduction.)
+  # -------------------------------------------------------------------------
+  cli-f14:
+    name: "f14_sigkill_recovery A/B: --profile ci vs default @ --retries 0"
+    runs-on: macos-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v6
+      - uses: loonghao/vx@v0.9.17
+        with:
+          setup: 'true'
+          cache: 'true'
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Confirm the remedy is where the ledger says it is
+        run: |
+          set -euo pipefail
+          echo "=== threads-required occurrences for this binary ==="
+          /usr/bin/grep -n "binary(f14_sigkill_recovery)" .config/nextest.toml
+          echo "=== the enclosing profile table ==="
+          /usr/bin/grep -n "^\[\[profile\..*overrides\]\]" .config/nextest.toml | tail -20
+
+      - name: Build
+        run: vx cargo nextest run --locked -p wcore-cli --test f14_sigkill_recovery --no-run
+
+      - name: "Interleaved A/B, 20 invocations per arm"
+        run: |
+          set -uo pipefail
+          N=20
+          mkdir -p /tmp/f14
+          declare -i ci_pass=0 ci_fail=0 def_pass=0 def_fail=0
+          for i in $(seq 1 "$N"); do
+            for arm in ci default; do
+              vx cargo nextest run --locked -p wcore-cli --test f14_sigkill_recovery \
+                --profile "$arm" --retries 0 --no-fail-fast --no-tests=fail \
+                > "/tmp/f14/${arm}-${i}.log" 2>&1
+              rc=$?
+              if [ "$arm" = "ci" ]; then
+                if [ "$rc" = "0" ]; then ci_pass+=1; else ci_fail+=1; fi
+              else
+                if [ "$rc" = "0" ]; then def_pass+=1; else def_fail+=1; fi
+              fi
+              echo "arm=${arm} invocation=${i} rc=${rc}"
+            done
+          done
+          echo "F14_CI_PASS=${ci_pass} F14_CI_FAIL=${ci_fail}"
+          echo "F14_DEFAULT_PASS=${def_pass} F14_DEFAULT_FAIL=${def_fail}"
+
+      - name: Grade the credential-store failure specifically
+        if: always()
+        run: |
+          set -uo pipefail
+          for arm in ci default; do
+            cs=$(/usr/bin/grep -l 'did not answer within' /tmp/f14/${arm}-*.log 2>/dev/null | /usr/bin/wc -l | tr -d ' ')
+            na=$(/usr/bin/grep -l 'NeverAsked\|never asked' /tmp/f14/${arm}-*.log 2>/dev/null | /usr/bin/wc -l | tr -d ' ')
+            present=$(/usr/bin/grep -l 'f14_seed_recoverable_turn_helper\|sigkill_during_tool_execution' /tmp/f14/${arm}-*.log 2>/dev/null | /usr/bin/wc -l | tr -d ' ')
+            echo "arm=${arm} CREDENTIAL_STORE_TIMEOUT_INVOCATIONS=${cs} NEVER_ASKED_INVOCATIONS=${na} SUITE_PRESENT=${present}"
+          done
+          echo "=== which profile nextest actually reported using ==="
+          /usr/bin/grep -h 'nextest profile' /tmp/f14/ci-1.log /tmp/f14/default-1.log 2>/dev/null || true
+          echo "=== first credential-store payload, verbatim ==="
+          /usr/bin/grep -h -B 2 -A 10 'did not answer within' /tmp/f14/*.log 2>/dev/null | head -40 || echo "(none)"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cli-f14-logs
+          path: /tmp/f14
+          retention-days: 7
