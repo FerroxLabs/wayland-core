@@ -45,28 +45,37 @@ jobs:
           # --in-place to avoid workspace copy issues. See strategy doc
           # .blackboard/E2E-MUTATION-BASELINE-2026-05-24.md §5.
           # ─────────────────────────────────────────────────────────────────
+          # min_test_timeout is a FLOOR, not a ceiling on the baseline. See the
+          # long comment on the `cargo mutants` invocation below: `--timeout`
+          # is documented by cargo-mutants 27.1.0 as "maximum run time for ALL
+          # cargo commands", so it also bounded the UNMUTATED baseline and
+          # censored it on four of five crates (core#451). The per-mutant test
+          # timeout is now derived from the measured baseline; these numbers
+          # only stop a very fast baseline from deriving an unrealistically
+          # tight bound.
+          # ─────────────────────────────────────────────────────────────────
           - crate: wcore-cron
-            test_timeout: 90
+            min_test_timeout: 90
             in_place: "false"
             estimated_minutes: 10
 
           - crate: wcore-config
-            test_timeout: 180
+            min_test_timeout: 180
             in_place: "true"
             estimated_minutes: 90
 
           - crate: wcore-providers
-            test_timeout: 60
+            min_test_timeout: 60
             in_place: "false"
             estimated_minutes: 160
 
           - crate: wcore-agent
-            test_timeout: 120
+            min_test_timeout: 120
             in_place: "true"
             estimated_minutes: 360
 
           - crate: wcore-cli
-            test_timeout: 120
+            min_test_timeout: 120
             in_place: "true"
             estimated_minutes: 360
 
@@ -121,7 +130,8 @@ jobs:
         id: mutants
         env:
           CRATE: ${{ matrix.crate }}
-          TEST_TIMEOUT: ${{ matrix.test_timeout }}
+          MIN_TEST_TIMEOUT: ${{ matrix.min_test_timeout }}
+          TIMEOUT_MULTIPLIER: "5"
           IN_PLACE: ${{ matrix.in_place }}
           SHARD_ARG: ${{ steps.shard.outputs.arg }}
         run: |
@@ -150,12 +160,34 @@ jobs:
             IN_PLACE_FLAG="--in-place"
           fi
 
+          # Per cargo-mutants 27.1.0 `--help`, `-t, --timeout` is the "maximum
+          # run time for ALL cargo commands" -- INCLUDING the unmutated
+          # baseline. Passing it therefore censors the very measurement the
+          # per-mutant timeout is supposed to be derived from. Run
+          # 33844721279 (macos-latest, main @ 57e2a244e) shows exactly that:
+          #   wcore-cron       ok       Unmutated baseline in  203s build +   5s test  (--timeout 90)
+          #   wcore-config     TIMEOUT  Unmutated baseline in  307s build + 180s test  (--timeout 180)
+          #   wcore-providers  TIMEOUT  Unmutated baseline in  457s build +  60s test  (--timeout 60)
+          #   wcore-cli        TIMEOUT  Unmutated baseline in 1009s build + 120s test  (--timeout 120)
+          #   wcore-agent      TIMEOUT  Unmutated baseline in 2011s build + 120s test  (--timeout 120)
+          # Every censored value equals its own `--timeout` to the second, and
+          # each leg ends "cargo test failed in an unmutated tree, so no
+          # mutants were tested". The BUILD phase was never the constraint --
+          # that run's debug.log records `timeouts=Timeouts { build: None,
+          # test: Some(90s) }`, so builds ran unbounded and completed.
+          # So: no `--timeout`. The baseline test run is unbounded (bounded
+          # only by the job) and therefore MEASURED, and each mutant's test
+          # timeout is derived from that measurement as
+          # max(min_test_timeout, multiplier x measured baseline test time).
+          # The old per-crate numbers survive only as that floor, where they
+          # can be too generous but can no longer be a censor. core#451.
           set +e   # capture exit code; don't fail the step immediately
           # shellcheck disable=SC2086
           cargo mutants \
             -p "${CRATE}" \
             --no-shuffle \
-            --timeout "${TEST_TIMEOUT}" \
+            --timeout-multiplier "${TIMEOUT_MULTIPLIER}" \
+            --minimum-test-timeout "${MIN_TEST_TIMEOUT}" \
             ${IN_PLACE_FLAG} \
             --output "target/mutants-${CRATE}" \
             ${SHARD_ARG} \
@@ -177,6 +209,29 @@ jobs:
           echo "real_data=${REAL_DATA}" >> "$GITHUB_OUTPUT"
           echo "summary=${SUMMARY}" >> "$GITHUB_OUTPUT"
           echo "exit_code=${MUTANTS_EXIT}" >> "$GITHUB_OUTPUT"
+
+          # Record the unmutated-tree measurement itself, machine-readable and
+          # in the uploaded artifact, so the derived per-mutant timeout can be
+          # told apart from a hopeful one without re-reading a 2 MB log. Only
+          # a line WITHOUT the TIMEOUT marker is a measurement; a censored
+          # baseline is recorded as censored, never as a duration. core#451 c2.
+          BASELINE_LINE=$(grep -E "Unmutated baseline in [0-9]+s build \+ [0-9]+s test" \
+            ".blackboard/E2E-MUTATION-BASELINE/${CRATE}.log" | tail -1)
+          BUILD_SECONDS=$(echo "${BASELINE_LINE}" | grep -oE '[0-9]+s build' | grep -oE '[0-9]+')
+          TEST_SECONDS=$(echo "${BASELINE_LINE}" | grep -oE '[0-9]+s test' | grep -oE '[0-9]+')
+          if [ -n "${BASELINE_LINE}" ] && ! echo "${BASELINE_LINE}" | grep -q "TIMEOUT"; then
+            BASELINE_MEASURED="true"
+          else
+            BASELINE_MEASURED="false"
+          fi
+          echo "baseline_measured=${BASELINE_MEASURED}" >> "$GITHUB_OUTPUT"
+          cat > ".blackboard/E2E-MUTATION-BASELINE/${CRATE}-baseline.json" <<BASELINE_EOF
+          {"crate": "${CRATE}", "measured": ${BASELINE_MEASURED},
+           "build_seconds": ${BUILD_SECONDS:-null}, "test_seconds": ${TEST_SECONDS:-null},
+           "censored_by_timeout_flag": $([ "${BASELINE_MEASURED}" = "true" ] && echo false || echo true),
+           "timeout_multiplier": ${TIMEOUT_MULTIPLIER}, "minimum_test_timeout": ${MIN_TEST_TIMEOUT},
+           "raw": "${BASELINE_LINE}", "run_id": "${GITHUB_RUN_ID:-unknown}", "runner_os": "${RUNNER_OS:-unknown}"}
+          BASELINE_EOF
 
           # Compute catch rate from the summary (0/N/A when there is none).
           CAUGHT=$(echo "${SUMMARY}" | grep -oE '[0-9]+ caught' | grep -oE '[0-9]+' || echo 0)
@@ -235,6 +290,7 @@ jobs:
           name: mutants-log-${{ matrix.crate }}
           path: |
             .blackboard/E2E-MUTATION-BASELINE/${{ matrix.crate }}.log
+            .blackboard/E2E-MUTATION-BASELINE/${{ matrix.crate }}-baseline.json
             target/mutants-${{ matrix.crate }}/mutants.out/
           retention-days: 30
 
