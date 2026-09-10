@@ -7709,6 +7709,51 @@ mod chunk_crash_injection {
         String::from(tag).repeat(len)
     }
 
+    /// The per-crash-round cost, split into the two things a round actually
+    /// does: creating the child that crashes, and RECOVERING from the lockfile
+    /// it left behind.
+    ///
+    /// wayland#1300 c1 asks for the recovery cost, and a whole-test duration
+    /// cannot answer it. MEASURED on SeanDesktop 2026-09-10 with `is_stale`
+    /// instrumented (see `staleness_census`): the recovery is 4-9ms flat while
+    /// `run_child` is 2351-3956ms and carries all of the variance, so the 48x
+    /// bistability CI reports is a property of Windows process creation on a
+    /// freshly linked test binary -- Defender real-time protection is on with an
+    /// empty exclusion list there -- and NOT of the crashed-holder recovery
+    /// path. That split is printed by every run from now on, so the next reader
+    /// of a bimodal timing here reads the answer out of the artifact instead of
+    /// re-deriving it.
+    #[derive(Default)]
+    struct RoundCost {
+        spawn_us: Vec<u128>,
+        recover_us: Vec<u128>,
+    }
+
+    impl RoundCost {
+        fn spread(samples: &[u128]) -> String {
+            let (Some(&min), Some(&max)) = (samples.iter().min(), samples.iter().max()) else {
+                return "no rounds".to_string();
+            };
+            format!(
+                "min={:.3}ms max={:.3}ms ratio={:.2}x",
+                min as f64 / 1000.0,
+                max as f64 / 1000.0,
+                max as f64 / min.max(1) as f64
+            )
+        }
+
+        fn report(&self, label: &str) {
+            println!(
+                "ROUND_COST {label} rounds={} recovery[{}] spawn[{}]",
+                self.recover_us.len(),
+                Self::spread(&self.recover_us),
+                Self::spread(&self.spawn_us),
+            );
+            println!("ROUND_COST {label} recover_us={:?}", self.recover_us);
+            println!("ROUND_COST {label} spawn_us={:?}", self.spawn_us);
+        }
+    }
+
     // -- child mode -------------------------------------------------------
     // Re-entered as a subprocess by the sweeps below. Not a test in its own
     // right; it early-returns when the harness env is absent.
@@ -7763,6 +7808,7 @@ mod chunk_crash_injection {
         let old = value_of('O', old_len);
         let new = value_of('N', new_len);
         let mut verdicts = Vec::new();
+        let mut cost = RoundCost::default();
 
         for crash_at in 0..24usize {
             let tmp = tempfile::tempdir().unwrap();
@@ -7781,9 +7827,15 @@ mod chunk_crash_injection {
                 "{label}: seeding is broken"
             );
 
+            let spawned = std::time::Instant::now();
             run_child(dir, lock_dir, crash_at, 'N', new_len);
+            cost.spawn_us.push(spawned.elapsed().as_micros());
 
+            // The RECOVERY, timed on its own: this read is what has to get past
+            // the lockfile the aborted child left behind.
+            let recovering = std::time::Instant::now();
             let read = chunked_get(&FileStore::open(dir), KEY, &locks);
+            cost.recover_us.push(recovering.elapsed().as_micros());
             let verdict = match &read {
                 Ok(Some(v)) if *v == old => "OLD".to_string(),
                 Ok(Some(v)) if *v == new => "NEW".to_string(),
@@ -7814,6 +7866,7 @@ mod chunk_crash_injection {
                  credential (the store now reports no value at all)"
             );
         }
+        cost.report(label);
         verdicts
     }
 
@@ -7879,27 +7932,34 @@ mod chunk_crash_injection {
         .unwrap();
 
         let mut census = Vec::new();
+        let mut cost = RoundCost::default();
         for round in 0..40usize {
             // Alternate long/short so part counts move around, and inject a kill
             // partway through the part-writing phase every round.
             let len = if round % 2 == 0 { 12000 } else { 2600 };
             let tag = char::from(b'A' + (round % 20) as u8);
+            let spawned = std::time::Instant::now();
             run_child(dir, lock_dir, 2, tag, len);
+            cost.spawn_us.push(spawned.elapsed().as_micros());
 
             // Then a clean write of the same value, so the store settles. It must
-            // not be wedged by the lockfile the aborted child left behind.
+            // not be wedged by the lockfile the aborted child left behind. This
+            // settle write IS the recovery wayland#1300 is about, so it is timed
+            // apart from the spawn above.
             let settled = value_of(tag, len);
+            let recovering = std::time::Instant::now();
             chunked_put(&FileStore::open(dir), KEY, &settled, UNITS, &locks).unwrap();
+            let read_back = chunked_get(&FileStore::open(dir), KEY, &locks);
+            cost.recover_us.push(recovering.elapsed().as_micros());
             assert_eq!(
-                chunked_get(&FileStore::open(dir), KEY, &locks)
-                    .unwrap()
-                    .as_deref(),
+                read_back.unwrap().as_deref(),
                 Some(settled.as_str()),
                 "round {round}: a settled write after an interrupted one did not read back \
                  as itself — an orphan was spliced in"
             );
             census.push(FileStore::entry_names(dir).len());
         }
+        cost.report("interrupted-rotations");
         println!("CENSUS entries-after-each-round: {census:?}");
         println!("CENSUS final entries: {:?}", FileStore::entry_names(dir));
 
