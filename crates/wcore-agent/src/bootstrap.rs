@@ -3123,9 +3123,15 @@ impl AgentBootstrap {
         // Wave SC SECURITY MAJOR fix: spawn the TTL reaper so abandoned
         // approvals auto-resolve as Cancelled instead of leaking
         // `oneshot::Sender`s + holding the session in Suspend forever.
-        // The reaper task lives for the engine's lifetime; tokio aborts
-        // it when the runtime shuts down.
-        let _reaper_handle = approval_bridge.spawn_reaper(crate::approval::DEFAULT_REAP_INTERVAL);
+        //
+        // wayland#1349: the handle is PARKED ON THE ENGINE below, not dropped.
+        // Dropping a `JoinHandle` detaches the task; it does not abort it. In a
+        // long-lived host (`acp serve`) every session builds one of these, so a
+        // dropped handle left one immortal 30s ticker per session-ever-created,
+        // each holding an `ApprovalBridge` clone alive for the life of the
+        // PROCESS. Measured by heaptrack over a 200-vs-50-session A/B: exactly
+        // one leaked allocation per session from this call site.
+        let reaper_handle = approval_bridge.spawn_reaper(crate::approval::DEFAULT_REAP_INTERVAL);
 
         // F09: attach the consent doorbell only to this session's policy. A
         // later ACP/Desktop session therefore cannot repoint an earlier
@@ -3770,6 +3776,12 @@ impl AgentBootstrap {
         if let Some(handle) = decay_handle {
             engine.push_decay_handle(handle);
         }
+
+        // wayland#1349: same contract for the approval-bridge TTL reaper spawned
+        // during `build_scoped`. `Drop for AgentEngine` drains `decay_handles`
+        // into the bootstrap cleanup, which aborts them, so the ticker dies with
+        // the session instead of outliving it for the life of the process.
+        engine.push_decay_handle(reaper_handle);
 
         // Install the pre-filter source on the engine BEFORE the capability
         // report is computed, so the report reads the engine's real state
