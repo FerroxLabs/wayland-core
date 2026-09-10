@@ -1,0 +1,25 @@
+{
+  "slot": "parallel-1",
+  "remote_root": "/root/waylandcore-stabilization-20260905/slots/parallel-1",
+  "source": "73bccf8361767e6f1bec1b9be08778ccde96e216",
+  "tree": "9ae4b532459e4e4a8165b6a787bd845f9f688fd9",
+  "bundle_import_anchor": "0cdd998adb1cd2ab13966a40b1b98c6136fd72d0",
+  "cargo_args": [
+    "nextest",
+    "run",
+    "--locked",
+    "-p",
+    "wcore-acp",
+    "--retries",
+    "0",
+    "--no-fail-fast",
+    "-E",
+    "test(=server::eviction_tests::a_close_between_victim_choice_and_pop_keeps_retained_total_exact) | test(=server::eviction_tests::churn_over_the_cap_with_mixed_chunk_sizes_keeps_retained_total_exact)"
+  ],
+  "core_binary_profile": null,
+  "ssh_exit": 100,
+  "remote_exit": 100,
+  "complete": true,
+  "duration_seconds": 14.134879112243652,
+  "status_sha256": "7159e59e6f25ae4682936922ed67b4cff8b7737a921be51ac411579b08451ded"
+}

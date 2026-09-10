@@ -1,0 +1,28 @@
+   Compiling wcore-acp v0.13.14 (/root/waylandcore-stabilization-20260905/slots/parallel-1/source/crates/wcore-acp)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.40s
+────────────
+ Nextest run ID 44b76411-ad88-43fd-a088-6eb83f922e5a with nextest profile: default
+    Starting 1 test across 8 binaries (176 tests skipped)
+        FAIL [   0.493s] (1/1) wcore-acp::stabilization_backpressure a_reader_that_stops_reading_is_detached_by_its_wait_budget_beside_a_fast_one
+  stdout ───
+
+    running 1 test
+    test a_reader_that_stops_reading_is_detached_by_its_wait_budget_beside_a_fast_one ... FAILED
+
+    failures:
+
+    failures:
+        a_reader_that_stops_reading_is_detached_by_its_wait_budget_beside_a_fast_one
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.49s
+
+  stderr ───
+
+    thread 'a_reader_that_stops_reading_is_detached_by_its_wait_budget_beside_a_fast_one' (3238904) panicked at crates/wcore-acp/tests/stabilization_backpressure.rs:411:5:
+    a reader that stopped reading is detached by its wait budget: 17 frames
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   0.494s] 1 test run: 0 passed, 1 failed, 176 skipped
+        FAIL [   0.493s] (1/1) wcore-acp::stabilization_backpressure a_reader_that_stops_reading_is_detached_by_its_wait_budget_beside_a_fast_one
+error: test run failed

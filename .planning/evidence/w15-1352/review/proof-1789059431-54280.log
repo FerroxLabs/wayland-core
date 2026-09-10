@@ -1,0 +1,38 @@
+   Compiling wcore-acp v0.13.14 (/root/waylandcore-stabilization-20260905/slots/parallel-1/source/crates/wcore-acp)
+warning: unused variable: `log`
+   --> crates/wcore-acp/src/server.rs:471:25
+    |
+471 |                     let log = events.read().await.get(&session_id).cloned();
+    |                         ^^^ help: if this is intentional, prefix it with an underscore: `_log`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `wcore-acp` (lib) generated 1 warning (run `cargo fix --lib -p wcore-acp` to apply 1 suggestion)
+warning: `wcore-acp` (lib test) generated 1 warning (1 duplicate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.46s
+────────────
+ Nextest run ID 19d32735-5bc1-46ba-a0d0-00d0b2c598fd with nextest profile: default
+    Starting 1 test across 8 binaries (176 tests skipped)
+        FAIL [  10.008s] (1/1) wcore-acp server::eviction_tests::an_exclusive_hold_on_the_log_map_does_not_stall_a_running_turn
+  stdout ───
+
+    running 1 test
+    test server::eviction_tests::an_exclusive_hold_on_the_log_map_does_not_stall_a_running_turn ... FAILED
+
+    failures:
+
+    failures:
+        server::eviction_tests::an_exclusive_hold_on_the_log_map_does_not_stall_a_running_turn
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 144 filtered out; finished in 10.00s
+
+  stderr ───
+
+    thread 'server::eviction_tests::an_exclusive_hold_on_the_log_map_does_not_stall_a_running_turn' (3244081) panicked at crates/wcore-acp/src/server/eviction_tests.rs:307:21:
+    a running turn stalled while the log map was held exclusively: Elapsed(())
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [  10.010s] 1 test run: 0 passed, 1 failed, 176 skipped
+        FAIL [  10.008s] (1/1) wcore-acp server::eviction_tests::an_exclusive_hold_on_the_log_map_does_not_stall_a_running_turn
+error: test run failed

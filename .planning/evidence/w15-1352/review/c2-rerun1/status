@@ -1,0 +1,12 @@
+queue start utc=2026-09-10T16:56:51Z driver_sha=5116380e1372b75360fe9d943cd1e76ba87836b6c9237d4b21523de1f71652a5
+arm=base-release start utc=2026-09-10T16:56:51Z loadavg=30.38 29.97 31.60 bin_sha=9b2e24f204f0fa18d0e418f487558a351e47550a80e9ef855178153988f27a0d source=cd85dac8872eedace6fbbd6421e2acdf4f2f0f60 schedule=8,8,32,8,8,8,32,8,8,8 extra=
+arm=base-release exit=0 end utc=2026-09-10T16:58:00Z loadavg=32.33 30.71 31.75
+arm=fix2-release start utc=2026-09-10T16:58:00Z loadavg=32.33 30.71 31.75 bin_sha=b08ee6d7e00dad1b984719fab7c37f7a83fc95d346f1b6802f7b76a6aff74eb9 source=f7f6b96d80fec1d6117d58ae375dbbf47cadbbb2 schedule=8,8,32,8,8,8,32,8,8,8 extra=
+arm=fix2-release exit=0 end utc=2026-09-10T16:59:09Z loadavg=34.75 31.72 32.02
+arm=base-release-churn start utc=2026-09-10T16:59:09Z loadavg=34.75 31.72 32.02 bin_sha=9b2e24f204f0fa18d0e418f487558a351e47550a80e9ef855178153988f27a0d source=cd85dac8872eedace6fbbd6421e2acdf4f2f0f60 schedule=32,8,32,32,8,32,32,8,32,32 extra=--mixed-chunks
+arm=base-release-churn exit=0 end utc=2026-09-10T17:04:58Z loadavg=41.70 39.46 35.60
+arm=fix1-release-churn start utc=2026-09-10T17:04:58Z loadavg=41.70 39.46 35.60 bin_sha=d73cb6232e17429c4b3fa0c9def9ef3411587f50b2965eae5f6b669124f9d6e1 source=671109fa92f83c129700790c1dedf79c244ea693 schedule=32,8,32,32,8,32,32,8,32,32 extra=--mixed-chunks
+arm=fix1-release-churn exit=0 end utc=2026-09-10T17:10:56Z loadavg=46.30 41.81 37.68
+arm=fix2-release-churn start utc=2026-09-10T17:10:56Z loadavg=46.30 41.81 37.68 bin_sha=b08ee6d7e00dad1b984719fab7c37f7a83fc95d346f1b6802f7b76a6aff74eb9 source=f7f6b96d80fec1d6117d58ae375dbbf47cadbbb2 schedule=32,8,32,32,8,32,32,8,32,32 extra=--mixed-chunks
+arm=fix2-release-churn exit=0 end utc=2026-09-10T17:16:51Z loadavg=39.60 40.07 38.22
+queue state=done utc=2026-09-10T17:16:51Z

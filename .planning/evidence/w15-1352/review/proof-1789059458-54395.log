@@ -1,0 +1,31 @@
+   Compiling wcore-acp v0.13.14 (/root/waylandcore-stabilization-20260905/slots/parallel-1/source/crates/wcore-acp)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.24s
+────────────
+ Nextest run ID 2d72cb8d-1127-4aa4-8dbc-ce31478bca7f with nextest profile: default
+    Starting 2 tests across 8 binaries (175 tests skipped)
+        FAIL [   1.564s] (1/2) wcore-acp server::eviction_tests::a_close_between_victim_choice_and_pop_keeps_retained_total_exact
+  stdout ───
+
+    running 1 test
+    test server::eviction_tests::a_close_between_victim_choice_and_pop_keeps_retained_total_exact ... FAILED
+
+    failures:
+
+    failures:
+        server::eviction_tests::a_close_between_victim_choice_and_pop_keeps_retained_total_exact
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 144 filtered out; finished in 1.56s
+
+  stderr ───
+
+    thread 'server::eviction_tests::a_close_between_victim_choice_and_pop_keeps_retained_total_exact' (3251021) panicked at crates/wcore-acp/src/server/eviction_tests.rs:221:5:
+    assertion `left == right` failed: retained_total drifted from the logs it counts after a close raced eviction
+      left: 61087487
+     right: 61349662
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        PASS [   2.164s] (2/2) wcore-acp server::eviction_tests::churn_over_the_cap_with_mixed_chunk_sizes_keeps_retained_total_exact
+────────────
+     Summary [   2.165s] 2 tests run: 1 passed, 1 failed, 175 skipped
+        FAIL [   1.564s] (1/2) wcore-acp server::eviction_tests::a_close_between_victim_choice_and_pop_keeps_retained_total_exact
+error: test run failed

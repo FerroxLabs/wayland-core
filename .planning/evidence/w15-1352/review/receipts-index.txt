@@ -1,0 +1,9 @@
+proof-1789058273-30510.json 2f93f78b6 nextest run --locked -p wcore-acp --retries 0 --no-fail-fast remote_exit 100 complete True
+proof-1789059000-48095.json f7f6b96d8 nextest run --locked -p wcore-acp --retries 0 --no-fail-fast remote_exit 0 complete True
+proof-1789059017-48697.json f7f6b96d8 clippy --locked -p wcore-acp --all-targets -- -D warnings remote_exit 0 complete True
+proof-1789059029-48896.json f7f6b96d8 clippy --locked -p wcore-acp --all-targets --target x86_64-pc-windows-gnu -- -D warnings remote_exit 0 complete True
+proof-1789059042-49250.json f7f6b96d8 nextest run --locked -p wcore-cli --lib --retries 0 --no-fail-fast -E test(acp_engine::) remote_exit 0 complete True
+proof-1789059111-50857.json f7f6b96d8 build --locked --release --features voice -p wcore-cli -j 6 remote_exit 0 complete True
+proof-1789059414-54137.json 0579423cf nextest run --locked -p wcore-acp --retries 0 --no-fail-fast -E test(=a_reader_that_stops_reading_is_detached_by_its_wai remote_exit 100 complete True
+proof-1789059431-54280.json 82212a446 nextest run --locked -p wcore-acp --retries 0 --no-fail-fast -E test(=server::eviction_tests::an_exclusive_hold_on_the_l remote_exit 100 complete True
+proof-1789059458-54395.json 73bccf836 nextest run --locked -p wcore-acp --retries 0 --no-fail-fast -E test(=server::eviction_tests::a_close_between_victim_cho remote_exit 100 complete True

@@ -1,5 +1,11 @@
 # wayland#1352 — the ACP relay cancellation, named and repaired
 
+> **Read the Review round at the end first.** An adversarial review of
+> d25526a37 found a close racing eviction could drift and wrap the retained
+> history total, and that the first guard test was vacuous. The repair was
+> reworked (af7e6d53c, f7f6b96d8). The c2 repair paragraph, its "exact" cap
+> claim and the commit list below describe 671109fa9 and are superseded there.
+
 Lane w15/relay1352, 2026-09-10. Host `hetzner-dsm` (Linux 6.8.0-101, 96 CPU,
 shared; loadavg 26-70 across these runs, recorded with every sample). Builds and
 tests through `tools/remote-proof.py` slot `parallel-1`; every receipt quoted
@@ -180,3 +186,160 @@ Never to merge: `w15/relay1352-diag` (`784419c4b`, timers), `w15/relay1352-redar
   It is equal on base and fix, and was not examined further.
 * A cause for the residual latency difference between the two release sources;
   it was not stable across the two runs.
+
+## Review round — adversarial review of d25526a37
+
+Reopened in the ledger (bd11a056a). Every finding below was fixed as new
+commits on top of 4ba1edfde; history was not rewritten. Receipts for every run
+quoted here are in `review/` (`review/receipts-index.txt`), all `"complete": true`.
+
+### BLOCKER 1 — a close racing eviction double-subtracted the total
+
+**Forced deterministically.** `crates/wcore-acp/src/server/eviction_tests.rs::a_close_between_victim_choice_and_pop_keeps_retained_total_exact`
+installs a `cfg(test)` gate between an evictor choosing its victim and popping
+it, closes the victim's session at that gate, releases it, then compares
+`retained_total` with the true sum of the remaining logs and requires zero once
+every session is gone. Committed with the seam first (2f93f78b6) and run on the
+unrepaired code: **FAIL**, counter 61,087,487 against a true sum of 61,349,662 --
+short by 262,175 bytes, exactly one 256 KiB event charged twice (remote_exit 100).
+
+**Repair (af7e6d53c; f7f6b96d8 points one older test at the new field).**
+* Every change to a log's retained bytes goes through `SessionLog::mutate`,
+  which applies the delta to that log's atomic mirror and to the cross-session
+  total under that log's own lock. A log can therefore only give back bytes it
+  added, so the total cannot go below the true sum.
+* A closed log -- and a failed create -- is retired by `forget_log`, outside the
+  map lock: it is EMPTIED under its own lock and gives its bytes back once. An
+  evictor that chose it earlier then pops nothing and gives nothing back.
+  Close does not take any eviction lock (there is none), so the deadlock the
+  review warned about cannot arise.
+* `RetainedHistory::account` subtracts with `checked_sub`. Underflow is
+  unreachable by construction; if it ever happened a debug build panics and a
+  release build logs an error and clamps, rather than wrapping silently to a
+  total that would evict every log on every append.
+
+GREEN at f7f6b96d8. **Red arm** `w15/relay1352-redarm-drift` (73bccf836, never
+merge): close gives the bytes back without emptying the log, as the reviewed
+repair did -- the forced test FAILS with the same 61,087,487 / 61,349,662.
+
+`churn_over_the_cap_with_mixed_chunk_sizes_keeps_retained_total_exact`
+(multi-thread: residents over the cap, churn sessions writing 26 x 256 KiB then
+256 x 1 KiB and closing, equality and cap asserted at quiescence) passes on the
+fix -- but it ALSO passed on the drift red arm, so it does not detect this race.
+The forced test is the detector.
+
+### MAJOR 2 — the guard test was vacuous
+
+Replaced by
+`crates/wcore-acp/tests/stabilization_backpressure.rs::a_reader_that_stops_reading_is_detached_by_its_wait_budget_beside_a_fast_one`:
+the stalled turn is 4 MiB (under the 8 MiB per-log cap), time is paused, and
+before the stalled stream is read the test proves `events_since(genesis)` still
+returns all 17 events, so no replay gap exists; only the budget can detach it.
+**Red arm** `w15/relay1352-redarm-budget` (0579423cf, never merge): delivery
+budget set to a year -- the test FAILS, the stalled reader receives all 17
+frames and no detach. The older
+`slow_reader_has_explicit_overload_while_replay_retains_bounded_tail` has the
+same weakness; it is kept, and now documents that it covers only the replay-gap
+detach.
+
+### MINOR 3 and 4 — cap exactness and serialization above the cap
+
+The eviction mutex is gone. `evict_for_append` finds the largest log from the
+per-log atomics without locking any log, locks only that victim for one O(1)
+pop, and frees at most what its own append added. Its doc comment states the
+bounds instead of claiming exactness: above the cap by at most the appends in
+flight (one event, at most 1 MiB, per recording session), below it by at most
+one event per concurrent evictor, at or under the cap once appends stop (the
+churn test asserts this at quiescence). What an eviction can still wait on is
+stated too: one map read per call (a create or close holding the map for write)
+and the victim's lock (a resume cloning that log's tail, up to 8 MiB). The field
+and `lock_log` doc comments were corrected to match.
+
+### MINOR 5 — the c1 red test was narrow
+
+It runs on one thread and holds the map only for READ, so it could not see a
+return to per-event map reads.
+`crates/wcore-acp/src/server/eviction_tests.rs::an_exclusive_hold_on_the_log_map_does_not_stall_a_running_turn`
+runs multi-threaded, feeds a turn's first event, then holds the map for WRITE
+while the rest of the turn records and delivers. **Red arm**
+`w15/relay1352-redarm-mapread` (82212a446, never merge): one map read per
+delivered event -- FAILS at 10 s, `a running turn stalled while the log map was
+held exclusively`.
+
+### Gates at f7f6b96d8
+
+wcore-acp nextest 177/177 (every test above included). Clippy `--all-targets
+-D warnings`: clean on Linux and on `--target x86_64-pc-windows-gnu`. wcore-cli
+`test(acp_engine::)` 52/52. fix2-release built from f7f6b96d8
+(`build --locked --release --features voice -p wcore-cli -j 6`), sha256
+`b08ee6d7e00dad1b984719fab7c37f7a83fc95d346f1b6802f7b76a6aff74eb9`.
+
+### Rerun A/B through the real `acp serve` (release)
+
+Driver `instruments/w15-relay1352-mixed.v2.py` (sha256 5116380e..., adds
+`--mixed-chunks`: first half of each turn in 512 KiB events, the rest in 4 KiB),
+queue `instruments/queue-c2-rerun.sh` (sha256 5b2acee3...), receipts
+`review/c2-rerun1/`. 2026-09-10 16:56:51-17:16:51Z, loadavg 30-47.
+
+| arm | binary | schedule | c8 fast pass | c32 fast pass | stage-1 | stage-2 | slow+disc | peak RSS | quiescent first -> last |
+|---|---|---|---|---|---|---|---|---|---|
+| base-release | 9b2e24f2 | standard | 32/32 | 32/32 | 0 | 0 | 64/64 | 4,503,220,224 | 74,813,440 -> 116,445,184 |
+| **fix2-release** | b08ee6d7 | standard | **32/32** | **32/32** | **0** | **0** | 64/64 | 4,552,253,440 | 74,018,816 -> 109,060,096 |
+| base-release | 9b2e24f2 | churn, mixed chunks | 12/12 | 111/112 | 0 | 1 | 124/124 | 4,196,319,232 | 115,089,408 -> 136,523,776 |
+| fix1 (pre-review, 671109fa9) | d73cb623 | churn, mixed chunks | 12/12 | 111/112 | 0 | 1 | 124/124 | 3,979,567,104 | 119,656,448 -> 138,596,352 |
+| **fix2-release** | b08ee6d7 | churn, mixed chunks | 12/12 | **108/112** | **0** | **4** | 124/124 | 3,958,349,824 | 117,391,360 -> 136,876,032 |
+
+Standard schedule `8,8,32,8,8,8,32,8,8,8`; churn schedule
+`32,8,32,32,8,32,32,8,32,32` keeps history over the 64 MiB cap while sessions
+close every cycle. Every batch of every arm quiesced.
+
+**Drift, live.** `retained_total` cannot be read from outside a live process.
+Drift low would make later turns detach at their first event, drift high would
+detach them through early eviction; later churn batches did not degrade on any
+binary, including fix1, which carries the race. That is consistent with the race
+not being hit live and is not proof of absence -- the forced test is the proof.
+
+**A separate finding, not this ticket's cancellation.** In the churn arms, fast
+c32 rows were detached at STAGE 2 (`live delivery overloaded; resume from
+retained event cursor`): 1/112 on base, 1/112 on fix1, 4/112 on fix2. Every such
+row had received exactly 16 or 11 of its 512 KiB events (7,864,320 or 5,242,880
+bytes) in 1.8-2.9 s, i.e. it was detached at or just before the switch to 4 KiB
+events, when the recorder writes about 2,048 small events at once. That fits the
+reader falling 256 positions behind its own recorder (the positions window) or
+1,024 events behind it (the per-log event cap, a replay gap); these receipts
+cannot tell which. It occurs on the base as well; 4/112 against 1/112 does not
+establish that the repair makes it more likely (Fisher exact p about 0.4); and
+it did not occur in any standard-schedule row (32 KiB chunks, the #1349 soak's
+shape) in either A/B.
+
+### Facts for the #1349 soak
+
+* fix-release for the soak: source f7f6b96d8, sha256
+  `b08ee6d7e00dad1b984719fab7c37f7a83fc95d346f1b6802f7b76a6aff74eb9`.
+* The soak driver (`evidence/mixed-soak353/run2/driver.py`) DELETEs every session
+  at the end of its cycle while the other cycles of its batch are still
+  recording, and in a concurrency-32 batch about a third of the rows are 16 MiB
+  turns whose logs reach the 8 MiB per-log cap, so retained history demand
+  exceeds the 64 MiB cap: the soak does exercise session close while other
+  sessions are over the cap. That is from reading the driver, not measured in
+  the soak.
+
+### Review-round commits on `w15/relay1352`
+
+1. `bd11a056a` ledger: reopen #1352 c2 after adversarial review
+2. `2f93f78b6` test(acp): force close-during-eviction drift; isolate the wait budget -- red on the unrepaired code
+3. `ef0b0afcf` test(acp): end the fed turn before closing its session -- the first run of the exclusive-hold test failed only because its fed engine never ended, so close hit its 10 s deadline; the turn itself passed every assertion
+4. `af7e6d53c` fix(acp): retire closed logs and pay eviction per append
+5. `f7f6b96d8` test(acp): read the retained total from its new home -- af7e6d53c did not compile its tests on its own
+6. the evidence and ledger commit that adds this section
+
+Never merge: `w15/relay1352-redarm-drift` (73bccf836), `w15/relay1352-redarm-budget` (0579423cf), `w15/relay1352-redarm-mapread` (82212a446), plus the earlier `w15/relay1352-diag` and `w15/relay1352-redarm-lock`.
+
+### Not claimed in this round
+
+* That the stage-2 count-bound detach at mixed chunk sizes is harmless, or that
+  the repair does not raise its rate: it is recorded above, its path is not
+  named, and it needs its own decision.
+* Live drift absence (not observable from outside the process).
+* Everything in the earlier Not claimed list still stands, except that the cap
+  is now stated with bounds instead of as exact.
