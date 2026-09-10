@@ -9,7 +9,7 @@ Owners come from each ledger's `owner:` on its UNMET criteria — the
 owner is read, not assigned, so a row cannot claim an owner the
 ledger does not.
 
-Blocking issues: 10   Outstanding criteria: 14
+Blocking issues: 9   Outstanding criteria: 13
 
 | Issue | Owner | Outstanding | Title |
 |---|---|---:|---|
@@ -22,4 +22,3 @@ Blocking issues: 10   Outstanding criteria: 14
 | FerroxLabs/wayland#1349 | core | 1 | W16 mixed soak fails RSS acceptance twice (41.5x, then 1.83x) with no carrier |
 | FerroxLabs/wayland#1351 | core | 2 | Two sessions racing a memory migration both degrade to NullMemory, and the user is never told |
 | FerroxLabs/wayland-core#404 | core | 1 | A ci-linux cancellation at the 120-minute budget destroys the JUnit evidence the run already produced |
-| FerroxLabs/wayland-core#449 | core | 1 | [mutants-nightly] wcore-cron — surviving mutants (2026-09-04) |
