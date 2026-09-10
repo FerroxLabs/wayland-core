@@ -3108,3 +3108,147 @@ async fn packaged_tui_restart_projection_matches_json_host() {
         ],
     );
 }
+
+/// Count the provider-dispatch recovery checkpoints in a preserved journal.
+///
+/// The same filter `assert_provider_checkpoint_sealed` applies, without its
+/// sealing assertions, because the question this answers is only HOW MANY —
+/// and the answer `0` is the one that has to be reachable.
+fn provider_dispatch_checkpoints(evidence: &Path, session_id: &str) -> usize {
+    let journal = evidence
+        .join("sessions")
+        .join(format!("{session_id}.journal"));
+    let bytes = fs::read(&journal).expect("read preserved F14 journal");
+    journal_frames(&bytes)
+        .into_iter()
+        .filter(|(_, envelope)| {
+            envelope.pointer("/event/type").and_then(Value::as_str) == Some("checkpoint_committed")
+                && envelope
+                    .pointer("/event/state/next_action")
+                    .and_then(Value::as_str)
+                    == Some("provider_dispatch")
+        })
+        .count()
+}
+
+/// FerroxLabs/wayland#1290 c1 and c2 — **the discriminator, run as an
+/// INTERVENTION rather than inferred from co-occurrence.**
+///
+/// #1290 was filed on an exactly-once DOUBLING premise that its own payload
+/// refutes: PR #417 run 33553656600, `outer-attempt-1.xml`,
+/// `f14_sigkill_recovery.rs:806:5`, `left: 0 right: 1`. Zero checkpoints, not
+/// two. c1 then asks which of two things produced that zero — the checkpoint
+/// was NEVER WRITTEN (a product defect) or it was written and not fsynced
+/// before the `SIGKILL` (a test defect) — and c2 asks whether those failures
+/// belong to gh#1289, the credential-store ticket, or are independent.
+///
+/// **The second branch of c1 is not reachable, and that is a fact about the
+/// code, not an opinion about it.** `JournalWriter::append`
+/// (`crates/wcore-agent/src/session_journal.rs:1526-1536`) does
+/// `write_all(&frame)` followed by `sync_all()` — an fsync, metadata included
+/// — and returns only after it, and `append_journal_event`
+/// (`crates/wcore-agent/src/engine.rs:12728-12739`) awaits that on a
+/// `spawn_blocking` handle rather than posting it to a channel. There is no
+/// `BufWriter`, no accumulator and no background writer between the commit and
+/// the syscall. So a checkpoint whose commit RETURNED is on the platter, and a
+/// later `SIGKILL` cannot take it back. `left: 0` can only mean the commit was
+/// never made.
+///
+/// This test drives the remaining half: it manipulates the one input the
+/// product consults before deciding whether to write that checkpoint, and
+/// shows the count move. `engine.rs:15386-15415` reads
+/// `sealed_request_key_available(&self.config)`, and when that errors it
+/// **mints a bare dispatch id and dispatches to the provider with nothing
+/// durable written** — because a `ProviderDispatch` checkpoint is required to
+/// carry a sealed prepared request, and a host that cannot seal one has no
+/// honest checkpoint to write. `[session] require_durability` defaults to
+/// `false` (`crates/wcore-config/src/config.rs:1328`), so the turn is not
+/// refused; it proceeds, unrecorded.
+///
+/// **Both arms run the same flow against the same fixture script on the same
+/// host, and differ in exactly one thing: whether a secure store answers.**
+/// The control is not decoration — without it, arm B's `0` would be consistent
+/// with a product that never writes this checkpoint at all, and with a counter
+/// that cannot count.
+///
+/// What this test does NOT establish, stated so nobody reads more into it: it
+/// does not reproduce the CI failure, and it is not evidence about how often
+/// that failure occurs. It shows that a credential store which does not answer
+/// is SUFFICIENT to produce `left: 0` at `:806`, on the same code path, with
+/// everything else held fixed.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn w1290_the_credential_store_alone_decides_whether_a_provider_checkpoint_is_written() {
+    let partial = "F14-1290-STREAM-STALLED-BEFORE-THE-KILL";
+    let prompt = "F14-1290-DISPATCH-THEN-DIE";
+
+    // ARM A — CONTROL. A host whose secure store answers.
+    let control_fixture = OpenAiFixtureScript::new([
+        OpenAiStep::text_then_stall(partial, 60_000),
+        OpenAiStep::text("F14-1290-CONTROL-MUST-NOT-REDISPATCH"),
+    ])
+    .start()
+    .await
+    .expect("start #1290 control fixture");
+    let control_env = environment(&control_fixture);
+    let vault = VaultSecret::new();
+    let control_session = "f1400000000000000000000000001290";
+    let mut control = CoreProcess::launch(
+        &control_env,
+        &control_fixture,
+        &vault,
+        control_session,
+        false,
+    )
+    .await;
+    send_message(&mut control, "f14-1290-control", prompt).await;
+    wait_for_requests(&control_fixture, 1).await;
+    assert_eq!(control.next_type("text_delta").await["text"], partial);
+    let _control_diagnostics = control.sigkill().await;
+    let control_evidence = preserve_crash_evidence(&control_env);
+    let control_count = provider_dispatch_checkpoints(control_evidence.path(), control_session);
+
+    // ARM B — INTERVENTION. The identical flow, with no secure store: no vault
+    // unlock material and a Secret Service bus address pointed at a socket that
+    // does not exist, so the probe fails deterministically instead of depending
+    // on the worker's desktop state.
+    let keyless_fixture = OpenAiFixtureScript::new([
+        OpenAiStep::text_then_stall(partial, 60_000),
+        OpenAiStep::text("F14-1290-KEYLESS-MUST-NOT-REDISPATCH"),
+    ])
+    .start()
+    .await
+    .expect("start #1290 keyless fixture");
+    let keyless_env = environment(&keyless_fixture);
+    let keyless_session = "f1400000000000000000000000001291";
+    let (mut keyless, keyless_ready) =
+        launch_keyless(&keyless_env, &keyless_fixture, keyless_session).await;
+    // THE INTERVENTION LANDED, read off the wire before anything is measured.
+    assert_eq!(
+        keyless_ready["session_persistence"], "journaled_without_replay",
+        "arm B must actually be keyless, or it is a second control: {keyless_ready}"
+    );
+    send_message(&mut keyless, "f14-1290-keyless", prompt).await;
+    let notice = keyless
+        .next_info_containing("crash replay protection is OFF", "f14-1290-keyless")
+        .await;
+    assert_eq!(notice["msg_id"], "f14-1290-keyless");
+    wait_for_requests(&keyless_fixture, 1).await;
+    assert_eq!(keyless.next_type("text_delta").await["text"], partial);
+    let _keyless_diagnostics = keyless.sigkill().await;
+    let keyless_evidence = preserve_crash_evidence(&keyless_env);
+    let keyless_count = provider_dispatch_checkpoints(keyless_evidence.path(), keyless_session);
+
+    // THE MEASUREMENT. Same flow, same fixture script, same kill point; one
+    // variable moved, and the count moves with it.
+    assert_eq!(
+        control_count, 1,
+        "the control arm must write exactly one provider-dispatch checkpoint, or arm B's \
+         zero grades nothing"
+    );
+    assert_eq!(
+        keyless_count, 0,
+        "a host whose credential store does not answer must be shown to produce the \
+         `left: 0` this ticket was re-founded on"
+    );
+}
