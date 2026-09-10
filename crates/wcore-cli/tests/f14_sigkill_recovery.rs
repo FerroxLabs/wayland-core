@@ -280,7 +280,17 @@ impl CoreProcess {
     /// Past tense on purpose: this asks about frames that have ALREADY arrived,
     /// so it can never block and can never invent a wait that changes the run
     /// it is measuring.
-    #[cfg(target_os = "linux")]
+    ///
+    /// NOT `#[cfg(target_os = "linux")]`, and that is load-bearing rather than
+    /// tidying. It was Linux-gated while its only callers were, and then
+    /// `sigkill_during_model_stream_resumes_as_provider_reconciliation_without_redispatch`
+    /// — a plain `#[tokio::test]` with no platform gate — started calling it at
+    /// e20f1a7cc. From that commit this whole test binary FAILED TO COMPILE on
+    /// macOS and on Windows (`E0599: no method named seen_message_containing`),
+    /// which was measured on a hosted macos-latest runner on 2026-09-10 and had
+    /// reached no CI leg that could see it. A pure six-line reader over
+    /// `self.seen` costs nothing to compile everywhere, and gating it again
+    /// would re-arm exactly this break.
     fn seen_message_containing(&self, needle: &str) -> Option<&Value> {
         self.seen.iter().find(|event| {
             event
