@@ -46,8 +46,10 @@ const V5_SQL: &str = include_str!("v5_procedure_latency.sql");
 const V6_SQL: &str = include_str!("v6_recall_control.sql");
 const V7_SQL: &str = include_str!("v7_evolved_prompts_score_measured.sql");
 
-/// How many times [`apply_migrations`] has yielded a step to another writer
-/// and re-run the ladder — see the concurrency note on `apply_migrations`.
+/// How many times [`apply_migrations`] has given way to a concurrent opener —
+/// either waiting out its hold on the journal-mode switch, or finding it had
+/// already applied the step this connection was about to run. See the
+/// concurrency note on `apply_migrations`.
 ///
 /// Public because the recovery is otherwise INVISIBLE: it turns a failure into
 /// a success and leaves no trace in the store, so a race test that never
@@ -88,22 +90,22 @@ pub static CONCURRENT_MIGRATION_RECOVERIES: std::sync::atomic::AtomicU64 =
 /// absent the original error is returned untouched, so a genuine broken
 /// migration still fails closed instead of being retried into a loop.
 ///
-/// SCOPE, stated rather than left to be discovered: only [`MemoryError::Migration`]
-/// is recoverable here. That is the failure that was measured. A `BUSY` at
-/// `COMMIT` would arrive as [`MemoryError::Db`] and is deliberately NOT swept
-/// into this arm — it has not been observed and would need its own evidence.
+/// SCOPE, stated rather than left to be discovered: in the ladder only
+/// [`MemoryError::Migration`] is recoverable. That is the failure that was
+/// measured. A `BUSY` at `COMMIT` would arrive as [`MemoryError::Db`] and is
+/// deliberately NOT swept into this arm — it has not been observed and would
+/// need its own evidence. The journal-mode switch has its own, separate wait;
+/// see [`configure_journal_mode`].
 pub fn apply_migrations(
     conn: &mut rusqlite::Connection,
     db_path: Option<&std::path::Path>,
 ) -> Result<()> {
-    // The other half of #1351, and the reason the retry alone is not enough.
-    // The WAL arm of `SqliteJournalMode` deliberately leaves the busy handler
-    // untouched, so the default applies: ZERO. A second opener whose write
-    // lands while the first still holds the write lock is refused INSTANTLY
-    // with `database is locked` — a different error from `duplicate column
-    // name`, but the same NullMemory fallback for the user. Measured on four
-    // concurrent openers of one fresh store: without this, a loser fails with
-    // `memory DB: database is locked` before the retry below is ever reached.
+    // The other half of #1351, and the reason the ladder retry alone is not
+    // enough. The WAL arm of `SqliteJournalMode` deliberately leaves the busy
+    // handler untouched, so the default applies: ZERO. A second opener whose
+    // write lands while the first still holds the write lock is refused
+    // INSTANTLY with `database is locked` — a different error from
+    // `duplicate column name`, but the same NullMemory fallback for the user.
     //
     // Set BEFORE the journal-mode pragma, not after: converting a brand-new
     // store to WAL takes a brief exclusive lock, so that pragma is itself one
@@ -127,9 +129,7 @@ pub fn apply_migrations(
     // rather than hardcoded. In-memory databases have no filesystem and no
     // journal to speak of, so they are left alone.
     let mode = match db_path {
-        Some(path) => Some(wcore_config::sqlite_journal::SqliteJournalMode::configure(
-            conn, path,
-        )?),
+        Some(path) => Some(configure_journal_mode(conn, path)?),
         None => None,
     };
     conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -144,6 +144,51 @@ pub fn apply_migrations(
 /// How long a migration step waits for another opener's write lock before
 /// giving up. Matches the value the `Truncate` journal arm already uses.
 const MIGRATION_BUSY_TIMEOUT_MS: u64 = 5_000;
+
+/// Select and apply the journal mode, waiting out a concurrent opener.
+///
+/// The busy timeout set above does NOT cover this call, which is why it needs
+/// its own loop: switching a store into WAL takes an exclusive lock, and SQLite
+/// returns `SQLITE_BUSY` for that without ever consulting the busy handler.
+/// MEASURED, not assumed — four concurrent openers of one fresh store, stages
+/// tagged, and the loser failed at exactly this call with
+/// `DIAGSTAGE=journal database is locked` while the ladder below was never
+/// reached.
+///
+/// Only a busy/locked failure is retried, and only inside the same 5 s budget
+/// the ladder gets. Anything else — an unwritable path, a corrupt header — is
+/// returned on the first attempt.
+fn configure_journal_mode(
+    conn: &rusqlite::Connection,
+    path: &std::path::Path,
+) -> Result<wcore_config::sqlite_journal::SqliteJournalMode> {
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_millis(MIGRATION_BUSY_TIMEOUT_MS);
+    let mut backoff_ms = 1u64;
+    loop {
+        let err = match wcore_config::sqlite_journal::SqliteJournalMode::configure(conn, path) {
+            Ok(mode) => return Ok(mode),
+            Err(e) => e,
+        };
+        let busy = matches!(
+            &err,
+            rusqlite::Error::SqliteFailure(f, _)
+                if f.code == rusqlite::ErrorCode::DatabaseBusy
+                    || f.code == rusqlite::ErrorCode::DatabaseLocked
+        );
+        if !busy || std::time::Instant::now() >= deadline {
+            return Err(MemoryError::Db(err));
+        }
+        CONCURRENT_MIGRATION_RECOVERIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        tracing::debug!(
+            target: "wcore_memory::schema",
+            error = %err,
+            "#1351: another opener held the store while the journal mode was set; retrying"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
+        backoff_ms = (backoff_ms * 2).min(50);
+    }
+}
 
 /// The ladder plus the #1351 concurrent-opener retry. See [`apply_migrations`].
 fn run_ladder(conn: &mut rusqlite::Connection) -> Result<()> {
