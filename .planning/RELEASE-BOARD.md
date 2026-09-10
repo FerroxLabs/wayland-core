@@ -9,7 +9,7 @@ Owners come from each ledger's `owner:` on its UNMET criteria — the
 owner is read, not assigned, so a row cannot claim an owner the
 ledger does not.
 
-Blocking issues: 40   Outstanding criteria: 93
+Blocking issues: 39   Outstanding criteria: 90
 
 | Issue | Owner | Outstanding | Title |
 |---|---|---:|---|
@@ -35,9 +35,8 @@ Blocking issues: 40   Outstanding criteria: 93
 | FerroxLabs/wayland#1289 | core | 1 | macOS keyring does not answer within the 5s credential-store timeout; f14_sigkill_recovery hard-fails 3/3 |
 | FerroxLabs/wayland#1290 | core | 3 | f14_sigkill_recovery: ZERO provider-dispatch checkpoints persist (left 0, right 1) - the exactly-once DOUBLING premise this was filed on is refuted |
 | FerroxLabs/wayland#1296 | core | 1 | wcore-eval-scenarios smoke: spawn returns ENOENT on a path discovery just proved exists (shared-process leg, main red) |
-| FerroxLabs/wayland#1300 | core | 5 | Windows-only: crashed-holder recovery in the chunked credential write lock is bistable (48x), and it is what times out interrupted_rotations_do_not_leak_entries_without_bound |
+| FerroxLabs/wayland#1300 | core | 3 | Windows-only: crashed-holder recovery in the chunked credential write lock is bistable (48x), and it is what times out interrupted_rotations_do_not_leak_entries_without_bound |
 | FerroxLabs/wayland#1301 | core | 3 | First Windows retry-flake cluster: a wall-clock ratio guard and a dispatch-budget test at 94% of its kill line (CI (Array)) |
-| FerroxLabs/wayland#1302 | core | 1 | The credential-store timeout tells the operator to repair a keyring that is not broken - 104 reproductions with a healthy store |
 | FerroxLabs/wayland#1303 | core | 1 | Windows: a racing chunked credential write fails outright with ACCESS_DENIED (os error 5), and the caller loses a single-use refresh token |
 | FerroxLabs/wayland#1304 | core | 3 | the_streaming_bash_timeout_bounds_the_secret_deny_walk hard-fails ci-linux at ~1 in 9: the manifest walk dominated the deadline and the caller was not told |
 | FerroxLabs/wayland#1308 | core | 4 | Windows: four wcore-skills watcher_tests fail together with ERROR_PATH_NOT_FOUND, and the bare unwrap hides which path |
