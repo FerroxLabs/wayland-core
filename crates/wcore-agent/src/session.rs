@@ -927,13 +927,17 @@ fn is_expired_empty_session(meta: &SessionMeta, now: SystemTime) -> bool {
 ///
 /// Two layers, taken in this order and released in the reverse one:
 ///
-/// 1. [`InProcessIndexLock`] queues the writers of THIS process. Only the
-///    thread at its head ever touches the sentinel, so no in-process writer
-///    can meet, steal or delete another's sentinel, and none fails because
-///    another held the lock past the sentinel's fixed 1 s budget (#1355).
+/// 1. [`InProcessIndexLock`], one slot per directory for the writers of THIS
+///    process. Only the thread holding the slot ever touches the sentinel, so
+///    no in-process writer can meet, steal or delete another's sentinel, and
+///    none fails because another held the lock past the sentinel's fixed 1 s
+///    budget (#1355).
 /// 2. A `.lock` sentinel file excludes writers in OTHER processes, with a
 ///    stale-lock timeout of 30 s so a SIGKILL of a writer does not
 ///    permanently block readers.
+///
+/// [`HeldIndexLock`] releases both, the sentinel first, on every path out of
+/// here, including a panic in `f`.
 ///
 /// The closure receives a `&mut SessionIndex` and any mutations are
 /// atomically written back to `index.json` after `f` returns.
@@ -951,6 +955,10 @@ where
     let in_process = InProcessIndexLock::acquire(directory, stale_after)?;
     // Acquire the sentinel lock with stale-lock timeout.
     acquire_sentinel_lock(&lock_path, stale_after)?;
+    let held = HeldIndexLock {
+        lock_path,
+        _in_process: in_process,
+    };
 
     #[cfg(test)]
     let acquired_at = std::time::Instant::now();
@@ -984,13 +992,8 @@ where
         Ok(value)
     })();
 
-    // Always release the lock, even on error.
-    #[cfg(test)]
-    tests::leave_index_holder();
-    let _ = std::fs::remove_file(&lock_path);
-    // Only now, with the sentinel gone, may the next in-process writer run.
-    // Releasing earlier would hand it this sentinel and the 1 s budget again.
-    drop(in_process);
+    // Always release the lock, even on error (and on unwind, via Drop).
+    drop(held);
     #[cfg(test)]
     tests::record_index_timing(
         acquired_at.duration_since(waiting_since),
@@ -1000,7 +1003,28 @@ where
     result
 }
 
-/// One index directory's place in the queue of this process's writers (#1355).
+/// The index lock while it is held (#1355).
+///
+/// Release is a `Drop`, so it runs on return, on error and on a panic
+/// unwinding out of the index closure alike. The order is fixed: `drop`
+/// removes the sentinel, and the in-process slot, a field, is released only
+/// after `drop` returns. The other order would hand the next in-process
+/// writer this process's own sentinel and its 1 s budget, which is what a
+/// panic used to leave behind for 30 s.
+struct HeldIndexLock {
+    lock_path: PathBuf,
+    _in_process: InProcessIndexLock,
+}
+
+impl Drop for HeldIndexLock {
+    fn drop(&mut self) {
+        #[cfg(test)]
+        tests::leave_index_holder();
+        let _ = std::fs::remove_file(&self.lock_path);
+    }
+}
+
+/// One index directory's in-process slot (#1355).
 ///
 /// The sentinel's fixed 1 s budget exists so that a peer PROCESS which died
 /// holding it cannot wedge this one. None of that applies between threads of
@@ -1011,8 +1035,26 @@ where
 /// up with an error; they never steal. The bound stays, so a holder hung in
 /// the filesystem cannot hang every later writer forever.
 ///
+/// NOT FIFO. A release wakes one waiter, but a writer arriving at that moment
+/// can take the slot first, and a waiter that is not woken re-checks every
+/// 50 ms. What is guaranteed is exclusion and the 30 s bound, not order.
+///
+/// Trades this makes on purpose:
+///
+/// * Callers block longer. `persist_first_message` and `update_index_for` run
+///   synchronously, in the engine on async-runtime worker threads, so under an
+///   fsync stall a waiter blocks for up to 30 s where it used to fail after
+///   1 s: a durable index write waits for the disk instead of being dropped.
+/// * A writer in ANOTHER process is disadvantaged. The next in-process writer
+///   takes the sentinel within microseconds of its release, while a foreign
+///   writer polls every 10 ms on a 1 s budget, so a busy process can starve a
+///   foreign writer, and that writer's engine then logs and drops its update.
+/// * Against a fresh foreign sentinel, writers waiting here fail one after
+///   another, each on its own 1 s sentinel budget, so the k-th fails after
+///   about k seconds (bounded by the 30 s here), not all of them after 1 s.
+///
 /// Keyed by the canonical directory so two spellings of one store share a
-/// queue. If canonicalisation fails the raw path is the key, which at worst
+/// slot. If canonicalisation fails the raw path is the key, which at worst
 /// leaves that writer to the sentinel's own exclusion, as before.
 struct InProcessIndexLock {
     key: PathBuf,
@@ -2077,6 +2119,52 @@ mod tests {
 
     const HOLD_INDEX_LOCK_CHILD: &str = "WCORE_1355_HOLD_INDEX_LOCK_IN";
 
+    /// Kills and reaps a child process when dropped, so a test that fails
+    /// before its own `kill` cannot leave the child running on a CI runner.
+    struct KillOnDrop(std::process::Child);
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// #1355 review: a panic inside the index closure must not leave this
+    /// process's own sentinel behind. It used to: the unwind skipped the
+    /// sentinel's removal but still released the in-process slot, so every
+    /// later writer here met a dead sentinel and failed on its 1 s budget until
+    /// the sentinel aged out at 30 s.
+    #[test]
+    fn test_1355_a_panic_inside_the_index_lock_releases_the_sentinel() {
+        let dir = tempdir().unwrap();
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            with_index_lock(dir.path(), |_| -> anyhow::Result<()> {
+                panic!("injected panic inside the index lock")
+            })
+        }));
+        assert!(panicked.is_err(), "the closure's panic must propagate");
+        assert!(
+            !dir.path().join("index.lock").exists(),
+            "a panicking holder must remove its own sentinel on unwind"
+        );
+
+        let manager = SessionManager::new(dir.path().to_path_buf(), 100);
+        let session = manager
+            .create("openai", "gpt-4", "/tmp", Some("aabbcc"))
+            .unwrap();
+        let started = std::time::Instant::now();
+        manager
+            .update_index_for(&session)
+            .expect("the next writer must not meet this process's dead sentinel");
+        let took = started.elapsed();
+        assert!(
+            took < Duration::from_secs(10),
+            "the next writer took {took:?}; a leaked sentinel is only stolen after 30 s"
+        );
+        let listed: Vec<_> = manager.list().unwrap().into_iter().map(|m| m.id).collect();
+        assert_eq!(listed, vec!["aabbcc".to_owned()]);
+    }
+
     /// #1355 c2: a writer KILLED while it holds the index lock leaves its
     /// sentinel behind, and the next writer recovers it.
     ///
@@ -2099,27 +2187,31 @@ mod tests {
 
         let root = tempdir().unwrap();
         let store = root.path().join("store");
-        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "session::tests::test_1355_a_killed_writers_index_lock_is_recovered",
-                "--nocapture",
-            ])
-            .env(HOLD_INDEX_LOCK_CHILD, root.path())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap();
+        // The child loops forever by design; the guard kills it even if this
+        // test fails before the deliberate kill below.
+        let mut child = KillOnDrop(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "session::tests::test_1355_a_killed_writers_index_lock_is_recovered",
+                    "--nocapture",
+                ])
+                .env(HOLD_INDEX_LOCK_CHILD, root.path())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
         wait_until("the child to hold the index lock", || {
             root.path().join("holding").exists()
         });
-        child.kill().unwrap();
-        child.wait().unwrap();
+        child.0.kill().unwrap();
+        child.0.wait().unwrap();
 
         let sentinel = store.join("index.lock");
         let recorded =
             std::fs::read_to_string(&sentinel).expect("a killed holder leaves its sentinel");
-        assert_eq!(recorded.trim(), child.id().to_string());
+        assert_eq!(recorded.trim(), child.0.id().to_string());
         std::fs::File::options()
             .write(true)
             .open(&sentinel)
