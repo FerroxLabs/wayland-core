@@ -96,6 +96,10 @@ GATES=(
   # directory with no env var on the path.
   "armed|python3 scripts/check-test-state-dir-guards.py --self-test"
   "armed|python3 scripts/check-test-state-dir-guards.py"
+  # wayland#1272 c1: the board must track the blocking list, not a snapshot of
+  # it. Offline here because preflight is a local gate; the release path runs
+  # it live.
+  "armed|python3 scripts/check-release-board.py --self-test"
   "armed|python3 scripts/check-message-whitespace.py --self-test"
   "armed|python3 scripts/check-message-whitespace.py crates"
   # Added 2026-09-04 with the wayland#1254 fix: ci.yml has run this gate
