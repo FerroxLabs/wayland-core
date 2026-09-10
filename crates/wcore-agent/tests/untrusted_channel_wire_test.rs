@@ -1018,6 +1018,49 @@ fn unnamed_line_in_accepts_only_the_blocks_the_directive_names() {
     );
 }
 
+/// The sender's own words on turn one and turn two of the fixture below.
+/// Named, because the classifier has to recognise them on the wire and a
+/// second spelling of a literal is how a classifier goes quietly wrong.
+const FIRST_TURN_TEXT: &str = "first turn";
+const SECOND_TURN_TEXT: &str = "second turn";
+
+/// The product-written HEAD of a wire user turn — everything ahead of the
+/// sender's own words.
+///
+/// A turn on this wire is `[runtime blocks…]\n<sender text>`: the sender's
+/// words come LAST, because `AgentEngine::attach_transient_block` inserts each
+/// block BEFORE a trailing text block. So the sender's text is stripped off
+/// the END and whatever precedes it is graded as product text. A turn that is
+/// nothing but the sender's words has an empty head; a pure product carrier
+/// turn (#559 c6) has no sender text to strip and is graded whole.
+///
+/// # The bug this replaces
+///
+/// The first version decided "is this a product-only turn?" from how the turn
+/// STARTED — it skipped a turn that was exactly the sender's text and graded
+/// every other turn whole. That is wrong the moment a legitimate runtime block
+/// is prepended to the sender's words, which is the ordinary case the
+/// directive exists to describe and which
+/// [`assert_user_turn_is_exactly_the_expected_composition`] already requires.
+/// Measured on the integration tree: a skill hint for
+/// `software-development:test-driven-development` fired, the turn became
+/// `"Experimental skill hint: …\nfirst turn"`, and the classifier reported the
+/// SENDER'S OWN TEXT — `"first turn"` — as an un-enumerated product line.
+///
+/// It passed locally only because no skill in that worktree's catalogue
+/// matched. Which catalogue an engine sees is itself neighbour-dependent
+/// through the shared profile home (FerroxLabs/wayland#1350), so a classifier
+/// that depends on no hint firing is a classifier that depends on what else is
+/// running.
+fn product_head(turn: &str) -> &str {
+    for sender in [FIRST_TURN_TEXT, SECOND_TURN_TEXT] {
+        if let Some(head) = turn.strip_suffix(sender) {
+            return head.strip_suffix('\n').unwrap_or(head);
+        }
+    }
+    turn
+}
+
 /// Drive TWO turns on one engine, installing a new skill into the workspace
 /// between them, and return every request body the provider saw.
 ///
@@ -1059,7 +1102,7 @@ async fn turns_across_a_mid_session_catalog_change(
         .expect("persisted session binds the production budget authority");
     built.engine.use_recovery_test_key(&RECOVERY_TEST_KEY);
 
-    if let Err(e) = built.engine.run("first turn", "catalog-msg-1").await {
+    if let Err(e) = built.engine.run(FIRST_TURN_TEXT, "catalog-msg-1").await {
         panic!("first turn failed before reaching the provider: {e}");
     }
 
@@ -1071,7 +1114,7 @@ async fn turns_across_a_mid_session_catalog_change(
     )
     .expect("added skill");
 
-    if let Err(e) = built.engine.run("second turn", "catalog-msg-2").await {
+    if let Err(e) = built.engine.run(SECOND_TURN_TEXT, "catalog-msg-2").await {
         panic!("second turn failed before reaching the provider: {e}");
     }
 
@@ -1114,9 +1157,11 @@ async fn a_local_engine_still_gets_the_inventory_refresh_after_a_catalog_change(
 ///
 /// Two assertions, and both are load-bearing. The first names the specific
 /// block this closes, so a regression says what came back. The second is the
-/// general form — any product-only user turn must consist entirely of lines the
+/// general form — the product-written HEAD of every user turn, everything
+/// ahead of the sender's own words, must consist entirely of lines the
 /// directive names — so a FIFTH un-enumerated block added later is caught here
-/// too, not just the one that was found.
+/// too, not just the one that was found. See [`product_head`] for why the head
+/// is taken from the END of the turn and not from how it begins.
 ///
 /// Verified by mutation: dropping `&& !self.untrusted_channel_session()` from
 /// the injection site in `engine.rs` turns this test red and leaves the local
@@ -1138,11 +1183,36 @@ async fn a_channel_engine_puts_no_inventory_refresh_on_the_wire_after_a_catalog_
          text from a sender's text is no longer sound. Turns: {turns:?}"
     );
     for turn in &turns {
-        if turn == "first turn" || turn == "second turn" {
-            continue;
-        }
-        if let Some(line) = unnamed_line_in(turn) {
+        if let Some(line) = unnamed_line_in(product_head(turn)) {
             panic!("un-enumerated product line on a channel wire: {line:?} (whole turn: {turn:?})");
         }
     }
+}
+
+/// The classifier's own test, because a classifier that cannot be wrong in the
+/// right direction is worth nothing — and the first one WAS wrong, in a way
+/// only another machine's catalogue revealed.
+///
+/// Both directions, and the middle row is the shape that broke on the
+/// integration tree.
+#[test]
+fn product_head_separates_the_senders_words_from_the_blocks_ahead_of_them() {
+    // The sender's words alone: no product head at all.
+    assert_eq!(product_head(FIRST_TURN_TEXT), "");
+    // A named block prepended to the sender's words - the ordinary case the
+    // directive describes, and the one the previous classifier failed.
+    let hint = "Experimental skill hint: the \"x\" skill may help with this request.";
+    assert_eq!(product_head(&format!("{hint}\n{FIRST_TURN_TEXT}")), hint);
+    // A pure product carrier with no sender text is graded whole.
+    assert_eq!(product_head(hint), hint);
+    // And the block this test exists to catch is still IN the head, so
+    // `unnamed_line_in` still sees it.
+    let offending = format!("{INVENTORY_REFRESH_HEAD} rest");
+    let refreshed = format!("{offending}\n{SECOND_TURN_TEXT}");
+    assert_eq!(
+        unnamed_line_in(product_head(&refreshed)),
+        Some(offending.as_str()),
+        "the classifier must not hide an un-enumerated block that sits ahead of \
+         the sender's words - that is the whole assertion"
+    );
 }
