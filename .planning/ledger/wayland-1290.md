@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "f14_sigkill_recovery: ZERO provider-dispatch checkpoints persist (left 0, right 1) - the exactly-once DOUBLING premise this was filed on is refuted"
 status: open
-last_verified_commit: 50dfc81f1
+last_verified_commit: 88a13b35e
 criteria:
   - id: c1
     text: "On a failing run, establish which of the two remaining possibilities holds: the provider-dispatch checkpoint was NEVER WRITTEN (a product defect), or it was written and not fsynced before the SIGKILL (a test defect). Measured at --retries 0, n>=20, on a host that has actually exhibited it."

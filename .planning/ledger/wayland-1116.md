@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "Desktop: no abandon verb on the host wire leaves a crash-interrupted session wedged in-app"
 status: open
-last_verified_commit: 0097f6a8b
+last_verified_commit: 88a13b35e
 criteria:
   - id: c1
     text: "A crash-interrupted session can be ended through the host wire and Desktop recovery surface while preserving unknown external-effect outcomes."
