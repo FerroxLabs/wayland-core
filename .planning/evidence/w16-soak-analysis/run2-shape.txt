@@ -1,0 +1,77 @@
+W16 mixed soak run 2 -- what the receipt already knew
+=====================================================
+
+Source        3530199fb757f3fcefecf9e40ba820775b867d84
+Binary        sha256 c68855d52d4ebc7ec2f5dc3ac41fc2cab646db6de9bef43c031146f6da5918da
+Receipt       evidence/mixed-soak353/run2/receipt.json
+              sha256 d60ddcb89b26da9866241dbfa37be9b4b76fd4ecfc36afb196d309224be1457f
+Host          Linux 6.8.0-101, 96 CPU, 251 GiB; loadavg 28.0 at start, 28.6 at end
+Elapsed       7213.781675985083 s over 8938 cycles
+Verdict       rss_bound_pass false,
+              error "AssertionError('frozen post-quiescence RSS growth exceeded')"
+
+Contract, verbatim:
+  duration_seconds 7200, concurrency [1, 8, 32],
+  reader [fast, disconnected, slow], totals [32768, 1048576, 16777216],
+  chunk_bytes 32768, delete_limit_ms 10000,
+  rss_growth "max(10%,32MiB)", slow_reader "1024 bytes/sec for 5 seconds then disconnect"
+
+RSS windows as the driver recorded them:
+  first_100_median 1271511040   last_100_median 6548955136
+  growth 5277444096 against max_growth 127151104  ->  41.5x over
+
+THIS FILE ADDS NOTHING NEW FROM THE PRODUCT. It is arithmetic over the 8938
+per-cycle rows already in that receipt, done because c1 asks where the growth
+lives and nobody had asked the data. Every number below is reproducible from
+receipt.json alone.
+
+1. THE GROWTH IS LINEAR IN CYCLE COUNT, not in wall time and not in load.
+   Least-squares fit of quiescent_rss_bytes against cycle index:
+       slope 417,726.7 bytes per cycle,  R^2 = 0.8432
+   417 KiB retained per cycle, held after quiescence, 8938 times.
+   Loadavg was 28.0 at start and 28.6 at end, so this is not a load artefact.
+
+2. IT IS INDEPENDENT OF THE READER MODE. The matrix ran three reader profiles
+   in near-equal thirds (fast 2979, disconnected 2981, slow 2978). Each one's
+   own first-100 vs last-100, in bytes:
+
+       fast          1,782,736,486  ->  6,540,927,263
+       disconnected  1,686,625,894  ->  6,531,480,330
+       slow          2,029,378,355  ->  6,560,249,487
+
+   All three converge on the same ~6.53-6.56 GB. A leak in the streaming or
+   slow-reader path would separate them; this does not. So the retention is NOT
+   in the reader path, which is where a first guess would have gone.
+
+3. ONE SESSION PER CYCLE, NEVER REUSED: 8938 distinct `session` values across
+   8938 cycles. Combined with (1) and (2), the retained ~417 KiB is per-SESSION
+   and survives the session's own teardown -- every cycle ends with
+   delete_status 204 and get_after_delete_status 404, so the session is gone
+   from the host's own view while its memory is not.
+
+4. TIME-TO-FIRST-BYTE DEGRADES WITH IT, 28x. Mean headers_ms first-100 59.20 ->
+   last-100 1663.83. Within each reader profile the same shape appears
+   (~62 ms -> ~790-834 ms). That is the signature of a per-dispatch walk over a
+   structure that grows with session count, and it is the user-visible cost of
+   the same defect -- worth stating because the RSS number alone reads as
+   "memory is cheap, ignore it".
+
+5. ZERO CYCLE FAILURES. 0 of 8938 cycles have pass=false. The run did not fail
+   on function; it failed on the frozen RSS bound alone.
+
+WHAT THIS DOES NOT DO, and why c1 stays not-met:
+   It narrows the search to per-session state that outlives session deletion,
+   and it excludes the reader/streaming path. It does NOT name an allocation
+   site or a retention path, and c1 explicitly requires a profile that
+   reproduces the growth -- a code reading, or arithmetic like this, is not
+   sufficient. The next instrument should be a heap profile over a short run
+   with the session count as the independent variable, since 417 KiB/session at
+   R^2 0.84 should reproduce in far fewer than 8938 cycles.
+
+c3, the latency row, is disposed on the ticket:
+   https://github.com/FerroxLabs/wayland/issues/1349#issuecomment-5614133763
+   control p95 5653.772 ms, candidate p95 6262.826 ms, limit 6219.149 ms,
+   excess 43.676 ms; 6262.826/5653.772 = 1.1077. The comment records the
+   disposition AND flags that its provenance is an inference from the user
+   message "Okay well, all within bounds. Whats next?", which asserts the
+   opposite of the measurement. Recorded, dated, and not treated as settled.
