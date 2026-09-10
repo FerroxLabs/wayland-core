@@ -1130,7 +1130,35 @@ impl Tool for BashTool {
                 };
             },
             built = tokio::time::timeout_at(deadline, build) => match built {
-                Ok(Ok((manifest, cmd, _built_at))) => (manifest, cmd),
+                Ok(Ok((manifest, cmd, built_at))) => {
+                    // #1304. `Ok` here does NOT mean the build finished in
+                    // time: `timeout_at` polls the inner future before it looks
+                    // at the deadline, so a build that became ready at or after
+                    // the deadline wins the race and the budget is already
+                    // gone. Starting the command anyway spends nothing on it
+                    // and lands on the SECOND `timeout_at` over the same
+                    // expired deadline, whose bare "Command timed out after
+                    // Nms" is byte-identical to the child timeout -- so the
+                    // caller whose secret-scan ate the budget is told the
+                    // command timed out, and the command never ran. MEASURED on
+                    // the unfixed tree at 90bef1c9c: a 13ms timeout against a
+                    // 26.26ms walk returned exactly that string.
+                    match post_build_budget(
+                        built_at.saturating_duration_since(spawned_at),
+                        timeout,
+                        tokio::time::Instant::now(),
+                        deadline,
+                    ) {
+                        PostBuildBudget::Available => (manifest, cmd),
+                        expired => {
+                            return budget_spent_before_command(
+                                expired,
+                                timeout_ms,
+                                built_at.saturating_duration_since(spawned_at),
+                            );
+                        }
+                    }
+                }
                 Ok(Err(join)) => {
                     return ToolResult {
                         content: format!(
@@ -1306,7 +1334,35 @@ impl Tool for BashTool {
                 };
             },
             built = tokio::time::timeout_at(deadline, build) => match built {
-                Ok(Ok((manifest, cmd, _built_at))) => (manifest, cmd),
+                Ok(Ok((manifest, cmd, built_at))) => {
+                    // #1304. `Ok` here does NOT mean the build finished in
+                    // time: `timeout_at` polls the inner future before it looks
+                    // at the deadline, so a build that became ready at or after
+                    // the deadline wins the race and the budget is already
+                    // gone. Starting the command anyway spends nothing on it
+                    // and lands on the SECOND `timeout_at` over the same
+                    // expired deadline, whose bare "Command timed out after
+                    // Nms" is byte-identical to the child timeout -- so the
+                    // caller whose secret-scan ate the budget is told the
+                    // command timed out, and the command never ran. MEASURED on
+                    // the unfixed tree at 90bef1c9c: a 13ms timeout against a
+                    // 26.26ms walk returned exactly that string.
+                    match post_build_budget(
+                        built_at.saturating_duration_since(spawned_at),
+                        timeout,
+                        tokio::time::Instant::now(),
+                        deadline,
+                    ) {
+                        PostBuildBudget::Available => (manifest, cmd),
+                        expired => {
+                            return budget_spent_before_command(
+                                expired,
+                                timeout_ms,
+                                built_at.saturating_duration_since(spawned_at),
+                            );
+                        }
+                    }
+                }
                 Ok(Err(join)) => {
                     return ToolResult {
                         content: format!(
