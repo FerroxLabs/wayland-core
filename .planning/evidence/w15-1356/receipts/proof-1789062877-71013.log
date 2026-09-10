@@ -1,0 +1,9 @@
+   Compiling wcore-acp v0.13.14 (/root/waylandcore-stabilization-20260905/slots/parallel-1/source/crates/wcore-acp)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.24s
+────────────
+ Nextest run ID eb1bfdb0-2c90-4ccb-a78f-ab1cc8c97bd9 with nextest profile: default
+    Starting 2 tests across 1 binary
+        PASS [   0.164s] (1/2) wcore-acp::stage2_small_event_burst a_reader_inside_its_budget_and_replay_window_is_not_detached_by_small_events
+        PASS [   0.376s] (2/2) wcore-acp::stage2_small_event_burst a_reader_that_falls_out_of_the_replay_window_is_detached_and_cannot_resume
+────────────
+     Summary [   0.376s] 2 tests run: 2 passed, 0 skipped

@@ -1,0 +1,17 @@
+proof-1789061607-20472.json 2fe327290 nextest run --locked -p wcore-acp --test stage2_1356_diag --retries 0 --no-fail-fast --no-capture remote_exit 0 complete True
+proof-1789061782-23575.json e3adb7301 nextest run --locked -p wcore-acp --test stage2_small_event_burst --retries 0 --no-fail-fast remote_exit 100 complete True
+proof-1789062122-32977.json e3adb7301 test --locked -p wcore-acp --lib remote_exit 0 complete True
+proof-1789062140-33625.json e3adb7301 test --locked -p wcore-acp --lib remote_exit 0 complete True
+proof-1789062154-33822.json e3adb7301 test --locked -p wcore-acp --lib remote_exit 0 complete True
+proof-1789062166-34132.json e3adb7301 test --locked -p wcore-acp --lib remote_exit 0 complete True
+proof-1789062179-34961.json e3adb7301 test --locked -p wcore-acp --lib remote_exit 0 complete True
+proof-1789062877-71013.json 47e4a0d7a nextest run --locked -p wcore-acp --test stage2_small_event_burst --retries 0 --no-fail-fast remote_exit 0 complete True
+proof-1789062891-71807.json 47e4a0d7a nextest run --locked -p wcore-acp --retries 0 --no-fail-fast remote_exit 0 complete True
+proof-1789062907-72968.json 47e4a0d7a test --locked -p wcore-acp --lib remote_exit 0 complete True
+proof-1789062919-73395.json 47e4a0d7a test --locked -p wcore-acp --lib remote_exit 0 complete True
+proof-1789062931-73592.json 47e4a0d7a clippy --locked -p wcore-acp --all-targets -- -D warnings remote_exit 0 complete True
+proof-1789062944-73901.json 47e4a0d7a clippy --locked -p wcore-acp --all-targets --target x86_64-pc-windows-gnu -- -D warnings remote_exit 0 complete True
+proof-1789062956-74459.json 47e4a0d7a nextest run --locked -p wcore-cli --lib --retries 0 --no-fail-fast -E test(acp_engine::) remote_exit 0 complete True
+proof-1789063063-78574.json 6f2ea594e build --locked --release --features voice -p wcore-cli -j 6 remote_exit 0 complete True
+proof-1789063368-93507.json 47e4a0d7a build --locked --release --features voice -p wcore-cli -j 6 remote_exit 0 complete True
+proof-1789063719-11535.json 2fe327290 build --locked --release --features voice -p wcore-cli -j 6 remote_exit 0 complete True

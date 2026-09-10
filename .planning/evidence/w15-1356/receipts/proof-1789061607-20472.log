@@ -1,0 +1,38 @@
+   Compiling wcore-acp v0.13.14 (/root/waylandcore-stabilization-20260905/slots/parallel-1/source/crates/wcore-acp)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.71s
+────────────
+ Nextest run ID bb259e4b-6f81-49ac-b742-574db9013253 with nextest profile: default
+    Starting 3 tests across 1 binary
+       START [         ] (1/3) wcore-acp::stage2_1356_diag diag_paced_reader
+
+running 1 test
+W1356DIAG site=positions_full recorder_position=Some(259) live_events_limit=256
+W1356DIAG site=positions_overflow delivered=3 budget_left_ms=999 log_tip=2065 oldest_available=1042 retained_len=1024 retained_bytes=4222010
+W1356TEST reader=paced_1ms_per_frame frames=3 text_deltas=2 text_bytes=1048576 last_is_done=false error=Some("live delivery overloaded; resume from retained event cursor")
+test diag_paced_reader ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.36s
+
+        PASS [   0.370s] (1/3) wcore-acp::stage2_1356_diag diag_paced_reader
+       START [         ] (2/3) wcore-acp::stage2_1356_diag diag_rest_loopback_reader
+
+running 1 test
+W1356DIAG site=completed delivered=2065 budget_left_ms=1000 log_tip=2065 oldest_available=1042 retained_len=1024 retained_bytes=4222010
+W1356TEST reader=rest_loopback frames=2065 text_deltas=2064 text_bytes=16777216 last_is_done=true error=None
+test diag_rest_loopback_reader ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 1.05s
+
+        PASS [   1.062s] (2/3) wcore-acp::stage2_1356_diag diag_rest_loopback_reader
+       START [         ] (3/3) wcore-acp::stage2_1356_diag diag_unpaced_reader
+
+running 1 test
+W1356DIAG site=completed delivered=2065 budget_left_ms=1000 log_tip=2065 oldest_available=1042 retained_len=1024 retained_bytes=4222010
+W1356TEST reader=unpaced_in_process frames=2065 text_deltas=2064 text_bytes=16777216 last_is_done=true error=None
+test diag_unpaced_reader ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.42s
+
+        PASS [   0.429s] (3/3) wcore-acp::stage2_1356_diag diag_unpaced_reader
+────────────
+     Summary [   1.861s] 3 tests run: 3 passed, 0 skipped

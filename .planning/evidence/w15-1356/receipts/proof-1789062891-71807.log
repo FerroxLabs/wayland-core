@@ -1,0 +1,188 @@
+   Compiling wcore-acp v0.13.14 (/root/waylandcore-stabilization-20260905/slots/parallel-1/source/crates/wcore-acp)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.78s
+────────────
+ Nextest run ID 395f74ed-d7fd-4ffe-a0ec-6b162b7d32f1 with nextest profile: default
+    Starting 181 tests across 9 binaries
+        PASS [   0.005s] (  1/181) wcore-acp auth::tests::constant_time_eq_correctness
+        PASS [   0.005s] (  2/181) wcore-acp cursor::tests::a_position_ahead_of_the_stream_is_refused_rather_than_answered_with_nothing
+        PASS [   0.006s] (  3/181) wcore-acp auth::tests::scheme_serialization_tags
+        PASS [   0.006s] (  4/181) wcore-acp auth::tests::bearer_wrong_scheme_rejected
+        PASS [   0.006s] (  5/181) wcore-acp a2a::tests::default_handler_handshake_returns_self_identity
+        PASS [   0.006s] (  6/181) wcore-acp a2a::tests::set_capabilities_round_trip
+        PASS [   0.006s] (  7/181) wcore-acp a2a::tests::default_handler_echo_message
+        PASS [   0.008s] (  8/181) wcore-acp client::tests::delete_then_get_returns_session_error
+        PASS [   0.014s] (  9/181) wcore-acp a2a::tests::default_handler_capabilities_starts_empty
+        PASS [   0.019s] ( 10/181) wcore-acp auth::tests::api_key_missing_header
+        PASS [   0.006s] ( 11/181) wcore-acp negotiate::tests::a_client_at_the_floor_is_accepted_at_the_server_version
+        PASS [   0.020s] ( 12/181) wcore-acp bounded::backpressure_tests::exhausting_an_isolated_budget_leaves_other_budgets_untouched
+        PASS [   0.006s] ( 13/181) wcore-acp cursor::tests::positions_are_never_reused_after_eviction
+        PASS [   0.006s] ( 14/181) wcore-acp cursor::tests::an_evicted_position_is_refused_with_the_oldest_still_servable
+        PASS [   0.006s] ( 15/181) wcore-acp idempotency::tests::a_full_ledger_refuses_a_new_identity_instead_of_evicting_a_guarantee
+        PASS [   0.006s] ( 16/181) wcore-acp negotiate::tests::a_client_below_the_floor_is_refused_by_name_not_downgraded
+        PASS [   0.007s] ( 17/181) wcore-acp idempotency::tests::a_repeated_identity_yields_one_effect_and_two_identical_receipts
+        PASS [   0.021s] ( 18/181) wcore-acp cursor::tests::a_caught_up_cursor_yields_nothing_without_erroring
+        PASS [   0.007s] ( 19/181) wcore-acp cursor::tests::positions_start_at_one_and_strictly_increase
+        PASS [   0.007s] ( 20/181) wcore-acp idempotency::tests::a_full_ledger_still_replays_a_known_identity
+        PASS [   0.008s] ( 21/181) wcore-acp cursor::tests::a_reconnecting_client_receives_exactly_what_it_missed_in_order_once
+        PASS [   0.008s] ( 22/181) wcore-acp protocol::tests::agent_not_found_code_value
+        PASS [   0.008s] ( 23/181) wcore-acp negotiate::tests::a_newer_client_is_met_at_the_server_version_and_told_so
+        PASS [   0.008s] ( 24/181) wcore-acp cursor::tests::the_genesis_cursor_yields_everything_retained
+        PASS [   0.023s] ( 25/181) wcore-acp client::tests::create_then_get_roundtrips_over_http
+        PASS [   0.023s] ( 26/181) wcore-acp client::tests::list_returns_created_sessions
+        PASS [   0.006s] ( 27/181) wcore-acp server::tests::session_create_mcp_switches_reach_the_turn_engine
+        PASS [   0.006s] ( 28/181) wcore-acp server::tests::send_message_without_engine_returns_error_event
+        PASS [   0.006s] ( 29/181) wcore-acp transport::http::tests::bad_path_is_404
+        PASS [   0.006s] ( 30/181) wcore-acp transport::http::tests::auth_error_maps_to_401
+        PASS [   0.006s] ( 31/181) wcore-acp transport::http::tests::delete_session_returns_204
+        PASS [   0.007s] ( 32/181) wcore-acp server::tests::tool_definitions_accepted_in_create
+        PASS [   0.008s] ( 33/181) wcore-acp transport::http::tests::bad_json_body_is_400
+        PASS [   0.006s] ( 34/181) wcore-acp transport::http::tests::post_sessions_creates
+        PASS [   0.007s] ( 35/181) wcore-acp transport::http::tests::get_agents_defaults_to_empty
+        PASS [   0.007s] ( 36/181) wcore-acp transport::http::tests::get_initialize_returns_handshake
+        PASS [   0.007s] ( 37/181) wcore-acp transport::http::tests::get_session_by_id
+        PASS [   0.007s] ( 38/181) wcore-acp transport::http::tests::get_sessions_lists
+        PASS [   0.007s] ( 39/181) wcore-acp transport::http::tests::post_messages_returns_sse
+        PASS [   0.007s] ( 40/181) wcore-acp transport::http::tests::session_not_found_maps_to_404
+        PASS [   0.008s] ( 41/181) wcore-acp transport::rest::tests::apidoc_serializes_with_all_documented_paths
+        PASS [   0.008s] ( 42/181) wcore-acp transport::rest::tests::get_agents_returns_empty_default
+        PASS [   0.008s] ( 43/181) wcore-acp transport::rest::tests::auth_gates_v1_but_not_spec
+        PASS [   0.006s] ( 44/181) wcore-acp transport::rest::tests::get_doc_returns_html
+        PASS [   0.006s] ( 45/181) wcore-acp transport::rest::tests::get_health_ok
+        PASS [   0.006s] ( 46/181) wcore-acp transport::rest::tests::get_initialize_returns_capabilities
+        PASS [   0.006s] ( 47/181) wcore-acp transport::rest::tests::get_session_not_found_maps_to_404
+        PASS [   0.006s] ( 48/181) wcore-acp transport::rest::tests::get_tools_returns_empty_default
+        PASS [   0.020s] ( 49/181) wcore-acp server::tests::a2a_capabilities_with_handler_returns_set_caps
+        PASS [   0.020s] ( 50/181) wcore-acp auth::tests::bearer_missing_header
+        PASS [   0.034s] ( 51/181) wcore-acp auth::tests::deny_all_denies
+        PASS [   0.034s] ( 52/181) wcore-acp cursor::tests::a_cursor_from_another_stream_is_refused_even_when_the_position_is_in_range
+        PASS [   0.020s] ( 53/181) wcore-acp cursor::tests::retention_is_bounded_so_a_disconnected_client_cannot_grow_the_log
+        PASS [   0.006s] ( 54/181) wcore-acp transport::rest::tests::health_answers_unauthenticated_while_other_routes_still_401
+        PASS [   0.006s] ( 55/181) wcore-acp transport::rest::tests::health_rejoins_the_gate_when_the_operator_requires_it
+        PASS [   0.007s] ( 56/181) wcore-acp transport::rest::tests::post_approval_resolve_approves_pending_call
+        PASS [   0.007s] ( 57/181) wcore-acp transport::rest::tests::list_get_delete_sessions
+        PASS [   0.006s] ( 58/181) wcore-acp transport::rest::tests::post_approval_resolve_deny_path
+        PASS [   0.006s] ( 59/181) wcore-acp transport::rest::tests::post_approval_resolve_is_auth_gated
+        PASS [   0.007s] ( 60/181) wcore-acp transport::rest::tests::post_approval_resolve_accepts_always_scope
+        PASS [   0.009s] ( 61/181) wcore-acp transport::rest::tests::get_openapi_json_has_paths_and_resolves_schemas
+        PASS [   0.006s] ( 62/181) wcore-acp transport::rest::tests::post_approval_resolve_missing_call_returns_404
+        PASS [   0.011s] ( 63/181) wcore-acp transport::rest::tests::only_health_is_carved_out_of_the_v1_gate
+        PASS [   0.008s] ( 64/181) wcore-acp transport::rest::tests::post_v1_sessions_creates
+        PASS [   0.010s] ( 65/181) wcore-acp transport::rest::tests::post_prompt_returns_sse
+        PASS [   0.009s] ( 66/181) wcore-acp transport::stdio::tests::clean_eof_returns_none
+        PASS [   0.009s] ( 67/181) wcore-acp transport::stdio::tests::roundtrip_request_response
+        PASS [   0.029s] ( 68/181) wcore-acp cursor::tests::the_eviction_boundary_is_exact
+        PASS [   0.010s] ( 69/181) wcore-acp transport::stdio::tests::parse_error_surfaces_as_serde
+        PASS [   0.010s] ( 70/181) wcore-acp transport::ws::tests::parse_error_surfaces_as_serde
+        PASS [   0.029s] ( 71/181) wcore-acp roles::tests::a_role_refusal_is_a_different_error_from_an_authentication_failure
+        PASS [   0.030s] ( 72/181) wcore-acp negotiate::tests::an_unparseable_version_is_refused_rather_than_compared
+        PASS [   0.011s] ( 73/181) wcore-acp transport::ws::tests::clean_close_returns_none
+        PASS [   0.011s] ( 74/181) wcore-acp roles::tests::the_resume_read_is_classified_rather_than_falling_through_to_admin
+        PASS [   0.031s] ( 75/181) wcore-acp protocol::tests::error_code_distinct_values
+        PASS [   0.031s] ( 76/181) wcore-acp server::tests::create_then_get_roundtrips
+        PASS [   0.030s] ( 77/181) wcore-acp negotiate::tests::the_server_version_is_the_one_the_handshake_advertises
+        PASS [   0.030s] ( 78/181) wcore-acp server::tests::list_agents_returns_roster_catalog
+        PASS [   0.031s] ( 79/181) wcore-acp negotiate::tests::version_comparison_is_numeric_and_not_lexicographic
+        PASS [   0.031s] ( 80/181) wcore-acp server::tests::profile_open_failure_fails_closed_with_no_dangling_session
+        PASS [   0.011s] ( 81/181) wcore-acp::approval_gate force_posture_emits_bare_tool_call_without_gate
+        PASS [   0.031s] ( 82/181) wcore-acp server::tests::send_message_missing_session_errors
+        PASS [   0.031s] ( 83/181) wcore-acp roles::tests::a_principal_the_policy_does_not_name_is_denied_everything
+        PASS [   0.032s] ( 84/181) wcore-acp roles::tests::no_recognised_role_is_denied_everything_including_reads
+        PASS [   0.032s] ( 85/181) wcore-acp protocol::tests::server_capabilities_is_forward_compatible
+        PASS [   0.012s] ( 86/181) wcore-acp::approval_gate mutating_tool_emits_approval_required_before_result
+        PASS [   0.032s] ( 87/181) wcore-acp server::tests::delete_missing_errors
+        PASS [   0.032s] ( 88/181) wcore-acp server::tests::list_agents_empty_without_roster
+        PASS [   0.032s] ( 89/181) wcore-acp roles::tests::a_policy_grants_the_named_role_and_denies_above_it
+        PASS [   0.032s] ( 90/181) wcore-acp protocol::tests::session_create_without_mcp_selection_is_byte_identical
+        PASS [   0.032s] ( 91/181) wcore-acp server::tests::send_message_per_call_tools_override_stored
+        PASS [   0.032s] ( 92/181) wcore-acp server::tests::create_stores_tools_and_send_falls_back_to_them
+        PASS [   0.033s] ( 93/181) wcore-acp idempotency::tests::a_malformed_identity_is_refused_rather_than_used_as_a_key
+        PASS [   0.032s] ( 94/181) wcore-acp cursor::tests::resuming_a_stream_continues_the_numbering_rather_than_restarting_it
+        PASS [   0.033s] ( 95/181) wcore-acp cursor::tests::borrowed_next_event_preserves_cursor_refusals
+        PASS [   0.013s] ( 96/181) wcore-acp server::tests::profile_agent_without_router_fails_closed
+        PASS [   0.012s] ( 97/181) wcore-acp turn::tests::mock_turn_engine_error_terminal_is_accepted
+        PASS [   0.047s] ( 98/181) wcore-acp bounded::backpressure_tests::pending_delivery_is_cancelled_without_waiting_for_its_budget
+        PASS [   0.033s] ( 99/181) wcore-acp server::tests::profile_agent_routes_to_supervisor_not_engine
+        PASS [   0.013s] (100/181) wcore-acp::roles_and_idempotency a_principal_the_policy_never_named_is_denied_even_a_read
+        PASS [   0.015s] (101/181) wcore-acp::roles_and_idempotency a_handler_that_cannot_honour_a_key_refuses_it_rather_than_ignoring_it
+        PASS [   0.015s] (102/181) wcore-acp::roles_and_idempotency a_key_reused_for_a_different_command_is_refused_and_the_original_still_replays
+        PASS [   0.008s] (103/181) wcore-acp::stabilization_session_close panicked_close_can_retry_instead_of_reusing_unpublished_result
+        PASS [   0.017s] (104/181) wcore-acp::roles_and_idempotency a_repeated_delete_under_one_key_does_not_become_a_spurious_not_found
+        PASS [   0.014s] (105/181) wcore-acp::roles_and_idempotency a_repeated_key_yields_one_session_counted_from_the_session_list
+        PASS [   0.009s] (106/181) wcore-acp::stabilization_session_close close_preserves_unread_tool_call_and_correlated_engine_cancel_terminal
+        PASS [   0.013s] (107/181) wcore-acp::roles_and_idempotency an_unclassified_route_is_refused_rather_than_reaching_dispatch
+        PASS [   0.009s] (108/181) wcore-acp::stabilization_session_close disconnecting_delete_caller_does_not_abandon_cleanup
+        PASS [   0.009s] (109/181) wcore-acp::stabilization_session_close failed_close_keeps_admission_closed_and_retry_completes
+        PASS [   0.009s] (110/181) wcore-acp::stabilization_session_close same_key_different_delete_target_conflicts_before_second_effect
+        PASS [   0.014s] (111/181) wcore-acp::roles_and_idempotency the_rest_surface_cannot_be_used_to_walk_around_a_role_refusal
+        PASS [   0.042s] (112/181) wcore-acp protocol::tests::capabilities_advertise_mcp_tool_selection_and_stay_forward_compatible
+        PASS [   0.013s] (113/181) wcore-acp::roles_and_idempotency the_wire_carries_the_distinct_codes_and_statuses_not_just_distinct_types
+        PASS [   0.023s] (114/181) wcore-acp protocol::tests::session_create_without_agent_is_byte_identical
+        PASS [   0.023s] (115/181) wcore-acp idempotency::tests::a_different_command_under_a_used_identity_is_a_named_conflict
+        PASS [   0.043s] (116/181) wcore-acp protocol::tests::session_create_with_agent_roundtrips
+        PASS [   0.014s] (117/181) wcore-acp::roles_and_idempotency with_no_policy_installed_the_server_performs_no_role_gating_and_reports_that
+        PASS [   0.043s] (118/181) wcore-acp protocol::tests::agents_list_response_roundtrip
+        PASS [   0.023s] (119/181) wcore-acp turn::tests::mock_turn_engine_emits_ordered_stream_with_one_terminal
+        PASS [   0.012s] (120/181) wcore-acp server::tests::a2a_handshake_with_handler_returns_self_identity
+        PASS [   0.043s] (121/181) wcore-acp protocol::tests::agent_info_omits_absent_description
+        PASS [   0.043s] (122/181) wcore-acp idempotency::tests::recording_twice_under_one_identity_does_not_rewrite_the_receipt
+        PASS [   0.012s] (123/181) wcore-acp protocol::tests::initialize_request_rejects_unknown_fields
+        PASS [   0.023s] (124/181) wcore-acp server::tests::create_with_authorized_agent_records_selector
+        PASS [   0.044s] (125/181) wcore-acp protocol::tests::agents_list_request_rejects_unknown_fields
+        PASS [   0.024s] (126/181) wcore-acp roles::tests::role_parsing_is_case_and_whitespace_tolerant_but_not_permissive
+        PASS [   0.043s] (127/181) wcore-acp server::tests::create_with_unauthorized_agent_is_agent_error
+        PASS [   0.024s] (128/181) wcore-acp roles::tests::an_explicit_default_role_applies_only_where_it_was_asked_for
+        PASS [   0.024s] (129/181) wcore-acp protocol::tests::session_metadata_roundtrip
+        PASS [   0.024s] (130/181) wcore-acp roles::tests::an_unclassified_method_requires_admin_so_the_omission_is_loud
+        PASS [   0.024s] (131/181) wcore-acp server::tests::create_without_agent_records_none
+        PASS [   0.044s] (132/181) wcore-acp roles::tests::a_higher_role_satisfies_a_lower_requirement
+        PASS [   0.012s] (133/181) wcore-acp roles::tests::a_lower_role_does_not_satisfy_a_higher_requirement
+        PASS [   0.016s] (134/181) wcore-acp::roles_and_idempotency the_unauthenticated_spec_routes_stay_reachable
+        PASS [   0.024s] (135/181) wcore-acp roles::tests::the_refusal_names_the_required_role_and_the_held_one
+        PASS [   0.024s] (136/181) wcore-acp protocol::tests::jsonrpc_request_roundtrip
+        PASS [   0.024s] (137/181) wcore-acp protocol::tests::initialize_response_roundtrips_with_capability
+        PASS [   0.025s] (138/181) wcore-acp roles::tests::the_refusal_does_not_name_the_principal
+        PASS [   0.025s] (139/181) wcore-acp server::tests::create_with_agent_but_no_roster_is_agent_error
+        PASS [   0.045s] (140/181) wcore-acp protocol::tests::jsonrpc_response_with_error
+        PASS [   0.026s] (141/181) wcore-acp protocol::tests::message_event_text_delta_serializes
+        PASS [   0.046s] (142/181) wcore-acp protocol::tests::tool_call_roundtrip
+        PASS [   0.014s] (143/181) wcore-acp server::tests::initialize_advertises_agent_selection
+        PASS [   0.049s] (144/181) wcore-acp protocol::tests::deny_unknown_fields_on_request
+        PASS [   0.029s] (145/181) wcore-acp server::tests::a2a_message_send_with_handler_echoes
+        PASS [   0.017s] (146/181) wcore-acp protocol::tests::mcp_tool_selection_distinguishes_absent_empty_and_named
+        PASS [   0.049s] (147/181) wcore-acp server::tests::send_message_with_engine_proxies_stream
+        PASS [   0.029s] (148/181) wcore-acp roster::tests::contains_default_answers_from_list
+        PASS [   0.030s] (149/181) wcore-acp server::tests::a_session_with_no_mcp_switches_carries_none
+        PASS [   0.017s] (150/181) wcore-acp protocol::tests::agent_info_exposes_no_secret_fields
+        PASS [   0.050s] (151/181) wcore-acp roster::tests::default_id_reports_configured_default
+        PASS [   0.018s] (152/181) wcore-acp server::tests::delete_then_get_errors
+        PASS [   0.064s] (153/181) wcore-acp client::tests::send_message_streams_done_event
+        PASS [   0.030s] (154/181) wcore-acp transport::ws::tests::roundtrip_request_response
+        PASS [   0.050s] (155/181) wcore-acp server::tests::a2a_handshake_no_handler_returns_protocol_error
+        PASS [   0.034s] (156/181) wcore-acp::stabilization_backpressure byte_overload_keeps_one_terminal_and_releases_owned_capacity
+        PASS [   0.047s] (157/181) wcore-acp server::commands::tests::keyed_retry_joins_the_gap_after_retirement_before_receipt
+        PASS [   0.057s] (158/181) wcore-acp::roles_and_idempotency a_role_refusal_and_an_auth_failure_are_different_answers_from_one_server
+        PASS [   0.065s] (159/181) wcore-acp::rest_roundtrip rest_create_prompt_sse_delete_roundtrip
+        PASS [   0.066s] (160/181) wcore-acp::rest_roundtrip rest_openapi_doc_served_over_live_listener
+        PASS [   0.067s] (161/181) wcore-acp::openapi_contract shape_checker_rejects_a_3_0_encoded_document
+        PASS [   0.069s] (162/181) wcore-acp::openapi_contract openapi_shape_matches_committed_fixture
+        PASS [   0.079s] (163/181) wcore-acp::openapi_contract old_coverage_is_blind_to_a_pure_encoding_flip
+        PASS [   0.097s] (164/181) wcore-acp server::tests::another_sessions_event_log_work_does_not_stall_this_sessions_turn
+        PASS [   0.120s] (165/181) wcore-acp server::eviction_tests::an_exclusive_hold_on_the_log_map_does_not_stall_a_running_turn
+        PASS [   0.161s] (166/181) wcore-acp server::tests::closing_a_session_returns_its_history_to_the_retained_total
+        PASS [   0.175s] (167/181) wcore-acp::stage2_small_event_burst a_reader_inside_its_budget_and_replay_window_is_not_detached_by_small_events
+        PASS [   0.375s] (168/181) wcore-acp::stabilization_backpressure slow_reader_has_explicit_overload_while_replay_retains_bounded_tail
+        PASS [   0.387s] (169/181) wcore-acp::stage2_small_event_burst a_reader_that_falls_out_of_the_replay_window_is_detached_and_cannot_resume
+        PASS [   0.487s] (170/181) wcore-acp::stabilization_backpressure a_reader_that_stops_reading_is_detached_by_its_wait_budget_beside_a_fast_one
+        PASS [   0.510s] (171/181) wcore-acp::typed_client_recovery a_cursor_from_another_stream_is_refused_over_the_wire_not_silently_served
+        PASS [   0.515s] (172/181) wcore-acp::typed_client_recovery a_cursor_that_fell_out_of_retention_is_refused_naming_where_to_resync
+        PASS [   0.520s] (173/181) wcore-acp::typed_client_recovery the_ahead_and_unknown_session_refusals_survive_the_wire_with_their_own_statuses
+        PASS [   0.540s] (174/181) wcore-acp::typed_client_recovery a_severed_typed_client_recovers_the_exact_gap_over_a_real_socket
+        PASS [   0.973s] (175/181) wcore-acp::stabilization_backpressure fast_rest_reader_receives_complete_sixteen_mib_burst
+        PASS [   1.031s] (176/181) wcore-acp server::tests::list_returns_newest_first
+        PASS [   1.532s] (177/181) wcore-acp server::eviction_tests::evictors_parked_on_one_victim_trim_it_only_as_far_as_the_cap_needs
+        PASS [   1.608s] (178/181) wcore-acp server::eviction_tests::a_close_between_victim_choice_and_pop_keeps_retained_total_exact
+        PASS [   1.727s] (179/181) wcore-acp client::tests::sse_parser_fails_on_unbounded_delimiterless_stream
+        PASS [   1.684s] (180/181) wcore-acp::stabilization_backpressure aggregate_replay_pressure_preserves_a_late_stream_first_event
+        PASS [   2.244s] (181/181) wcore-acp server::eviction_tests::churn_over_the_cap_with_mixed_chunk_sizes_keeps_retained_total_exact
+────────────
+     Summary [   2.290s] 181 tests run: 181 passed, 0 skipped
