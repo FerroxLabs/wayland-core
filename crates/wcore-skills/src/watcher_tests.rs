@@ -647,3 +647,175 @@ async fn tc20_version_monotonically_increasing() {
         prev_version = new_version;
     }
 }
+
+// ---------------------------------------------------------------------------
+// wayland#1308 c2: which directory component goes missing, and who removes it
+// ---------------------------------------------------------------------------
+//
+// `make_visible_test_dir` names a directory from the test name plus a
+// PROCESS-LOCAL `AtomicU64`. Every test name is used once, so within one
+// process the counter is always 0 and two identically-launched test binaries
+// therefore compute the SAME path under the SAME `std::env::temp_dir()`. On a
+// box running several runner services as one user that root is shared, so two
+// concurrent runs of the same test share one directory -- and whichever
+// finishes first removes it out from under the other. The survivor's next
+// write then fails with `ERROR_PATH_NOT_FOUND` (3), the directory-component
+// error, which is exactly the code the four siblings reported.
+//
+// This is a control, not an observation: it drives the two processes through a
+// file handshake so the removal happens at a chosen instant rather than in a
+// race window, and it reports the missing component by name.
+
+/// Env var naming the role a child process of this test binary plays.
+const COLLISION_ROLE: &str = "WCORE_WATCHER_COLLISION_ROLE";
+/// Env var naming the directory the parent and its two children hand files through.
+const COLLISION_SYNC: &str = "WCORE_WATCHER_COLLISION_SYNC";
+/// libtest path of the child entry point, used with `--exact`.
+const COLLISION_CHILD_PATH: &str = "watcher_tests::collision_child";
+/// Ceiling on every handshake wait. Windows process spawn on this class of box
+/// is bimodal at ~3s, so this is generous by design; it exists so a lost child
+/// fails the test rather than hanging the run.
+const COLLISION_BUDGET: Duration = Duration::from_secs(90);
+
+/// Publish `body` under `name` in the sync directory, atomically.
+///
+/// Written to a `.partial` sibling and renamed, so a reader can never observe
+/// a half-written signal and mistake it for a short answer.
+fn signal(sync: &Path, name: &str, body: &str) {
+    let partial = sync.join(format!("{name}.partial"));
+    expect_fs(fs::write(&partial, body), "write signal", &partial);
+    let final_path = sync.join(name);
+    expect_fs(
+        fs::rename(&partial, &final_path),
+        "publish signal",
+        &final_path,
+    );
+}
+
+/// Block until `path` exists, returning its contents. Panics at the budget.
+fn await_signal(path: &Path, what: &str) -> String {
+    let deadline = std::time::Instant::now() + COLLISION_BUDGET;
+    loop {
+        if let Ok(body) = fs::read_to_string(path) {
+            return body;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out after {COLLISION_BUDGET:?} waiting for {what} ({})",
+            path.display()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// One half of the two-process control. Ignored: it is meaningless alone and is
+/// launched by `cross_process_siblings_do_not_share_a_test_directory` with a
+/// role and a sync directory in the environment.
+#[test]
+#[ignore = "child half of cross_process_siblings_do_not_share_a_test_directory"]
+fn collision_child() {
+    let role = std::env::var(COLLISION_ROLE)
+        .expect("collision_child ran with no role -- it is driven by its parent test");
+    let sync = PathBuf::from(
+        std::env::var(COLLISION_SYNC).expect("collision_child ran with no sync directory"),
+    );
+
+    // Deliberately the SAME logical test name in both children. Two runner
+    // services on one box run the same test at the same time, and that -- not
+    // two different siblings inside one process -- is the collision domain.
+    let (dir, guard) = make_visible_test_dir("collision");
+    signal(&sync, &format!("{role}.path"), &dir.display().to_string());
+
+    match role.as_str() {
+        "a" => {
+            await_signal(&sync.join("go-a"), "the parent's teardown signal");
+            drop(guard);
+            signal(&sync, "a.dropped", &dir.display().to_string());
+        }
+        "b" => {
+            await_signal(&sync.join("go-b"), "the parent's write signal");
+            let skill = dir.join("SKILL.md");
+            let report = match fs::write(&skill, "# b") {
+                Ok(()) => "ok".to_string(),
+                Err(error) => format!(
+                    "ERR raw_os_error={:?} kind={:?} ({error})\n{}",
+                    error.raw_os_error(),
+                    error.kind(),
+                    first_missing_component(&skill)
+                ),
+            };
+            signal(&sync, "b.result", &report);
+            drop(guard);
+        }
+        other => panic!("unknown collision role {other:?}"),
+    }
+}
+
+/// Two processes running the SAME watcher test at the same time must not be
+/// handed the same directory, so that one finishing cannot delete the other's.
+#[test]
+fn cross_process_siblings_do_not_share_a_test_directory() {
+    let sync = TempDir::new().expect("create collision sync directory");
+    let sync_path = sync.path().to_path_buf();
+    let exe = std::env::current_exe().expect("locate this test binary");
+
+    let spawn = |role: &str| {
+        std::process::Command::new(&exe)
+            .args([
+                "--exact",
+                "--ignored",
+                "--nocapture",
+                "--test-threads",
+                "1",
+                COLLISION_CHILD_PATH,
+            ])
+            .env(COLLISION_ROLE, role)
+            .env(COLLISION_SYNC, &sync_path)
+            .spawn()
+            .unwrap_or_else(|error| panic!("spawn collision child {role}: {error}"))
+    };
+
+    let mut child_a = spawn("a");
+    let mut child_b = spawn("b");
+
+    let path_a = PathBuf::from(await_signal(
+        &sync_path.join("a.path"),
+        "child a's allocated directory",
+    ));
+    let path_b = PathBuf::from(await_signal(
+        &sync_path.join("b.path"),
+        "child b's allocated directory",
+    ));
+
+    // Both children must really be in one collision domain, or "the paths
+    // differ" would be true for a reason that proves nothing.
+    assert_eq!(
+        path_a.parent(),
+        path_b.parent(),
+        "the two children did not share a temp root, so this run cannot say \
+         anything about collisions: a={} b={}",
+        path_a.display(),
+        path_b.display()
+    );
+
+    signal(&sync_path, "go-a", "");
+    await_signal(&sync_path.join("a.dropped"), "child a's teardown");
+    signal(&sync_path, "go-b", "");
+    let write_result = await_signal(&sync_path.join("b.result"), "child b's write");
+
+    let status_a = child_a.wait().expect("reap collision child a");
+    let status_b = child_b.wait().expect("reap collision child b");
+
+    assert!(
+        path_a != path_b && write_result == "ok",
+        "a concurrent process running the same test shared child b's directory and \
+         removed it during teardown, so child b lost the directory it was watching.\n  \
+         child a: {}\n  child b: {}\n  child b's write AFTER child a tore down: {write_result}",
+        path_a.display(),
+        path_b.display()
+    );
+    assert!(
+        status_a.success() && status_b.success(),
+        "collision children must exit cleanly: a={status_a} b={status_b}"
+    );
+}
