@@ -211,4 +211,47 @@ mod tests {
             "a nonsense bound must degrade to the smallest useful one, not to nothing"
         );
     }
+
+    /// Kills `history.rs:122:19` (the `NotFound` match guard replaced with
+    /// `true`).
+    ///
+    /// The `Err(e) if NotFound => Ok(Vec::new())` arm exists so that a history
+    /// file that was never written reads as "no records" rather than as a
+    /// failure. Widening the guard to every error turns EVERY io failure —
+    /// permission denied, a path component that is not a directory, a bad
+    /// descriptor — into "the history is empty", which is the shape that makes
+    /// a broken store look like a clean one.
+    ///
+    /// `a_missing_file_reads_as_empty_rather_than_failing` above cannot see
+    /// this: it only exercises the arm the guard already selects. The witness
+    /// has to be a DIFFERENT error, so this uses a path one of whose directory
+    /// components is a regular file. That is `ENOTDIR`, not `ENOENT`, on every
+    /// Unix and `ERROR_DIRECTORY`/`ERROR_PATH_NOT_FOUND` on Windows — in no
+    /// case `NotFound` from a `File::open` of a real, present component.
+    #[test]
+    fn a_non_notfound_io_error_is_reported_rather_than_read_as_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("history.jsonl");
+        std::fs::write(&blocker, b"not a directory\n").unwrap();
+        let through_a_file = blocker.join("inner.jsonl");
+
+        // Control: a genuinely absent path still reads as empty. Without this
+        // half, a `read_lines` that failed on everything would also satisfy
+        // the assertion below.
+        let absent = dir.path().join("no-such-dir").join("history.jsonl");
+        assert_eq!(
+            read_lines(&absent).unwrap(),
+            Vec::<String>::new(),
+            "control: an absent history must still read as empty"
+        );
+
+        let err = read_lines(&through_a_file)
+            .expect_err("a path routed through a regular file must not read as an empty history");
+        assert_ne!(
+            err.kind(),
+            std::io::ErrorKind::NotFound,
+            "control: this fixture must produce an error that is NOT NotFound, \
+             or it cannot distinguish the guard from its replacement; got {err}"
+        );
+    }
 }

