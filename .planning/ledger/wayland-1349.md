@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "W16 mixed soak fails RSS acceptance twice (41.5x, then 1.83x) with no carrier"
 status: open
-last_verified_commit: 16a34638c
+last_verified_commit: 194385793
 criteria:
   - id: c1
     text: "The RSS growth is explained by measurement rather than inferred: the allocation site or retention path responsible for the 5.28 GB growth over 8938 cycles is NAMED, with the instrument that named it. A profile that reproduces the growth is required; a code reading is not sufficient."
