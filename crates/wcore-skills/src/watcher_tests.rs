@@ -674,6 +674,29 @@ async fn tc20_version_monotonically_increasing() {
 // This is a control, not an observation: it drives the two processes through a
 // file handshake so the removal happens at a chosen instant rather than in a
 // race window, and it reports the missing component by name.
+//
+// MEASURED 2026-09-10 (wayland#1308 c2/c3) on SeanDesktop -- the same physical
+// box that hosts the `CI (Array)` Windows runner services -- cargo 1.95.0,
+// nextest 0.9.138, debug, `--retries 0`, every arm run at both the pre-fix
+// helper (f7564ea4) and the fixed one (785a22ea):
+//
+//   arm                                            pre-fix        fixed
+//   this control                                    0/3 pass      5/5 pass
+//   tc06+tc07+tc08+tc09 together, one process      20/20 pass    20/20 pass
+//   each of the four alone, 20 runs each            --           80/80 pass
+//   the four together in TWO concurrent processes   0/20 pass    20/20 pass
+//
+// The single-process arms pass at BOTH helpers, which is the control that
+// separates shared state from a per-test bug: one process alone never
+// collides, so no number of repetitions of it can reproduce this. The
+// concurrent-process arm fails 20/20 before the fix, every time in tc07 and
+// tc08 of whichever process lost the race. Read the codes honestly: this
+// control reports `ERROR_PATH_NOT_FOUND` (3), the code the outage reported,
+// because the handshake removes the directory and holds it removed; the
+// naturalistic concurrent arm usually reports `ERROR_FILE_NOT_FOUND` (2)
+// instead, because the sibling has already recreated the directory for its
+// own next test by the time the survivor's call lands. Same collision, caught
+// a few milliseconds later.
 
 /// Env var naming the role a child process of this test binary plays.
 const COLLISION_ROLE: &str = "WCORE_WATCHER_COLLISION_ROLE";
