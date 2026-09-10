@@ -1,0 +1,98 @@
+name: wayland#1300 c5 macOS control
+
+# The macOS half of wayland#1300 c5: `macOS 0/10 at --retries 0`, with the
+# census staying [13, 4]-periodic.
+#
+# WHY A DEDICATED WORKFLOW AND NOT `CI (macos-latest)`. c5 asks for TEN runs of
+# `credentials::chunk_crash_injection::*` at `--retries 0`; a `[ci-darwin]` leg
+# gives exactly one, and one green run cannot answer a 0/10 control. Nothing
+# else in the repo repeats a named module on macOS.
+#
+# WHY NOT THE SELF-HOSTED MAC. `sean-mac-arm64` is Sean's own machine and the
+# standing rule is that cargo does not run on it. `macos-latest` is the
+# GitHub-hosted pool — a self-hosted runner carries no `macos-latest` label, so
+# this can never land on his laptop.
+#
+# THIS FILE LIVES ONLY ON THE THROWAWAY BRANCH `w1300-macos-c5` AND MUST NEVER
+# REACH `main` OR A RELEASE BRANCH. It is a measurement instrument for one
+# criterion, not coverage. A workflow file on a non-default branch still fires
+# on push, so this needs no dispatch and no presence on `main`, and the trigger
+# is pinned to that one branch name so that even if the file were merged by
+# accident it stays inert everywhere that matters.
+#
+# THE BRANCH IS DELIBERATELY NOT NAMED `lane/**`. `ci.yml` fires on
+# `push -> lane/**` with no paths filter, so a lane-prefixed push would also
+# start the ~67-minute Linux CI leg. That leg contributes nothing to c5 -- this
+# control already runs the module ten times on real macOS, which is strictly
+# more than the single sample a `[ci-darwin]` leg gives -- so the branch is
+# named to fire THIS workflow and nothing else.
+
+on:
+  push:
+    branches:
+      - 'w1300-macos-c5'
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: "Repetitions of the module"
+        type: string
+        required: false
+        default: "10"
+
+permissions:
+  contents: read
+
+jobs:
+  control:
+    name: chunk_crash_injection x10 (macos-latest)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Toolchain
+        run: |
+          rustc --version
+          uname -m
+          sw_vers
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Build the module under test
+        run: cargo nextest run -p wcore-config --lib --no-run
+
+      # RUNS goes through `env`, never a `${{ }}` splice into the shell: a
+      # dispatch input is caller-supplied text and interpolating it would be a
+      # command injection.
+      - name: Run the module at --retries 0
+        env:
+          RUNS: ${{ inputs.runs || '10' }}
+        run: |
+          set -uo pipefail
+          case "$RUNS" in
+            ''|*[!0-9]*) echo "runs must be a positive integer, got: $RUNS"; exit 1 ;;
+          esac
+          runs="$RUNS"
+          fails=0
+          for i in $(seq 1 "$runs"); do
+            echo "===== RUN $i/$runs ====="
+            if cargo nextest run -p wcore-config --lib \
+                 --profile ci --retries 0 --no-fail-fast \
+                 --success-output=immediate \
+                 -E 'test(credentials::chunk_crash_injection::)' 2>&1 \
+               | tee "run-$i.log"; then
+              echo "RUN $i PASS"
+            else
+              echo "RUN $i FAIL"
+              fails=$((fails + 1))
+            fi
+          done
+          echo "==================================================="
+          echo "C5_MACOS_RESULT failures=$fails of $runs"
+          echo "--- per-run round cost and census ---"
+          grep -h 'ROUND_COST .* rounds=\|CENSUS entries-after' run-*.log || true
+          # The control is a COUNT, so it must fail the job when it is not 0/N.
+          test "$fails" -eq 0
