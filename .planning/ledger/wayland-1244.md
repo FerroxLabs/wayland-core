@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "The live /model-switch leg of the spend-audit keying proof needs a PTY-driven TUI run"
 status: open
-last_verified_commit: 6f7eea1b0
+last_verified_commit: bee06b19a
 criteria:
   - id: c1
     text: "A PTY-driven run of the shipped `wayland-core` TUI performs an in-session model switch that reaches `rebind_provider`, and the `~/.wayland/budget/spend-audit.jsonl` records written before and after the switch share one `session_id`; the jsonl lines are quoted"
