@@ -3114,13 +3114,14 @@ async fn packaged_tui_restart_projection_matches_json_host() {
 /// The same filter `assert_provider_checkpoint_sealed` applies, without its
 /// sealing assertions, because the question this answers is only HOW MANY —
 /// and the answer `0` is the one that has to be reachable.
-fn provider_dispatch_checkpoints(evidence: &Path, session_id: &str) -> usize {
+fn provider_dispatch_checkpoints(evidence: &Path, session_id: &str) -> (usize, String) {
     let journal = evidence
         .join("sessions")
         .join(format!("{session_id}.journal"));
     let bytes = fs::read(&journal).expect("read preserved F14 journal");
-    journal_frames(&bytes)
-        .into_iter()
+    let frames = journal_frames(&bytes);
+    let count = frames
+        .iter()
         .filter(|(_, envelope)| {
             envelope.pointer("/event/type").and_then(Value::as_str) == Some("checkpoint_committed")
                 && envelope
@@ -3128,7 +3129,27 @@ fn provider_dispatch_checkpoints(evidence: &Path, session_id: &str) -> usize {
                     .and_then(Value::as_str)
                     == Some("provider_dispatch")
         })
-        .count()
+        .count();
+    // The census travels with the count, because `0` on its own cannot say
+    // whether the journal is empty, whether it holds checkpoints of another
+    // kind, or whether the walker read the wrong file.
+    let census = frames
+        .iter()
+        .map(|(frame, envelope)| {
+            format!(
+                "  frame {frame}: type={:?} next_action={:?}",
+                envelope.pointer("/event/type").and_then(Value::as_str),
+                envelope
+                    .pointer("/event/state/next_action")
+                    .and_then(Value::as_str)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    (
+        count,
+        format!("{} ({} frames)\n{census}", journal.display(), frames.len()),
+    )
 }
 
 /// FerroxLabs/wayland#1290 c1 and c2 — **the discriminator, run as an
@@ -3206,7 +3227,8 @@ async fn w1290_the_credential_store_alone_decides_whether_a_provider_checkpoint_
     assert_eq!(control.next_type("text_delta").await["text"], partial);
     let _control_diagnostics = control.sigkill().await;
     let control_evidence = preserve_crash_evidence(&control_env);
-    let control_count = provider_dispatch_checkpoints(control_evidence.path(), control_session);
+    let (control_count, control_census) =
+        provider_dispatch_checkpoints(control_evidence.path(), control_session);
 
     // ARM B — INTERVENTION. The identical flow, with no secure store: no vault
     // unlock material and a Secret Service bus address pointed at a socket that
@@ -3237,18 +3259,19 @@ async fn w1290_the_credential_store_alone_decides_whether_a_provider_checkpoint_
     assert_eq!(keyless.next_type("text_delta").await["text"], partial);
     let _keyless_diagnostics = keyless.sigkill().await;
     let keyless_evidence = preserve_crash_evidence(&keyless_env);
-    let keyless_count = provider_dispatch_checkpoints(keyless_evidence.path(), keyless_session);
+    let (keyless_count, keyless_census) =
+        provider_dispatch_checkpoints(keyless_evidence.path(), keyless_session);
 
     // THE MEASUREMENT. Same flow, same fixture script, same kill point; one
     // variable moved, and the count moves with it.
     assert_eq!(
         control_count, 1,
         "the control arm must write exactly one provider-dispatch checkpoint, or arm B's \
-         zero grades nothing"
+         zero grades nothing.\nCONTROL {control_census}\nKEYLESS {keyless_census}"
     );
     assert_eq!(
         keyless_count, 0,
         "a host whose credential store does not answer must be shown to produce the \
-         `left: 0` this ticket was re-founded on"
+         `left: 0` this ticket was re-founded on.\nKEYLESS {keyless_census}"
     );
 }
