@@ -9,15 +9,12 @@ Owners come from each ledger's `owner:` on its UNMET criteria — the
 owner is read, not assigned, so a row cannot claim an owner the
 ledger does not.
 
-Blocking issues: 21   Outstanding criteria: 28
+Blocking issues: 16   Outstanding criteria: 22
 
 | Issue | Owner | Outstanding | Title |
 |---|---|---:|---|
 | FerroxLabs/wayland#1116 | core | 1 | Desktop: no abandon verb on the host wire leaves a crash-interrupted session wedged in-app |
-| FerroxLabs/wayland#1238 | core | 1 | Flaky: parallel_spawn_caps_active_child_engines_across_shared_calls fails on a 15s wall-clock budget above loadavg ~190, not on its invariant |
 | FerroxLabs/wayland#1244 | core | 1 | The live /model-switch leg of the spend-audit keying proof needs a PTY-driven TUI run |
-| FerroxLabs/wayland#1245 | core | 1 | Flaky: t19_live_negative_leg has a 45s drain window with zero headroom; it fails 3/3 above loadavg ~150 |
-| FerroxLabs/wayland#1250 | core | 1 | wcore-exec-backend tests race on the WAYLAND_EXEC_BACKEND_STATE_DIR process global in the shared-process suite |
 | FerroxLabs/wayland#1272 | core | 2 | 0.13.12 release board: all 32 blocking issues mapped to an owner (17 in flight, 15 unassigned) |
 | FerroxLabs/wayland#1284 | core | 1 | Flaky on macOS only: the_live_backend_timeout_bounds compares two wall-clock samples taken under different load |
 | FerroxLabs/wayland#1285 | core | 1 | Two more macOS-only retry flakes: harness_tui_flow resume_repaints and wcore-mcp f016_real_spawn |
@@ -30,7 +27,5 @@ Blocking issues: 21   Outstanding criteria: 28
 | FerroxLabs/wayland#1349 | core | 2 | W16 mixed soak fails RSS acceptance twice (41.5x, then 1.83x) with no carrier |
 | FerroxLabs/wayland-core#401 | core | 1 | an_unknown_window_sizes_the_skill_listing precondition cannot pass in a clean container, so every integ/f13 CI run is red |
 | FerroxLabs/wayland-core#404 | core | 1 | A ci-linux cancellation at the 120-minute budget destroys the JUnit evidence the run already produced |
-| FerroxLabs/wayland-core#415 | core | 2 | Close the quarantine console bypass with a restricting-SID token, without removing the feature (from #389 c1) |
-| FerroxLabs/wayland-core#424 | core | 1 | mutants-nightly has produced zero data in 87 runs: every leg dies in ~30s on a missing target/ parent, and the step exits 0 so it can never go red |
 | FerroxLabs/wayland-core#449 | core | 1 | [mutants-nightly] wcore-cron — surviving mutants (2026-09-04) |
 | FerroxLabs/wayland-core#451 | core | 2 | Four of five mutation legs cannot run their unmutated test suite inside the per-crate timeout, so they test zero mutants |
