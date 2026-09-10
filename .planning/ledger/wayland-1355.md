@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "Session index writes give up after a 1 s lock wait under contention, and a writer can hit ENOENT"
 status: open
-last_verified_commit: e1c3bf704
+last_verified_commit: 1e4be84b0
 criteria:
   - id: c1
     text: "Both errors are root-caused with the instrument that named them -- the 1 s give-up under contention AND the ENOENT -- each with a deterministic red test that does not depend on CI load (a held lock, an injected stall)."

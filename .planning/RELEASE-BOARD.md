@@ -9,7 +9,7 @@ Owners come from each ledger's `owner:` on its UNMET criteria — the
 owner is read, not assigned, so a row cannot claim an owner the
 ledger does not.
 
-Blocking issues: 6   Outstanding criteria: 13
+Blocking issues: 5   Outstanding criteria: 9
 
 | Issue | Owner | Outstanding | Title |
 |---|---|---:|---|
@@ -18,4 +18,3 @@ Blocking issues: 6   Outstanding criteria: 13
 | FerroxLabs/wayland#1349 | core | 1 | W16 mixed soak fails RSS acceptance twice (41.5x, then 1.83x) with no carrier |
 | FerroxLabs/wayland#1352 | core | 1 | ACP serve cancels a keeping-up 16 MiB reader with 'protocol relay overloaded' under concurrency |
 | FerroxLabs/wayland#1353 | core | 4 | Concurrent effect-checkpoint stores can jointly exceed the session quota |
-| FerroxLabs/wayland#1355 | core | 4 | Session index writes give up after a 1 s lock wait under contention, and a writer can hit ENOENT |
