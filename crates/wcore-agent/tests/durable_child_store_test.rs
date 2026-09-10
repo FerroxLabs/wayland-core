@@ -353,6 +353,51 @@ fn legacy_children_replay_without_becoming_v2_authority() {
     ));
 }
 
+/// `inspect` reads one child's durable record under the journal lock instead
+/// of cloning the whole reduced session state (wayland#1301). The narrow read
+/// must return exactly what the full-state projection returned, including both
+/// ways a child has no durable record: never declared, and legacy-only.
+#[test]
+fn inspect_matches_the_full_state_projection_for_durable_legacy_and_unknown_children() {
+    let temp = tempfile::tempdir().unwrap();
+    let journal = SessionJournal::open(temp.path().join("session.journal"), "session-1").unwrap();
+    let store = DurableChildStore::new(journal.clone());
+    journal
+        .append(SessionEvent::TurnStarted {
+            turn_id: "turn-1".into(),
+            user_message: "hello".into(),
+        })
+        .unwrap();
+    journal
+        .append(SessionEvent::ChildPrepared {
+            child_id: "legacy-child".into(),
+            turn_id: "turn-1".into(),
+            request: json!({"legacy": true}),
+        })
+        .unwrap();
+    store.declare(child_record("child-1", false)).unwrap();
+
+    let durable_id = ChildId::new("child-1").unwrap();
+    let inspected = store.inspect(&durable_id).unwrap();
+    let projected = journal.state().unwrap().children["child-1"].durable.clone();
+    assert!(inspected.is_some());
+    assert_eq!(
+        serde_json::to_value(&inspected).unwrap(),
+        serde_json::to_value(&projected).unwrap()
+    );
+
+    let legacy_id = ChildId::new("legacy-child").unwrap();
+    assert!(
+        journal.state().unwrap().children["legacy-child"]
+            .durable
+            .is_none()
+    );
+    assert!(store.inspect(&legacy_id).unwrap().is_none());
+
+    let unknown_id = ChildId::new("never-declared").unwrap();
+    assert!(store.inspect(&unknown_id).unwrap().is_none());
+}
+
 #[test]
 fn durable_schema_rejects_unbounded_ids_and_never_persists_prompt_plaintext() {
     let oversized = "x".repeat(MAX_DURABLE_CHILD_ID_BYTES + 1);
