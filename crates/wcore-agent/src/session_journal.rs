@@ -1326,7 +1326,7 @@ fn checkpoint_directory_bytes(directory: &Path) -> Result<u64, JournalError> {
             source,
         })?;
         let path = entry.path();
-        let metadata = std::fs::symlink_metadata(&path).map_err(|source| JournalError::Io {
+        let metadata = checkpoint_entry_metadata(&entry).map_err(|source| JournalError::Io {
             path: path.clone(),
             source,
         })?;
@@ -1343,6 +1343,56 @@ fn checkpoint_directory_bytes(directory: &Path) -> Result<u64, JournalError> {
         })?;
     }
     Ok(total)
+}
+
+/// Whether a checkpoint-store entry name is a PUBLISHED checkpoint: exactly a
+/// digest as [`valid_sha256_hex`] defines it (64 lowercase hex digits). This is a
+/// whole-name match, never a prefix or suffix test, so temporaries
+/// (`.{digest}.*.tmp`), leftovers and unrecognised names are all excluded.
+fn is_published_checkpoint_name(name: &std::ffi::OsStr) -> bool {
+    name.to_str().is_some_and(valid_sha256_hex)
+}
+
+/// Size one entry of the private checkpoint store for the session quota.
+///
+/// A published checkpoint is created only by hard-linking a temporary that was
+/// already fully written and synced (`store_effect_checkpoint`), and nothing in
+/// this crate rewrites or truncates it afterwards, so the size the directory
+/// listing returned for that entry is final. Reading it from the listing avoids
+/// opening every published file on every store. On Windows each
+/// `symlink_metadata` is a full open, query and close, and the store gains one
+/// file per durable child, so those opens made each dispatch cost grow with the
+/// number of dispatches before it (wayland#1301).
+///
+/// Every other entry keeps the per-file `symlink_metadata` open, whose size is
+/// current even while another store is still writing that file.
+fn checkpoint_entry_metadata(entry: &std::fs::DirEntry) -> std::io::Result<std::fs::Metadata> {
+    if is_published_checkpoint_name(&entry.file_name()) {
+        return entry.metadata();
+    }
+    #[cfg(test)]
+    checkpoint_sizing_probe::record_opened(&entry.file_name());
+    std::fs::symlink_metadata(entry.path())
+}
+
+/// TEST-ONLY record of which checkpoint entries were sized through a per-file
+/// open, so a test can prove the listing path is taken for published names only.
+#[cfg(test)]
+mod checkpoint_sizing_probe {
+    use std::cell::RefCell;
+    use std::ffi::{OsStr, OsString};
+
+    thread_local! {
+        static OPENED: RefCell<Vec<OsString>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn record_opened(name: &OsStr) {
+        OPENED.with(|opened| opened.borrow_mut().push(name.to_os_string()));
+    }
+
+    pub(super) fn take_opened() -> Vec<OsString> {
+        OPENED.with(|opened| std::mem::take(&mut *opened.borrow_mut()))
+    }
 }
 
 fn remove_effect_checkpoint_directory(journal_path: &Path) -> Result<(), JournalError> {
@@ -4138,6 +4188,87 @@ mod fault_tests {
             }),
             Err(JournalError::WriterFaulted)
         ));
+    }
+
+    /// wayland#1301: the quota scan sizes exact-digest published checkpoints from
+    /// the directory listing and every other entry through a per-file open. The
+    /// fixture holds a published checkpoint, an in-flight temporary, an
+    /// unrecognised name and three near misses of the digest rule, all with
+    /// distinct sizes, so a mis-classified or mis-sized entry changes the total.
+    #[test]
+    fn checkpoint_quota_sizes_only_exact_digest_names_from_the_listing() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = SessionJournal::open(dir.path().join("session.journal"), "session").unwrap();
+        let contents = b"published checkpoint";
+        let digest = sha256_hex(contents);
+        journal.store_effect_checkpoint(&digest, contents).unwrap();
+        let directory = journal
+            .effect_checkpoint_path(&digest)
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+
+        let temporary = format!(".{digest}.4242.in-flight.tmp");
+        std::fs::write(directory.join(&temporary), vec![0_u8; 777]).unwrap();
+        let unknown = "not-a-checkpoint".to_string();
+        std::fs::write(directory.join(&unknown), vec![0_u8; 4096]).unwrap();
+        // Case variants are exercised by name only in the classifier test below:
+        // on a case-insensitive filesystem an uppercase copy would overwrite the
+        // published file itself.
+        let near_misses = [
+            format!("{digest}.tmp"),
+            format!("x{digest}"),
+            digest[..63].to_string(),
+        ];
+        for (index, name) in near_misses.iter().enumerate() {
+            std::fs::write(directory.join(name), vec![0_u8; 10 + index]).unwrap();
+        }
+
+        let _ = checkpoint_sizing_probe::take_opened();
+        let total = checkpoint_directory_bytes(&directory).unwrap();
+        let mut opened: Vec<String> = checkpoint_sizing_probe::take_opened()
+            .into_iter()
+            .map(|name| name.to_string_lossy().into_owned())
+            .collect();
+        opened.sort();
+        let mut expected_opened = vec![temporary, unknown];
+        expected_opened.extend(near_misses.iter().cloned());
+        expected_opened.sort();
+        assert_eq!(
+            opened, expected_opened,
+            "only the exact-digest published name may skip the per-file open"
+        );
+
+        // The implementation this replaced opened every entry.
+        let mut reference = 0_u64;
+        for entry in std::fs::read_dir(&directory).unwrap() {
+            reference += std::fs::symlink_metadata(entry.unwrap().path())
+                .unwrap()
+                .len();
+        }
+        assert_eq!(total, reference);
+        assert_eq!(total, contents.len() as u64 + 777 + 4096 + 10 + 11 + 12);
+    }
+
+    #[test]
+    fn published_checkpoint_names_are_exact_lowercase_digests_only() {
+        let digest = sha256_hex(b"any contents");
+        assert!(is_published_checkpoint_name(std::ffi::OsStr::new(&digest)));
+        for name in [
+            digest.to_uppercase(),
+            format!("{digest}.tmp"),
+            format!(".{digest}.1.tmp"),
+            format!("x{digest}"),
+            format!("{digest}0"),
+            digest[..63].to_string(),
+            String::new(),
+        ] {
+            assert!(
+                !is_published_checkpoint_name(std::ffi::OsStr::new(&name)),
+                "{name:?} must not be classified as a published checkpoint"
+            );
+        }
     }
 
     #[test]
