@@ -10481,10 +10481,16 @@ impl AgentEngine {
         match self.recovery_request_protection.preflight(&self.config) {
             Ok(()) => {}
             Err(
-                crate::recovery_confidential::RecoveryConfidentialError::NoSecureBackendAvailable,
+                crate::recovery_confidential::RecoveryConfidentialError::NoSecureBackendAvailable {
+                    diagnostic,
+                },
             ) => {
+                // wayland#1302 c3: the notice is the surface a normal turn puts
+                // in front of a user, so the store's own report has to travel
+                // on it. Everything else here is unchanged.
                 self.announce_replay_protection_unavailable_for_this_turn(
                     ReplayProtectionLoss::NoSecureStore,
+                    Some(diagnostic),
                 );
             }
             Err(crate::recovery_confidential::RecoveryConfidentialError::KeyStoreTimedOut {
@@ -10506,7 +10512,9 @@ impl AgentEngine {
                         loss.refusal_remedy(),
                     )));
                 }
-                self.announce_replay_protection_unavailable_for_this_turn(loss);
+                // No store report: the wait expired, so nothing was received
+                // from any backend and nothing may be implied about one.
+                self.announce_replay_protection_unavailable_for_this_turn(loss, None);
             }
             Err(error) => return Err(AgentError::SessionAuthority(error.to_string())),
         }
@@ -13794,7 +13802,11 @@ impl AgentEngine {
     /// host still gets it every turn (asserted by `f14_sigkill_recovery`); a
     /// human gets it once, because they were already told at config
     /// resolution and the condition cannot change mid-process.
-    fn announce_replay_protection_unavailable_for_this_turn(&self, cause: ReplayProtectionLoss) {
+    fn announce_replay_protection_unavailable_for_this_turn(
+        &self,
+        cause: ReplayProtectionLoss,
+        store_report: Option<wcore_config::confidential_blob::ConfidentialStoreDiagnostic>,
+    ) {
         tracing::warn!(
             target: "wcore_agent::session",
             session = %self
@@ -13806,15 +13818,24 @@ impl AgentEngine {
             "this turn cannot be replayed if it is interrupted: the exact provider request is \
              not sealed. The turn IS journaled"
         );
-        self.output.emit_durability_degraded(&format!(
-            "crash replay protection is OFF for this run: {}, so the exact provider \
+        self.output.emit_durability_degraded(
+            &format!(
+                "crash replay protection is OFF for this run: {}, so the exact provider \
              request cannot be sealed. This turn IS being recorded — the journal keeps its \
              provider, tool, approval and delivery boundaries — but if it is interrupted \
              mid-dispatch it will not resume itself; you will be asked to resume, \
              reconcile or cancel it. {}",
-            cause.condition(),
-            cause.remedy(),
-        ));
+                cause.condition(),
+                cause.remedy(),
+            ) + &match store_report {
+                // wayland#1302 c3. Bounded and non-secret by construction: the
+                // diagnostic is drawn from two fixed vocabularies in
+                // `wcore_config::confidential_blob` and never from a backend
+                // message.
+                Some(report) => format!(" What the store itself reported: {report}."),
+                None => String::new(),
+            },
+        );
     }
 
     /// Legacy loop body. `journal_turn_id` is present only for an engine that

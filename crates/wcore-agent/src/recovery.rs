@@ -713,7 +713,7 @@ pub(crate) fn admit_session_resume(
 /// three things it must say cannot drift apart under editing: WHICH session,
 /// WHY, and — the part a refusal usually forgets — what still works. A refusal
 /// that reads like an outage gets escalated as one.
-fn locked_session_refusal(
+pub(crate) fn locked_session_refusal(
     session_id: &str,
     cause: &crate::recovery_confidential::RecoveryConfidentialError,
 ) -> String {
@@ -2340,7 +2340,14 @@ mod tests {
              lift this refusal: {plaintext}"
         );
 
-        let unavailable = locked_session_refusal("session-a", &Cause::NoSecureBackendAvailable);
+        let unavailable = locked_session_refusal(
+            "session-a",
+            &Cause::SecureStoreUnreadable {
+                diagnostic: wcore_config::confidential_blob::ConfidentialStoreDiagnostic::local(
+                    wcore_config::confidential_blob::ConfidentialStoreStage::Read,
+                ),
+            },
+        );
         assert!(
             unavailable.contains("WAYLAND_VAULT_PASSPHRASE_FD"),
             "the unlock remedy must survive for the causes an unlock can change, or the \

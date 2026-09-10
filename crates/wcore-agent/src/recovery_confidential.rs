@@ -9,11 +9,12 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use wcore_config::confidential_blob::{
     ConfidentialBlobAad, ConfidentialBlobKey, ConfidentialKeyStoreError,
+    ConfidentialKeyStoreErrorKind, ConfidentialStoreDiagnostic, ConfidentialStoreStage,
     load_confidential_blob_key, load_or_create_confidential_blob_key, open_confidential_blob,
     seal_confidential_blob,
 };
 use wcore_config::config::Config;
-use wcore_config::credentials::CredentialsBackend;
+use wcore_config::credentials::{CredentialsBackend, CredentialsError};
 
 /// The single source of this identifier is `wcore_config`, so the profile-delete
 /// purge (`purge_profile_confidential_keys`) deletes exactly what this writes.
@@ -125,21 +126,44 @@ pub(crate) enum RecoveryConfidentialError {
          [session] enabled = false"
     )]
     PlaintextBackendRejected,
+    /// No confidential backend could be selected or opened.
+    ///
+    /// Carries what the SELECTION reported, because "unavailable" was the
+    /// whole of what this said and a selection can fail for reasons an
+    /// operator can act on differently (wayland#1302 c3).
     #[error(
         "secure recovery storage is unavailable: no OS keyring was usable and no encrypted \
          credentials vault is unlocked. On a headless host set WAYLAND_VAULT_PASSPHRASE_FD (a \
          passphrase file descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE to unlock the \
-         encrypted vault, or turn durable sessions off with [session] enabled = false"
+         encrypted vault, or turn durable sessions off with [session] enabled = false. What the \
+         store itself reported: {diagnostic}"
     )]
-    NoSecureBackendAvailable,
+    NoSecureBackendAvailable {
+        diagnostic: ConfidentialStoreDiagnostic,
+    },
+    /// The store was reached and the key could not be obtained from it.
+    ///
+    /// Carries the step and the class of what the backend said. Before
+    /// wayland#1302 c3 this was payload-free, so a locked keyring, a corrupt
+    /// vault file and an undecodable stored value were one sentence.
     #[error(
         "secure recovery storage could not be read: the configured store rejected this profile's \
          recovery key. An encrypted vault opened with the wrong unlock passphrase reads this way \
-         — re-check the passphrase for this profile"
+         — re-check the passphrase for this profile. What the store itself reported: {diagnostic}"
     )]
-    SecureStoreUnreadable,
+    SecureStoreUnreadable {
+        diagnostic: ConfidentialStoreDiagnostic,
+    },
+    /// The store answered, and holds no key for this profile.
+    ///
+    /// Deliberately payload-free: it has exactly one producer — a `get` that
+    /// returned `Ok(None)` at the read step — so its store report is a
+    /// constant, and stating it in the sentence is both true by construction
+    /// and the HEALTHY-store half of wayland#1302 c3.
     #[error(
-        "this profile has no stored recovery key, so a sealed request cannot be opened. The key \
+        "this profile has no stored recovery key, so a sealed request cannot be opened. The \
+         configured credential store was asked and answered without reporting any error — it \
+         holds no key for this profile, so nothing here shows the store to be at fault. The key \
          is created when a new turn starts on a confidential-capable backend"
     )]
     MissingRecoveryKey,
@@ -171,8 +195,13 @@ pub(crate) enum RecoveryConfidentialError {
         /// Which store this timeout is about, from the operator's own config.
         backend: &'static str,
     },
-    #[error("secure recovery storage is unavailable")]
-    Unavailable,
+    /// Everything else. Carries its store report so a refused write — the
+    /// shape of a keyring that reads and will not write — is no longer
+    /// indistinguishable from a load this process could not even run.
+    #[error("secure recovery storage is unavailable. What the store itself reported: {diagnostic}")]
+    Unavailable {
+        diagnostic: ConfidentialStoreDiagnostic,
+    },
     #[error("recovery confidential request is invalid")]
     Invalid,
 }
@@ -565,10 +594,7 @@ impl RecoveryRequestProtector {
         budget: Duration,
         operation: impl FnOnce(&ConfidentialBlobKey) -> Result<T, RecoveryConfidentialError>,
     ) -> Result<T, RecoveryConfidentialError> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| RecoveryConfidentialError::Unavailable)?;
+        let mut state = self.state.lock().map_err(|_| key_load_machinery_failed())?;
         if state.key.is_none() {
             // Decide the config-determined cause before touching any store, so
             // a plaintext backend is never reported as an environment problem.
@@ -577,12 +603,7 @@ impl RecoveryRequestProtector {
             let key = self.acquire_key(&mut state, config, create, budget, backend)?;
             state.key = Some(key);
         }
-        operation(
-            state
-                .key
-                .as_ref()
-                .ok_or(RecoveryConfidentialError::Unavailable)?,
-        )
+        operation(state.key.as_ref().ok_or_else(key_load_machinery_failed)?)
     }
 
     /// Obtain the key from the configured store, or give up inside
@@ -658,7 +679,7 @@ impl RecoveryRequestProtector {
                 // normal end of a load nobody waited for.
                 let _ = tx.send(load());
             })
-            .map_err(|_| RecoveryConfidentialError::Unavailable)?;
+            .map_err(|_| key_load_machinery_failed())?;
         match rx.recv_timeout(budget) {
             Ok(result) => result,
             Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -678,9 +699,7 @@ impl RecoveryRequestProtector {
             }
             // The loader thread died without sending. Nothing is known about
             // the key, but nothing is outstanding either.
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                Err(RecoveryConfidentialError::Unavailable)
-            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(key_load_machinery_failed()),
         }
     }
 
@@ -730,7 +749,7 @@ fn load_key_from_configured_store(
 ) -> Result<ConfidentialBlobKey, RecoveryConfidentialError> {
     let store = config
         .open_confidential_credentials_store()
-        .map_err(|_| RecoveryConfidentialError::NoSecureBackendAvailable)?;
+        .map_err(|error| store_selection_failure(&error))?;
     let loaded = if create {
         load_or_create_confidential_blob_key(&store, KEY_REF)
     } else {
@@ -738,15 +757,58 @@ fn load_key_from_configured_store(
     };
     // The store opened, so the backend exists; a failure past this point is
     // about the key itself, not about availability.
-    loaded.map_err(|error| match error {
-        ConfidentialKeyStoreError::ReadFailed | ConfidentialKeyStoreError::MalformedStoredKey => {
-            RecoveryConfidentialError::SecureStoreUnreadable
+    loaded.map_err(key_load_failure)
+}
+
+/// A confidential backend could not be selected or opened.
+///
+/// Pure, and separated from its one caller so the classification can be graded
+/// without a real store: the caller needs a `Config` whose keyring exists.
+/// wayland#1302 c3 — the backend error was discarded here entirely, so every
+/// selection failure reached the operator as one sentence.
+fn store_selection_failure(error: &CredentialsError) -> RecoveryConfidentialError {
+    RecoveryConfidentialError::NoSecureBackendAvailable {
+        diagnostic: ConfidentialStoreDiagnostic::from_backend_error(
+            ConfidentialStoreStage::Select,
+            error,
+        ),
+    }
+}
+
+/// The store opened and the key did not come back.
+///
+/// Carries the store's own report through unchanged. The KIND still decides
+/// which sentence and which remedy the operator gets — that mapping is
+/// unaltered — and the diagnostic decides what the sentence can say about the
+/// store, which before wayland#1302 c3 was nothing.
+fn key_load_failure(error: ConfidentialKeyStoreError) -> RecoveryConfidentialError {
+    let diagnostic = error.diagnostic();
+    match error.kind() {
+        ConfidentialKeyStoreErrorKind::ReadFailed
+        | ConfidentialKeyStoreErrorKind::MalformedStoredKey => {
+            RecoveryConfidentialError::SecureStoreUnreadable { diagnostic }
         }
-        ConfidentialKeyStoreError::MissingStoredKey => {
+        ConfidentialKeyStoreErrorKind::MissingStoredKey => {
             RecoveryConfidentialError::MissingRecoveryKey
         }
-        _ => RecoveryConfidentialError::Unavailable,
-    })
+        ConfidentialKeyStoreErrorKind::InvalidReference
+        | ConfidentialKeyStoreErrorKind::WriteFailed
+        | ConfidentialKeyStoreErrorKind::LockFailed => {
+            RecoveryConfidentialError::Unavailable { diagnostic }
+        }
+    }
+}
+
+/// The load itself could not be run or completed — a poisoned lock, a thread
+/// that could not be spawned, a loader that died without answering.
+///
+/// No backend was reached, so the report says exactly that rather than
+/// implying one answered. This is the same discipline
+/// [`KeyStoreReach::NeverAsked`] applies to the timeout.
+fn key_load_machinery_failed() -> RecoveryConfidentialError {
+    RecoveryConfidentialError::Unavailable {
+        diagnostic: ConfidentialStoreDiagnostic::local(ConfidentialStoreStage::Load),
+    }
 }
 
 fn seal_with_key(
@@ -1203,6 +1265,195 @@ mod tests {
         assert!(!rendered.contains(binding_secret));
     }
 
+    /// Stands in for whatever a real backend puts in its error text — a
+    /// passphrase, a token, a decoded secret. Nothing on this path may carry
+    /// it outward.
+    const SENSITIVE_SENTINEL: &str = "SENTINEL-must-not-leak-9f3a2b";
+
+    /// A backend error carrying the sentinel, in the variant only the keyring
+    /// backend constructs.
+    fn keyring_error() -> CredentialsError {
+        CredentialsError::Keyring(SENSITIVE_SENTINEL.to_owned())
+    }
+
+    /// Backend SELECTION refused, as `select_confidential_backend` refuses.
+    fn selection_failure() -> RecoveryConfidentialError {
+        store_selection_failure(&CredentialsError::BackendUnavailable(
+            SENSITIVE_SENTINEL.to_owned(),
+        ))
+    }
+
+    /// The store was reached and the read failed — a locked keyring.
+    fn read_failure() -> RecoveryConfidentialError {
+        key_load_failure(ConfidentialKeyStoreError::new(
+            ConfidentialKeyStoreErrorKind::ReadFailed,
+            ConfidentialStoreDiagnostic::from_backend_error(
+                ConfidentialStoreStage::Read,
+                &keyring_error(),
+            ),
+        ))
+    }
+
+    /// The store answered and holds nothing — a HEALTHY store.
+    fn missing_key() -> RecoveryConfidentialError {
+        key_load_failure(ConfidentialKeyStoreError::new(
+            ConfidentialKeyStoreErrorKind::MissingStoredKey,
+            ConfidentialStoreDiagnostic::local(ConfidentialStoreStage::Read),
+        ))
+    }
+
+    /// wayland#1302 c3, in the words of the criterion: a healthy store and a
+    /// locked one must not be indistinguishable in the output.
+    ///
+    /// Every one of these rendered from a payload-free variant before this
+    /// change, so the two read-side arms were byte-identical and the
+    /// selection arm said only "unavailable".
+    #[test]
+    fn what_the_store_reported_reaches_the_message() {
+        let selection = selection_failure().to_string();
+        let locked = read_failure().to_string();
+        let healthy = missing_key().to_string();
+
+        assert!(
+            locked.contains("read/keyring-error") && locked.contains("the OS keyring"),
+            "a locked store must carry the step, the class and the rung that answered: {locked}"
+        );
+        assert!(
+            healthy.contains("was asked and answered without reporting any error"),
+            "a healthy store must be reported as having answered: {healthy}"
+        );
+        assert!(
+            selection.contains("select/backend-unavailable"),
+            "a selection refusal must carry the step and class it failed at: {selection}"
+        );
+        assert_ne!(locked, healthy);
+        assert_ne!(locked, selection);
+        assert_ne!(healthy, selection);
+    }
+
+    /// THE SECURITY CONTROL on c3.
+    ///
+    /// The suppression this path shipped with exists to keep backend text out
+    /// of error chains, and c3 relaxes what is CARRIED, not what is disclosed.
+    /// A sentinel embedded in the backend's own error must not reach any
+    /// rendering, through `Display` or through `Debug`, at either layer.
+    ///
+    /// Both halves are asserted together deliberately: an implementation that
+    /// leaks nothing because it carries nothing passes the first half and
+    /// fails the second, and that is exactly the pre-fix state.
+    #[test]
+    fn a_sensitive_sentinel_in_a_backend_error_never_reaches_the_operator() {
+        for error in [
+            selection_failure(),
+            read_failure(),
+            missing_key(),
+            key_load_failure(ConfidentialKeyStoreError::new(
+                ConfidentialKeyStoreErrorKind::WriteFailed,
+                ConfidentialStoreDiagnostic::from_backend_error(
+                    ConfidentialStoreStage::Create,
+                    &keyring_error(),
+                ),
+            )),
+            key_load_machinery_failed(),
+        ] {
+            let rendered = error.to_string();
+            assert!(
+                !rendered.contains(SENSITIVE_SENTINEL),
+                "backend error text reached Display: {rendered}"
+            );
+            assert!(
+                !format!("{error:?}").contains(SENSITIVE_SENTINEL),
+                "backend error text reached Debug: {error:?}"
+            );
+            // The same rendering an operator gets from a refused resume.
+            let refusal = crate::recovery::locked_session_refusal("session-sentinel", &error);
+            assert!(
+                !refusal.contains(SENSITIVE_SENTINEL),
+                "backend error text reached the resume refusal: {refusal}"
+            );
+        }
+
+        // Instrument control: the scan must be able to FIND the sentinel, or
+        // every assertion above passes vacuously.
+        assert!(
+            format!("{}", keyring_error()).contains(SENSITIVE_SENTINEL),
+            "the sentinel is not in the backend error under test; the leak scan would pass \
+             vacuously"
+        );
+    }
+
+    /// The store report must reach the surface an operator actually reads, not
+    /// only `Display`. `locked_session_refusal` interpolates the cause, so a
+    /// report that stops at the enum would still be invisible on a refused
+    /// resume.
+    #[test]
+    fn the_store_report_reaches_the_resume_refusal() {
+        let locked = crate::recovery::locked_session_refusal("session-a", &read_failure());
+        let healthy = crate::recovery::locked_session_refusal("session-a", &missing_key());
+
+        assert!(
+            locked.contains("read/keyring-error"),
+            "the safe error code must reach the refusal: {locked}"
+        );
+        assert!(
+            locked.contains("the OS keyring"),
+            "the rung that answered must reach the refusal: {locked}"
+        );
+        assert_ne!(
+            locked, healthy,
+            "a locked store and a healthy one must not produce one refusal string"
+        );
+    }
+
+    /// A rung is named only where the error identifies one.
+    ///
+    /// `CredentialsError::Keyring` is constructed by the keyring backend and
+    /// nothing else. `BackendUnavailable` is produced by selection and by more
+    /// than one rung, so attributing it to a rung would be the same class of
+    /// fabrication wayland#1302 is about.
+    #[test]
+    fn an_ambiguous_backend_error_is_not_attributed_to_a_rung() {
+        let ambiguous = key_load_failure(ConfidentialKeyStoreError::new(
+            ConfidentialKeyStoreErrorKind::ReadFailed,
+            ConfidentialStoreDiagnostic::from_backend_error(
+                ConfidentialStoreStage::Read,
+                &CredentialsError::BackendUnavailable(SENSITIVE_SENTINEL.to_owned()),
+            ),
+        ))
+        .to_string();
+
+        assert!(
+            !ambiguous.contains("the OS keyring"),
+            "an error several rungs produce must not be attributed to one: {ambiguous}"
+        );
+        assert!(
+            ambiguous.contains("read/backend-unavailable"),
+            "the class must still reach the message: {ambiguous}"
+        );
+    }
+
+    /// c1 is not disturbed: a timeout still reports REACH, and neither arm
+    /// invents a store error it never received.
+    #[test]
+    fn a_timeout_still_reports_reach_and_invents_no_store_error() {
+        for (reach, expected) in [
+            (KeyStoreReach::Asked, "did not answer"),
+            (KeyStoreReach::NeverAsked, "reported nothing"),
+        ] {
+            let rendered = RecoveryConfidentialError::KeyStoreTimedOut {
+                waited: KEY_STORE_ACQUIRE_BUDGET,
+                reach,
+                backend: "the OS keyring",
+            }
+            .to_string();
+            assert!(rendered.contains(expected), "{rendered}");
+            assert!(
+                !rendered.contains("store-report"),
+                "a wait that expired received no store report and must not carry one: {rendered}"
+            );
+        }
+    }
+
     fn config_with_backend(backend: CredentialsBackend) -> Config {
         let mut config = Config::default();
         config.storage.credentials = CredentialsStorageConfig {
@@ -1263,8 +1514,8 @@ mod tests {
     fn every_backend_value_the_messages_advertise_actually_parses() {
         let messages = [
             RecoveryConfidentialError::PlaintextBackendRejected.to_string(),
-            RecoveryConfidentialError::NoSecureBackendAvailable.to_string(),
-            RecoveryConfidentialError::SecureStoreUnreadable.to_string(),
+            selection_failure().to_string(),
+            read_failure().to_string(),
             RecoveryConfidentialError::MissingRecoveryKey.to_string(),
         ];
 
@@ -1310,7 +1561,7 @@ mod tests {
     /// makes a default install complete a turn on a host with no OS keyring.
     #[test]
     fn the_unavailable_message_names_a_remedy_an_operator_can_actually_perform() {
-        let message = RecoveryConfidentialError::NoSecureBackendAvailable.to_string();
+        let message = selection_failure().to_string();
 
         assert!(
             message.contains("WAYLAND_VAULT_PASSPHRASE"),
@@ -1409,8 +1660,7 @@ mod tests {
         // Instrument control. An empty extraction below has to mean "no dead
         // advice", never "the scanner stopped working", so prove the scanner
         // finds the variables that ARE named elsewhere in this same enum.
-        let control =
-            env_vars_named_in(&RecoveryConfidentialError::NoSecureBackendAvailable.to_string());
+        let control = env_vars_named_in(&selection_failure().to_string());
         for expected in ["WAYLAND_VAULT_PASSPHRASE_FD", "WAYLAND_VAULT_PASSPHRASE"] {
             assert!(
                 control.iter().any(|found| found == expected),
@@ -1448,8 +1698,8 @@ mod tests {
     #[test]
     fn distinct_confidential_failures_do_not_share_one_message() {
         let plaintext = RecoveryConfidentialError::PlaintextBackendRejected.to_string();
-        let unavailable = RecoveryConfidentialError::NoSecureBackendAvailable.to_string();
-        let unreadable = RecoveryConfidentialError::SecureStoreUnreadable.to_string();
+        let unavailable = selection_failure().to_string();
+        let unreadable = read_failure().to_string();
 
         assert_ne!(plaintext, unavailable);
         assert_ne!(plaintext, unreadable);
@@ -1488,10 +1738,10 @@ mod tests {
     fn cause_specific_messages_still_render_no_secret_material() {
         for error in [
             RecoveryConfidentialError::PlaintextBackendRejected,
-            RecoveryConfidentialError::NoSecureBackendAvailable,
-            RecoveryConfidentialError::SecureStoreUnreadable,
+            selection_failure(),
+            read_failure(),
             RecoveryConfidentialError::MissingRecoveryKey,
-            RecoveryConfidentialError::Unavailable,
+            key_load_machinery_failed(),
             RecoveryConfidentialError::Invalid,
         ] {
             let rendered = error.to_string();
