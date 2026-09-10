@@ -9,20 +9,18 @@ Owners come from each ledger's `owner:` on its UNMET criteria — the
 owner is read, not assigned, so a row cannot claim an owner the
 ledger does not.
 
-Blocking issues: 13   Outstanding criteria: 17
+Blocking issues: 11   Outstanding criteria: 15
 
 | Issue | Owner | Outstanding | Title |
 |---|---|---:|---|
-| FerroxLabs/wayland#1272 | core | 1 | 0.13.12 release board: all 32 blocking issues mapped to an owner (17 in flight, 15 unassigned) |
-| FerroxLabs/wayland#1284 | core | 1 | Flaky on macOS only: the_live_backend_timeout_bounds compares two wall-clock samples taken under different load |
 | FerroxLabs/wayland#1285 | core | 1 | Two more macOS-only retry flakes: harness_tui_flow resume_repaints and wcore-mcp f016_real_spawn |
 | FerroxLabs/wayland#1286 | core | 1 | macOS retry-flake cluster: redundant_walk_root_is_not_walked_twice is the 5th member; discovery is one per CI cycle |
-| FerroxLabs/wayland#1287 | core | 1 | macOS process-tree containment intermittently refuses to attach - root NOT in its own group at recheck (fails closed) |
 | FerroxLabs/wayland#1289 | core | 1 | macOS keyring does not answer within the 5s credential-store timeout; f14_sigkill_recovery hard-fails 3/3 |
 | FerroxLabs/wayland#1300 | core | 3 | Windows-only: crashed-holder recovery in the chunked credential write lock is bistable (48x), and it is what times out interrupted_rotations_do_not_leak_entries_without_bound |
 | FerroxLabs/wayland#1301 | core | 2 | First Windows retry-flake cluster: a wall-clock ratio guard and a dispatch-budget test at 94% of its kill line (CI (Array)) |
 | FerroxLabs/wayland#1303 | core | 1 | Windows: a racing chunked credential write fails outright with ACCESS_DENIED (os error 5), and the caller loses a single-use refresh token |
-| FerroxLabs/wayland#1349 | core | 2 | W16 mixed soak fails RSS acceptance twice (41.5x, then 1.83x) with no carrier |
+| FerroxLabs/wayland#1349 | core | 1 | W16 mixed soak fails RSS acceptance twice (41.5x, then 1.83x) with no carrier |
+| FerroxLabs/wayland#1351 | core | 2 | Two sessions racing a memory migration both degrade to NullMemory, and the user is never told |
 | FerroxLabs/wayland-core#401 | core | 1 | an_unknown_window_sizes_the_skill_listing precondition cannot pass in a clean container, so every integ/f13 CI run is red |
 | FerroxLabs/wayland-core#404 | core | 1 | A ci-linux cancellation at the 120-minute budget destroys the JUnit evidence the run already produced |
 | FerroxLabs/wayland-core#449 | core | 1 | [mutants-nightly] wcore-cron — surviving mutants (2026-09-04) |
