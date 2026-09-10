@@ -231,9 +231,9 @@ fn reminder_containing<'a>(system: &'a str, mark: &str) -> Option<&'a str> {
     Some(&system[head..end])
 }
 
-/// The whole system prefix, with the ONE field that legitimately differs
-/// between two boots of this fixture — the working directory, a fresh tempdir
-/// per session — replaced by a fixed token.
+/// The whole system prefix, with the one thing that legitimately differs
+/// between two boots of this fixture — the per-session tempdir — replaced by a
+/// fixed token everywhere it appears.
 ///
 /// ARM B COMPARES THIS, NOT AN EXTRACTED BLOCK, AND THE REASON IS A MEASURED
 /// ONE. The first cut of that arm extracted the `<system-reminder>` span
@@ -243,17 +243,26 @@ fn reminder_containing<'a>(system: &'a str, mark: &str) -> Option<&'a str> {
 /// GREEN on a tree whose prefix demonstrably churned. A prefix-cache oracle
 /// that reads a sub-span can only see churn it already expected. What an
 /// implicit cache keys on is the whole prefix, so that is what is compared.
-fn prefix_modulo_cwd(system: &str) -> String {
-    let mut out = String::with_capacity(system.len());
-    for line in system.lines() {
-        if line.starts_with("Working directory: ") {
-            out.push_str("Working directory: <CWD>");
-        } else {
-            out.push_str(line);
-        }
-        out.push('\n');
-    }
-    out
+///
+/// The tempdir's random component is substituted rather than only the
+/// `Working directory:` line, because it reaches the prefix twice in two
+/// different spellings: as the cwd, and slugged (`/` and `.` rewritten to `-`)
+/// inside the per-project memory path. That second occurrence is itself worth
+/// noting and is NOT this issue's to fix: a cached prefix carrying a
+/// project-derived path can never be shared between projects.
+fn prefix_modulo_tempdir(system: &str) -> String {
+    // "Working directory: /tmp/.tmpAbCdEf" -> "tmpAbCdEf"
+    let tag = system
+        .lines()
+        .find_map(|l| l.strip_prefix("Working directory: "))
+        .and_then(|cwd| cwd.trim().rsplit('/').next())
+        .map(|leaf| leaf.trim_start_matches('.').to_string())
+        .expect("the intro always states the working directory");
+    assert!(
+        tag.len() >= 6,
+        "the tempdir tag {tag:?} is too short to substitute safely"
+    );
+    system.replace(&tag, "<TMPDIR>")
 }
 
 /// Every `(body, is_error)` tool result carried by a request's message stream.
@@ -652,10 +661,10 @@ async fn the_skills_section_is_identical_across_two_different_catalogues() {
     );
 
     // THE ASSERTION: the WHOLE prefix, not the extracted block. See
-    // `prefix_modulo_cwd` for why — an earlier cut compared the block alone and
+    // `prefix_modulo_tempdir` for why — an earlier cut compared the block alone and
     // a real nonce mutant slipped past it by one line.
-    let pa = prefix_modulo_cwd(&small[0].system);
-    let pb = prefix_modulo_cwd(&large[0].system);
+    let pa = prefix_modulo_tempdir(&small[0].system);
+    let pb = prefix_modulo_tempdir(&large[0].system);
     if pa != pb {
         let at = pa
             .char_indices()
