@@ -9,11 +9,10 @@ Owners come from each ledger's `owner:` on its UNMET criteria — the
 owner is read, not assigned, so a row cannot claim an owner the
 ledger does not.
 
-Blocking issues: 16   Outstanding criteria: 22
+Blocking issues: 14   Outstanding criteria: 19
 
 | Issue | Owner | Outstanding | Title |
 |---|---|---:|---|
-| FerroxLabs/wayland#1116 | core | 1 | Desktop: no abandon verb on the host wire leaves a crash-interrupted session wedged in-app |
 | FerroxLabs/wayland#1244 | core | 1 | The live /model-switch leg of the spend-audit keying proof needs a PTY-driven TUI run |
 | FerroxLabs/wayland#1272 | core | 2 | 0.13.12 release board: all 32 blocking issues mapped to an owner (17 in flight, 15 unassigned) |
 | FerroxLabs/wayland#1284 | core | 1 | Flaky on macOS only: the_live_backend_timeout_bounds compares two wall-clock samples taken under different load |
@@ -28,4 +27,3 @@ Blocking issues: 16   Outstanding criteria: 22
 | FerroxLabs/wayland-core#401 | core | 1 | an_unknown_window_sizes_the_skill_listing precondition cannot pass in a clean container, so every integ/f13 CI run is red |
 | FerroxLabs/wayland-core#404 | core | 1 | A ci-linux cancellation at the 120-minute budget destroys the JUnit evidence the run already produced |
 | FerroxLabs/wayland-core#449 | core | 1 | [mutants-nightly] wcore-cron — surviving mutants (2026-09-04) |
-| FerroxLabs/wayland-core#451 | core | 2 | Four of five mutation legs cannot run their unmutated test suite inside the per-crate timeout, so they test zero mutants |
