@@ -36,6 +36,26 @@
 //! walk, so the token assertion reds there too. NOT RE-RUN at v0.13.4 in this
 //! pass — that re-verification is owed, and is recorded as owed rather than
 //! claimed.
+//! INSTRUMENT CHANGED, SUBJECT UNCHANGED (FerroxLabs/wayland-core#403 c2). The
+//! three assertions in this file used to be single-sample WALL-CLOCK RATIOS
+//! against the measured walk — the same shape as the three `bash::tests`
+//! siblings c1 covers, and the same reason: on a shared 96-core host one
+//! scheduler stall in the numerator decides the verdict. They are now stated as
+//! EVENTS:
+//!
+//! * the two cancellation assertions read `secret_deny_walk_count()`, the
+//!   injected counter #1111 acceptance 1 already asks the memo to be graded
+//!   with, and each is paired with an uncancelled control on the same policy
+//!   through the same call path so a dead counter cannot pass;
+//! * the timeout assertion keeps the message that NAMES the manifest build,
+//!   which has exactly one producer in `bash.rs` and can only be reached with
+//!   the build still outstanding.
+//!
+//! The v0.13.4 numbers above are preserved because they are the provenance of
+//! the defect, not the current instrument. Restated in the new instrument, the
+//! v0.13.4 shape recomputes the deny set inside a cancelled call (count 1) and
+//! v0.13.5 does not (count 0) — verified by a scratch reproduction of that
+//! shape on the sibling unit tests, recorded on core#403 c1.
 
 use serde_json::json;
 use std::sync::Arc;
@@ -181,6 +201,29 @@ async fn warm_process_init() {
 /// output; if it is present the child ran. Deliberately not a word that occurs
 /// anywhere in the timeout message — "hi" would have matched `while`.
 const CHILD_TOKEN: &str = "MANIFEST_BOUND_CHILD_RAN_a1b2";
+/// The KNOWN-POSITIVE CONTROL for the `secret_deny_walk_count() == 0`
+/// assertions in this file (core#403 c2).
+///
+/// A counter that nothing increments reads zero exactly like a walk that was
+/// correctly escaped, so each cancellation assertion is paired with the SAME
+/// policy driven through the SAME live-backend call path with the token NOT
+/// cancelled. It is the wiring that is controlled: the counter is moved by
+/// `BashTool`'s own manifest build, not by a direct call on the policy.
+async fn assert_uncancelled_exec_walks(policy: &Arc<WorkspacePolicy>) {
+    let before = policy.secret_deny_walk_count();
+    let ctx = ctx_for(Arc::clone(policy));
+    let result = BashTool
+        .execute_with_ctx(json!({"command": "echo hi"}), &ctx)
+        .await;
+    let after = policy.secret_deny_walk_count();
+    assert!(
+        after > before,
+        "instrument control: an uncancelled exec through the live backend did \
+         not recompute the deny set ({before} -> {after}), so a zero count on \
+         the cancelled call proves nothing; got: {}",
+        result.content
+    );
+}
 
 /// #1111 bullet 2 — "Esc cancels during manifest construction" — through the
 /// real platform backend.
@@ -194,19 +237,18 @@ async fn esc_during_the_live_backend_manifest_build_does_not_wait_for_the_walk()
     let root = std::fs::canonicalize(dir.path()).unwrap();
     let (policy, walk) = workspace_whose_walk_costs_at_least(&root, TARGET);
 
-    let ctx = ctx_for(policy);
+    let ctx = ctx_for(Arc::clone(&policy));
     // Cancelled BEFORE the call, so a correct implementation has nothing to do
     // but return; any time spent is time the user could not interrupt.
     ctx.cancel.cancel();
 
-    let started = Instant::now();
     let result = BashTool
         .execute_with_ctx(json!({"command": "echo hi"}), &ctx)
         .await;
-    let elapsed = started.elapsed();
 
     println!(
-        "esc: elapsed={elapsed:?} walk={walk:?} msg={:?}",
+        "esc: walks={} walk={walk:?} msg={:?}",
+        policy.secret_deny_walk_count(),
         result.content
     );
     assert!(
@@ -214,12 +256,17 @@ async fn esc_during_the_live_backend_manifest_build_does_not_wait_for_the_walk()
         "a cancelled command must say so; got: {}",
         result.content
     );
-    assert!(
-        elapsed * 3 < walk,
-        "Esc waited {elapsed:?} for a walk measured at {walk:?} on the live \
-         {} backend — the manifest build is outside the cancellation scope",
+    // core#403 c2: the injected counter, not a wall-clock ratio. See the
+    // module header for why this file changed instrument without changing
+    // subject.
+    assert_eq!(
+        policy.secret_deny_walk_count(),
+        0,
+        "Esc paid the deny walk (measured at {walk:?}) on the live {} backend \
+         — the manifest build is inside the cancellation scope",
         ToolContext::test_default().sandbox.backend_name()
     );
+    assert_uncancelled_exec_walks(&policy).await;
 }
 
 /// #1111 bullet 3 — the timeout bounds the manifest build AND names it — through
@@ -290,6 +337,21 @@ async fn the_live_backend_timeout_bounds_the_manifest_build_and_names_it() {
     // THE BOUND, as an event. `contains("timed out")` alone is satisfied by the
     // byte-identical string the CHILD-timeout path returns, so it would grade
     // nothing here; `manifest` is what pins the return to the build's own arm.
+    // core#403 c2 — THE EVENT, not a duration. This exact string has ONE
+    // producer: the `Err(_)` arm of `timeout_at(deadline, build)` in
+    // `bash.rs::execute_with_ctx`, reached only when the deadline fired while
+    // the manifest build was STILL OUTSTANDING. So it says the timeout cut the
+    // build, which is the whole of acceptance bullet 3, and it says it without
+    // a clock.
+    //
+    // The wall-clock ratio this replaced (`bounded * 3 < walk`, against a
+    // `timer_allowance` probe) added nothing the message does not already
+    // carry: the return from that arm is immediate, there is no path that
+    // produces this string after a completed walk. What it DID add was a
+    // second and a third single-sample measurement on a shared 96-core host.
+    //
+    // `contains("timed out")` alone is satisfied by the byte-identical string
+    // the CHILD-timeout path returns, so it would grade nothing here.
     assert!(
         result.content.contains("timed out") && result.content.contains("manifest"),
         "the caller was not told the workspace secret-scan ate the budget and \
@@ -366,16 +428,16 @@ async fn a_non_walking_posture_on_the_same_tree_is_the_negative_control() {
          still walks the tree and discriminates nothing"
     );
 
-    let ctx = ctx_for(policy);
+    let before = policy.secret_deny_walk_count();
+    let ctx = ctx_for(Arc::clone(&policy));
     ctx.cancel.cancel();
-    let started = Instant::now();
     let result = BashTool
         .execute_with_ctx(json!({"command": "echo hi"}), &ctx)
         .await;
-    let elapsed = started.elapsed();
 
     println!(
-        "control: elapsed={elapsed:?} contained_walk={walk:?} msg={:?}",
+        "control: walks={} (was {before}) contained_walk={walk:?} msg={:?}",
+        policy.secret_deny_walk_count(),
         result.content
     );
     assert!(
@@ -383,10 +445,11 @@ async fn a_non_walking_posture_on_the_same_tree_is_the_negative_control() {
         "a cancelled command must say so; got: {}",
         result.content
     );
-    assert!(
-        elapsed * 3 < walk,
-        "a posture that never walks still took {elapsed:?} against a contained \
-         walk of {walk:?} — the promptness the tests above assert would not be \
-         attributable to the walk"
+    assert_eq!(
+        policy.secret_deny_walk_count(),
+        before,
+        "a cancelled call on a posture that never walks the project tree still \
+         recomputed its deny set against a contained walk of {walk:?} — the \
+         escape the tests above assert would not be attributable to the walk"
     );
 }

@@ -202,20 +202,30 @@ async fn the_caller_budget_bounds_the_unsaved_work_guard() {
     let (tree, cost) = tree_whose_guard_costs_at_least(&root, TARGET);
 
     let ctx = ctx_for(&tree);
-    let started = Instant::now();
     let result = BashTool
         .execute_with_ctx(json!({"command": "rm -rf sub", "timeout": BUDGET_MS}), &ctx)
         .await;
-    let elapsed = started.elapsed();
 
-    println!(
-        "bound: guard cost={cost:?} elapsed={elapsed:?} msg={:?}",
-        result.content
-    );
+    println!("bound: guard cost={cost:?} msg={:?}", result.content);
+    // core#403 c2 — THE EVENT, not a duration. This clause has exactly one
+    // producer: the `Err(_)` arm of `timeout(budget, task)` in
+    // `bash.rs::bounded_unsaved_shell_refusal`, and `budget` there is
+    // `timeout.min(UNSAVED_GUARD_BUDGET_MS)` — the CALLER'S budget, which is
+    // the whole claim. A guard running outside the caller's clock cannot
+    // produce this string: it would run to completion and, on this clean tree,
+    // return `None` and let the command through.
+    //
+    // What this replaced was `elapsed * 2 < cost`, a single wall-clock sample
+    // of the call divided by a single wall-clock sample of the guard — two
+    // measurements on a shared 96-core host to decide a fact the product
+    // states in words.
     assert!(
-        elapsed * 2 < cost,
-        "the guard cost {cost:?} and the call took {elapsed:?} against a {BUDGET_MS}ms \
-         budget — the guard is running outside the caller's clock"
+        result
+            .content
+            .contains(&format!("it was still running after {BUDGET_MS} ms")),
+        "the guard was not cut off by the caller's {BUDGET_MS}ms budget (it \
+         costs {cost:?} when allowed to finish); got: {}",
+        result.content
     );
     assert!(result.is_error, "an expired guard must be an error result");
 }
