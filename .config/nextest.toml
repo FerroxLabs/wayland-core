@@ -834,6 +834,41 @@ retries = 0
 filter = 'test(=bash::tests::the_bash_timeout_bounds_the_secret_deny_walk) + test(=bash::tests::the_streaming_bash_timeout_bounds_the_secret_deny_walk) + test(=matching_assistant_dials_scoped_deferred_server)'
 retries = 0
 
+# ── #1304 c3: a green here must be distinguishable from a vacuous one ───────
+#
+# The two bash timeout tests decide BY MEASUREMENT whether this host can put
+# #1111 acceptance 3 in scope at all, and say so on stderr: `SKIP (#319)` /
+# `SKIP (wayland-core#350)` / `SKIP (#1142)` / `SKIP (#1304)` when the premise
+# could not be established, and `GRADED (#1111 acceptance 3)` when it was. That
+# disclosure is the only difference between a run that graded the criterion and
+# a run that graded nothing -- and with the profile default `success-output =
+# "never"` nextest captures a PASSING test's output and drops it, so on exactly
+# the runs where it matters the disclosure reached nobody. ci.yml runs
+# `--profile ci`, so a run of greens carried no evidence in either direction.
+#
+# Same class as this repository's three recorded `warn!`-under-unset-`RUST_LOG`
+# failures: the information existed and was discarded before any reader.
+#
+# Scoped to these two tests, and `final` rather than `immediate` so the lines
+# land in one block at the end of the run instead of interleaving with the
+# parallel suite. `retries` is deliberately NOT set here -- the override above
+# already pins these two at 0 and this block must not be read as a second,
+# competing answer to that question.
+[[profile.ci.overrides]]
+filter = 'test(=bash::tests::the_bash_timeout_bounds_the_secret_deny_walk) + test(=bash::tests::the_streaming_bash_timeout_bounds_the_secret_deny_walk)'
+success-output = "final"
+
+# ── #1304 c2: the deterministic regression must not be retried into a pass ──
+#
+# `a_manifest_build_that_returns_after_the_deadline_still_names_the_scan` reaches
+# the #1304 frame by stalling the caller rather than by racing a wall clock, so
+# it has no honest reason to fail once and pass twice. If it ever does, that is
+# the fixture's determinism breaking and it must reach the run conclusion rather
+# than a buried TRY line.
+[[profile.ci.overrides]]
+filter = 'test(=bash::tests::a_manifest_build_that_returns_after_the_deadline_still_names_the_scan)'
+retries = 0
+
 # ── #1155: the TOCTOU race whose regression must not be retryable ───────────
 #
 # FerroxLabs/wayland#1155 is "an Edit can overwrite a save that arrives while

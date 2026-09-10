@@ -26,6 +26,7 @@
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -37,6 +38,21 @@ const HELPER_TEST: &str = "helper_child_answers_one_raw_confirmation";
 const CHILD_BUDGET_SECS: u64 = 2;
 /// How long the harness waits before calling the child hung.
 const ARM_BUDGET: Duration = Duration::from_secs(20);
+/// #1309: how long the harness waits, AFTER the child has been reaped, for the
+/// pty reader to reach a terminal condition.
+///
+/// A child exit does not mean the transcript is complete. The reader is a
+/// separate thread blocked in `read` on a dup of the pty master, and the bytes
+/// the child wrote on its way out sit in the pty buffer until that thread is
+/// scheduled again. Cloning the transcript at the moment the child is reaped
+/// samples whatever happens to have been copied by then, which is why a
+/// missing denial reason and a read that returned early produce the SAME
+/// string. Every slave dup is closed once the child is reaped, so the master
+/// reaches EOF (or `EIO`, which is how Linux spells it) after handing over the
+/// last byte -- a terminal condition the harness can WAIT for instead of
+/// sampling. Five seconds is far past what that costs; it is a bound so a
+/// wedged reader cannot hang the suite, not a race to be tuned.
+const DRAIN_BUDGET: Duration = Duration::from_secs(5);
 
 /// Re-execution target, not a test of its own: with `HELPER_OUT_ENV` unset
 /// (every ordinary suite run) it returns immediately.
@@ -104,13 +120,33 @@ fn make_raw(slave: &OwnedFd) {
     }
 }
 
+/// Why the pty reader stopped.
+///
+/// #1309: the transcript is evidence about the PRODUCT only once the reader has
+/// reached `Terminal`. Before that it is evidence about the harness, and the
+/// two must never be reported as the same thing.
+#[derive(Debug)]
+enum DrainEnd {
+    /// The master handed over its last byte and then reported EOF (`Ok(0)`) or
+    /// the `EIO` that Linux returns once every slave dup is closed. Whatever
+    /// the child wrote, the transcript now holds.
+    Terminal(String),
+    /// The reader was still blocked in `read` when `DRAIN_BUDGET` ran out. The
+    /// transcript is a truncated read and grades nothing.
+    StillReading,
+}
+
 /// One arm's outcome. `exited` separates "the child decided" from "the harness
-/// killed it", which is the whole distinction this file grades.
+/// killed it", which is the whole distinction this file grades. `drain`
+/// separates "the child never wrote it" from "the harness never read it",
+/// which is the distinction #1309 was filed for.
 struct Arm {
     exited: bool,
     verdict: String,
     transcript: String,
     elapsed: Duration,
+    drain: DrainEnd,
+    drain_wait: Duration,
 }
 
 /// Run one arm. `answer` is what (if anything) gets typed at the prompt.
@@ -145,16 +181,27 @@ fn run_arm(answer: Option<&str>) -> Arm {
     let mut reader = std::fs::File::from(master.try_clone().expect("dup master to read"));
     let seen = Arc::new(Mutex::new(String::new()));
     let sink = Arc::clone(&seen);
+    // The reader announces the terminal condition it reached, so the harness can
+    // WAIT for one rather than sample the transcript at an arbitrary moment.
+    // Sending only after the last `push_str` is what makes the announcement
+    // mean "every byte is in the transcript" and not merely "I am leaving".
+    let (drained_tx, drained_rx) = mpsc::channel::<String>();
     std::thread::spawn(move || {
         let mut buf = [0u8; 1024];
-        while let Ok(n) = reader.read(&mut buf) {
-            if n == 0 {
-                break;
+        let end = loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break "EOF".to_string(),
+                Ok(n) => sink
+                    .lock()
+                    .expect("transcript mutex")
+                    .push_str(&String::from_utf8_lossy(&buf[..n])),
+                // Linux reports "the last slave dup closed" as EIO rather than
+                // EOF. It is the same terminal condition and it arrives after
+                // the same last byte.
+                Err(e) => break format!("{e}"),
             }
-            sink.lock()
-                .expect("transcript mutex")
-                .push_str(&String::from_utf8_lossy(&buf[..n]));
-        }
+        };
+        let _ = drained_tx.send(end);
     });
 
     if let Some(answer) = answer {
@@ -179,6 +226,16 @@ fn run_arm(answer: Option<&str>) -> Arm {
         }
     }
     let elapsed = started.elapsed();
+    // #1309. The child is reaped, so every slave dup it held is closed and the
+    // master is on its way to a terminal condition. Wait for the reader to say
+    // it got there before reading the transcript: the alternative is a sample
+    // whose truncation is indistinguishable from a product that stayed silent.
+    let drain_started = Instant::now();
+    let drain = match drained_rx.recv_timeout(DRAIN_BUDGET) {
+        Ok(end) => DrainEnd::Terminal(end),
+        Err(_) => DrainEnd::StillReading,
+    };
+    let drain_wait = drain_started.elapsed();
     let transcript = seen.lock().expect("transcript mutex").clone();
     let verdict = std::fs::read_to_string(&verdict_path).unwrap_or_else(|e| format!("<none: {e}>"));
     Arm {
@@ -186,17 +243,23 @@ fn run_arm(answer: Option<&str>) -> Arm {
         verdict,
         transcript,
         elapsed,
+        drain,
+        drain_wait,
     }
 }
 
 /// Report an arm the way the issue reports it, so a red arm is quotable.
 fn report(name: &str, arm: &Arm) {
     println!(
-        "[{name}] exited={} elapsed={:.3}s verdict={:?} prompt_seen={}",
+        "[{name}] exited={} elapsed={:.3}s verdict={:?} prompt_seen={} \
+         drain={:?} drain_wait={:.3}s transcript_bytes={}",
         arm.exited,
         arm.elapsed.as_secs_f64(),
         arm.verdict,
-        arm.transcript.contains("Allow?")
+        arm.transcript.contains("Allow?"),
+        arm.drain,
+        arm.drain_wait.as_secs_f64(),
+        arm.transcript.len()
     );
 }
 
@@ -282,9 +345,34 @@ fn raw_mode_with_nothing_typed_still_denies() {
         arm.elapsed.as_secs_f64()
     );
     assert_eq!(arm.verdict, "Denied");
+    // #1309 c1 -- the two readings, told apart and reported apart.
+    //
+    // A transcript that stops at the `> ` prompt has two causes and the old
+    // shape could not name either: the product denied without saying why, or
+    // the harness read the pty before the reason was written. This assertion
+    // fires FIRST and only on the second cause, so a truncated capture can
+    // never be reported as a product defect (nor a product defect excused as a
+    // truncated capture).
+    assert!(
+        matches!(arm.drain, DrainEnd::Terminal(_)),
+        "CAPTURE INCOMPLETE -- this grades the harness, not the product. The \
+         child was reaped (exited={}, elapsed={:.3}s) but the pty reader was \
+         still blocked in read after a further {:.3}s, so the transcript below \
+         is whatever had been copied by then and says NOTHING about whether \
+         the denial reason was written. pty saw so far: {:?}",
+        arm.exited,
+        arm.elapsed.as_secs_f64(),
+        arm.drain_wait.as_secs_f64(),
+        arm.transcript
+    );
     assert!(
         arm.transcript.contains("No answer after"),
-        "the operator must be told why it was denied; pty saw: {:?}",
+        "the operator must be told why it was denied. THE CAPTURE IS COMPLETE: \
+         the pty reader reached {:?} {:.3}s after the child was reaped, so \
+         every byte the child ever wrote is in this transcript and the reason \
+         is genuinely ABSENT rather than merely unread; pty saw: {:?}",
+        arm.drain,
+        arm.drain_wait.as_secs_f64(),
         arm.transcript
     );
 }

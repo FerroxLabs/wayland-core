@@ -486,6 +486,117 @@ fn output_to_result(output: SandboxOutput) -> ToolResult {
 thread_local! {
     static UNSAVED_GUARD_SPAWNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static MANIFEST_BUILD_SPAWNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// #1304 seam: milliseconds to stall the CALLER between spawning the
+    /// manifest build and first polling it.
+    ///
+    /// The frame this issue is about is only reachable when the build becomes
+    /// ready at or after the deadline: `tokio::time::timeout` polls its inner
+    /// future FIRST and returns `Ok` if that future is ready, no matter how
+    /// late the poll happened. Reaching that by racing a wall clock is a 3-10
+    /// percent event. Stalling the runtime thread here reaches it every time --
+    /// the build runs on the blocking pool, so it completes DURING the stall,
+    /// and the select's first poll then happens with the deadline already
+    /// behind it. Thread-local, not a global, so a stall set by one test cannot
+    /// leak into another running beside it in the same process.
+    static MANIFEST_POLL_STALL_MS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// See [`MANIFEST_POLL_STALL_MS`]. A no-op outside `cfg(test)`.
+#[cfg(test)]
+fn stall_before_first_manifest_poll() {
+    let ms = MANIFEST_POLL_STALL_MS.with(|c| c.get());
+    if ms > 0 {
+        std::thread::sleep(Duration::from_millis(ms));
+    }
+}
+
+#[cfg(not(test))]
+fn stall_before_first_manifest_poll() {}
+
+/// The phrase that names the #1304 frame: the manifest build spent the whole
+/// budget and handed back a manifest the caller no longer had time to use.
+pub(crate) const MANIFEST_SCAN_ATE_BUDGET_MARK: &str =
+    "returned only after the deadline had already passed";
+
+/// The phrase that names the OTHER post-build expiry: the build finished inside
+/// the budget and the runtime did not resume this command in time. A different
+/// cause with a different owner, and it must never be reported as the scan.
+pub(crate) const MANIFEST_RESUMED_LATE_MARK: &str = "was not resumed before the deadline";
+
+/// #1304 — what the caller is owed once the manifest build has produced a
+/// manifest.
+///
+/// `tokio::time::timeout_at` polls the inner future before it looks at the
+/// deadline, so `Ok(pieces)` does NOT mean the build finished in time; it means
+/// the build was ready when the task was finally polled. On the streaming path
+/// the old code took that `Ok` as permission to start the child and then hit
+/// the SECOND `timeout_at` on the same, already-expired deadline, which returns
+/// a bare "Command timed out after Nms". That message is byte-identical to the
+/// child timeout, so a caller whose workspace secret-scan ate the entire budget
+/// was told the command timed out -- and the command had never run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PostBuildBudget {
+    /// There is budget left. Start the command.
+    Available,
+    /// The build itself ran to or past the whole budget.
+    ScanAteBudget,
+    /// The build finished inside the budget; the task was resumed too late.
+    ResumedLate,
+}
+
+/// Pure, so both call sites share one decision and the boundaries are testable
+/// without a runtime. `build_took` is measured INSIDE the blocking closure, so
+/// it is the scan's own cost and not the caller's view of it -- that is the
+/// whole difference between blaming the scan and blaming the scheduler.
+fn post_build_budget(
+    build_took: Duration,
+    timeout: Duration,
+    now: tokio::time::Instant,
+    deadline: tokio::time::Instant,
+) -> PostBuildBudget {
+    if now < deadline {
+        PostBuildBudget::Available
+    } else if build_took >= timeout {
+        PostBuildBudget::ScanAteBudget
+    } else {
+        PostBuildBudget::ResumedLate
+    }
+}
+
+/// The message for a budget that was gone before the command could start.
+///
+/// The "Command timed out after Nms" prefix is kept so anything matching on it
+/// (TUI formatter, breaker telemetry) is unaffected, exactly as the existing
+/// manifest-timeout arm does.
+fn budget_spent_before_command(
+    kind: PostBuildBudget,
+    timeout_ms: u64,
+    build_took: Duration,
+) -> ToolResult {
+    let build_ms = build_took.as_millis();
+    let content = match kind {
+        PostBuildBudget::ScanAteBudget => format!(
+            "Command timed out after {timeout_ms}ms while building the sandbox manifest \
+             (the workspace secret-scan): the scan took {build_ms}ms and \
+             {MANIFEST_SCAN_ATE_BUDGET_MARK}, so the command never ran"
+        ),
+        PostBuildBudget::ResumedLate => format!(
+            "Command timed out after {timeout_ms}ms before the command started: the \
+             sandbox manifest build finished in {build_ms}ms, inside the budget, but \
+             this command {MANIFEST_RESUMED_LATE_MARK}, so the command never ran"
+        ),
+        // Unreachable by construction: callers only build a message once
+        // `post_build_budget` has reported an expiry. Stated rather than
+        // `unreachable!()` so a future caller cannot turn a mistake into a
+        // panic in the shell path.
+        PostBuildBudget::Available => {
+            format!("Command timed out after {timeout_ms}ms; the command never ran")
+        }
+    };
+    ToolResult {
+        content,
+        is_error: true,
+    }
 }
 
 /// #1111 — run the manifest build on the blocking pool.
@@ -516,17 +627,23 @@ fn spawn_manifest_build(
     workspace: Option<Arc<crate::workspace_policy::WorkspacePolicy>>,
     sandbox: Arc<wcore_sandbox::SandboxRegistry>,
     backend_enforces_read_deny: bool,
-) -> tokio::task::JoinHandle<(SandboxManifest, SandboxCommand)> {
+) -> tokio::task::JoinHandle<(SandboxManifest, SandboxCommand, std::time::Instant)> {
     #[cfg(test)]
     MANIFEST_BUILD_SPAWNS.with(|count| count.set(count.get() + 1));
     let command = command.to_string();
     tokio::task::spawn_blocking(move || {
-        build_sandbox_pieces_for_session(
+        let (manifest, cmd) = build_sandbox_pieces_for_session(
             &command,
             workspace.as_deref(),
             Some(sandbox.env_passthrough()),
             backend_enforces_read_deny,
-        )
+        );
+        // #1304: stamped INSIDE the closure, on the blocking thread, so it is
+        // the moment the scan finished rather than the moment the caller was
+        // next scheduled. The caller cannot recover this after the fact: by the
+        // time it sees the handle it can only tell that the deadline has
+        // passed, not which of the two things spent it.
+        (manifest, cmd, std::time::Instant::now())
     })
 }
 
@@ -991,6 +1108,9 @@ impl Tool for BashTool {
         // on expiry, and a destructive command running unguarded is worse
         // than a slow one. See `bounded_unsaved_shell_refusal`.
         let deadline = tokio::time::Instant::now() + timeout;
+        // #1304: the std-clock twin of `deadline`, so the build's own
+        // cost can be compared against `timeout` without mixing clocks.
+        let spawned_at = std::time::Instant::now();
         let build = spawn_manifest_build(
             command,
             ctx.workspace.clone(),
@@ -999,6 +1119,8 @@ impl Tool for BashTool {
             backend.enforces_read_deny(),
         );
         let build_abort = build.abort_handle();
+        // #1304 test seam; a no-op outside `cfg(test)`.
+        stall_before_first_manifest_poll();
         let (manifest, mut cmd) = tokio::select! {
             _ = ctx.cancel.cancelled() => {
                 build_abort.abort();
@@ -1008,7 +1130,7 @@ impl Tool for BashTool {
                 };
             },
             built = tokio::time::timeout_at(deadline, build) => match built {
-                Ok(Ok(pieces)) => pieces,
+                Ok(Ok((manifest, cmd, _built_at))) => (manifest, cmd),
                 Ok(Err(join)) => {
                     return ToolResult {
                         content: format!(
@@ -1162,6 +1284,9 @@ impl Tool for BashTool {
         // #1111: same defect and same fix as `execute_with_ctx` — fixing only
         // one call site leaves the other live.
         let deadline = tokio::time::Instant::now() + timeout;
+        // #1304: the std-clock twin of `deadline`, so the build's own
+        // cost can be compared against `timeout` without mixing clocks.
+        let spawned_at = std::time::Instant::now();
         let build = spawn_manifest_build(
             command,
             ctx.workspace.clone(),
@@ -1170,6 +1295,8 @@ impl Tool for BashTool {
             backend.enforces_read_deny(),
         );
         let build_abort = build.abort_handle();
+        // #1304 test seam; a no-op outside `cfg(test)`.
+        stall_before_first_manifest_poll();
         let (manifest, mut cmd) = tokio::select! {
             _ = ctx.cancel.cancelled() => {
                 build_abort.abort();
@@ -1179,7 +1306,7 @@ impl Tool for BashTool {
                 };
             },
             built = tokio::time::timeout_at(deadline, build) => match built {
-                Ok(Ok(pieces)) => pieces,
+                Ok(Ok((manifest, cmd, _built_at))) => (manifest, cmd),
                 Ok(Err(join)) => {
                     return ToolResult {
                         content: format!(

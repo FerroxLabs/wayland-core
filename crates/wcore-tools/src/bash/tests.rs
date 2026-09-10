@@ -2493,11 +2493,43 @@ fn grade_manifest_attribution(
     // the CHILD-timeout path returns, so it does not grade the criterion — the
     // caller has to be told the workspace scan ate the budget and that no child
     // ever ran.
+    // #1304: the OTHER post-build expiry. `post_build_budget` reports
+    // `ResumedLate` when the scan finished INSIDE the budget and the runtime did
+    // not resume the command before the deadline. That message names the
+    // manifest build too, so the arm below would grade it -- but the premise
+    // #1111 acceptance 3 needs (a build that EXCEEDED the timeout) did not hold,
+    // so it grades nothing. Re-raced, exactly like the P2b guard below, and
+    // matched through the constant the producer owns so the two cannot drift.
+    if content.contains(super::MANIFEST_RESUMED_LATE_MARK) {
+        if last_attempt {
+            eprintln!(
+                "SKIP (#1304) {test}: the sandbox manifest build finished INSIDE the \
+                 {timeout:?} budget and this command was not resumed before the \
+                 deadline, so the scan did not exceed the timeout and #1111 \
+                 acceptance 3 was never put in scope. Got: {content} ({context})"
+            );
+            return true;
+        }
+        return false;
+    }
+
     if content.contains("manifest") {
         assert!(
             content.contains("timed out"),
             "the caller must be told WHY it stopped, and that it was the manifest \
              build rather than the command itself; got: {content} ({context})"
+        );
+        // #1304 c3: a GRADED receipt, not just a SKIP one. `success-output` is
+        // `never` for a passing test, so before this line a green run carried no
+        // evidence in either direction -- the criterion could pass without ever
+        // being put in scope and nobody could tell. Printing both outcomes makes
+        // the two distinguishable in the log, and the nextest override that
+        // shows a passing test's output for this test is what carries it out of
+        // the runner. See `.config/nextest.toml`.
+        eprintln!(
+            "GRADED (#1111 acceptance 3) {test}: the manifest build outlived the \
+             {timeout:?} deadline and the caller was told which build ate the \
+             budget. Got: {content} ({context})"
         );
         return true;
     }
@@ -3049,6 +3081,160 @@ async fn the_streaming_bash_timeout_bounds_the_secret_deny_walk() {
         // `RACE_ATTEMPTS`. Make the real walk more expensive and race again.
         grow_workspace(&root, attempt);
     }
+}
+
+/// #1304 c2 — the frame, reached DETERMINISTICALLY instead of at 3-10 percent.
+///
+/// The racing tests above establish their premise by growing a tree until the
+/// secret-scan dominates the deadline and then re-racing, which is the right
+/// instrument for grading the property in situ and the wrong one for verifying
+/// a fix: a fix graded by absence over many runs is what this repository has
+/// already paid for twice.
+///
+/// The frame itself is not a race, it is a poll order. `tokio::time::timeout_at`
+/// polls its inner future BEFORE it looks at the deadline, so a manifest build
+/// that becomes ready at or after the deadline returns `Ok` and the budget is
+/// already gone. Whether that happens depends on when the runtime thread is next
+/// scheduled, and stalling it on purpose reaches the frame every time.
+///
+/// TWO facts of the fixture, not two hopes:
+///
+/// * `timeout` is derived at HALF the measured walk, and the measured walk is
+///   warm and therefore a LOWER bound on what the build under test pays, so
+///   `build_took >= timeout` cannot fail to hold.
+/// * the stall is an order of magnitude longer than that walk, so the build is
+///   finished — and the deadline long past — before the select is first polled.
+///
+/// It reds on the unfixed tree with the CHILD timeout's bare
+/// `Command timed out after Nms`, which is what identifies the frame: that
+/// message can only come from the second `timeout_at`, over an already expired
+/// deadline, reached because the first one returned `Ok`.
+#[tokio::test]
+async fn a_manifest_build_that_returns_after_the_deadline_still_names_the_scan() {
+    warm_bash_tool_process_init().await;
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (_policy, walk) = workspace_whose_walk_costs_at_least(&root, CALIBRATED_WALK);
+
+    // Half the measured walk. Big enough that the P2b unsaved-work guard — which
+    // shares this budget and runs FIRST — is not the thing that expires (its
+    // interference is #1142 and is asserted against below, never absorbed), and
+    // small enough that the scan cannot finish inside it.
+    let timeout_ms = ((walk.as_millis() as u64) / 2).max(1);
+    let stall_ms = ((walk.as_millis() as u64) * 10).max(500);
+    let sink = crate::NullToolOutputSink;
+
+    for streaming in [true, false] {
+        // A FRESH policy for the warm-up and another for the graded call: the
+        // exec path memoises the deny walk, so sharing one would hand the graded
+        // call a cache lookup instead of a scan.
+        let warm = canned_ctx(
+            std::sync::Arc::new(crate::workspace_policy::WorkspacePolicy::contained(&root)),
+            CannedBackend::enforcing(),
+        );
+        // Pays the guard's and the pool's cold dispatch under a budget that
+        // cannot expire, so the graded call below measures the scan and not a
+        // first-call constant.
+        let _ = BashTool
+            .execute_streaming_with_ctx(
+                json!({"command": "echo hi", "timeout": 5000}),
+                &warm,
+                &sink,
+            )
+            .await;
+
+        let ctx = canned_ctx(
+            std::sync::Arc::new(crate::workspace_policy::WorkspacePolicy::contained(&root)),
+            CannedBackend::enforcing(),
+        );
+        let args = json!({"command": "echo hi", "timeout": timeout_ms});
+        super::MANIFEST_POLL_STALL_MS.with(|c| c.set(stall_ms));
+        let result = if streaming {
+            BashTool.execute_streaming_with_ctx(args, &ctx, &sink).await
+        } else {
+            BashTool.execute_with_ctx(args, &ctx).await
+        };
+        super::MANIFEST_POLL_STALL_MS.with(|c| c.set(0));
+
+        let path = if streaming { "streaming" } else { "buffered" };
+        let context = format!(
+            "{path} path, a {timeout_ms}ms timeout against a walk measured at {walk:?},              stalled {stall_ms}ms before the first poll"
+        );
+
+        // INSTRUMENT CONTROL, not an absorbed confound: if the P2b guard spent
+        // the budget first this call never reached the manifest build, and a
+        // pass would grade nothing. It is asserted rather than retried because
+        // the budget here is derived to leave it room.
+        assert!(
+            !result
+                .content
+                .contains(super::UNSAVED_GUARD_UNANSWERED_PREFIX),
+            "instrument: the P2b unsaved-work guard spent this call's budget before              the manifest build was reached, so nothing about #1111 acceptance 3              was exercised; got: {} ({context})",
+            result.content
+        );
+        assert!(
+            result.is_error,
+            "a command that never ran is an error; got: {} ({context})",
+            result.content
+        );
+        assert!(
+            result.content.contains("timed out") && result.content.contains("manifest"),
+            "the caller must be told the sandbox manifest build stopped this, not              the command; got: {} ({context})",
+            result.content
+        );
+        // The load-bearing one. Both post-build expiries and the pre-deadline
+        // `Err` arm name the manifest, so only this phrase says WHICH frame
+        // produced the message: the build handed back a manifest the caller no
+        // longer had the budget to use.
+        assert!(
+            result
+                .content
+                .contains(super::MANIFEST_SCAN_ATE_BUDGET_MARK),
+            "the build returned AFTER the deadline and the caller was not told:              expected a message containing {:?}; got: {} ({context})",
+            super::MANIFEST_SCAN_ATE_BUDGET_MARK,
+            result.content
+        );
+    }
+}
+
+/// The boundaries of the #1304 decision, without a runtime.
+///
+/// `post_build_budget` is the whole of the fix's judgement and it decides who is
+/// blamed, so its two edges are graded directly: at `build_took == timeout` the
+/// scan owns the expiry, and one nanosecond below it the scheduler does. Blaming
+/// the scan for a scan that finished in time is the failure mode this function
+/// exists to prevent, and it is not visible from the end-to-end test above.
+#[test]
+fn post_build_budget_blames_the_scan_only_when_the_scan_spent_the_budget() {
+    let timeout = Duration::from_millis(10);
+    let deadline = tokio::time::Instant::now();
+    let before = deadline - Duration::from_nanos(1);
+    let after = deadline + Duration::from_nanos(1);
+
+    // Budget left: nothing is blamed and the command runs, however long the
+    // build took.
+    assert_eq!(
+        super::post_build_budget(timeout * 100, timeout, before, deadline),
+        super::PostBuildBudget::Available
+    );
+    // The deadline has passed and the scan spent the whole budget.
+    assert_eq!(
+        super::post_build_budget(timeout, timeout, after, deadline),
+        super::PostBuildBudget::ScanAteBudget
+    );
+    // The deadline has passed and the scan did NOT. One nanosecond decides it,
+    // and it must not read as the scan.
+    assert_eq!(
+        super::post_build_budget(timeout - Duration::from_nanos(1), timeout, after, deadline),
+        super::PostBuildBudget::ResumedLate
+    );
+    // `now == deadline` is expiry: `timeout_at` fires at the deadline, not
+    // after it, so treating the instant as still-available would leave a
+    // zero-budget command to be started.
+    assert_eq!(
+        super::post_build_budget(timeout, timeout, deadline, deadline),
+        super::PostBuildBudget::ScanAteBudget
+    );
 }
 
 /// NEGATIVE CONTROL for the four tests above — and it must stay GREEN on the
