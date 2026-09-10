@@ -269,14 +269,18 @@ fn run_arm(answer: Option<&str>) -> Arm {
 
 /// Report an arm the way the issue reports it, so a red arm is quotable.
 fn report(name: &str, arm: &Arm) {
+    let (drain_state, drain_reason) = match &arm.drain {
+        DrainEnd::Terminal(reason) => ("terminal", reason.as_str()),
+        DrainEnd::StillReading => ("still-reading", "<none>"),
+    };
     println!(
         "[{name}] exited={} elapsed={:.3}s verdict={:?} prompt_seen={} \
-         drain={:?} drain_wait={:.3}s transcript_bytes={}",
+         drain={drain_state} drain_reason={drain_reason:?} drain_wait={:.3}s \
+         transcript_bytes={}",
         arm.exited,
         arm.elapsed.as_secs_f64(),
         arm.verdict,
         arm.transcript.contains("Allow?"),
-        arm.drain,
         arm.drain_wait.as_secs_f64(),
         arm.transcript.len()
     );
