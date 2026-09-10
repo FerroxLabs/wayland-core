@@ -9,34 +9,31 @@ Owners come from each ledger's `owner:` on its UNMET criteria — the
 owner is read, not assigned, so a row cannot claim an owner the
 ledger does not.
 
-Blocking issues: 31   Outstanding criteria: 59
+Blocking issues: 28   Outstanding criteria: 48
 
 | Issue | Owner | Outstanding | Title |
 |---|---|---:|---|
 | FerroxLabs/wayland#1116 | core | 2 | Desktop: no abandon verb on the host wire leaves a crash-interrupted session wedged in-app |
 | FerroxLabs/wayland#1233 | core | 2 | Eight helper-attributed env-global hazards, now audited and carried as dated debt |
-| FerroxLabs/wayland#1238 | core | 2 | Flaky: parallel_spawn_caps_active_child_engines_across_shared_calls fails on a 15s wall-clock budget above loadavg ~190, not on its invariant |
+| FerroxLabs/wayland#1238 | core | 1 | Flaky: parallel_spawn_caps_active_child_engines_across_shared_calls fails on a 15s wall-clock budget above loadavg ~190, not on its invariant |
 | FerroxLabs/wayland#1240 | core | 1 | await_completion_returns_on_match reds the shared-process lib leg on a timing race, not a process global |
 | FerroxLabs/wayland#1244 | core | 3 | The live /model-switch leg of the spend-audit keying proof needs a PTY-driven TUI run |
 | FerroxLabs/wayland#1245 | core | 4 | Flaky: t19_live_negative_leg has a 45s drain window with zero headroom; it fails 3/3 above loadavg ~150 |
 | FerroxLabs/wayland#1250 | core | 1 | wcore-exec-backend tests race on the WAYLAND_EXEC_BACKEND_STATE_DIR process global in the shared-process suite |
 | FerroxLabs/wayland#1256 | core | 1 | A lane can break the Desktop contract corpus and pass its own gate: preflight.sh never asks whether the corpus is current |
 | FerroxLabs/wayland#1269 | core | 2 | Unmerged lane/f13-* branches held out of 0.13.12: four carry work integ lacks, two await their owning lane, five archived as redundant |
-| FerroxLabs/wayland#1272 | core | 3 | 0.13.12 release board: all 32 blocking issues mapped to an owner (17 in flight, 15 unassigned) |
+| FerroxLabs/wayland#1272 | core | 2 | 0.13.12 release board: all 32 blocking issues mapped to an owner (17 in flight, 15 unassigned) |
 | FerroxLabs/wayland#1282 | core | 2 | dangerous_expiry_cancels_production_streaming_bash_process_tree fails only under full-suite contention, and is not allowlisted |
 | FerroxLabs/wayland#1284 | core | 1 | Flaky on macOS only: the_live_backend_timeout_bounds compares two wall-clock samples taken under different load |
 | FerroxLabs/wayland#1285 | core | 1 | Two more macOS-only retry flakes: harness_tui_flow resume_repaints and wcore-mcp f016_real_spawn |
 | FerroxLabs/wayland#1286 | core | 1 | macOS retry-flake cluster: redundant_walk_root_is_not_walked_twice is the 5th member; discovery is one per CI cycle |
 | FerroxLabs/wayland#1287 | core | 1 | macOS process-tree containment intermittently refuses to attach - root NOT in its own group at recheck (fails closed) |
-| FerroxLabs/wayland#1288 | core | 1 | Three Linux retry-flakes surfaced in the run that overran its 120-min timeout; rate unmeasured, entries expire 2026-09-20 |
 | FerroxLabs/wayland#1289 | core | 1 | macOS keyring does not answer within the 5s credential-store timeout; f14_sigkill_recovery hard-fails 3/3 |
 | FerroxLabs/wayland#1290 | core | 3 | f14_sigkill_recovery: ZERO provider-dispatch checkpoints persist (left 0, right 1) - the exactly-once DOUBLING premise this was filed on is refuted |
 | FerroxLabs/wayland#1300 | core | 3 | Windows-only: crashed-holder recovery in the chunked credential write lock is bistable (48x), and it is what times out interrupted_rotations_do_not_leak_entries_without_bound |
-| FerroxLabs/wayland#1301 | core | 3 | First Windows retry-flake cluster: a wall-clock ratio guard and a dispatch-budget test at 94% of its kill line (CI (Array)) |
+| FerroxLabs/wayland#1301 | core | 2 | First Windows retry-flake cluster: a wall-clock ratio guard and a dispatch-budget test at 94% of its kill line (CI (Array)) |
 | FerroxLabs/wayland#1303 | core | 1 | Windows: a racing chunked credential write fails outright with ACCESS_DENIED (os error 5), and the caller loses a single-use refresh token |
-| FerroxLabs/wayland#1308 | core | 4 | Windows: four wcore-skills watcher_tests fail together with ERROR_PATH_NOT_FOUND, and the bare unwrap hides which path |
 | FerroxLabs/wayland#1349 | core | 2 | W16 mixed soak fails RSS acceptance twice (41.5x, then 1.83x) with no carrier |
-| FerroxLabs/wayland-core#386 | core | 3 | core#325 c2 remainder: one real nightly-windows-soak run with a red sibling |
 | FerroxLabs/wayland-core#401 | core | 1 | an_unknown_window_sizes_the_skill_listing precondition cannot pass in a clean container, so every integ/f13 CI run is red |
 | FerroxLabs/wayland-core#404 | core | 1 | A ci-linux cancellation at the 120-minute budget destroys the JUnit evidence the run already produced |
 | FerroxLabs/wayland-core#415 | core | 2 | Close the quarantine console bypass with a restricting-SID token, without removing the feature (from #389 c1) |
