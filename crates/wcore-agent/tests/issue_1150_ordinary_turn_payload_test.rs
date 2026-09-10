@@ -371,40 +371,39 @@ async fn a_folded_out_tool_becomes_callable_on_explicit_activation() {
 // The SKILLS half of c5
 // ---------------------------------------------------------------------------
 
-/// The gap, pinned so it is falsifiable rather than asserted in a ledger note.
+/// The skills half of c5, now CLOSED — and the assertion is the inverse of the
+/// one this function was written to make.
 ///
-/// c5 asks for skills "injected only when relevant or explicitly activated".
-/// There is no relevance gate and no activation gate on that path: a turn whose
-/// text has nothing to do with any planted skill still gets a listing naming
-/// every one of them.
+/// THE NAME IS DELIBERATELY UNCHANGED, and it no longer describes what the body
+/// does. `.planning/ledger/wayland-1150.md` cites this function by name as c5's
+/// evidence token (`test:...::the_skills_listing_is_unconditional_on_an_ordinary_turn`),
+/// the ledger gate resolves every such token to a declared `fn`, and that file
+/// belongs to a different issue than the lane that closed this gap
+/// (FerroxLabs/wayland#1283). Renaming here would break the gate on a file this
+/// lane must not edit. Whoever next touches wayland-1150.md should repoint c5's
+/// evidence at `issue_1283_skill_activation_gate_test.rs` and rename this to
+/// `an_ordinary_turn_carries_no_skills_listing`.
 ///
-/// This test deliberately does NOT compare the listings of two turns. An
-/// earlier cut did, as a change-detector for a future per-turn gate, and a red
-/// arm proved it could not fail: `context::build_system_prompt` has exactly ONE
-/// call site, `bootstrap.rs:2377`, so the system prompt — skills listing
-/// included — is assembled once at boot and the same String is handed to every
-/// dispatch for the life of the session. Comparing two turns compared a stored
-/// value with itself. That structural fact is the single most important input
-/// to how c5's skills half gets built: a gate that varies per turn cannot live
-/// where the listing is assembled today, and moving the assembly onto the
-/// per-turn path also moves it out of the cached prefix — segment 0 of an
-/// OpenAI-shaped body, ahead of the tool schemas and the whole conversation —
-/// which on the reporter's own implicit-cache endpoint re-bills every request
-/// in full. That is a structural change, not a bounded one.
+/// WHAT IT USED TO ASSERT, kept because it is the record of the defect: a turn
+/// whose text has nothing to do with any planted skill still got a listing
+/// naming every one of them. The listing was assembled once at boot —
+/// `context::build_system_prompt` had exactly ONE call site — and the same
+/// String was handed to every dispatch for the life of the session. That
+/// structural fact is why a per-turn relevance gate was never the answer:
+/// moving assembly onto the dispatch path moves it out of the cached prefix and
+/// re-bills every request in full on the reporter's own implicit-cache endpoint.
 ///
-/// This test does NOT assert the listing's size. It used to say it could not,
-/// because the budget was not a ceiling: `format_skills_within_budget`
-/// subtracted the bundled entries from it and never capped them, and its
-/// minimal mode still emitted every non-bundled NAME — 100 bundled + 10 project
-/// skills rendered 22,399 chars against a 1,310-char budget, 17.1x. That was
-/// FerroxLabs/wayland#1280 c1 and it is now FIXED; the ceiling and its
-/// wrong-refusal control are graded by
-/// `issue_1280_skills_ceiling_test.rs`. Size is that file's subject, and
-/// duplicating the assertion here would give two places to update and one of
-/// them would rot. What is left for THIS test is the other half: the listing is
-/// still UNCONDITIONAL.
+/// WHAT #1283 c1 DID INSTEAD: the boot prompt now carries fixed Skill DISCOVERY
+/// instructions (`context::SKILL_DISCOVERY_SECTION`) and no per-skill listing at
+/// all. Nothing is withheld — the full installed registry is still searchable
+/// through `Skill { query }` and invocable by exact name, which is the
+/// wrong-refusal control, graded in `issue_1283_skill_activation_gate_test.rs`
+/// alongside the prefix-stability arm.
 ///
-/// When a gate is built, the first assertion below is the one that must go red.
+/// SIZE IS NOT THIS TEST'S SUBJECT and never was; the ceiling
+/// (`format_skills_within_budget`, #1280 c1) is graded in
+/// `issue_1280_skills_ceiling_test.rs` and still has live call sites on the
+/// late-MCP and inventory-change paths.
 #[tokio::test]
 #[serial_test::serial]
 async fn the_skills_listing_is_unconditional_on_an_ordinary_turn() {
@@ -416,23 +415,27 @@ async fn the_skills_listing_is_unconditional_on_an_ordinary_turn() {
     )
     .await;
 
-    let first = skills_block(&reqs[0].system).expect("a skills listing was rendered");
-
-    let named = (0..10)
-        .filter(|i| first.contains(&format!("m-skill-{i:03}")))
-        .count();
-    assert_eq!(
-        named, 10,
-        "every planted skill is listed on a turn about arithmetic; none of them \
-         is relevant to it and none was activated. This is c5's open half"
+    let named: Vec<String> = (0..10)
+        .map(|i| format!("m-skill-{i:03}"))
+        .filter(|n| reqs[0].system.contains(n.as_str()))
+        .collect();
+    assert!(
+        named.is_empty(),
+        "{} of the 10 installed skills are listed on a turn about arithmetic;          none of them is relevant to it and none was activated. Named: {named:?}",
+        named.len()
+    );
+    assert!(
+        skills_block(&reqs[0].system).is_none(),
+        "the unconditional listing block is still being rendered at boot"
     );
 
-    // NON-VACUITY: the listing must actually be carrying something, or the
-    // equality above is the equality of two empty strings.
+    // NON-VACUITY: the catalogue really loaded. The discovery block is emitted
+    // only when at least one model-invocable skill was discovered, so without
+    // this the assertion above would also pass on a session with no skills at
+    // all — which measures nothing.
     assert!(
-        first.len() > 200,
-        "the skills listing is only {} bytes; this test would pass on a session \
-         with no skills at all, which measures nothing",
-        first.len()
+        reqs[0].system.contains("call the `Skill` tool with"),
+        "no skill-discovery block in the prompt: either the fixture installed          nothing, or the model has skills it cannot reach. System          prompt:\n{}",
+        reqs[0].system
     );
 }

@@ -268,6 +268,49 @@ pub fn format_skills_section(
     }
 }
 
+/// The boot-time skills section — FerroxLabs/wayland#1283 c1/c3.
+///
+/// Fixed text. It names no skill, counts no skill and consults no turn, so it
+/// is byte-identical for every session that has at least one model-invocable
+/// skill installed, whatever those skills are and however many there are.
+///
+/// WHY IT REPLACED THE LISTING. `build_system_prompt` runs exactly once, at
+/// boot (`bootstrap.rs`), and the String it returns is segment 0 of every
+/// request for the life of the session. The per-skill listing that used to sit
+/// here was therefore UNCONDITIONAL: assembled before the first user turn and
+/// shipped on every turn whatever the turn was about — #1150 c5's reported
+/// symptom, and #1283 c1's text. A relevance gate cannot live where the
+/// listing is assembled, and moving the assembly onto the per-turn path moves
+/// it out of the cached prefix and re-bills the whole prompt uncached on an
+/// implicit-cache endpoint, which is worse than the listing and is what #1283
+/// c3 exists to refuse. So the listing is gone from the trusted prefix and
+/// what is left is the route to it.
+///
+/// WHY IT IS NOT A WRONG REFUSAL (#1283 c2). Nothing is withheld: the full
+/// installed registry is still searchable through `Skill { query }`
+/// (`skill_tool.rs`, ranked by [`wcore_skills::prompt::search_skills`] over
+/// `SkillCatalog::visible()`, so hidden and revoked skills stay hidden), and
+/// exact-name invocation is unchanged and never consulted the listing. This
+/// block is the only thing that tells the model that route exists, which is
+/// why it names both hops — `Skill` is not on `defer_cold`'s hot allowlist, so
+/// on a default session the model has to hydrate it through `ToolSearch`
+/// first.
+///
+/// SIZE, stated so this is not oversold: about 470 characters against a
+/// listing budget of 1,310 on a 32,768-token window (#1280 c1's ceiling). It
+/// is a saving on a machine with many skills installed and a small COST on one
+/// with two or three, and the point of the change is the conditionality, not
+/// the bytes.
+pub const SKILL_DISCOVERY_SECTION: &str = "<system-reminder>\n\
+     Installed skills - named, reusable procedures for this machine or \
+     repository - are not listed here. To find one, call the `Skill` tool with \
+     {\"query\": \"<what you are trying to do>\"} for a ranked shortlist of \
+     every installed skill, then run it with {\"skill\": \"<exact name>\"} \
+     (plus optional \"args\"). If `Skill` is not in your tools array, \
+     `ToolSearch` with {\"query\": \"Skill\"} loads it. Search before \
+     concluding no skill covers a task; the names are not visible anywhere \
+     else.\n</system-reminder>";
+
 /// Build the system prompt from config and environment.
 ///
 /// Sections are assembled in this order:
@@ -278,7 +321,8 @@ pub fn format_skills_section(
 /// 4. AGENTS.md (project instructions)
 /// 5. Memory system prompt (behavioral instructions + MEMORY.md content)
 /// 6. Plan mode instructions (when active)
-/// 7. Skills reminder (available skills listing)
+/// 7. Skills reminder ([`SKILL_DISCOVERY_SECTION`] — the fixed route to the
+///    installed registry, NOT a per-skill listing; see #1283 c1)
 /// 8. Plugin rules (universal + project-scoped, gated on cwd)
 ///
 /// `terse_enabled` gates the static [`TERSENESS_DIRECTIVE`] section. The caller
@@ -297,7 +341,12 @@ pub fn build_system_prompt(
     cwd: &str,
     model: &str,
     skills: &[SkillRef],
-    context_window_tokens: Option<usize>,
+    // #1283 c1: retained so the boot call site (`bootstrap.rs`) and the
+    // late-bind renderer keep one shape, and so a future active-skill epoch
+    // can size itself the way `format_skills_section` still does. Nothing in
+    // this function reads it now — the skills section it used to size is a
+    // constant.
+    _context_window_tokens: Option<usize>,
     memory_dir: Option<&Path>,
     plan_mode_active: bool,
     toon_enabled: bool,
@@ -446,18 +495,21 @@ pub fn build_system_prompt(
         parts.push(plan_prompt::plan_mode_instructions().to_string());
     }
 
-    // Section: skills (cached, event-invalidated)
-    let visible_skills: Vec<SkillRef> = skills
-        .iter()
-        .filter(|s| !s.disable_model_invocation)
-        .cloned()
-        .collect();
+    // Section: skills (session permanent, and CONSTANT — #1283 c1/c3)
+    //
+    // What lands here is [`SKILL_DISCOVERY_SECTION`], not a listing. The gate
+    // is only "does this session have any model-invocable skill at all": a
+    // session with none says nothing about skills, and one with any says the
+    // same fixed sentence. `disable_model_invocation` is still honoured here
+    // AND independently at the search/invoke path, so a hidden skill is not
+    // advertised by this block's existence either.
+    let has_visible_skill = skills.iter().any(|s| !s.disable_model_invocation);
 
-    if !visible_skills.is_empty() {
+    if has_visible_skill {
         let skills_section = cache
             .sections
             .entry("skills")
-            .or_insert_with(|| format_skills_section(&visible_skills, context_window_tokens));
+            .or_insert_with(|| SKILL_DISCOVERY_SECTION.to_string());
         if !skills_section.is_empty() {
             parts.push(skills_section.clone());
         }
@@ -602,7 +654,7 @@ mod tests {
             false,
         );
         assert!(
-            !result.contains("The following skills are available"),
+            !result.contains(SKILL_DISCOVERY_SECTION),
             "empty skills should not inject skill reminder"
         );
     }
@@ -627,19 +679,23 @@ mod tests {
             false,
         );
         assert!(
-            result.contains("<system-reminder>"),
-            "result should contain <system-reminder>"
+            result.contains(SKILL_DISCOVERY_SECTION),
+            "a session with visible skills should carry the discovery block"
+        );
+        // #1283 c1: and it should carry NOTHING about which skills those are.
+        assert!(
+            !result.contains("skill-one"),
+            "skill-one is named in the boot prompt; the listing is supposed to \
+             be gone"
         );
         assert!(
-            result.contains("The following skills are available for use with the Skill tool:"),
-            "result should contain skills header"
+            !result.contains("skill-two"),
+            "skill-two is named in the boot prompt"
         );
         assert!(
-            result.contains("</system-reminder>"),
-            "result should close <system-reminder>"
+            !result.contains("The following skills are available for use with the Skill tool:"),
+            "the unconditional listing header is still being emitted at boot"
         );
-        assert!(result.contains("skill-one"), "result should list skill-one");
-        assert!(result.contains("skill-two"), "result should list skill-two");
     }
 
     #[test]
@@ -661,9 +717,19 @@ mod tests {
             &[],
             false,
         );
+        // #1283 c1 inverted what "filtered" means here: NEITHER name reaches
+        // the prompt now. What the visible skill still buys is the discovery
+        // block itself, and what `disable_model_invocation` still buys is
+        // graded by `test_build_system_prompt_all_hidden_no_reminder` — a set
+        // that is ONLY hidden gets no block at all, so the block's presence
+        // never advertises a skill the model must not invoke.
         assert!(
-            result.contains("visible-skill"),
-            "visible skill should appear"
+            result.contains(SKILL_DISCOVERY_SECTION),
+            "one visible skill should still earn the discovery block"
+        );
+        assert!(
+            !result.contains("visible-skill"),
+            "visible-skill is named in the boot prompt; the listing is gone"
         );
         assert!(
             !result.contains("hidden-skill"),
@@ -691,7 +757,7 @@ mod tests {
             false,
         );
         assert!(
-            !result.contains("The following skills are available"),
+            !result.contains(SKILL_DISCOVERY_SECTION),
             "all-hidden skills should not inject reminder"
         );
     }
@@ -717,7 +783,7 @@ mod tests {
             "custom prompt should appear"
         );
         assert!(
-            result.contains("The following skills are available for use with the Skill tool:"),
+            result.contains(SKILL_DISCOVERY_SECTION),
             "skills reminder should also appear"
         );
     }
@@ -748,28 +814,22 @@ mod tests {
 
     /// A budget too small for even a name drops the entry and says so.
     ///
-    /// This used to assert that a 50-token window (a 2-character budget) still
-    /// rendered `- nb-skill` — minimal mode emitting names with nothing capping
-    /// the total, which is one of the three unbounded terms
-    /// FerroxLabs/wayland#1280 c1 removed. The listing is now clamped, and what
-    /// it clamps away it counts and points at: the model reaches a trimmed
-    /// skill through `Skill { query }`, not through the listing.
+    /// This used to drive `build_system_prompt`. It cannot any more, and the
+    /// reason is the point: after FerroxLabs/wayland#1283 c1 the boot prompt
+    /// renders [`SKILL_DISCOVERY_SECTION`] and no listing at all, so every
+    /// budget assertion made through that door would pass for the wrong
+    /// reason — "the entry is absent" would be true of a 2-character budget
+    /// and of a 200,000-character one alike.
+    ///
+    /// [`format_skills_section`] is still production code: `late_mcp.rs`
+    /// renders newly arrived MCP skills through it, and `engine.rs` renders
+    /// the transient inventory-change block through it. #1280 c1's ceiling
+    /// therefore still has live call sites and is still graded — here, and end
+    /// to end in `issue_1280_skills_ceiling_test.rs`.
     #[test]
-    fn test_build_system_prompt_budget_below_one_entry_trims_and_says_so() {
+    fn test_format_skills_section_budget_below_one_entry_trims_and_says_so() {
         let skill = make_test_skill("nb-skill", &"x".repeat(100), false, false);
-        let result = build_system_prompt(
-            &mut SystemPromptCache::new(),
-            None,
-            "/tmp",
-            "test-model",
-            &[skill],
-            Some(50),
-            None,
-            false,
-            false,
-            &[],
-            false,
-        );
+        let result = format_skills_section(&[skill], Some(50));
         assert!(
             !result.contains("- nb-skill"),
             "a 2-character budget cannot hold an entry, so none should be rendered"
@@ -781,18 +841,9 @@ mod tests {
 
         // CONTROL: the same skill at a budget that fits IS listed in full, so
         // the assertion above is about the budget and not about the skill.
-        let roomy = build_system_prompt(
-            &mut SystemPromptCache::new(),
-            None,
-            "/tmp",
-            "test-model",
+        let roomy = format_skills_section(
             &[make_test_skill("nb-skill", "short", false, false)],
             Some(100_000),
-            None,
-            false,
-            false,
-            &[],
-            false,
         );
         assert!(roomy.contains("- nb-skill: short"));
         assert!(!roomy.contains(wcore_skills::prompt::SKILL_OVERFLOW_HINT));

@@ -309,19 +309,46 @@ async fn e7_system_prompt_injection() {
         &[],
         false,
     );
+    // FerroxLabs/wayland#1283 c1 inverted this assertion. The boot prompt used
+    // to name every discovered skill; it now carries fixed Skill DISCOVERY
+    // instructions and no per-skill listing, so what E7 grades is that
+    // discovering skills still changes the prompt — and that discovering THESE
+    // skills does not put THEIR names in it.
     assert!(
-        prompt.contains("greet"),
-        "E7 FAIL: 'greet' not in system prompt"
-    );
-    assert!(
-        prompt.contains("db:migrate"),
-        "E7 FAIL: 'db:migrate' not in system prompt"
+        prompt.contains("call the `Skill` tool with"),
+        "E7 FAIL: no skill-discovery block in the system prompt"
     );
     assert!(
         prompt.contains("system-reminder"),
         "E7 FAIL: missing <system-reminder> wrapper"
     );
-    println!("E7 PASS: skills injected into system prompt");
+    assert!(
+        !prompt.contains("db:migrate"),
+        "E7 FAIL: 'db:migrate' is named in the system prompt; the unconditional \
+         listing is supposed to be gone"
+    );
+
+    // CONTROL: with no skills discovered there is no block at all, so the
+    // assertion above is about discovery and not about a constant that is
+    // always emitted.
+    let bare = build_system_prompt(
+        &mut SystemPromptCache::new(),
+        None,
+        &cwd,
+        "test-model",
+        &[],
+        None,
+        None,
+        false,
+        false,
+        &[],
+        false,
+    );
+    assert!(
+        !bare.contains("call the `Skill` tool with"),
+        "E7 FAIL: the discovery block is emitted with no skills installed"
+    );
+    println!("E7 PASS: skill discovery injected into system prompt, names are not");
 }
 
 // ---------------------------------------------------------------------------

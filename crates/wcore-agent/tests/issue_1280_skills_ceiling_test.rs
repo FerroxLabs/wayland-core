@@ -243,19 +243,61 @@ fn width(s: &str) -> usize {
 // c1 — the ceiling, end to end
 // ---------------------------------------------------------------------------
 
-/// 1,000 project skills, on the real bootstrap path.
+/// 1,000 project skills.
 ///
 /// Before the fix this rendered 19,999 chars against the 1,310-char budget the
 /// session's own resolved window implies — 15.3x — because level 3 emitted
 /// every non-bundled NAME with nothing capping the total.
+///
+/// WHERE THIS IS MEASURED, AND WHY IT MOVED. It used to read the listing off
+/// the `<system-reminder>` block of a real `AgentBootstrap::build()` request.
+/// FerroxLabs/wayland#1283 c1 removed that block: the boot prompt now carries
+/// fixed Skill discovery instructions and NO per-skill listing, so a budget
+/// assertion made through that door would pass for the wrong reason — "under
+/// 1,310 columns" is trivially true of a listing that does not exist. The
+/// bootstrap arm is kept, and now asserts that FACT; the ceiling itself is
+/// measured on `format_skills_section`, which is the same product renderer the
+/// 100-bundled arm below uses and which still has two live production call
+/// sites: `late_mcp.rs` renders newly arrived MCP skills through it, and
+/// `engine.rs` renders the transient inventory-change block through it. What
+/// this test no longer proves is that the ceiling holds on the BOOT path,
+/// because on the boot path there is nothing left for it to bound.
 #[tokio::test]
 #[serial_test::serial]
 async fn a_thousand_project_skills_still_fit_the_window_budget() {
     let budget = get_char_budget(None);
 
+    // The boot path, on the product: no listing, for any skill count.
     let reqs = session(1_000, vec![plain_answer()], &["What is 2 + 2?"]).await;
-    let block = skills_block(&reqs[0].system).expect("a skills listing was rendered");
-    let listing = listing_of(block);
+    assert!(
+        skills_block(&reqs[0].system).is_none(),
+        "the boot prompt still renders a skills listing (#1283 c1): {}",
+        skills_block(&reqs[0].system).unwrap_or("")
+    );
+    assert!(
+        !reqs[0].system.contains("m-skill-"),
+        "the boot prompt names installed skills"
+    );
+    // NON-VACUITY for the two assertions above: the fixture really installed
+    // 1,000 skills, so "no listing" is the gate and not an empty catalogue.
+    assert!(
+        reqs[0].system.contains("call the `Skill` tool with"),
+        "no skill-discovery block, so the catalogue may never have loaded"
+    );
+
+    // The ceiling, on the renderer the surviving production call sites use.
+    let skills: Vec<SkillRef> = (0..1_000)
+        .map(|i| {
+            skill_ref(
+                &format!("m-skill-{i:03}"),
+                &(format!("skill {i:03} ")
+                    + &"does a distinct thing worth describing at some length so                         the listing is realistic "
+                        .repeat(3)),
+                SkillSource::User,
+            )
+        })
+        .collect();
+    let listing = listing_of(&wcore_agent::context::format_skills_section(&skills, None));
 
     // NON-VACUITY: the arm has to be over budget BEFORE the ceiling, or a pass
     // here means only that 1,000 skills happen to be small. One name-only entry
@@ -275,15 +317,14 @@ async fn a_thousand_project_skills_still_fit_the_window_budget() {
         width(listing)
     );
 
-    // ...and it is not bounded by being empty. Something real is listed, and
-    // it is one of THIS test's fixtures — see `isolate_user_skill_dirs`.
+    // ...and it is not bounded by being empty.
     assert!(
         listing.contains("- m-skill-"),
-        "the listing named no planted skill at all, so the bound above measures \
+        "the listing named no skill at all, so the bound above measures \
          nothing: {listing}"
     );
 
-    // WRONG-REFUSAL CONTROL, prompt half: what was trimmed is counted and the
+    // WRONG-REFUSAL CONTROL, listing half: what was trimmed is counted and the
     // route back to it is named in the listing itself.
     assert!(
         listing.contains(SKILL_OVERFLOW_HINT),
@@ -292,15 +333,18 @@ async fn a_thousand_project_skills_still_fit_the_window_budget() {
     );
 }
 
-/// The CONTROL for the test above: a session whose skills fit is not trimmed.
+/// The CONTROL for the test above: a skill set that fits is not trimmed.
 ///
 /// A ceiling that always fires is indistinguishable from a listing that always
-/// says "search for it", and would be its own wrong refusal.
-#[tokio::test]
-#[serial_test::serial]
-async fn a_small_skill_set_is_listed_in_full_and_not_trimmed() {
-    let reqs = session(6, vec![plain_answer()], &["What is 2 + 2?"]).await;
-    let listing = listing_of(skills_block(&reqs[0].system).expect("a skills listing"));
+/// says "search for it", and would be its own wrong refusal. Measured on
+/// `format_skills_section` for the reason given above — the boot path renders
+/// no listing to control against since #1283 c1.
+#[test]
+fn a_small_skill_set_is_listed_in_full_and_not_trimmed() {
+    let skills: Vec<SkillRef> = (0..6)
+        .map(|i| skill_ref(&format!("m-skill-{i:03}"), "short", SkillSource::User))
+        .collect();
+    let listing = listing_of(&wcore_agent::context::format_skills_section(&skills, None));
 
     for i in 0..6 {
         assert!(
@@ -524,17 +568,30 @@ async fn a_trimmed_skill_is_found_and_run_on_a_turn_that_needs_it() {
         reqs.len()
     );
 
-    // PRECONDITION: the skill really is absent from the listing, or this test
+    // PRECONDITION: the skill really is absent from the prompt, or this test
     // proves nothing about reachability after trimming.
-    let listing = listing_of(skills_block(&reqs[0].system).expect("a skills listing"));
+    //
+    // The precondition got STRONGER with FerroxLabs/wayland#1283 c1 and the
+    // assertion changed shape with it: there is no listing at boot at all now,
+    // so the needle is not merely trimmed out of one, it is one of a thousand
+    // skills none of which is named anywhere in the trusted prefix. What has to
+    // hold is that the prefix still tells the model the route exists — that is
+    // the wrong-refusal half, and it is what the marker below reads.
     assert!(
-        !listing.contains(NEEDLE),
-        "{NEEDLE} was in the listing all along, so nothing about a TRIMMED \
+        skills_block(&reqs[0].system).is_none(),
+        "a per-skill listing is still rendered at boot"
+    );
+    assert!(
+        !reqs[0].system.contains(NEEDLE),
+        "{NEEDLE} was in the prompt all along, so nothing about a WITHHELD \
          skill's reachability was measured"
     );
     assert!(
-        listing.contains(SKILL_OVERFLOW_HINT),
-        "the listing did not even declare that skills were withheld: {listing}"
+        reqs[0].system.contains("call the `Skill` tool with"),
+        "the prompt withholds every installed skill and states no route to \
+         them, which is a wrong refusal whatever the tool layer can do. System \
+         prompt:\n{}",
+        reqs[0].system
     );
 
     // The Skill tool is cold; the model has to ask for it first. That is the

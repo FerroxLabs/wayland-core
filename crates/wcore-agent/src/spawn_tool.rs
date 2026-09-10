@@ -482,8 +482,12 @@ mod child_prompt_trim_tests {
     /// `build_child_prompt` output.
     const FULL_PROMPT_TOOL_GUIDANCE_MARKER: &str = "# Using your tools";
     const FULL_PROMPT_INTRO_MARKER: &str = "You are an AI assistant that can use tools";
-    /// The skills index is wrapped in this reminder tag in the full prompt.
-    const FULL_PROMPT_SKILLS_MARKER: &str = "The following skills are available for use";
+    /// The skills section of the full prompt. FerroxLabs/wayland#1283 c1
+    /// replaced the per-skill index with fixed discovery instructions, and this
+    /// marker moved with it: the old string appears nowhere in
+    /// `build_system_prompt` output now, so a guard still watching for it would
+    /// be blind rather than satisfied.
+    const FULL_PROMPT_SKILLS_MARKER: &str = "call the `Skill` tool with";
 
     #[test]
     fn spawn_child_system_prompt_is_trimmed_not_full_framework() {
