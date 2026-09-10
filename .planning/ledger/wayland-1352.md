@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "ACP serve cancels a keeping-up 16 MiB reader with 'protocol relay overloaded' under concurrency"
 status: open
-last_verified_commit: d25526a37
+last_verified_commit: a5dcce723
 criteria:
   - id: c1
     text: "The cause of the cancellation is NAMED with the instrument that named it, and a red test reproduces it deterministically -- not only under soak contention."
