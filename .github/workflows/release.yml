@@ -1694,3 +1694,88 @@ jobs:
               fi
             fi
           fi
+
+  # ── terminal admission guard (release-engine P5) ──────────────────────────
+  # A skipped job does not fail a workflow run. Run 34327731386 attempt 2 was
+  # GREEN with the required consumers skipped, and nothing published: the
+  # graph is a straight dependency chain, so one skip upstream silently
+  # skipped everything below it while the run still concluded success.
+  # "The workflow was green" was therefore never evidence of a publication.
+  #
+  # This job runs on `always()` so it cannot itself be skipped, and turns that
+  # state into a NAMED blocker. It also re-asks the outcome question directly
+  # against the API rather than trusting the graph: a release that is still a
+  # draft, or is missing assets, is not a release regardless of job results.
+  release-complete:
+    name: Release actually completed
+    runs-on: ubuntu-latest
+    if: always()
+    needs:
+      - prepare-release
+      - build
+      - github-release
+      - post-tag-smoke
+      - collect-release-mutants
+      - collect-release-native
+      - produce-release-evidence
+      - promote-release
+      - publish-npm
+    permissions:
+      contents: read
+    steps:
+      - name: Every required job ran and succeeded
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+
+          results = json.loads(os.environ["RESULTS"])
+          bad = {job: (data.get("result") or "no-result")
+                 for job, data in sorted(results.items())
+                 if data.get("result") != "success"}
+
+          for job, data in sorted(results.items()):
+              print(f"{job}: {data.get('result')}")
+
+          if bad:
+              print()
+              for job, result in bad.items():
+                  print(f"::error title=Release incomplete::{job} did not succeed: "
+                        f"{result}. A skipped job leaves the run green and publishes "
+                        f"nothing; this is the blocker, not the absence of a failure.")
+              sys.exit(1)
+          print("\nall required release jobs succeeded")
+          PY
+
+      - name: The release is public, complete and signed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag_name || github.ref_name }}
+        run: |
+          set -euo pipefail
+          release="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}")"
+          draft="$(printf '%s' "$release" | python3 -c 'import json,sys; print(json.load(sys.stdin)["draft"])')"
+          names="$(printf '%s' "$release" | python3 -c 'import json,sys; [print(a["name"]) for a in json.load(sys.stdin)["assets"]]')"
+          count="$(printf '%s\n' "$names" | grep -c . || true)"
+
+          echo "draft=${draft} assets=${count}"
+          printf '%s\n' "$names" | sed 's/^/  /'
+
+          if [ "$draft" != "False" ]; then
+            echo "::error title=Release incomplete::${TAG} is still a draft. Every job may have succeeded; the release is not public."
+            exit 1
+          fi
+          # Six platform archives, their six checksums, the signed manifest
+          # and the contract manifest. A short set means a partial upload was
+          # promoted, which is the state that has to be caught here and not by
+          # a user reporting a missing binary.
+          if [ "$count" -lt 14 ]; then
+            echo "::error title=Release incomplete::${TAG} carries ${count} assets, expected at least 14. A partial asset set was promoted."
+            exit 1
+          fi
+          if ! printf '%s\n' "$names" | grep -q 'release-manifest'; then
+            echo "::error title=Release incomplete::${TAG} carries no signed release manifest."
+            exit 1
+          fi
+          echo "release ${TAG} is public with ${count} assets and a signed manifest"

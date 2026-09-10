@@ -325,10 +325,61 @@ class Github:
         return found[0] if found else None
 
     def create(self):
-        self.run("release", "create", self.tag, "--repo", self.repo,
-                 "--draft", "--verify-tag", "--title", self.tag, "--generate-notes")
+        """Create the draft and RETURN it, identified by its own id.
+
+        The previous body created the draft and then went looking for it in a
+        LIST, which is a different question with a different answer: a create
+        that succeeded followed by a list that had not caught up yet produced
+        None, and the caller subscripted it (run 34327731386 attempt 1, whose
+        draft 385331683 then existed with zero assets). Returning the created
+        object removes the second question entirely -- there is nothing to
+        look up, so there is no window in which to fail to find it, and no
+        path on which an uncertain result invites a second create.
+        """
+        # POST /releases CREATES the tag when it is absent, at whatever the
+        # default branch happens to be. `gh release create --verify-tag`
+        # refused that; the REST call does not, so the check is explicit here
+        # or a mistyped tag silently invents one and signs against it.
+        self.run("api", f"repos/{self.repo}/git/ref/tags/{self.tag}")
+        created = json.loads(self.run(
+            "api", "--method", "POST", f"repos/{self.repo}/releases",
+            "-f", f"tag_name={self.tag}", "-f", f"name={self.tag}",
+            "-F", "draft=true", "-F", "generate_release_notes=true"))
+        require(isinstance(created, dict) and created.get("id"),
+                "create returned no release id")
+        require(created.get("tag_name") == self.tag,
+                "created release names a different tag")
+        require(created.get("draft") is True, "created release is not a draft")
+        created.setdefault("assets", [])
+        return created
+
+    def refresh(self, release):
+        """Re-read ONE release by id, bounded, absent distinguished from unreachable.
+
+        Used instead of `view()` wherever a release is already known, because
+        a list that omits it and a list that could not be fetched are the same
+        value -- None -- and only one of them means the release is gone.
+        """
+        require(release is not None and release.get("id"), "refresh needs a known release")
+        last = ""
+        for attempt in range(5):
+            completed = subprocess.run(
+                ["gh", "api", f"repos/{self.repo}/releases/{release['id']}"],
+                capture_output=True, text=True)
+            if completed.returncode == 0:
+                return json.loads(completed.stdout)
+            last = completed.stderr.strip()
+            require("(HTTP 404)" in last,
+                    f"reading release {release['id']} failed and it is NOT a 404, so "
+                    f"this is not evidence the release is absent: {last}")
+            time.sleep(2 * (attempt + 1))
+        raise ValueError(
+            f"release {release['id']} was created but is still 404 after five reads: {last}")
 
     def hashes(self, release):
+        # A clear refusal rather than `'NoneType' object is not subscriptable`,
+        # which is what this actually failed with in production.
+        require(release is not None, "cannot read assets of an absent release")
         if not release["assets"]:
             return {}
         with tempfile.TemporaryDirectory() as directory:
@@ -362,8 +413,7 @@ def transition(backend, directory, action, risk_notes=""):
         return
     if release is None:
         require(action == "stage", "promotion requires private staging")
-        backend.create()
-        release = backend.view()
+        release = backend.create()
     remote = backend.hashes(release)
     require(all(name in assets and assets[name] == digest for name, digest in remote.items()),
             "remote artifact mismatch; refusing overwrite")
@@ -373,7 +423,7 @@ def transition(backend, directory, action, risk_notes=""):
             return
         for name in sorted(assets.keys() - remote.keys()):
             backend.upload(Path(directory) / name)
-        require(backend.hashes(backend.view()) == assets, "incomplete private upload")
+        require(backend.hashes(backend.refresh(release)) == assets, "incomplete private upload")
     else:
         require(remote == assets, "promotion requires exact complete asset set")
         marker = "\n\n### Deferred release risks\n"
@@ -431,12 +481,29 @@ def self_test():
             release = None
             remote = {}
             interrupt = False
+            creates = 0
+            # When set, every LIST lookup after a create answers None, which
+            # is the run 34327731386 shape: the create succeeded and the read
+            # that followed it did not see the object yet.
+            list_goes_blind = False
             def view(self):
+                if self.list_goes_blind:
+                    return None
                 return self.release
             def create(self):
-                self.release = dict(draft=True, body="release notes", assets=[])
+                self.creates += 1
+                self.release = dict(id=385331683, draft=True,
+                                    body="release notes", assets=[])
                 self.remote = {}
+                return self.release
+            def refresh(self, release):
+                require(release is not None, "refresh called with no release")
+                return self.release
             def hashes(self, release):
+                # The real backend subscripts release["assets"] here. Mirror
+                # that so a None reaching this point is a failure in the
+                # control rather than something the fake quietly absorbs.
+                require(release is not None, "hashes called with an absent release")
                 return dict(self.remote)
             def upload(self, path):
                 self.remote[path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -468,6 +535,19 @@ def self_test():
             except ValueError:
                 continue
             raise AssertionError("mismatch accepted")
+
+        # P1: a create that succeeds followed by a list that cannot see it.
+        # This raised `'NoneType' object is not subscriptable` and left an
+        # empty draft behind; the danger on retry was a SECOND draft. The
+        # staging must complete from the created object alone, and create
+        # must be called exactly once.
+        blind = Fake()
+        blind.list_goes_blind = True
+        transition(blind, directory, "stage")
+        require(blind.creates == 1,
+                f"a blind list made the gate create {blind.creates} drafts")
+        require(blind.hashes(blind.release) == assets,
+                "staging did not complete when the list could not see the draft")
     producer_self_test()
     print("PASS: receipt refusals, private create/resume, promotion retry, withdrawal, mismatch")
 
