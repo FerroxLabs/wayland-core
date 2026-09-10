@@ -2771,11 +2771,18 @@ impl ExclusiveFileLock {
                         continue;
                     }
                     if std::time::Instant::now() >= deadline {
+                        // The census says WHY the waiter never stole it. A
+                        // waiter that polled a lock whose mtime it could not
+                        // read, or one dated in the future, is in a different
+                        // situation from one that waited out a live holder --
+                        // and until wayland#1300 both looked identical from
+                        // here, because both collapsed to "not stale".
                         return Err(CredentialsError::BackendUnavailable(format!(
                             "the {label} lock at {} is held by another process and did not \
-                             free within {:?}",
+                             free within {:?} [staleness polls: {}]",
                             path.display(),
-                            policy.wait_ceiling
+                            policy.wait_ceiling,
+                            staleness_census::snapshot()
                         )));
                     }
                     std::thread::sleep(
@@ -2827,14 +2834,129 @@ impl ExclusiveFileLock {
     }
 
     /// A lockfile untouched for longer than `stale_after` is treated as
-    /// abandoned by a crashed holder. Any error reading the mtime (clock skew,
-    /// missing) → not stale.
+    /// abandoned by a crashed holder.
+    ///
+    /// The decision stays FAIL-CLOSED: anything that is not a readable age
+    /// older than `stale_after` means "do not steal". What changed for
+    /// wayland#1300 is that the two ways of not knowing are no longer the same
+    /// answer as "the holder is alive". The old body was
+    ///
+    /// ```text
+    /// .map(|r| r.unwrap_or(false))   // mtime is in the FUTURE
+    /// .unwrap_or(false)              // metadata()/modified() FAILED
+    /// ```
+    ///
+    /// so a future-dated mtime and an unreadable one both became a silent
+    /// `false`, and a waiter that could never steal simply polled until its
+    /// ceiling. That is indistinguishable from a live holder while it happens,
+    /// which is why the cause could only be inferred and not named.
     fn is_stale(path: &Path, stale_after: std::time::Duration) -> bool {
-        std::fs::metadata(path)
-            .and_then(|m| m.modified())
-            .map(|t| t.elapsed().map(|age| age > stale_after))
-            .map(|r| r.unwrap_or(false))
-            .unwrap_or(false)
+        let observation = Self::observe_staleness(path, stale_after);
+        observation.record();
+        matches!(observation, Staleness::Stale { .. })
+    }
+
+    fn observe_staleness(path: &Path, stale_after: std::time::Duration) -> Staleness {
+        let modified = match std::fs::metadata(path).and_then(|m| m.modified()) {
+            Ok(modified) => modified,
+            Err(error) => return Staleness::Unreadable { kind: error.kind() },
+        };
+        match modified.elapsed() {
+            Ok(age) if age > stale_after => Staleness::Stale { age },
+            Ok(age) => Staleness::Fresh { age },
+            // `elapsed()` fails ONLY when the timestamp is ahead of now, so the
+            // error carries the skew rather than a failure to read anything.
+            Err(ahead) => Staleness::FutureDated {
+                ahead: ahead.duration(),
+            },
+        }
+    }
+}
+
+/// What one staleness poll actually observed, rather than the boolean it
+/// collapses to (wayland#1300 c3/c4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Staleness {
+    /// Readable, older than `stale_after`: the holder is presumed crashed.
+    Stale { age: std::time::Duration },
+    /// Readable and recent: the holder is presumed alive.
+    Fresh { age: std::time::Duration },
+    /// The mtime is AHEAD of this clock, so its age is not a duration. Counts
+    /// as not-stale, and is now counted rather than merely being slow.
+    FutureDated { ahead: std::time::Duration },
+    /// `metadata()`/`modified()` refused. Counts as not-stale.
+    Unreadable { kind: std::io::ErrorKind },
+}
+
+/// Process-wide census of staleness polls.
+///
+/// Deliberately counters and one maximum, not a log: this runs inside a poll
+/// loop, and per-poll I/O would change the very timing being measured. It
+/// records NOTHING derived from the lock's contents -- no nonce, no credential
+/// bytes, no path -- only which arm fired and how far off the clock was.
+pub(crate) mod staleness_census {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    pub(crate) static STALE: AtomicU64 = AtomicU64::new(0);
+    pub(crate) static FRESH: AtomicU64 = AtomicU64::new(0);
+    pub(crate) static FUTURE_DATED: AtomicU64 = AtomicU64::new(0);
+    pub(crate) static UNREADABLE: AtomicU64 = AtomicU64::new(0);
+    pub(crate) static MAX_AHEAD_MICROS: AtomicU64 = AtomicU64::new(0);
+    pub(crate) static MAX_AGE_MICROS: AtomicU64 = AtomicU64::new(0);
+
+    pub(crate) fn snapshot() -> String {
+        format!(
+            "stale={} fresh={} future_dated={} unreadable={} \
+             max_age={}us max_ahead={}us",
+            STALE.load(Ordering::Relaxed),
+            FRESH.load(Ordering::Relaxed),
+            FUTURE_DATED.load(Ordering::Relaxed),
+            UNREADABLE.load(Ordering::Relaxed),
+            MAX_AGE_MICROS.load(Ordering::Relaxed),
+            MAX_AHEAD_MICROS.load(Ordering::Relaxed),
+        )
+    }
+
+    pub(crate) fn reset() {
+        for counter in [
+            &STALE,
+            &FRESH,
+            &FUTURE_DATED,
+            &UNREADABLE,
+            &MAX_AHEAD_MICROS,
+            &MAX_AGE_MICROS,
+        ] {
+            counter.store(0, Ordering::Relaxed);
+        }
+    }
+}
+
+impl Staleness {
+    fn record(self) {
+        use staleness_census as census;
+        use std::sync::atomic::Ordering;
+
+        fn raise(cell: &std::sync::atomic::AtomicU64, value: u64) {
+            cell.fetch_max(value, Ordering::Relaxed);
+        }
+
+        match self {
+            Staleness::Stale { age } => {
+                census::STALE.fetch_add(1, Ordering::Relaxed);
+                raise(&census::MAX_AGE_MICROS, age.as_micros() as u64);
+            }
+            Staleness::Fresh { age } => {
+                census::FRESH.fetch_add(1, Ordering::Relaxed);
+                raise(&census::MAX_AGE_MICROS, age.as_micros() as u64);
+            }
+            Staleness::FutureDated { ahead } => {
+                census::FUTURE_DATED.fetch_add(1, Ordering::Relaxed);
+                raise(&census::MAX_AHEAD_MICROS, ahead.as_micros() as u64);
+            }
+            Staleness::Unreadable { .. } => {
+                census::UNREADABLE.fetch_add(1, Ordering::Relaxed);
+            }
+        }
     }
 }
 
