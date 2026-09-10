@@ -1,0 +1,68 @@
+core#403 c3 / core#373 c5 — the ten-consecutive workspace --lib arm
+===================================================================
+
+Command    cargo test --locked --workspace --lib --no-fail-fast
+Host       hetzner-dsm, through tools/remote-proof.py, slot parallel-2
+Source     70659720863c3d64b276f60427dcdb2a09daf284  (w15/gateB)
+Tree       e1808586c9667fff938e33926f5d5a44b0b8bc2b
+Window     2026-09-10T04:42Z .. 2026-09-10T05:40Z
+
+THIS IS A CENSUS, NOT A SELECTION. The table below is every proof receipt in
+`evidence/` whose `source` is the commit above and whose `cargo_args` are
+exactly this command, enumerated by the receipt files themselves. A failing run
+could not be omitted from it without deleting its receipt, which is the point:
+a hand-kept list of ten greens is indistinguishable from eleven runs with one
+red dropped.
+
+  n   nonce               rc   secs   never-executed   FAILED blocks   ok blocks
+  --  ------------------  ---  -----  ---------------  --------------  ---------
+   1  1789015345-36375     0    388         0               1              57
+   2  1789016050-3851      0    258         0               1              57
+   3  1789016313-35591     0    272         0               1              57
+   4  1789016588-48141     0    254         0               1              57
+   5  1789017190-61885     0    260         0               1              57
+   6  1789017476-66605     0    279         0               1              57
+   7  1789017798-72489     0    259         0               1              57
+   8  1789018076-74330     0    249         0               1              57
+   9  1789018342-77275     0    236         0               1              57
+  10  1789018598-82780     0    228         0               1              57
+
+  10 of 10 rc=0. Streak 10. `never executed` 0 on every run, so this is NOT the
+  concurrent-cargo artifact-deletion instrument failure core#373 c5 documented.
+
+HOST LOAD, stated because the criterion asks for the range and because the
+previous arm's two reds were a statement about a quiet window rather than about
+the tree (1-minute loadavg, sampled either side of each run):
+
+  27.4  30.1  31.0  41.1  47.5  48.5  49.0  49.5  50.3  52.8  57.1  60.6
+  64.5  70.4  74.4
+
+  range 27.4 .. 74.4. The arm that regraded core#373 c5 to not-met reddened at
+  load up to 103; this one did not reach that. Ten greens between 27 and 74 is
+  not a claim about 103.
+
+THE ONE `FAILED` BLOCK IN EVERY RUN IS NOT A FAILURE OF THE SUITE. Each of the
+ten logs contains exactly ONE `panicked at` line and it reads `always_fails`:
+a nested `failing_fixture` crate that a test in this workspace compiles, runs
+and asserts FAILS. It appears identically in all ten, and in the two red runs
+of the previous arm. The run's exit code is the signal, not the count of
+`FAILED` strings — recorded here because a reader grepping these logs for
+FAILED will find it.
+
+RUNS THAT PRODUCED NO VERDICT ARE EXCLUDED, AND SAID SO RATHER THAN COUNTED.
+Several attempts in this window returned `Proof slot busy; no build ran`
+(exit 3, the slot flock) or were killed locally mid-flight by the agent harness
+reaping a background shell. Neither produces a `proof-*.status` on the host and
+neither appears above: no cargo verdict was reached, so there is nothing to
+grade in either direction. That is an instrument outcome, not a suite outcome,
+and it is the same distinction core#373 c5 drew for the `never executed` class.
+One such kill (2026-09-10 ~04:55Z) was investigated rather than assumed: the
+remote log stopped mid-suite inside `wcore-cli`, no `.status` was written, and
+the remote cargo went on to be re-run from the start.
+
+WHAT THIS DOES NOT ESTABLISH. Ten greens do not exclude a defect whose rate is
+below roughly 10%, and they say nothing about load above ~75 or about macOS and
+Windows, where this suite is not run here at all. What carries the two
+single-sample classes core#403 c1/c2 name is the instrument change recorded in
+those criteria — the assertions no longer decide on a wall clock — not this
+streak.
