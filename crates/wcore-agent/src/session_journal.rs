@@ -795,9 +795,7 @@ impl SessionJournal {
         // the admission is taken BEFORE the scan and is decided against it plus
         // every store the scan may not have seen.
         let mut admission = CheckpointAdmission::before_scan(&self.checkpoint_quota);
-        let session_bytes = checkpoint_directory_bytes(directory)?;
-        #[cfg(test)]
-        quota_race_gate::after_quota_scan(directory);
+        let session_bytes = scan_checkpoint_quota(directory)?;
         admission.admit(session_bytes, contents.len() as u64)?;
 
         let temporary = directory.join(format!(
@@ -1345,10 +1343,26 @@ impl Drop for CheckpointAdmission<'_> {
         if self.reserved == 0 {
             return;
         }
+        #[cfg(test)]
+        quota_race_gate::reservation_ended();
         let mut ledger = CheckpointQuota::lock(self.ledger);
         ledger.reserved = ledger.reserved.saturating_sub(self.reserved);
         ledger.released = ledger.released.wrapping_add(self.reserved);
     }
+}
+
+/// The session-quota scan exactly as a store takes it.
+///
+/// Test instrumentation is the only thing between the directory listing and
+/// this function's return: under test a store can be parked here, AFTER its
+/// listing and BEFORE any statement that follows the scan. That is what lets a
+/// test run another store's whole publication inside that gap, so moving the
+/// released snapshot to after the scan cannot hide from it (wayland#1353).
+fn scan_checkpoint_quota(directory: &Path) -> Result<u64, JournalError> {
+    let scanned = checkpoint_directory_bytes(directory)?;
+    #[cfg(test)]
+    quota_race_gate::after_quota_scan(directory);
+    Ok(scanned)
 }
 
 /// TEST-ONLY rendezvous between a checkpoint store's session-quota scan and the
@@ -1372,6 +1386,40 @@ pub(crate) mod quota_race_gate {
         expected: usize,
         passed: usize,
         timed_out: usize,
+        /// Park mode: only the FIRST store to arrive waits, until released;
+        /// every later store passes straight through.
+        park_first: bool,
+        parked: bool,
+        released: bool,
+    }
+
+    thread_local! {
+        static RESERVATION_ENDED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            std::cell::RefCell::new(None);
+    }
+
+    /// Run `hook` the next time a checkpoint reservation ends on this thread.
+    pub(crate) fn set_reservation_end_hook(hook: impl FnOnce() + 'static) {
+        RESERVATION_ENDED.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    pub(crate) fn reservation_ended() {
+        RESERVATION_ENDED.with(|slot| {
+            if let Some(hook) = slot.borrow_mut().take() {
+                hook();
+            }
+        });
+    }
+
+    /// Arm park mode for `directory`: the first store that finishes its scan
+    /// there waits until [`Armed::release`]; no other store is held.
+    pub(crate) fn park_first(directory: &Path) -> Armed {
+        let armed = arm(&[directory], 0);
+        let (lock, _) = gate();
+        lock.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .park_first = true;
+        armed
     }
 
     /// What one armed window observed.
@@ -1398,13 +1446,29 @@ pub(crate) mod quota_race_gate {
         *lock.lock().unwrap_or_else(PoisonError::into_inner) = Gate {
             armed_for: directories.iter().map(|path| path.to_path_buf()).collect(),
             expected,
-            passed: 0,
-            timed_out: 0,
+            ..Gate::default()
         };
         Armed { _serial: serial }
     }
 
     impl Armed {
+        /// Park mode: wait until a store is parked. False if none arrived.
+        pub(crate) fn wait_until_parked(&self) -> bool {
+            let (lock, condvar) = gate();
+            let state = lock.lock().unwrap_or_else(PoisonError::into_inner);
+            let (state, _) = condvar
+                .wait_timeout_while(state, Duration::from_secs(10), |state| !state.parked)
+                .unwrap_or_else(PoisonError::into_inner);
+            state.parked
+        }
+
+        /// Park mode: let the parked store continue.
+        pub(crate) fn release(&self) {
+            let (lock, condvar) = gate();
+            lock.lock().unwrap_or_else(PoisonError::into_inner).released = true;
+            condvar.notify_all();
+        }
+
         pub(crate) fn disarm(self) -> Rendezvous {
             let (lock, _) = gate();
             let state = lock.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1431,6 +1495,23 @@ pub(crate) mod quota_race_gate {
             .iter()
             .any(|armed| armed.as_path() == directory)
         {
+            return;
+        }
+        if state.park_first {
+            if state.parked {
+                return;
+            }
+            state.parked = true;
+            state.passed += 1;
+            condvar.notify_all();
+            let (mut state, wait) = condvar
+                .wait_timeout_while(state, Duration::from_secs(10), |state| {
+                    !state.armed_for.is_empty() && !state.released
+                })
+                .unwrap_or_else(PoisonError::into_inner);
+            if wait.timed_out() {
+                state.timed_out += 1;
+            }
             return;
         }
         state.passed += 1;
@@ -4814,6 +4895,96 @@ mod fault_tests {
         assert!(
             !directory.join(loser).exists(),
             "a refused store must leave no published checkpoint"
+        );
+    }
+
+    /// wayland#1353: the released-bytes snapshot must be taken BEFORE the scan.
+    /// Y finishes its listing and is parked before anything else it does; X then
+    /// stores, publishes and ends its reservation completely; only then does Y
+    /// decide. Y's listing cannot contain X and X holds no reservation, so the
+    /// only thing that can count X for Y is a snapshot Y took before it listed.
+    #[test]
+    fn a_store_published_after_another_stores_scan_is_still_counted() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = SessionJournal::open(dir.path().join("session.journal"), "session").unwrap();
+        let directory = seeded_checkpoint_directory(&journal);
+        leave_checkpoint_quota_room(
+            &directory,
+            MAX_EFFECT_CHECKPOINT_BYTES + MAX_EFFECT_CHECKPOINT_BYTES / 2,
+        );
+        let payload_len = usize::try_from(MAX_EFFECT_CHECKPOINT_BYTES).unwrap();
+        let payload_x = vec![0x66_u8; payload_len];
+        let payload_y = vec![0x77_u8; payload_len];
+        let digest_x = sha256_hex(&payload_x);
+        let digest_y = sha256_hex(&payload_y);
+
+        let gate = quota_race_gate::park_first(&directory);
+        let store_y = {
+            let journal = journal.clone();
+            let digest_y = digest_y.clone();
+            std::thread::spawn(move || journal.store_effect_checkpoint(&digest_y, &payload_y))
+        };
+        assert!(
+            gate.wait_until_parked(),
+            "Y never reached the end of its scan"
+        );
+        journal
+            .store_effect_checkpoint(&digest_x, &payload_x)
+            .unwrap();
+        assert!(directory.join(&digest_x).exists());
+        assert_eq!(
+            CheckpointQuota::lock(&journal.checkpoint_quota).reserved,
+            0,
+            "X must have ended its reservation before Y decides"
+        );
+        gate.release();
+        let result_y = store_y.join().unwrap();
+        let observed = gate.disarm();
+
+        let total = checkpoint_directory_bytes(&directory).unwrap();
+        assert!(
+            total <= MAX_EFFECT_CHECKPOINT_SESSION_BYTES,
+            "Y was admitted on a scan that could not see X: {total} > \
+             {MAX_EFFECT_CHECKPOINT_SESSION_BYTES} bytes ({result_y:?})"
+        );
+        assert!(
+            is_session_quota_refusal(&result_y),
+            "Y must be refused by the session quota: {result_y:?}"
+        );
+        assert!(!directory.join(&digest_y).exists());
+        assert_eq!(observed.timed_out, 0, "Y was never released: {observed:?}");
+    }
+
+    /// wayland#1353: a reservation may end only once its checkpoint is reachable
+    /// under the published name. Ending it earlier (before the bytes are written,
+    /// or after the write but before the hard link) opens a window in which a
+    /// store that snapshots after the release and lists before the publication
+    /// counts these bytes nowhere. Whether a listing misses them inside that
+    /// window depends on directory-listing order, which a test cannot force, so
+    /// the ordering itself is pinned: at the instant the reservation ends, the
+    /// published checkpoint must already exist.
+    #[test]
+    fn a_checkpoint_reservation_ends_only_after_its_checkpoint_is_published() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = SessionJournal::open(dir.path().join("session.journal"), "session").unwrap();
+        let directory = seeded_checkpoint_directory(&journal);
+        let payload = b"published before its reservation ends";
+        let digest = sha256_hex(payload);
+        let published = directory.join(&digest);
+
+        let observed = std::rc::Rc::new(std::cell::Cell::new(None));
+        {
+            let observed = std::rc::Rc::clone(&observed);
+            let published = published.clone();
+            quota_race_gate::set_reservation_end_hook(move || {
+                observed.set(Some(published.exists()));
+            });
+        }
+        journal.store_effect_checkpoint(&digest, payload).unwrap();
+        assert_eq!(
+            observed.get(),
+            Some(true),
+            "the reservation ended before the checkpoint was published"
         );
     }
 
