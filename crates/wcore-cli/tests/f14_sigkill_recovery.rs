@@ -348,6 +348,7 @@ impl CoreProcess {
             let Ok(event) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
+            self.seen.push(event.clone());
             let event_type = event.get("type").and_then(Value::as_str);
             if event_type.is_some_and(|ty| expected.contains(&ty)) {
                 return event;
@@ -3306,11 +3307,9 @@ async fn w1290_the_credential_store_alone_decides_whether_a_provider_checkpoint_
         .next_info_containing("crash replay protection is OFF", "f14-1290-keyless")
         .await;
     assert_eq!(notice["msg_id"], "f14-1290-keyless");
+    let keyless_degrade = notice["message"].as_str().map(str::to_string);
     wait_for_requests(&keyless_fixture, 1).await;
     assert_eq!(keyless.next_type("text_delta").await["text"], partial);
-    let keyless_degrade = keyless
-        .seen_message_containing("crash replay protection is OFF")
-        .map(|frame| frame["message"].as_str().unwrap_or_default().to_string());
     let _keyless_diagnostics = keyless.sigkill().await;
     let keyless_evidence = preserve_crash_evidence(&keyless_env);
     let (keyless_count, keyless_census) =
