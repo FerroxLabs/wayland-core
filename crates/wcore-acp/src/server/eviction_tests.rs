@@ -315,5 +315,7 @@ async fn an_exclusive_hold_on_the_log_map_does_not_stall_a_running_turn() {
     assert_eq!(text, 64 * 32 * 1024);
     assert!(matches!(rest.last(), Some(MessageEvent::Done { .. })));
     assert_eq!(server.event_tip(&id).await.unwrap().position, 66);
+    // End the fed upstream so recording finishes; close awaits the recorder.
+    drop(feed);
     server.delete_session(id).await.unwrap();
 }
