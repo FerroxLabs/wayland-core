@@ -1,0 +1,48 @@
+wayland#1349 c2 -- red arms for the single-flight repair (w15/leak2)
+
+Every arm is a COMMITTED mutation of the fix commit f6eccfda5, run through
+tools/remote-proof.py slot parallel-1 on hetzner-dsm, filtered to the five new
+recovery_confidential tests. A run counts only with "complete": true.
+
+GREEN (fix, f6eccfda5): all 26 recovery_confidential tests pass
+  receipt: remote_exit 0, complete true (26 run, 26 passed)
+  lint (008d88ce9, the doc-only follow-up): clippy -p wcore-agent --all-targets
+  -- -D warnings, remote_exit 0, complete true
+
+RED label -- 32d52ddcd "key the recovery-key single-flight on the backend label"
+  mutation: join an in-flight load when source, create and the backend
+  DISCRIMINANT match (i.e. the backend label), instead of the full identity.
+  receipt: proof-1789049095-82836.json, remote_exit 100, complete true
+  FAIL a_refusing_vault_is_refused_while_another_vaults_key_load_is_in_flight
+  FAIL a_session_in_another_profile_home_never_receives_this_homes_in_flight_key
+       "AUTHORIZATION BOUNDARY CROSSED: a session whose store refuses was
+        answered with Ok(()). It joined another store's in-flight key load
+        instead of being refused by its own store"
+  PASS concurrent_sessions_on_one_store_start_one_key_load
+  PASS a_settled_key_load_answers_no_later_session
+  PASS an_unresolvable_or_different_authority_load_is_never_shared
+
+RED never -- 031730521 "never share a recovery-key load"
+  mutation: the identity is always None, so every engine starts its own load
+  (the pre-fix behaviour).
+  receipt: proof-1789049194-84955.json, remote_exit 100, complete true
+  FAIL concurrent_sessions_on_one_store_start_one_key_load
+       "32 concurrent sessions on one store started 32 key loads -- one loader
+        thread and one held lock fd each, which is the wayland#1349 leak"
+  PASS the other four. The two boundary tests pass under this mutation BY
+  CONSTRUCTION -- a load that is never shared cannot cross a boundary -- which
+  is why the collapse test, not the boundary tests, is their positive control:
+  it is the one that proves sharing happens at all.
+
+RED memo -- 4d8db8b66 "keep settled recovery-key loads joinable"
+  mutation: `settle` no longer removes the flight from the registry, so a load
+  that has already answered stays joinable -- a per-process memo of the key
+  and of the refusal.
+  receipt: proof-1789049301-87522.json, remote_exit 100, complete true
+  FAIL a_settled_key_load_answers_no_later_session
+       "a store that refuses NOW must be asked, not answered with a key an
+        earlier session already loaded"
+  PASS the other four.
+
+Each of the three mutations is caught by exactly the test written for it, and
+by no other; the unmutated fix passes all of them.

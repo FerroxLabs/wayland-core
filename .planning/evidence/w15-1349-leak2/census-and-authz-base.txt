@@ -1,0 +1,257 @@
+wayland#1349 c2 -- BASE arms (the red side of the census and of the authz A/B)
+
+Host hetzner-dsm (Linux 6.8.0-101, 96 CPU, 251 GiB), shared.
+Base binary: source 38f82b87fbe2aabd01f06c469d3bab8c602c7987 (includes the
+#1289 NeverAsked extension, 011bf05ed), cargo build --bin wayland-core through
+remote-proof slot parallel-1, remote_exit 0, complete true,
+sha256 6cc6a44ba388cd5a3c58d96e556262137504181683489c1397e535280a3286c0.
+
+Driver: w15-leak2-probe6.py (sha256 ba74608bde8388f70bcf8d5d36e96a7059edec6120f7b344c0746c19b4919373)
+-- the previous lane's w15-leak-probe5.py plus a per-batch /proc census
+(threads, threads named wayland-recover*, fds on *confidential-key.lock,
+smaps_rollup) and error-frame capture. Same config as
+evidence/mixed-soak353/run2/driver.py: encrypted_file vault,
+WAYLAND_VAULT_PASSPHRASE set, [session] require_durability = true.
+
+--- base-c32-durable: concurrency 32, 32 KiB, n=320 ----------------------------
+loadavg start 29.12 31.24 34.52 / end 28.32 30.69 34.16
+
+  batch  refused  wayland-recover threads  key-lock fds  threads  quiescent RSS
+    0      30            30                    30          141    252,575,744
+    1      32            59                    59          170    259,801,088
+    2      32            88                    88          201    262,545,408
+    3      32           117                   117          230    265,289,728
+    4      32           147                   147          260    267,931,648
+    5      32           176                   176          289    270,098,432
+    6      32           205                   205          318    272,445,440
+    7      32           234                   234          347    274,706,432
+    8      32           263                   263          376    276,738,048
+    9      32           293                   293          406    278,736,896
+
+  318 of 320 turns REFUSED, every refusal between 5,061 and 5,227 ms:
+    {"code": -32003, "message": "Session persistence authority unavailable:
+     [session] require_durability = true, but this profile's credential store
+     was asked for the recovery key and did not answer in time, ..."}
+  RSS 82,210 B/cycle at R^2 0.957. Final census, every session deleted:
+  293 wayland-recover threads, 293 key-lock fds, 406 threads, VmData 1,746,173,952.
+
+  So the #1289 extension at 011bf05ed does NOT change the refusal: the store
+  WAS asked (reach = Asked), and the extension is granted only for NeverAsked.
+  Every refusal and every stranded thread is the same lock queue.
+
+--- FIX census: fix-c32-durable, same arm on the fix binary (008d88ce9, sha256 d0819d10...) ---
+loadavg start 27.95 28.97 31.56 / end 32.59 30.01 31.84. No cargo/rustc running.
+
+  batch  refused  wayland-recover threads  key-lock fds  threads  quiescent RSS      BASE threads/fds/threads
+    0       0             0                     0          131    204,115,968            30 /  30 / 141
+    1       0             0                     0          131    214,228,992            59 /  59 / 170
+    2       0             0                     0          131    219,418,624            88 /  88 / 201
+    3       0             0                     0          131    220,717,056           117 / 117 / 230
+    4       0             0                     0          131    221,818,880           147 / 147 / 260
+    5       0             0                     0          131    224,079,872           176 / 176 / 289
+    6       0             0                     0          131    226,775,040           205 / 205 / 318
+    7       0             0                     0          131    227,672,064           234 / 234 / 347
+    8       0             0                     0          131    228,466,688           263 / 263 / 376
+    9       0             0                     0          131    228,270,080           293 / 293 / 406
+
+  0 of 320 turns refused (base 318), 320/320 pass. Final census with every
+  session deleted: 0 wayland-recover threads, 0 key-lock fds, 131 threads,
+  VmData 1,264,996,352 (base 1,746,173,952).
+
+  THE CENSUS COLLAPSE, stated against c1's numbers: one stranded loader thread
+  and one held lock fd per concurrent session (462/461 at ~461 sessions on
+  e7b46387e; 293/293 at 320 here on 38f82b87f) becomes ZERO of either. The
+  in-flight load is shared and finishes, so nothing is left to strand.
+
+  WHAT IT DOES NOT DO: RSS still rises over these 320 cycles, 204.1 -> 228.3 MB,
+  71,017 B/cycle at R^2 0.817 -- but the per-batch steps DECAY (+10.1, +5.2,
+  +1.3, +1.1, +2.3, +2.7, +0.9, +0.8, -0.2 MB), the shape of warm-up rather
+  than of a per-session leak. Ten batches cannot settle that; the 640-cycle
+  arms below are the instrument for it. Time-to-first-byte also still rises
+  (140.5 -> 422.8 ms mean over the first/last 10), with no lock queue left to
+  explain it -- recorded, not attributed.
+
+--- n=640 slope A/B at concurrency 32, 32 KiB, require_durability = FALSE -------
+(optional durability so the BASE side serves its turns and the slope is not a
+refusal artefact; the same config the previous lane used for od32.)
+
+base-c32-optional640 -- base binary 6cc6a44b..., loadavg 32.1 -> 32.0
+  640/640 pass. RSS 263,237,632 -> 340,983,808, 109,058 B/cycle at R^2 0.870
+  (previous lane's od32 on e7b46387e: 101,104 B/cycle -- reproduced).
+  time-to-first-byte 314.6 -> 589.4 ms. Final census, every session deleted:
+  573 wayland-recover threads, 573 key-lock fds, 695 threads, VmData 2,472,394,752.
+  per batch of 32 (MiB, recover threads, lock fds, threads):
+    251/29/29/151  264/58/58/180  273/87/87/209  281/116/116/238  288/144/144/266
+    291/173/173/295  297/202/202/324  303/231/231/353  307/260/260/382  309/288/288/410
+    311/317/317/439  312/346/346/468  313/374/374/496  316/402/402/524  317/431/431/553
+    319/459/459/581  320/488/488/610  322/516/516/638  323/545/545/667  325/573/573/695
+  The stranded threads and fds grow by ~28.7 per batch of 32 without bound.
+
+fix-c32-optional640 -- fix binary d0819d10..., loadavg 32.0 -> 29.9
+  640/640 pass. RSS 204,476,416 -> 247,877,632, 55,096 B/cycle at R^2 0.918
+  (base 109,058). time-to-first-byte 198.1 -> 140.6 ms (base 314.6 -> 589.4:
+  the TTFB degradation is gone with the lock queue). Final census: 0
+  wayland-recover threads, 0 key-lock fds, 131 threads, VmData 1,277,886,464.
+  per batch (MiB): 195 206 211 213 214 216 217 220 221 222 223 224 226 227 228
+                   229 231 234 235 236 -- threads 130/131 throughout.
+  HALF-SPLIT: first 10 batches 81,819 B/cycle, second 10 batches 49,086 B/cycle
+  at R^2 0.991. So the repair HALVES the concurrency-32 slope, and the part it
+  leaves is NOT warm-up: a second, linear ~49 KB/cycle concurrency term remains
+  on a process with zero stranded threads and a flat thread count.
+
+  WHERE THAT RESIDUAL LIVES -- /proc/<pid>/smaps classified by mapping, taken at
+  quiescence in batches 0, 5, 10, 15 and after the last batch:
+
+    fix  kind           b0            b5            b10           b15           final
+         [heap]         3 MiB/1       6 MiB/1       5 MiB/1       6 MiB/1       6 MiB/1
+         anon rw-p     80 MiB/290    98 MiB/292   106 MiB/292   112 MiB/292   118 MiB/292
+         anon ---p      0 MiB/285     0 MiB/287     0 MiB/287     0 MiB/287     0 MiB/287
+         file         111 MiB/29    111 MiB/29    111 MiB/29    111 MiB/29    111 MiB/29
+    base kind
+         [heap]         3 MiB/1       5 MiB/1       6 MiB/1       7 MiB/1       7 MiB/1
+         anon rw-p    136 MiB/333   174 MiB/621   193 MiB/909   200 MiB/1193  206 MiB/1421
+         anon ---p      0 MiB/327     0 MiB/615     0 MiB/903     0 MiB/1187    0 MiB/1415
+         file         111 MiB/29    111 MiB/29    111 MiB/29    111 MiB/29    111 MiB/29
+
+  Base: the MAPPING COUNT climbs 333 -> 1421 rw-p and 327 -> 1415 ---p -- one
+  stack plus one guard page per stranded thread. That is c1's term, seen as
+  mappings. Fix: both counts are FLAT (290/292, 285/287), [heap] is flat, file
+  is flat, and the whole rise is RESIDENT pages inside the same ~290 anonymous
+  rw-p mappings -- the largest are 10-16 MiB regions whose RSS goes from 3-5 MiB
+  to 6-7 MiB each. That is the signature of glibc thread-arena heaps filling in:
+  the same heap segments, more of each resident. The previous lane's heaptrack
+  run found LIVE heap flat at concurrency 32, so this is freed memory the
+  arenas retain, not reachable objects. The same fill-in is present on the base
+  underneath its thread term (136 -> 206 MiB of rw-p).
+
+fix-c32-durable640 -- fix binary d0819d10..., require_durability = TRUE, loadavg 29.9 -> 31.9
+  640/640 pass, 0 refused. RSS 203,784,192 -> 243,040,256, 54,632 B/cycle at
+  R^2 0.826. time-to-first-byte 144.3 -> 138.8 ms. Threads 131 in every batch,
+  0 wayland-recover threads and 0 key-lock fds in every batch, VmData 1,284,481,024.
+  per batch (MiB): 194 200 203 209 217 219 220 221 222 223 223 224 226 228 229
+                   229 230 231 231 231
+  HALF-SPLIT: 107,120 -> 30,428 B/cycle (second-half R^2 0.910).
+  smaps anon rw-p 78 MiB/292 -> 112 MiB/292, [heap] 3 -> 7 MiB.
+  The same shape as the optional arm: the stranded-thread term is gone under
+  the soak's own durability setting, and what remains is the arena fill-in,
+  decelerating across the run (half-split 107 -> 30 KB/cycle here, 82 -> 49 on
+  the optional arm) but not flat by cycle 640. n=640 cannot tell a slow
+  saturation from linear-after-warm-up.
+
+  IT IS NOT A MISSED TRIM, and this part is a code reading, stated as one.
+  crates/wcore-cli/src/acp_engine/lifecycle.rs:291 is the only caller of
+  wcore_config::allocator::release_idle_memory: it runs when the LAST session
+  of the pool closes, and it is AWAITED inside close_owned_session, so that
+  DELETE does not return until malloc_trim(0) has run. It is skipped only when
+  another trim ran under a second earlier, and these batches end seconds apart.
+  The probe and the soak both sample quiescent RSS after every DELETE of the
+  batch, so the sample is post-trim: the retained pages are ones malloc_trim(0)
+  itself cannot return -- fragmentation inside the arena heaps -- rather than
+  pages nobody asked it to return. No build was spent testing a "trim more
+  often" variant, because this reading says it could not move the sample.
+
+  NAMED AT THE MAPPING LEVEL, NOT YET AT THE CALL SITE. What decides whether it
+  is bounded: an arena heap segment can grow to 64 MiB, and configure_for_launch
+  caps glibc at 8 arenas, so the ceiling is of order 8 x 64 MiB -- far above the
+  soak's 32 MiB growth limit. Over 640 cycles it shows no sign of saturating.
+
+--- THE PAYLOAD TERM: base-pay16-n400, concurrency 1, 16 MiB, require_durability = true ---
+Base binary 6cc6a44b..., started 13:50:28Z, STOPPED by SIGINT at n=70 (the driver's
+finally block wrote the per-cycle receipt; the fit below is computed from it).
+Each 16 MiB turn took a median 21.7 s at concurrency 1, which is why n=400 was not
+reachable. loadavg 28.3 -> 30.5.
+
+  70/70 PASS -- every cycle received exactly 16,777,216 bytes, zero error frames,
+  threads 100-101 throughout, zero wayland-recover threads.
+  quiescent RSS every 10th cycle (MiB): 134.6 142.2 144.8 145.4 145.3 145.3 145.4, last 145.2
+  whole run: 141,189,120 -> 152,297,472, 107,442 B/cycle at R^2 0.502
+  SECOND HALF: -6,087 B/cycle at R^2 0.067 -- flat.
+
+  NAMED AS A BOUNDED WARM-UP, and this is what the previous lane could not tell
+  apart at n=60. The concurrency-1 16 MiB term rises ~11 MB over its first ~30
+  cycles and then stops: cycles 30-70 sit within 0.2 MiB of 145.3 MiB. The
+  "83,247 B/cycle" slope was that warm-up read over too few cycles, so the
+  ~248 MB linear projection built on it is REFUTED. It saturates, it does not
+  accumulate per cycle, and at ~11 MB it cannot by itself breach either
+  original limit.
+
+--- A SEPARATE, PRE-EXISTING FUNCTIONAL LIMIT: concurrent 16 MiB fast readers ----
+Found when the planned fix-pay16-c8-n400 arm came back 0/400 PASS. Every one of
+its turns streamed ~2.9-3.1 MiB and then ended on:
+  {"kind":"error","error":{"code":-32003,"message":"protocol relay overloaded;
+   turn cancelled without truncating structured events","data":{"retryable":true}}}
+so that arm measured nothing about payload RSS and is NOT used as a payload
+measurement. Short arms to place the cause (probe6, 16 cycles unless stated):
+
+  arm                        binary  conc  payload  durability  pass   relay-cancelled
+  relay-base-c8-optional     base      8   16 MiB   optional     2/16       14
+  relay-fix-c8-optional      fix       8   16 MiB   optional     0/16       16
+  relay-fix-c32-durable-1m   fix      32    1 MiB   on          32/32        0
+  relay-fix-c1-16m           fix       1   16 MiB   on           3/3         0
+  (loadavg 29.7-36.6)
+
+  * PRESENT ON THE BASE. The cancellation is the ACP relay's per-turn bound
+    (crates/wcore-cli/src/acp_engine.rs, `protocol_channel`), which this change
+    does not touch; the base binary hits it too. The fix is marginally worse
+    (0 vs 2 of 16), consistent with it now letting all eight turns reach the
+    relay at once instead of holding some behind five-second key timeouts.
+  * NOT A CONCURRENCY LIMIT AS SUCH: 32 concurrent 1 MiB turns all pass, and
+    16 MiB at concurrency 1 passes. It is eight fast 16 MiB readers at once,
+    all served from ONE Python client process.
+  * WHY THE ORIGINAL SOAK NEVER SAW IT: its source 3530199fb is NOT an ancestor
+    of this release base 38f82b87f -- it sits on a different line with its own
+    copy of the guard -- and there 967 fast 16 MiB rows at concurrency 8/32
+    passed with 0 relay cancellations in 8,938 cycles. On this line
+    crates/wcore-cli/src/acp_engine.rs has one commit since the fork, 1780b3164.
+  * NOT ESTABLISHED: whether the soak's own schedule trips it. The soak has at
+    most one fast 16 MiB reader per concurrency-8 batch and ~3 per
+    concurrency-32 batch, far less client-side contention than eight at once.
+    The soak asserts every row of every batch, so if it does trip, the soak
+    aborts within its first few dozen batches rather than after two hours --
+    which makes launching it the cheap way to find out.
+
+--- base authz A/B arms (w15-leak2-authz-ab.py, sha256 f88ca4697c720001b7c581141378cbc5432293bc4c86db3a47a72ded561c10da) ---
+3 batches each at concurrency 1, 8, 32 (123 turns), 32 KiB, require_durability = true.
+loadavg across all four arms 28.03 -> 30.04.
+
+  mode              phase                         turns  served  refused
+  healthy           healthy                        123       5      118   (c1 3/3 served, c8 2/24, c32 0/96)
+  wrong-passphrase  precreate under other phrase     1       1        0
+                    wrong-passphrase               123       0      123
+  corrupt-after     before corruption                3       3        0
+                    after corruption               123       0      123
+  plaintext         plaintext                      123       0      123   (0 provider dispatches)
+
+  Refusal text on wrong-passphrase / after-corruption is a mix of the timeout
+  above and "secure recovery storage could not be read: the configured store
+  rejected ..." -- both are refusals. The plaintext arm is refused by a
+  non-200 prompt status (the body is not captured by this driver).
+
+--- FIX authz A/B arms: same driver, same schedule --------------------------------
+Fix binary: source 008d88ce960322967adcef7637b44a5cfad44207 (f6eccfda5 + a
+doc-only follow-up), cargo build --bin wayland-core through remote-proof slot
+parallel-1, remote_exit 0, complete true,
+sha256 d0819d10b693ee1c6420041ca3d2ba4c54bc7a15121b22e74a4fe20b5f8d9cb0.
+loadavg across all four arms 28.48 -> 27.95. No cargo/rustc running.
+
+  mode              phase                         turns  served  refused   BASE served/refused
+  healthy           healthy                        123     123        0         5 / 118
+                    (c1 3/3, c8 24/24, c32 96/96; 123 provider dispatches)
+  wrong-passphrase  precreate under other phrase     1       1        0         1 / 0
+                    wrong-passphrase               123       0      123         0 / 123
+  corrupt-after     before corruption                3       3        0         3 / 0
+                    after corruption               123       0      123         0 / 123
+  plaintext         plaintext                      123       0      123         0 / 123   (0 dispatches both)
+
+THE A/B VERDICT. Every mode in which the store must refuse refuses on the fix
+exactly as on the base -- 0 turns served out of 123 in each, at concurrency 1, 8
+and 32. The single difference is the one the repair is for: a HEALTHY vault
+under concurrency goes from 5/123 served to 123/123. On the fix, every refusal
+after corruption carries the store's own "secure recovery storage could not be
+read" -- none is a timeout -- because loads no longer queue behind each other,
+so the refusal the operator reads is now the true cause every time.
+
+After-corruption is the live check of "in flight only": three sessions loaded
+the key from the healthy vault first, the vault was overwritten at a quiescent
+point, and not one of the 123 later sessions -- including 32 concurrent ones --
+was answered with the key those earlier sessions had loaded.

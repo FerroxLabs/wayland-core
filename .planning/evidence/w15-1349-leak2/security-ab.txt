@@ -1,0 +1,41 @@
+wayland#1349 c2 -- base-vs-HEAD A/B on the security-sensitive recovery paths
+
+The single-flight repair changes who starts a confidential-key load. This A/B
+runs the SAME test selection on the base and on the fix, one proof at a time
+through tools/remote-proof.py slot parallel-1 on hetzner-dsm, from a worktree
+checked out detached at each commit. A run counts only with "complete": true.
+
+  base  38f82b87fbe2aabd01f06c469d3bab8c602c7987
+  fix   008d88ce960322967adcef7637b44a5cfad44207  (f6eccfda5 + doc-only follow-up)
+
+Selection:
+  lib   nextest -p wcore-agent --lib, filter:
+          recovery_confidential::  recovery::
+          engine::audit_2026_05_22_tests -- the five tests that drive the
+          wedged / starved / unselectable key-store doubles through a real
+          journaled engine:
+            a_wedged_key_store_still_lets_the_turn_reach_the_provider_and_says_so
+            require_durability_refuses_a_turn_whose_key_store_timed_out
+            a_starved_key_load_does_not_tell_the_user_to_repair_the_keyring
+            a_refused_backend_selection_reaches_the_degrade_notice
+            require_durability_refusal_names_starvation_not_a_broken_keyring
+  agent nextest -p wcore-agent --test d3_credentials_backend_test
+                               --test headless_durable_session_test
+  cli   nextest -p wcore-cli --test f14_sigkill_recovery --test stabilization_recovery
+                             --test stabilization_acp_durable
+                             --test json_stream_startup_refusal --test remedy_advertisements
+
+  leg    base result                       receipt                         fix result                        receipt
+  lib    71 run, 71 passed                  proof-1789049808-15661.json     76 run, 76 passed                  proof-1789050024-21755.json
+  agent   5 run,  5 passed                  proof-1789049922-17880.json      5 run,  5 passed                  proof-1789050135-27995.json
+  cli    96 run, 96 passed, 3 skipped       proof-1789049934-18160.json     96 run, 96 passed, 3 skipped       proof-1789050148-28577.json
+
+  Every receipt: remote_exit 0, complete true.
+
+The fix runs exactly the base's selection plus the five new
+recovery_confidential tests (71 + 5 = 76); nothing that passed on the base
+fails on the fix, and no test was skipped on one side and run on the other.
+
+This grades the security paths the TESTS reach. The live counterpart -- the
+same four refusal modes driven through the real `acp serve` product at
+concurrency 1, 8 and 32 on both binaries -- is in census-and-authz-base.txt.

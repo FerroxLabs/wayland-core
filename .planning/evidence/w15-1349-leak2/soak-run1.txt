@@ -1,0 +1,52 @@
+wayland#1349 c2 -- the fresh 7200-second soak (run1)
+
+HOST hetzner-dsm: Linux 6.8.0-101-generic, 96 CPU, MemTotal 263,609,704 kB --
+the same box both recorded runs used. Shared host.
+
+WHAT RAN
+  driver     evidence/mixed-soak353/run2/driver.py (sha256
+             f64b20bd620911a08406449817f88a9df96d8ddc3dc0b2673e75f261ede318ce),
+             the driver of BOTH original runs, copied with EXACTLY ONE line
+             changed -- the pinned binary hash, the same single-line change the
+             memory_confirmation2h run made to this driver:
+               234c234
+               <  assert receipt["binary_sha256"] == "c68855d5...18da", "immutable binary hash mismatch"
+               >  assert receipt["binary_sha256"] == "d0819d10...cb0", "immutable binary hash mismatch"
+             run copy sha256 b84ed56b95071d06642a9bb99191fe42f1fa5f5c50dc6930061e16483cab67be.
+             The oracle is untouched: 7200 s, concurrency [1, 8, 32] rotating,
+             readers [fast, disconnected, slow], payloads [32 KiB, 1 MiB, 16 MiB],
+             [session] require_durability = true, encrypted_file vault, and
+             rss_bound_pass = median(last 100 quiescent) - median(first 100)
+             <= max(10% of the first-100 median, 32 MiB).
+  binary     source 008d88ce960322967adcef7637b44a5cfad44207, cargo build --bin
+             wayland-core via remote-proof slot parallel-1 (remote_exit 0,
+             complete true), sha256
+             d0819d10b693ee1c6420041ca3d2ba4c54bc7a15121b22e74a4fe20b5f8d9cb0.
+  launcher   w15-leak2-soak-launch.sh -- refuses while any process named cargo,
+             rustc, cargo-nextest, mold or ld.mold is running, refuses unless the
+             original driver still hashes to f64b20bd..., refuses unless the
+             driver diff is exactly two changed lines, then runs the driver
+             under `unshare --net` (the driver asserts a fresh namespace with no
+             routes) with setsid/nohup.
+
+LAUNCH RECORD (soak/run1.launch)
+  launched_utc              2026-09-10T14:26:24Z
+  loadavg_at_launch         26.83 30.09 31.42
+  builds_running_at_launch  none
+  driver_pid                297378
+
+THE ORIGINAL LIMITS, and how this run is graded against them
+  The two numbers in the ticket are two instances of the driver's ONE formula,
+  max(10% of the first-100 median, 32 MiB):
+    127,151,104  = 10% of the 1,271,511,040 first-100 median at 3530199fb (mixed)
+     33,554,432  = the 32 MiB floor, since the first-100 median at 6b7da6a0f
+                   was only 93,503,488 (confirmation)
+  Neither is moved here. This run's `rss_bound_pass` is the driver's own
+  verdict under that formula. Whenever its first-100 median is below
+  1,271,511,040 bytes, that verdict is at least as strict as 127,151,104, and
+  it is exactly 33,554,432 whenever the median is below 335,544,320 bytes.
+
+CYCLE COUNT. The soak is bounded by time (7200 s), not by cycles; both
+original runs reached 8,938 and 8,897. This tree runs a 16 MiB fast turn far
+slower at concurrency 1 than 3530199fb did (median 21.7 s here against 2.6 s
+there), so this run's count is an outcome to be reported, not a setting.
