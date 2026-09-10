@@ -50,3 +50,49 @@ CYCLE COUNT. The soak is bounded by time (7200 s), not by cycles; both
 original runs reached 8,938 and 8,897. This tree runs a 16 MiB fast turn far
 slower at concurrency 1 than 3530199fb did (median 21.7 s here against 2.6 s
 there), so this run's count is an outcome to be reported, not a setting.
+
+RESULT -- ABORTED AT 125 SECONDS ON A FUNCTIONAL FAILURE; NO RSS VERDICT EXISTS
+receipt soak/run1/receipt.json sha256 cae8519394981e5ef96151cbe0271b1a57e1d91c5056948f9397936610590145
+
+  completed        false
+  elapsed          125.162 s of 7200 (soak_started 14:26:24.91Z, finished 14:28:30.72Z)
+  batches/cycles   6 / 82, 81 passing
+  loadavg          start 26.83 30.09 31.42, end 28.32 29.56 31.04
+  cleanup          remaining_owned_pids [], sampler_alive false
+  namespace        fresh, routes []; MCP preflight exit 0
+  rss_windows      null      rss_bound_pass  null   -- the driver computes these only
+                                                    after 7200 s, so neither original
+                                                    limit was ever evaluated
+
+  batch  conc  t (s)   pass    quiescent RSS    peak RSS        sessions after
+    0      1     2.2    1/1     133,804,032      192,958,464     []
+    1      8    37.1    8/8     154,615,808      535,121,920     []
+    2     32    68.5   32/32    198,070,272    1,322,156,032     []
+    3      1    81.5    1/1     188,792,832      265,740,288     []
+    4      8    94.6    8/8     193,748,992      322,371,584     []
+    5     32   125.2   31/32    208,556,032    1,008,390,144     []
+
+  THE ONE FAILING ROW (batch 5): reader fast, text_bytes 16,777,216, received
+  3,932,160, terminal_count 1, turn 3,735 ms, delete 204, get-after-delete 404,
+  error -32003 "protocol relay overloaded; turn cancelled without truncating
+  structured events" (retryable). The driver asserts every row of every batch,
+  so this one row ends the soak.
+
+  Fast 16 MiB readers in the run: 7, of which 6 passed -- 1/1 at concurrency 8,
+  3/3 in the first concurrency-32 batch, 2/3 in the second. The other rows of
+  the failing batch all passed, including every slow and disconnected reader,
+  and the batch quiesced to zero sessions and zero active fixture requests.
+
+  WHAT THIS IS AND IS NOT. It is the pre-existing relay limit measured in
+  census-and-authz-base.txt, which the BASE binary also hits (2/16 passing at
+  concurrency 8 with 16 MiB). It is not #1349's memory mechanism, and not a
+  consequence of the repair. It means no fresh 7200-second soak can pass on
+  this tree, for a reason unrelated to RSS, until that limit is dealt with.
+  The oracle was NOT changed to step round it: making the fast 16 MiB rows
+  retry, or excusing the relay error, would turn a red green by weakening the
+  check, which is the failure this programme is graded against.
+
+  NO SECOND LAUNCH. The cancellation is contention-dependent, so a rerun might
+  get further. But the soak's own batch schedule has already been shown to trip
+  it, and a run that happened to survive would tell a reader nothing that this
+  one does not.
