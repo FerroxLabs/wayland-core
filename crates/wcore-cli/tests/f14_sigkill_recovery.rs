@@ -280,7 +280,6 @@ impl CoreProcess {
     /// Past tense on purpose: this asks about frames that have ALREADY arrived,
     /// so it can never block and can never invent a wait that changes the run
     /// it is measuring.
-    #[cfg(target_os = "linux")]
     fn seen_message_containing(&self, needle: &str) -> Option<&Value> {
         self.seen.iter().find(|event| {
             event
