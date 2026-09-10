@@ -1,0 +1,90 @@
+name: w15-1301 dispatch budget base-vs-fix A/B (throwaway)
+
+# THROWAWAY measurement workflow for FerroxLabs/wayland#1301 c3. Lives ONLY on
+# the `timing/w15-1301-ab` branch and must never reach a release or main branch.
+#
+# Arms, both on the same hosted executor class CI (Array) uses (windows-latest):
+#   base: this checkout (38f82b87f plus the throwaway harness commit; no code
+#         difference from 38f82b87f).
+#   fix:  FIX_SHA checked out into ./fix.
+# Each arm builds its own release test binary into its own target dir, then the
+# harness interleaves the EXACT CI isolated-step nextest invocation per arm.
+
+on:
+  push:
+    branches: ['timing/w15-1301-ab']
+
+permissions:
+  contents: read
+
+env:
+  FIX_SHA: 07272c36bc6dc57383ef54e16413fb5ced98c154
+
+jobs:
+  measure:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [a, b]
+    name: dispatch-budget A/B ${{ matrix.shard }} (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 340
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - name: Record executor
+        shell: pwsh
+        run: |
+          "runner_name=$env:RUNNER_NAME computername=$env:COMPUTERNAME cores=$([Environment]::ProcessorCount)"
+          (Get-CimInstance Win32_Processor | Select-Object -First 1).Name
+          "mem_gb=" + [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 1)
+          "os_build=" + (Get-CimInstance Win32_OperatingSystem).BuildNumber
+      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.FIX_SHA }}
+          path: fix
+      - name: Record arm identities
+        shell: bash
+        run: |
+          echo "base_head=$(git rev-parse HEAD)"
+          echo "fix_head=$(git -C fix rev-parse HEAD)"
+          test "$(git -C fix rev-parse HEAD)" = "$FIX_SHA"
+      - name: Setup vx (installs Rust + just from vx.toml)
+        uses: loonghao/vx@v0.9.17
+        with:
+          setup: 'true'
+          cache: 'true'
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+      - name: Build base release test binary
+        shell: bash
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}\target-base
+        run: vx cargo nextest run --locked --release -p wcore-agent --test workflow_limits_test --no-run
+      - name: Build fix release test binary
+        shell: bash
+        working-directory: fix
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}\target-fix
+        run: vx cargo nextest run --locked --release -p wcore-agent --test workflow_limits_test --no-run
+      - name: Interleaved base-vs-fix timing (every sample recorded)
+        shell: pwsh
+        run: |
+          $ws = $env:GITHUB_WORKSPACE
+          ./.scratch1301/harnessab1301.ps1 -Out "$env:RUNNER_TEMP\ab1301" -N 6 -CargoExe vx -CargoPrefix cargo `
+            -ArmSpecs "base|$ws|$ws\target-base", "fix|$ws\fix|$ws\target-fix"
+      - name: Publish samples
+        if: always()
+        shell: pwsh
+        run: |
+          Get-Content "$env:RUNNER_TEMP\ab1301\meta.txt" -ErrorAction SilentlyContinue
+          Get-Content "$env:RUNNER_TEMP\ab1301\samples.csv" -ErrorAction SilentlyContinue
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ab1301-${{ matrix.shard }}
+          path: ${{ runner.temp }}/ab1301
