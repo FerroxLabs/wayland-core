@@ -166,9 +166,16 @@ def packages_of(args: list):
     return named, whole
 
 
-def receipts_for(head: str, evidence_dirs: list) -> list:
-    """Completed, PASSING test receipts recorded against `head`."""
-    out = []
+def receipts_for(head: str, evidence_dirs: list):
+    """-> (passing runs, failing runs), each [(receipt name, cargo args)].
+
+    A FAILING run buys no coverage. "I ran it and it was red" is not knowledge
+    that the crate is green, and folding the two together is the exact
+    conflation this gate exists to refuse. It is reported separately rather
+    than dropped, because a red run at the commit under audit is something the
+    reader of a verdict has to be told about.
+    """
+    ok, bad = [], []
     for d in evidence_dirs:
         if not d.is_dir():
             continue
@@ -177,14 +184,12 @@ def receipts_for(head: str, evidence_dirs: list) -> list:
                 r = json.loads(path.read_text())
             except (ValueError, OSError):
                 continue
-            if r.get("source") != head:
-                continue
-            if not r.get("complete") or r.get("remote_exit") != 0:
+            if r.get("source") != head or not r.get("complete"):
                 continue
             if not is_test_run(r.get("cargo_args") or []):
                 continue
-            out.append((path.name, r["cargo_args"]))
-    return out
+            (ok if r.get("remote_exit") == 0 else bad).append((path.name, r["cargo_args"]))
+    return ok, bad
 
 
 def evaluate(members: dict, runs: list):
@@ -203,7 +208,7 @@ def evaluate(members: dict, runs: list):
     return sorted(set(members) - covered), sorted(unknown)
 
 
-def report(members, runs, weak_source):
+def report(members, runs, weak_source, failing=()):
     uncovered, unknown = evaluate(members, runs)
     if unknown:
         for n in unknown:
@@ -215,12 +220,25 @@ def report(members, runs, weak_source):
                 "number it cannot stand behind." % n
             )
         return 1
+    red = ""
+    if failing:
+        print(
+            "RED RUNS at this commit -- these bought no coverage, because a run "
+            "that failed is not evidence that its crates are green:"
+        )
+        for label, args in failing:
+            print("      FAILED: %s :: cargo %s" % (label, shlex.join(args)))
+        print(
+            "      (Deliberate red arms land here too. This gate does not judge "
+            "why a run was red; it refuses to count one as knowledge.)"
+        )
+        red = " and %d recorded run(s) at this commit FAILED" % len(failing)
     if not runs:
         print(
             "DEGRADED: no completed, passing test run is recorded for this "
             "commit, so NOTHING is known about whether any crate in this "
-            "workspace is green. All %d member(s) are unrun as far as any "
-            "evidence goes." % len(members)
+            "workspace is green%s. All %d member(s) are unrun as far as any "
+            "evidence goes." % (red, len(members))
         )
         print(
             "This is not a failure and not a pass. Run the tests, or say in "
@@ -236,6 +254,14 @@ def report(members, runs, weak_source):
             "happened."
         )
     if not uncovered:
+        if failing:
+            print(
+                "DEGRADED: every member was covered by a passing run, but %d "
+                "recorded run(s) at this commit FAILED (above). Nothing here "
+                "decides whether those were deliberate; the verdict has to say."
+                % len(failing)
+            )
+            return DEGRADED_RC
         print(
             "OK: every one of the %d workspace member(s) was covered by a "
             "completed, passing test run at this commit." % len(members)
@@ -335,6 +361,32 @@ def self_test() -> int:
         print("  %-62s want rc %-2s got rc %-2s  %s"
               % (label[:62], want, got, "ok" if got == want else "SELF-TEST FAILED"))
 
+    # A red run must not be counted as coverage, and must not be silent. Both
+    # arms, because a gate that ignored red runs and a gate that failed on them
+    # are each wrong in a different direction -- deliberate red arms are how
+    # this repo grades its own guards, so a FAIL here would punish the practice
+    # the gate is written to support.
+    red_cases = [
+        ("a full run that FAILED buys no coverage -> DEGRADED",
+         [], [("x", ["nextest", "run"])], DEGRADED_RC),
+        ("full coverage BESIDE a red run is still not a pass -> DEGRADED",
+         [("a", ["nextest", "run"])], [("b", ["test", "-p", "wcore-mcp"])], DEGRADED_RC),
+        ("full coverage and no red run -> 0",
+         [("a", ["nextest", "run"])], [], 0),
+    ]
+    for label, runs, failing, want in red_cases:
+        buf = io.StringIO()
+        real, sys.stdout = sys.stdout, buf
+        try:
+            got = report(_members(), runs, weak_source=False, failing=failing)
+        finally:
+            sys.stdout = real
+        named = "FAILED:" in buf.getvalue()
+        good = (got == want) and (bool(failing) == named)
+        ok &= good
+        print("  %-62s want rc %-2s got rc %-2s  %s"
+              % (label[:62], want, got, "ok" if good else "SELF-TEST FAILED"))
+
     print("self-test: %s" % ("both directions proven" if ok else "BROKEN"))
     return 0 if ok else 1
 
@@ -377,7 +429,8 @@ def main() -> int:
     dirs.append(root / "evidence")
     print("commit under audit: %s" % head)
     print("receipt dir(s): %s" % ", ".join(str(d) for d in dirs))
-    return report(members, receipts_for(head, dirs), weak_source=False)
+    passing, failing = receipts_for(head, dirs)
+    return report(members, passing, weak_source=False, failing=failing)
 
 
 if __name__ == "__main__":
