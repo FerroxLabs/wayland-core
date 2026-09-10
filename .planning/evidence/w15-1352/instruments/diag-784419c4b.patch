@@ -1,5 +1,5 @@
 From 784419c4b710076d68c759dfe2d3635aa31b1a4f Mon Sep 17 00:00:00 2001
-From: ci <sean@seandonahoe.com>
+From: ci <REDACTED-AUTHOR@redacted.invalid>
 Date: Thu, 10 Sep 2026 22:26:57 +0700
 Subject: [PATCH] diag(acp): time relay recorder, delivery and wait budget
 
