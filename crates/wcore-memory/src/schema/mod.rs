@@ -96,35 +96,48 @@ pub fn apply_migrations(
     conn: &mut rusqlite::Connection,
     db_path: Option<&std::path::Path>,
 ) -> Result<()> {
-    // Journal mode is idempotent, and is chosen from the backing filesystem
-    // rather than hardcoded. In-memory databases have no filesystem and no
-    // journal to speak of, so they are left alone.
-    if let Some(path) = db_path {
-        wcore_config::sqlite_journal::SqliteJournalMode::configure(conn, path)?;
-    }
-    conn.pragma_update(None, "foreign_keys", "ON")?;
-
     // The other half of #1351, and the reason the retry alone is not enough.
     // The WAL arm of `SqliteJournalMode` deliberately leaves the busy handler
-    // untouched, so the default applies: ZERO. A second opener whose
-    // `ALTER TABLE` lands while the first still holds the write lock is
-    // refused instantly with `database is locked` — a different error from
-    // `duplicate column name`, but the same NullMemory fallback for the user.
-    // Waiting turns that arm into the one the retry below can answer.
+    // untouched, so the default applies: ZERO. A second opener whose write
+    // lands while the first still holds the write lock is refused INSTANTLY
+    // with `database is locked` — a different error from `duplicate column
+    // name`, but the same NullMemory fallback for the user. Measured on four
+    // concurrent openers of one fresh store: without this, a loser fails with
+    // `memory DB: database is locked` before the retry below is ever reached.
     //
-    // Scoped to the ladder and restored afterwards, because a busy timeout is
-    // a CONNECTION-level setting: leaving it on would silently change how every
+    // Set BEFORE the journal-mode pragma, not after: converting a brand-new
+    // store to WAL takes a brief exclusive lock, so that pragma is itself one
+    // of the statements that loses this race.
+    //
+    // Scoped to the open, and restored afterwards, because a busy timeout is a
+    // CONNECTION-level setting: leaving it on would silently change how every
     // later memory write behaves under contention, which is not what this
     // ticket is about. Migration is the one window where contention between
-    // openers is certain.
+    // openers is certain. The `Truncate` arm is the exception — it installs its
+    // own 5 s handler and means it to persist for the connection's life, so a
+    // network-mount store is left exactly as that arm set it.
     let prior_busy_ms = conn
         .pragma_query_value(None, "busy_timeout", |r| r.get::<_, i64>(0))
         .unwrap_or(0)
         .max(0) as u64;
     conn.busy_timeout(std::time::Duration::from_millis(MIGRATION_BUSY_TIMEOUT_MS))
         .map_err(MemoryError::Db)?;
+
+    // Journal mode is idempotent, and is chosen from the backing filesystem
+    // rather than hardcoded. In-memory databases have no filesystem and no
+    // journal to speak of, so they are left alone.
+    let mode = match db_path {
+        Some(path) => Some(wcore_config::sqlite_journal::SqliteJournalMode::configure(
+            conn, path,
+        )?),
+        None => None,
+    };
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+
     let outcome = run_ladder(conn);
-    let _ = conn.busy_timeout(std::time::Duration::from_millis(prior_busy_ms));
+    if mode != Some(wcore_config::sqlite_journal::SqliteJournalMode::Truncate) {
+        let _ = conn.busy_timeout(std::time::Duration::from_millis(prior_busy_ms));
+    }
     outcome
 }
 

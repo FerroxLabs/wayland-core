@@ -74,6 +74,11 @@ fn race_one_store(path: std::path::PathBuf) -> Vec<Result<(), String>> {
 }
 
 /// THE #1351 c1 GUARD.
+///
+/// `serial` because `CONCURRENT_MIGRATION_RECOVERIES` is process-wide: a
+/// sibling test racing its own store would inflate this one's delta and, worse,
+/// could make the negative test below read a recovery it did not cause.
+#[serial_test::serial]
 #[test]
 fn both_openers_of_a_migrating_store_get_a_working_backend() {
     let before = CONCURRENT_MIGRATION_RECOVERIES.load(Ordering::Relaxed);
@@ -137,6 +142,10 @@ fn both_openers_of_a_migrating_store_get_a_working_backend() {
 /// keyed off `duplicate column name` or simply retried every `Migration` error
 /// — this would spin `CURRENT_VERSION` times and then return the same error
 /// anyway; with it, the first failure is returned untouched.
+///
+/// `serial` for the same reason as the guard above: the recovery counter it
+/// asserts on is process-wide.
+#[serial_test::serial]
 #[test]
 fn a_migration_nobody_else_repaired_still_fails() {
     let tmp = tempfile::tempdir().expect("tempdir");
