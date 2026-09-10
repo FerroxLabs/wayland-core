@@ -46,11 +46,52 @@ const V5_SQL: &str = include_str!("v5_procedure_latency.sql");
 const V6_SQL: &str = include_str!("v6_recall_control.sql");
 const V7_SQL: &str = include_str!("v7_evolved_prompts_score_measured.sql");
 
+/// How many times [`apply_migrations`] has yielded a step to another writer
+/// and re-run the ladder — see the concurrency note on `apply_migrations`.
+///
+/// Public because the recovery is otherwise INVISIBLE: it turns a failure into
+/// a success and leaves no trace in the store, so a race test that never
+/// actually raced would pass exactly like one that did.
+/// `tests/issue_1351_migration_race_test.rs` reads this to prove the arm it
+/// claims to exercise was really taken. Monotonic, process-wide, never reset.
+pub static CONCURRENT_MIGRATION_RECOVERIES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 /// Apply all pending migrations on the given connection.
 ///
 /// `db_path` is the file backing `conn`, or `None` for an in-memory
 /// database. It selects the journal mode: WAL on local disks, rollback
 /// journaling on network filesystems where WAL corrupts the database.
+///
+/// # Concurrent openers (FerroxLabs/wayland#1351)
+///
+/// Migrations are not serialized across connections, and one base directory is
+/// one set of database files: two agents starting at once against a store that
+/// needs a migration both read [`current_schema_version`] below the target and
+/// both run the same step. The steps that are not idempotent are the
+/// `ALTER TABLE ADD COLUMN`s — SQLite has no `IF NOT EXISTS` for a column — so
+/// the loser gets `duplicate column name: last_latency_ms`, `Memory::open`
+/// returns `Err`, and bootstrap silently falls back to `NullMemory`: the user's
+/// long-term memory is gone for that session with nothing said.
+///
+/// The repair is a RETRY, not a new lock. A lock across processes would be a
+/// new failure surface at the exact place this one lives, and this repo has
+/// already paid for one (the session-journal `flock` that fork() duplicated,
+/// where reopens were refused under load).
+///
+/// The retry predicate is the store's own version, not the text of the error:
+/// re-read [`current_schema_version`] and re-run the ladder ONLY if the step
+/// that failed is now recorded as installed. Every step commits its
+/// `schema_version` row in the same transaction as its DDL (v3 is autocommit,
+/// but its `CREATE VIRTUAL TABLE` carries `IF NOT EXISTS`), so "version N is
+/// present" means "step N completed" — someone else did our work. If it is
+/// absent the original error is returned untouched, so a genuine broken
+/// migration still fails closed instead of being retried into a loop.
+///
+/// SCOPE, stated rather than left to be discovered: only [`MemoryError::Migration`]
+/// is recoverable here. That is the failure that was measured. A `BUSY` at
+/// `COMMIT` would arrive as [`MemoryError::Db`] and is deliberately NOT swept
+/// into this arm — it has not been observed and would need its own evidence.
 pub fn apply_migrations(
     conn: &mut rusqlite::Connection,
     db_path: Option<&std::path::Path>,
@@ -63,6 +104,69 @@ pub fn apply_migrations(
     }
     conn.pragma_update(None, "foreign_keys", "ON")?;
 
+    // The other half of #1351, and the reason the retry alone is not enough.
+    // The WAL arm of `SqliteJournalMode` deliberately leaves the busy handler
+    // untouched, so the default applies: ZERO. A second opener whose
+    // `ALTER TABLE` lands while the first still holds the write lock is
+    // refused instantly with `database is locked` — a different error from
+    // `duplicate column name`, but the same NullMemory fallback for the user.
+    // Waiting turns that arm into the one the retry below can answer.
+    //
+    // Scoped to the ladder and restored afterwards, because a busy timeout is
+    // a CONNECTION-level setting: leaving it on would silently change how every
+    // later memory write behaves under contention, which is not what this
+    // ticket is about. Migration is the one window where contention between
+    // openers is certain.
+    let prior_busy_ms = conn
+        .pragma_query_value(None, "busy_timeout", |r| r.get::<_, i64>(0))
+        .unwrap_or(0)
+        .max(0) as u64;
+    conn.busy_timeout(std::time::Duration::from_millis(MIGRATION_BUSY_TIMEOUT_MS))
+        .map_err(MemoryError::Db)?;
+    let outcome = run_ladder(conn);
+    let _ = conn.busy_timeout(std::time::Duration::from_millis(prior_busy_ms));
+    outcome
+}
+
+/// How long a migration step waits for another opener's write lock before
+/// giving up. Matches the value the `Truncate` journal arm already uses.
+const MIGRATION_BUSY_TIMEOUT_MS: u64 = 5_000;
+
+/// The ladder plus the #1351 concurrent-opener retry. See [`apply_migrations`].
+fn run_ladder(conn: &mut rusqlite::Connection) -> Result<()> {
+    // At most one yield per version. Each retry only happens after observing
+    // `installed >= failed_version`, and `schema_version` only ever grows, so
+    // every pass through the loop starts from a strictly higher installed
+    // version: the ladder cannot spin.
+    let mut yields_left = CURRENT_VERSION;
+    loop {
+        let err = match apply_pending(conn) {
+            Ok(()) => return Ok(()),
+            Err(e) => e,
+        };
+        let MemoryError::Migration { version, .. } = &err else {
+            return Err(err);
+        };
+        let failed = *version;
+        if yields_left == 0 || current_schema_version(conn)? < failed {
+            return Err(err);
+        }
+        yields_left -= 1;
+        CONCURRENT_MIGRATION_RECOVERIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        tracing::debug!(
+            target: "wcore_memory::schema",
+            version = failed,
+            error = %err,
+            "#1351: migration step was applied concurrently by another opener; \
+             re-reading the installed version and continuing"
+        );
+    }
+}
+
+/// One pass of the migration ladder, from whatever version the store reports
+/// right now. Separated from [`apply_migrations`] so a retry re-reads the
+/// version rather than acting on the value it cached before the race.
+fn apply_pending(conn: &mut rusqlite::Connection) -> Result<()> {
     let installed = current_schema_version(conn)?;
     // Fail closed on a store from the future. Every arm below is
     // `installed < N`, so a newer store matches no arm: nothing runs, nothing

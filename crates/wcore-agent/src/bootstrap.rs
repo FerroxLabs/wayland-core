@@ -566,6 +566,26 @@ fn canonical_workspace(workspace: String) -> String {
 /// local-shell notice announces.
 const FAIL_CLOSED_BACKEND: &str = "fail_closed";
 
+/// The words a session uses to tell its user that long-term memory is not
+/// there. Pure, so the sentence is under test rather than reachable only on a
+/// host whose memory store happens to be broken.
+///
+/// FerroxLabs/wayland#1351 c2. It states the FEATURE, not the result: the F05
+/// fail-closed path below already stops runtime code from falsely reporting an
+/// `outcome_changed` it never achieved, but a user who asked for memory and
+/// silently got none is still owed the fact. It names the cause the store gave
+/// so the line is actionable, and says what is NOT lost so the notice does not
+/// read as data loss.
+pub(crate) fn memory_unavailable_notice(cause: &wcore_memory::error::MemoryError) -> String {
+    format!(
+        "notice: long-term memory is OFF for this session — the memory store could not be \
+         opened: {cause}. Nothing from this session will be remembered and nothing will be \
+         recalled into it; the features built on memory (smart handoff, skills lifecycle) are \
+         disabled with it. Memories already stored are not deleted. Fix the store the error \
+         names and start a new session to restore it."
+    )
+}
+
 /// The local-shell activation notice, or `None` when there is nothing true to
 /// say. Pure so every arm of the decision is directly testable against a real
 /// backend instead of being reachable only on one platform.
@@ -2266,6 +2286,27 @@ impl AgentBootstrap {
                     Arc::new(mem) as Arc<dyn wcore_memory::MemoryApi>
                 }
                 Err(e) => {
+                    // FerroxLabs/wayland#1351 c2 — say it where the user is
+                    // looking. This degradation used to exist ONLY as the
+                    // `tracing::warn!` below, and with `RUST_LOG` unset — the
+                    // default for every ordinary user — `wcore-cli` builds the
+                    // stderr writer as `with_max_level(Level::ERROR)`, so the
+                    // one line explaining that memory stopped working went to
+                    // a rotating log file nobody reads. `NullMemory` then
+                    // accepts every write and hands back a fresh id, so
+                    // nothing downstream looks wrong either: the session
+                    // quietly remembers nothing and says so to no one.
+                    //
+                    // A `warn!` -> `error!` bump is NOT the fix and was not
+                    // made: it would put a stack-shaped log record on stderr
+                    // and still miss the TUI and a JSON-stream host entirely.
+                    // The sink is the channel the retry notices, the capability
+                    // narrowings (#1130) and the local-shell notice already
+                    // use, so one emission reaches all three surfaces. The WARN
+                    // is kept for the log file, where an operator debugging
+                    // after the fact looks — it is a COPY of the notice, not
+                    // the notice itself.
+                    self.output.emit_info(&memory_unavailable_notice(&e));
                     tracing::warn!(
                         error = %e,
                         "Memory::open failed under skills_lifecycle / memory.enabled; \
