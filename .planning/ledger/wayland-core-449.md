@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "[mutants-nightly] wcore-cron — surviving mutants (2026-09-04)"
 status: open
-last_verified_commit: 7f808e952
+last_verified_commit: 617214492
 criteria:
   - id: c1
     text: "The surviving mutants reported for wcore-cron are dispositioned: each is either killed by a new or strengthened test, or recorded with a reason it is not worth killing."
