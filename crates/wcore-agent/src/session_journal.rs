@@ -5558,6 +5558,37 @@ mod fault_tests {
         assert!(checkpoint_temporaries(&directory, &digest).is_empty());
     }
 
+    /// wayland#1357 c2: a crash-left temporary of the SAME checkpoint that is NOT a
+    /// hard link to anything (the store died mid-write, before its link) is still
+    /// removed by the next store of that checkpoint, whether the checkpoint is not
+    /// yet published or already is. Green before the repair; it pins that skipping
+    /// live temporaries did not stop crash-left ones being cleaned.
+    #[test]
+    fn a_stale_temporary_of_the_same_checkpoint_is_still_removed() {
+        for already_published in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let journal =
+                SessionJournal::open(dir.path().join("session.journal"), "session").unwrap();
+            let directory = seeded_checkpoint_directory(&journal);
+            let payload: &'static [u8] = b"stored after a crash left a partial temporary";
+            let digest = sha256_hex(payload);
+            if already_published {
+                journal.store_effect_checkpoint(&digest, payload).unwrap();
+            }
+            let crashed = directory.join(format!(".{digest}.4242.{}.tmp", uuid::Uuid::new_v4()));
+            std::fs::write(&crashed, b"partial").unwrap();
+
+            journal.store_effect_checkpoint(&digest, payload).unwrap();
+
+            assert!(
+                !crashed.exists(),
+                "published={already_published}: the crash-left temporary was not removed"
+            );
+            assert!(checkpoint_temporaries(&directory, &digest).is_empty());
+            assert_eq!(journal.load_effect_checkpoint(&digest).unwrap(), payload);
+        }
+    }
+
     #[test]
     fn append_io_failure_permanently_faults_writer() {
         let dir = tempfile::tempdir().unwrap();
