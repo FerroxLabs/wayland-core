@@ -9,17 +9,16 @@ Owners come from each ledger's `owner:` on its UNMET criteria — the
 owner is read, not assigned, so a row cannot claim an owner the
 ledger does not.
 
-Blocking issues: 26   Outstanding criteria: 43
+Blocking issues: 24   Outstanding criteria: 37
 
 | Issue | Owner | Outstanding | Title |
 |---|---|---:|---|
-| FerroxLabs/wayland#1116 | core | 2 | Desktop: no abandon verb on the host wire leaves a crash-interrupted session wedged in-app |
+| FerroxLabs/wayland#1116 | core | 1 | Desktop: no abandon verb on the host wire leaves a crash-interrupted session wedged in-app |
 | FerroxLabs/wayland#1238 | core | 1 | Flaky: parallel_spawn_caps_active_child_engines_across_shared_calls fails on a 15s wall-clock budget above loadavg ~190, not on its invariant |
 | FerroxLabs/wayland#1240 | core | 1 | await_completion_returns_on_match reds the shared-process lib leg on a timing race, not a process global |
 | FerroxLabs/wayland#1244 | core | 1 | The live /model-switch leg of the spend-audit keying proof needs a PTY-driven TUI run |
 | FerroxLabs/wayland#1245 | core | 4 | Flaky: t19_live_negative_leg has a 45s drain window with zero headroom; it fails 3/3 above loadavg ~150 |
 | FerroxLabs/wayland#1250 | core | 1 | wcore-exec-backend tests race on the WAYLAND_EXEC_BACKEND_STATE_DIR process global in the shared-process suite |
-| FerroxLabs/wayland#1269 | core | 2 | Unmerged lane/f13-* branches held out of 0.13.12: four carry work integ lacks, two await their owning lane, five archived as redundant |
 | FerroxLabs/wayland#1272 | core | 2 | 0.13.12 release board: all 32 blocking issues mapped to an owner (17 in flight, 15 unassigned) |
 | FerroxLabs/wayland#1282 | core | 2 | dangerous_expiry_cancels_production_streaming_bash_process_tree fails only under full-suite contention, and is not allowlisted |
 | FerroxLabs/wayland#1284 | core | 1 | Flaky on macOS only: the_live_backend_timeout_bounds compares two wall-clock samples taken under different load |
@@ -27,7 +26,6 @@ Blocking issues: 26   Outstanding criteria: 43
 | FerroxLabs/wayland#1286 | core | 1 | macOS retry-flake cluster: redundant_walk_root_is_not_walked_twice is the 5th member; discovery is one per CI cycle |
 | FerroxLabs/wayland#1287 | core | 1 | macOS process-tree containment intermittently refuses to attach - root NOT in its own group at recheck (fails closed) |
 | FerroxLabs/wayland#1289 | core | 1 | macOS keyring does not answer within the 5s credential-store timeout; f14_sigkill_recovery hard-fails 3/3 |
-| FerroxLabs/wayland#1290 | core | 3 | f14_sigkill_recovery: ZERO provider-dispatch checkpoints persist (left 0, right 1) - the exactly-once DOUBLING premise this was filed on is refuted |
 | FerroxLabs/wayland#1300 | core | 3 | Windows-only: crashed-holder recovery in the chunked credential write lock is bistable (48x), and it is what times out interrupted_rotations_do_not_leak_entries_without_bound |
 | FerroxLabs/wayland#1301 | core | 2 | First Windows retry-flake cluster: a wall-clock ratio guard and a dispatch-budget test at 94% of its kill line (CI (Array)) |
 | FerroxLabs/wayland#1303 | core | 1 | Windows: a racing chunked credential write fails outright with ACCESS_DENIED (os error 5), and the caller loses a single-use refresh token |
