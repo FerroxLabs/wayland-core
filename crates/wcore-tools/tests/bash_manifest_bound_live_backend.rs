@@ -28,6 +28,14 @@
 //!
 //! Both assertions below FAIL at v0.13.4 and pass at v0.13.5, so they are a
 //! real gate on a real regression rather than a description of today.
+//!
+//! gh#1284, 2026-09-10: the timeout test no longer grades a wall-clock ratio —
+//! see its own doc block. The v0.13.4 red arm is UNCHANGED in kind but is now
+//! carried by two different assertions: that table's "timeout message names a
+//! cause: no" row is the first of them, and at v0.13.4 the child ran after the
+//! walk, so the token assertion reds there too. NOT RE-RUN at v0.13.4 in this
+//! pass — that re-verification is owed, and is recorded as owed rather than
+//! claimed.
 
 use serde_json::json;
 use std::sync::Arc;
@@ -166,17 +174,13 @@ async fn warm_process_init() {
         .await;
 }
 
-/// The host's cost for one `tokio` timer wait of `ms`, with nothing else in
-/// flight, so a few-millisecond budget is not graded against timer granularity.
-async fn timer_allowance(ms: u64) -> Duration {
-    let mut worst = Duration::ZERO;
-    for _ in 0..5 {
-        let s = Instant::now();
-        let _ = tokio::time::timeout(Duration::from_millis(ms), std::future::pending::<()>()).await;
-        worst = worst.max(s.elapsed().saturating_sub(Duration::from_millis(ms)));
-    }
-    worst
-}
+/// A token only the CHILD can put into the result, so "the command never ran"
+/// is graded by an observation rather than by a duration.
+///
+/// `echo`ing it is the whole child. If it is absent the child produced no
+/// output; if it is present the child ran. Deliberately not a word that occurs
+/// anywhere in the timeout message — "hi" would have matched `while`.
+const CHILD_TOKEN: &str = "MANIFEST_BOUND_CHILD_RAN_a1b2";
 
 /// #1111 bullet 2 — "Esc cancels during manifest construction" — through the
 /// real platform backend.
@@ -220,6 +224,40 @@ async fn esc_during_the_live_backend_manifest_build_does_not_wait_for_the_walk()
 
 /// #1111 bullet 3 — the timeout bounds the manifest build AND names it — through
 /// the real platform backend.
+///
+/// REWRITTEN for gh#1284. The previous version decided on
+/// `bounded * 3 < walk`: a RATIO between two wall-clock samples taken at
+/// different moments — the walk measured inside the growth helper, and the
+/// timed call afterwards. That ratio only holds if load is comparable across
+/// the two samples, and on a hosted macOS runner it is not: the allowlist
+/// records one attempt at 3.434s where the Linux control ran the same bytes at
+/// ~4.5ms against a ~42ms walk, 0/60 at `--retries 0`. The ratio was therefore
+/// grading the runner, and it flaked on macOS in two consecutive runs
+/// (33437649161, 33462025536).
+///
+/// Nothing here is timed any more. The bound is graded as an EVENT and the
+/// "no child ran" half as an OBSERVATION:
+///
+/// * the manifest-named timeout string is emitted at exactly ONE site — the
+///   `Err(_)` arm of `timeout_at(deadline, build)` in `bash.rs` — so its
+///   presence IS the proof that the deadline fired while the manifest build was
+///   still outstanding, which is the property this test is named for. A bare
+///   "Command timed out after Nms" is byte-identical to the CHILD-timeout
+///   return, which is why `manifest` and not just `timed out` is required.
+/// * `CHILD_TOKEN` can only reach the result through the child's stdout, so its
+///   ABSENCE is "the command never ran" without reference to any clock — and
+///   the second call below is its POSITIVE CONTROL: the same command in the
+///   same posture on the same policy does put the token in the result once the
+///   budget is not the constraint, so the absence above is attributable to the
+///   timeout and not to a token that never appears.
+/// * `secret_deny_walk_count` is the injected counter `workspace_policy.rs`
+///   documents for exactly this ("a wall clock cannot tell a skipped walk from
+///   a fast one"), and it keeps the grade from passing vacuously on a policy
+///   that never walked at all.
+///
+/// Load can still only make the walk SLOWER, which makes the deadline fire
+/// during the build MORE reliably. The remaining failure direction is one-sided
+/// and is the one that means the product regressed.
 #[tokio::test]
 async fn the_live_backend_timeout_bounds_the_manifest_build_and_names_it() {
     if !enforcing_host() {
@@ -230,38 +268,65 @@ async fn the_live_backend_timeout_bounds_the_manifest_build_and_names_it() {
     let root = std::fs::canonicalize(dir.path()).unwrap();
     let (policy, walk) = workspace_whose_walk_costs_at_least(&root, TARGET);
 
-    let ctx = ctx_for(policy);
+    let ctx = ctx_for(Arc::clone(&policy));
     // Derived from the walk just measured, not pinned: a literal that is small
     // against today's walk becomes large against a faster one, and the
-    // assertion would then pass for the wrong reason.
+    // assertion would then pass for the wrong reason. The derived number sets
+    // up the condition; it is no longer part of what is asserted.
     let timeout_ms = (walk / 10).as_millis().max(1) as u64;
-    let allowance = timer_allowance(timeout_ms).await;
+    let command = format!("echo {CHILD_TOKEN}");
 
-    let started = Instant::now();
     let result = BashTool
-        .execute_with_ctx(json!({"command": "echo hi", "timeout": timeout_ms}), &ctx)
+        .execute_with_ctx(
+            json!({"command": command.as_str(), "timeout": timeout_ms}),
+            &ctx,
+        )
         .await;
-    let elapsed = started.elapsed();
-    let bounded = elapsed.saturating_sub(allowance);
 
     println!(
-        "timeout: budget={timeout_ms}ms elapsed={elapsed:?} allowance={allowance:?} \
-         bounded={bounded:?} walk={walk:?} msg={:?}",
+        "timeout: budget={timeout_ms}ms walk={walk:?} msg={:?}",
         result.content
     );
-    assert!(
-        bounded * 3 < walk,
-        "a {timeout_ms}ms timeout returned after {elapsed:?} ({bounded:?} above \
-         this host's {allowance:?} allowance for one timer wait) against a walk \
-         measured at {walk:?} — the manifest build is outside the timeout scope"
-    );
-    // `contains("timed out")` alone is satisfied by the byte-identical string
-    // the CHILD-timeout path returns, so it would grade nothing here.
+    // THE BOUND, as an event. `contains("timed out")` alone is satisfied by the
+    // byte-identical string the CHILD-timeout path returns, so it would grade
+    // nothing here; `manifest` is what pins the return to the build's own arm.
     assert!(
         result.content.contains("timed out") && result.content.contains("manifest"),
         "the caller was not told the workspace secret-scan ate the budget and \
          that no child ran; got: {}",
         result.content
+    );
+    // NO CHILD RAN, as an observation. Positive-controlled below.
+    assert!(
+        !result.content.contains(CHILD_TOKEN),
+        "the child produced output after a timeout that claims it never ran, so \
+         the manifest build was not what the deadline cut; got: {}",
+        result.content
+    );
+
+    // POSITIVE CONTROL for the assertion above, and the anti-vacuity check for
+    // the whole test: the same command, same policy, same posture, with the
+    // default budget instead of a tenth of the walk.
+    let ran = BashTool
+        .execute_with_ctx(json!({"command": command.as_str()}), &ctx)
+        .await;
+    println!("control: msg={:?}", ran.content);
+    assert!(
+        ran.content.contains(CHILD_TOKEN),
+        "control is broken: the child never emits {CHILD_TOKEN} even without a \
+         tight budget, so its absence above graded nothing; got: {}",
+        ran.content
+    );
+    // Read AFTER the control call, never after the timed one: the timed call's
+    // build is detached on the blocking pool and may not have entered the walk
+    // by the time the deadline fires, which would be a load-sensitive read of
+    // exactly the kind this rewrite removes. The control returned, so its
+    // manifest build completed, so the deny set was produced — by a fresh walk
+    // or from the memo a completed walk left behind. Either way this is >= 1.
+    assert!(
+        policy.secret_deny_walk_count() >= 1,
+        "no deny walk was ever entered on this policy, so the timeout above \
+         bounded a manifest build that had nothing to bound"
     );
 }
 
