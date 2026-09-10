@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "Concurrent effect-checkpoint stores fail spuriously on each other's temporary files"
 status: open
-last_verified_commit: 8aad7667a
+last_verified_commit: 327e410d7
 criteria:
   - id: c1
     text: "Both failures are reproduced deterministically by tests that force the interleaving, red on the current code: two same-digest stores, and a store whose scan races another store's temp removal."
