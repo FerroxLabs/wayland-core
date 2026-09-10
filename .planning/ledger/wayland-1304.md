@@ -4,12 +4,12 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "the_streaming_bash_timeout_bounds_the_secret_deny_walk hard-fails ci-linux at ~1 in 9: the manifest walk dominated the deadline and the caller was not told"
 status: open
-last_verified_commit: 7e0a105a4
+last_verified_commit: 676336306
 criteria:
   - id: c1
     text: "The path that returns a message NOT naming the manifest, while the manifest walk dominated the deadline, is identified BY FRAME rather than inferred. The two candidates are the child-timeout path returning first, and the manifest-build path losing its own attribution."
     state: met
-    evidence: "commit:90bef1c9c"
+    evidence: "commit:dafa1aa5c"
     owner: core
     note: "MET at 7e0a105a4 BY FRAME: the frame produced the message rather than being argued to. The evidence commit 90bef1c9c is the RED ARM -- the deterministic reproducer and the poll-stall seam, with the product decision NOT yet wired. Against that tree, on hetzner-dsm in proof slot parallel-1, `cargo test -p wcore-tools --lib`: `a_manifest_build_that_returns_after_the_deadline_still_names_the_scan` FAILED with `got: Command timed out after 13ms (streaming path, a 13ms timeout against a walk measured at 26.261776ms, stalled 500ms before the first poll)`. That byte sequence is produced at exactly ONE site -- the SECOND `tokio::time::timeout_at(deadline, run)` in `execute_streaming_with_ctx` -- and that site is reachable only when the FIRST `timeout_at(deadline, build)` returned `Ok`, i.e. when the build became ready at or after the deadline and tokio`s poll-inner-before-deadline order let it win. CANDIDATE 1 (the child-timeout path returning first) CONFIRMED. CANDIDATE 2 (the manifest-build path losing its own attribution) REFUTED by the same frame: that arm`s message names the manifest verbatim (`while building the sandbox manifest (the workspace secret-scan); the command never ran`) and is not what came back. LIMIT, STATED: this identifies the mechanism on a reproducer, not the historical CI event of run 33708958434, which was not frame-captured and cannot now be. What it establishes is that the mechanism exists, is the only one producing that string, and is reachable with the walk dominating the deadline. ORIGINAL FILING 2026-09-03 from a hard ci-linux failure on PR #426, run 33708958434, bash/tests.rs:2532; the premise-resistance design described there is unchanged and still grades the property in situ."
   - id: c2

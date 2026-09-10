@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "raw_mode_with_nothing_typed_still_denies: the pty capture ends at the prompt, so a missing denial reason and a truncated read are indistinguishable"
 status: open
-last_verified_commit: 7e0a105a4
+last_verified_commit: 676336306
 criteria:
   - id: c1
     text: "The failure distinguishes the two readings: the assertion waits for a terminal condition rather than sampling whatever the pty holds at one moment, and on failure reports how long it waited."
@@ -15,7 +15,7 @@ criteria:
   - id: c2
     text: "With the denial-reason write deliberately suppressed, the test still reds."
     state: met
-    evidence: "commit:b41d38397"
+    evidence: "commit:dd84ade27"
     owner: core
     note: "MET at 7e0a105a4, and this is the criterion that separates a fix from a silencing. RED ARM at commit b41d38397: the `eprintln!` in the `AnswerRead::Expired` match arm of `crates/wcore-agent/src/confirm.rs` replaced by a discarded `format!` -- the verdict still Denied, the reason never written. The mutation was PRINTED IN CONTEXT before it was believed and lands on executable code inside a match arm, not on a comment. ARMS on hetzner-dsm in proof slot parallel-1, `cargo test -p wcore-agent --test approval_pty_raw_partial_line`: MUTATED at b41d38397 -- 4 passed, 1 FAILED, `raw_mode_with_nothing_typed_still_denies` at approval_pty_raw_partial_line.rs:387 with `the operator must be told why it was denied. THE CAPTURE IS COMPLETE: the pty reader reached Terminal(Input/output error (os error 5)) 0.000s after the child was reaped ... the reason is genuinely ABSENT rather than merely unread`, transcript_bytes 203 -> 83. It failed on the COMPLETE-CAPTURE assertion, not the truncation one, which is the whole point of c1. RESTORED at 7e0d5d3e6 -- `git diff dcd9ff79a` for confirm.rs is EMPTY, the file was touched after restore so cargo could not skip the rebuild -- and the arm is green again. PASS-AFTER at f0aba0e5e and at 7e0a105a4: 5 passed, 0 failed."
   - id: c3

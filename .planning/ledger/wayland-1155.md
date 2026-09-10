@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "[Bug]: an Edit can overwrite a save that arrives while the guard is checking it (TOCTOU), and retries=2 hides it"
 status: closed
-last_verified_commit: 93ede3424
+last_verified_commit: 676336306
 criteria:
   - id: c1
     text: "A guarded write publishes through an atomic compare-and-exchange rather than a re-check"
