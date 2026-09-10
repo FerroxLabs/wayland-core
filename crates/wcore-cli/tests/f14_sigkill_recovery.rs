@@ -3160,6 +3160,7 @@ async fn packaged_tui_restart_projection_matches_json_host() {
 /// The same filter `assert_provider_checkpoint_sealed` applies, without its
 /// sealing assertions, because the question this answers is only HOW MANY —
 /// and the answer `0` is the one that has to be reachable.
+#[cfg(target_os = "linux")]
 fn provider_dispatch_checkpoints(evidence: &Path, session_id: &str) -> (usize, String) {
     let journal = evidence
         .join("sessions")
