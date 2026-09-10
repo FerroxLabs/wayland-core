@@ -819,12 +819,16 @@ impl SessionJournal {
         let publication = (|| {
             file.write_all(contents)?;
             file.sync_all()?;
+            #[cfg(test)]
+            quota_race_gate::reached(quota_race_gate::Point::BeforeLink, directory, None);
             match std::fs::hard_link(&temporary, &path) {
                 Ok(()) => Ok(()),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
                 Err(error) => Err(error),
             }
         })();
+        #[cfg(test)]
+        quota_race_gate::reached(quota_race_gate::Point::AfterLink, directory, None);
         let _ = std::fs::remove_file(&temporary);
         publication.map_err(|source| JournalError::Io {
             path: path.clone(),
@@ -1389,6 +1393,7 @@ pub(crate) mod quota_race_gate {
         /// Park mode: only the FIRST store to arrive waits, until released;
         /// every later store passes straight through.
         park_first: bool,
+        park_at: Point,
         parked: bool,
         released: bool,
     }
@@ -1411,14 +1416,39 @@ pub(crate) mod quota_race_gate {
         });
     }
 
+    /// Where in a checkpoint store a test may park it.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub(crate) enum Point {
+        /// After the session-quota scan, before the quota decision.
+        #[default]
+        AfterScan,
+        /// The temporary is written and synced; its hard link is next.
+        BeforeLink,
+        /// The hard link was attempted; removing the temporary is next.
+        AfterLink,
+        /// Stale-temporary cleanup listed a `.{digest}.*.tmp`; its stat is next.
+        CleanupListed,
+        /// Stale-temporary cleanup stat'd that entry; its removal is next.
+        CleanupStatted,
+        /// The quota scan listed a `.tmp` entry; its stat is next.
+        ScanListed,
+    }
+
     /// Arm park mode for `directory`: the first store that finishes its scan
     /// there waits until [`Armed::release`]; no other store is held.
     pub(crate) fn park_first(directory: &Path) -> Armed {
+        park_first_at(directory, Point::AfterScan)
+    }
+
+    /// Arm park mode for `directory` at `point`: the first store to reach it
+    /// there waits until [`Armed::release`]; no other store is held.
+    pub(crate) fn park_first_at(directory: &Path, point: Point) -> Armed {
         let armed = arm(&[directory], 0);
         let (lock, _) = gate();
-        lock.lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .park_first = true;
+        let mut state = lock.lock().unwrap_or_else(PoisonError::into_inner);
+        state.park_first = true;
+        state.park_at = point;
+        drop(state);
         armed
     }
 
@@ -1488,6 +1518,14 @@ pub(crate) mod quota_race_gate {
     }
 
     pub(crate) fn after_quota_scan(directory: &Path) {
+        reached(Point::AfterScan, directory, None);
+    }
+
+    /// A store in `directory` reached `point`. `name` is the directory entry the
+    /// point concerns, where there is one. Park mode holds the first store to
+    /// reach the armed point (at [`Point::ScanListed`], the first `.tmp` entry);
+    /// the rendezvous applies only after the scan.
+    pub(crate) fn reached(point: Point, directory: &Path, name: Option<&std::ffi::OsStr>) {
         let (lock, condvar) = gate();
         let mut state = lock.lock().unwrap_or_else(PoisonError::into_inner);
         if !state
@@ -1498,7 +1536,11 @@ pub(crate) mod quota_race_gate {
             return;
         }
         if state.park_first {
-            if state.parked {
+            if state.parked
+                || state.park_at != point
+                || (point == Point::ScanListed
+                    && !name.is_some_and(|name| name.to_string_lossy().ends_with(".tmp")))
+            {
                 return;
             }
             state.parked = true;
@@ -1512,6 +1554,9 @@ pub(crate) mod quota_race_gate {
             if wait.timed_out() {
                 state.timed_out += 1;
             }
+            return;
+        }
+        if point != Point::AfterScan {
             return;
         }
         state.passed += 1;
@@ -1561,6 +1606,8 @@ fn remove_stale_checkpoint_temps(
         if !name.starts_with(&prefix) || !name.ends_with(".tmp") {
             continue;
         }
+        #[cfg(test)]
+        quota_race_gate::reached(quota_race_gate::Point::CleanupListed, directory, None);
         let path = entry.path();
         let metadata = std::fs::symlink_metadata(&path).map_err(|source| JournalError::Io {
             path: path.clone(),
@@ -1572,6 +1619,8 @@ fn remove_stale_checkpoint_temps(
                 path.display()
             )));
         }
+        #[cfg(test)]
+        quota_race_gate::reached(quota_race_gate::Point::CleanupStatted, directory, None);
         if published {
             std::fs::remove_file(&path).map_err(|source| JournalError::Io {
                 path: path.clone(),
@@ -1593,6 +1642,16 @@ fn checkpoint_directory_bytes(directory: &Path) -> Result<u64, JournalError> {
         path: directory.to_path_buf(),
         source,
     })? {
+        #[cfg(test)]
+        quota_race_gate::reached(
+            quota_race_gate::Point::ScanListed,
+            directory,
+            entry
+                .as_ref()
+                .ok()
+                .map(|entry| entry.file_name())
+                .as_deref(),
+        );
         let entry = entry.map_err(|source| JournalError::Io {
             path: directory.to_path_buf(),
             source,
@@ -5158,6 +5217,235 @@ mod fault_tests {
         journal
             .store_effect_checkpoint(&sha256_hex(&payload), &payload)
             .unwrap();
+    }
+
+    /// Every `.{digest}.*.tmp` currently in `directory`.
+    fn checkpoint_temporaries(directory: &Path, digest: &str) -> Vec<PathBuf> {
+        let prefix = format!(".{digest}.");
+        let mut found: Vec<PathBuf> = std::fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(&prefix) && name.ends_with(".tmp"))
+            })
+            .collect();
+        found.sort();
+        found
+    }
+
+    /// wayland#1357 c1: two stores of the SAME checkpoint. The first has written
+    /// and synced its temporary and is parked just before its hard link; the
+    /// second then runs to completion. The second's stale-temporary cleanup must
+    /// not delete the first store's live temporary, or the first store's link
+    /// fails NotFound.
+    #[test]
+    fn a_store_never_deletes_the_live_temporary_of_another_store_of_the_same_checkpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = SessionJournal::open(dir.path().join("session.journal"), "session").unwrap();
+        let directory = seeded_checkpoint_directory(&journal);
+        let payload: &'static [u8] = b"identical preimage stored twice at once";
+        let digest = sha256_hex(payload);
+
+        let gate = quota_race_gate::park_first_at(&directory, quota_race_gate::Point::BeforeLink);
+        let first = {
+            let journal = journal.clone();
+            let digest = digest.clone();
+            std::thread::spawn(move || journal.store_effect_checkpoint(&digest, payload))
+        };
+        assert!(
+            gate.wait_until_parked(),
+            "the first store never reached its link"
+        );
+        assert_eq!(checkpoint_temporaries(&directory, &digest).len(), 1);
+
+        let second = journal.store_effect_checkpoint(&digest, payload);
+        gate.release();
+        let first = first.join().unwrap();
+        let observed = gate.disarm();
+
+        assert!(second.is_ok(), "{second:?}");
+        assert!(
+            first.is_ok(),
+            "the second store deleted the first store's live temporary: {first:?}"
+        );
+        assert_eq!(observed.timed_out, 0, "{observed:?}");
+        assert_eq!(journal.load_effect_checkpoint(&digest).unwrap(), payload);
+        assert!(checkpoint_temporaries(&directory, &digest).is_empty());
+    }
+
+    /// wayland#1357 c1: loading a checkpoint that has a crash-left hard link
+    /// removes that link, and must not remove the LIVE temporary of another store
+    /// of the same checkpoint that has not linked yet.
+    #[cfg(unix)]
+    #[test]
+    fn loading_a_checkpoint_never_deletes_the_live_temporary_of_a_store_not_yet_linked() {
+        use std::os::unix::fs::OpenOptionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let journal = SessionJournal::open(dir.path().join("session.journal"), "session").unwrap();
+        let directory = seeded_checkpoint_directory(&journal);
+        let payload: &'static [u8] = b"published while another store is mid-write";
+        let digest = sha256_hex(payload);
+
+        let gate = quota_race_gate::park_first_at(&directory, quota_race_gate::Point::BeforeLink);
+        let pending = {
+            let journal = journal.clone();
+            let digest = digest.clone();
+            std::thread::spawn(move || journal.store_effect_checkpoint(&digest, payload))
+        };
+        assert!(
+            gate.wait_until_parked(),
+            "the pending store never reached its link"
+        );
+
+        // The same checkpoint is published beside it, with a crash-left alias.
+        let published = directory.join(&digest);
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&published)
+            .unwrap()
+            .write_all(payload)
+            .unwrap();
+        let crash_alias = directory.join(format!(".{digest}.crash.tmp"));
+        std::fs::hard_link(&published, &crash_alias).unwrap();
+
+        let loaded = journal.load_effect_checkpoint(&digest);
+        gate.release();
+        let pending = pending.join().unwrap();
+        let observed = gate.disarm();
+
+        assert_eq!(loaded.unwrap(), payload);
+        assert!(
+            !crash_alias.exists(),
+            "the crash-left alias must still be removed"
+        );
+        assert!(
+            pending.is_ok(),
+            "loading deleted a live store's temporary: {pending:?}"
+        );
+        assert_eq!(observed.timed_out, 0, "{observed:?}");
+        assert!(checkpoint_temporaries(&directory, &digest).is_empty());
+    }
+
+    /// wayland#1357 c1: a crash-left temporary that something else removes while
+    /// this store's cleanup is part-way through it is already gone, not an error:
+    /// once between the listing and the stat, once between the stat and the
+    /// removal.
+    #[test]
+    fn a_temporary_removed_during_stale_temporary_cleanup_is_already_gone() {
+        for point in [
+            quota_race_gate::Point::CleanupListed,
+            quota_race_gate::Point::CleanupStatted,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let journal =
+                SessionJournal::open(dir.path().join("session.journal"), "session").unwrap();
+            let directory = seeded_checkpoint_directory(&journal);
+            let payload: &'static [u8] = b"stored while its crash-left temporary vanishes";
+            let digest = sha256_hex(payload);
+            let crashed = directory.join(format!(".{digest}.4242.{}.tmp", uuid::Uuid::new_v4()));
+            std::fs::write(&crashed, b"partial").unwrap();
+
+            let gate = quota_race_gate::park_first_at(&directory, point);
+            let store = {
+                let journal = journal.clone();
+                let digest = digest.clone();
+                std::thread::spawn(move || journal.store_effect_checkpoint(&digest, payload))
+            };
+            assert!(
+                gate.wait_until_parked(),
+                "{point:?}: the store never reached its cleanup"
+            );
+            std::fs::remove_file(&crashed).unwrap();
+            gate.release();
+            let result = store.join().unwrap();
+            let observed = gate.disarm();
+
+            assert!(
+                result.is_ok(),
+                "{point:?}: a vanished temporary failed the store: {result:?}"
+            );
+            assert_eq!(observed.timed_out, 0, "{point:?}: {observed:?}");
+            assert_eq!(journal.load_effect_checkpoint(&digest).unwrap(), payload);
+        }
+    }
+
+    /// wayland#1357 c1: an entry removed between this store's quota listing and
+    /// its stat is gone and counts as gone. Room is left so the store fits ONLY
+    /// if the vanished 4,096-byte entry is not counted; an error, or a total
+    /// that still counts it, both fail the store.
+    #[test]
+    fn an_entry_removed_during_the_quota_scan_counts_as_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = SessionJournal::open(dir.path().join("session.journal"), "session").unwrap();
+        let directory = seeded_checkpoint_directory(&journal);
+        let other = directory.join(format!(
+            ".{}.4242.{}.tmp",
+            sha256_hex(b"another checkpoint"),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&other, vec![0_u8; 4096]).unwrap();
+        let payload: &'static [u8] = b"stored while another temporary vanishes";
+        let digest = sha256_hex(payload);
+        leave_checkpoint_quota_room(&directory, payload.len() as u64 - 1);
+
+        let gate = quota_race_gate::park_first_at(&directory, quota_race_gate::Point::ScanListed);
+        let store = {
+            let journal = journal.clone();
+            let digest = digest.clone();
+            std::thread::spawn(move || journal.store_effect_checkpoint(&digest, payload))
+        };
+        assert!(
+            gate.wait_until_parked(),
+            "the store never listed the other temporary"
+        );
+        std::fs::remove_file(&other).unwrap();
+        gate.release();
+        let result = store.join().unwrap();
+        let observed = gate.disarm();
+
+        assert!(
+            result.is_ok(),
+            "an entry removed during the scan failed the store: {result:?}"
+        );
+        assert_eq!(observed.timed_out, 0, "{observed:?}");
+        assert_eq!(journal.load_effect_checkpoint(&digest).unwrap(), payload);
+    }
+
+    /// wayland#1357: a reader that loads a checkpoint while the store that just
+    /// published it still holds its temporary (by then a second hard link to the
+    /// same file) removes that redundant link instead of refusing the checkpoint.
+    /// Green before the repair; it pins that the repair still deletes a live
+    /// temporary when it is only a link to the published checkpoint.
+    #[cfg(unix)]
+    #[test]
+    fn loading_a_checkpoint_while_its_store_still_links_its_temporary_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = SessionJournal::open(dir.path().join("session.journal"), "session").unwrap();
+        let directory = seeded_checkpoint_directory(&journal);
+        let payload: &'static [u8] = b"loaded while its own temporary still links it";
+        let digest = sha256_hex(payload);
+
+        let gate = quota_race_gate::park_first_at(&directory, quota_race_gate::Point::AfterLink);
+        let store = {
+            let journal = journal.clone();
+            let digest = digest.clone();
+            std::thread::spawn(move || journal.store_effect_checkpoint(&digest, payload))
+        };
+        assert!(gate.wait_until_parked(), "the store never linked");
+        let loaded = journal.load_effect_checkpoint(&digest);
+        gate.release();
+        let stored = store.join().unwrap();
+        let observed = gate.disarm();
+
+        assert_eq!(loaded.unwrap(), payload);
+        assert!(stored.is_ok(), "{stored:?}");
+        assert_eq!(observed.timed_out, 0, "{observed:?}");
+        assert!(checkpoint_temporaries(&directory, &digest).is_empty());
     }
 
     #[test]
