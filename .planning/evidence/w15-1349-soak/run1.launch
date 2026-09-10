@@ -1,0 +1,15 @@
+launched_utc=2026-09-10T17:32:54Z
+host=Ubuntu-2404-noble-amd64-base nproc=96 kernel=6.8.0-101-generic mem=MemTotal: 263609704 kB
+source=b348328cc139c70e86bd3254b1afb743e79a3a15
+binary=/root/w15-soak1349/bin/wayland-core
+binary_sha256=a24886726e8cf9b84d75afe6347e98b8ead301654699b9ea0e92c06e22569e84
+build_command=WCORE_PROOF_SLOT=parallel-1 tools/remote-proof.py build --locked --release --features voice -p wcore-cli -j 6
+driver_original=/root/waylandcore-stabilization-20260905/evidence/mixed-soak353/run2/driver.py
+driver_original_sha256=f64b20bd620911a08406449817f88a9df96d8ddc3dc0b2673e75f261ede318ce
+driver_run_sha256=3c62f3a345186f98d4e2d25853ff734a684fd8a8a0d9a08a6561e28736ad040d
+loadavg_at_launch=29.02 28.61 31.38 28/4504 3730599
+waited_for_calm_seconds=0 max_wait=1200 calm=yes
+builds_running_at_launch=0 (list in run1.builds-at-launch)
+isolation=setsid nohup unshare --net
+driver_pid=3730601
+monitor_pid=3730602

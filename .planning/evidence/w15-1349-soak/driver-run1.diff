@@ -1,0 +1,4 @@
+234c234
+<         assert receipt["binary_sha256"] == "c68855d52d4ebc7ec2f5dc3ac41fc2cab646db6de9bef43c031146f6da5918da", "immutable binary hash mismatch"
+---
+>         assert receipt["binary_sha256"] == "a24886726e8cf9b84d75afe6347e98b8ead301654699b9ea0e92c06e22569e84", "immutable binary hash mismatch"

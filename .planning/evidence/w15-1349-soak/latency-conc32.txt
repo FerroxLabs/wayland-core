@@ -1,0 +1,19 @@
+wayland#1349 c2 soak run1 -- concurrency-32 latency, first vs last batches
+Informational. NOT part of c2, which grades RSS only.
+
+Computed on hetzner-dsm from soak/run1/receipt.json (sha256 4be438ae...):
+only concurrency-32 batches (240 of 720), so both windows hold the same
+concurrency. Headers are pooled over all rows; turn time over fast readers.
+
+  window    soak elapsed     median headers_ms   median fast turn_ms
+  first 10  24-280 s                  69.8                  358
+  last 10   6914-7200 s             1,307.5                2,428
+
+  rows with any error frame over the whole run: 0 (9,840 rows)
+
+Load moved the OTHER way: loadavg was about 29 during the first window and
+about 3-4 during the last (run1.status.jsonl), so host contention cannot
+explain the rise. The original W16 run at 3530199fb showed the same shape
+(mean headers_ms 59.20 -> 1663.83 over its whole first/last 100). This run
+does not attribute it. It is recorded here because it is measured, not
+because it is graded.

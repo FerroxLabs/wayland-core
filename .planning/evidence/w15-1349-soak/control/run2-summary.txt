@@ -1,0 +1,70 @@
+receipt        /root/waylandcore-stabilization-20260905/evidence/mixed-soak353/run2/receipt.json
+receipt sha256 d60ddcb89b26da9866241dbfa37be9b4b76fd4ecfc36afb196d309224be1457f
+source          3530199fb757f3fcefecf9e40ba820775b867d84
+build_info      wayland-core 0.13.13 (source 3530199fb757f3fcefecf9e40ba820775b867d84)
+build_profile   release-voice
+binary_sha256   c68855d52d4ebc7ec2f5dc3ac41fc2cab646db6de9bef43c031146f6da5918da
+driver_sha256   f64b20bd620911a08406449817f88a9df96d8ddc3dc0b2673e75f261ede318ce
+platform        Linux-6.8.0-101-generic-x86_64-with-glibc2.39
+cpu_count       96
+network_namespace net:[4026534768]
+routes          []
+soak_started    2026-09-06T13:27:46.244159+00:00
+finished        2026-09-06T15:28:01.079872+00:00
+elapsed_seconds 7213.781675985083
+completed       False
+error           AssertionError('frozen post-quiescence RSS growth exceeded')
+rss_bound_pass  False
+rss_windows     {'first_100_median_bytes': 1271511040.0, 'last_100_median_bytes': 6548955136.0, 'independent_windows': True, 'growth_bytes': 5277444096.0, 'max_growth_bytes': 127151104.0}
+cleanup         {'remaining_owned_pids': [], 'sampler_alive': False}
+loadavg_start   [28.009765625, 31.90185546875, 31.865234375]
+loadavg_end     [28.6298828125, 27.76318359375, 27.76171875]
+core_pids       [3106231]
+owned_process_resets None
+rss_unavailable None
+MemTotal        MemTotal:       263609704 kB
+
+batches 654   cycles 8938   passing 8938   failing 0
+
+per-row pass count (concurrency, reader, payload bytes): pass/total
+  conc  1  disconnected     32768   25/25
+  conc  1  disconnected   1048576   24/24
+  conc  1  disconnected  16777216   24/24
+  conc  1  fast             32768   25/25
+  conc  1  fast           1048576   24/24
+  conc  1  fast          16777216   24/24
+  conc  1  slow             32768   24/24
+  conc  1  slow           1048576   24/24
+  conc  1  slow          16777216   24/24
+  conc  8  disconnected     32768   194/194
+  conc  8  disconnected   1048576   194/194
+  conc  8  disconnected  16777216   194/194
+  conc  8  fast             32768   194/194
+  conc  8  fast           1048576   194/194
+  conc  8  fast          16777216   193/193
+  conc  8  slow             32768   194/194
+  conc  8  slow           1048576   194/194
+  conc  8  slow          16777216   193/193
+  conc 32  disconnected     32768   776/776
+  conc 32  disconnected   1048576   776/776
+  conc 32  disconnected  16777216   774/774
+  conc 32  fast             32768   776/776
+  conc 32  fast           1048576   775/775
+  conc 32  fast          16777216   774/774
+  conc 32  slow             32768   776/776
+  conc 32  slow           1048576   775/775
+  conc 32  slow          16777216   774/774
+batches by concurrency: {1: 218, 8: 218, 32: 218}
+
+RSS VERDICT (driver's own formula max(10%% of first-100 median, 32 MiB))
+  first-100 quiescent median  1271511040
+  last-100 quiescent median   6548955136
+  growth                      5277444096
+  driver max_growth_bytes     127151104
+  rss_bound_pass              False
+  growth <= 127,151,104 (original mixed limit)        False  (41.505x)
+  growth <= 33,554,432 (original confirmation limit)  False  (157.280x)
+  informational: LSQ slope quiescent RSS vs cycle index 417726.7 B/cycle, R^2 0.8432
+  informational: second-half slope 214866.0 B/cycle
+  informational: mean headers_ms first-100 59.20, last-100 1663.83
+  informational: max batch peak RSS 7009255424
