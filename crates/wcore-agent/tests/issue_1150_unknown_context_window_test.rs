@@ -398,9 +398,12 @@ async fn the_bootstrap_prompt_uses_the_real_window_derived_skill_budget() {
     // name. Reading the listing instead of the prompt exposed that, and the
     // honest form of the same claim is asymmetric: the roomy arm HOLDS the
     // skill, the tight arm DECLARES that it dropped it.
+    // "issue-1150" is safe as a marker HERE and was not safe in the prompt:
+    // the listing cannot contain the model id, the prompt's intro always does.
     assert!(
-        roomy.contains("issue-1150-skill"),
-        "precondition: the planted skill never reached the 1,000,000-token listing"
+        roomy.contains("issue-1150"),
+        "precondition: the planted skill never reached the 1,000,000-token \
+         listing: {roomy}"
     );
     assert!(
         roomy.contains("ISSUE_1150_DESCRIPTION_MARKER"),
