@@ -348,6 +348,39 @@ pub(crate) const KEY_STORE_ACQUIRE_BUDGET: Duration = Duration::from_secs(5);
 /// tests refused on a host where the same key loads fine given more time).
 pub(crate) const RESUME_KEY_WAIT_BUDGET: Duration = Duration::from_secs(30);
 
+/// ONE further wait, granted only when a budget expired with
+/// [`KeyStoreReach::NeverAsked`] — the load never reached the store.
+///
+/// # Why this exists (wayland#1289)
+///
+/// [`KEY_STORE_ACQUIRE_BUDGET`] is a wall-clock deadline on a thread that has
+/// to be SCHEDULED to do its work. `NeverAsked` is exactly the observation
+/// that the deadline expired before the store was asked anything — so what
+/// the budget measured was this host's own scheduling, and spending it as if
+/// the store had been silent is the defect. Measured: wayland#1302 recorded
+/// this reach 104 times against a store that was demonstrably HEALTHY, and
+/// wayland#1289 measured every rung of the store itself well inside the
+/// budget (keyring 0-4 ms, Argon2id 142 ms to 1244 ms at 192-way) — nothing
+/// in the store approaches 5 s, so the expiry was never about the store.
+///
+/// It is scoped, not a blanket raise, and the scoping is the whole design:
+///
+/// * `Asked` keeps its 5 s. That IS the store's condition to answer for, and
+///   a wedged or ACL-blocked keychain must still be given up on quickly.
+/// * The extension is granted ONCE per outstanding load (see
+///   [`PendingKeyLoad::extended`]), never once per caller, so a session
+///   against a permanently starved host does not extend without bound.
+///
+/// # What it costs, stated rather than waved at
+///
+/// This sits on the pre-provider path of every journaled turn, so on a host
+/// that never schedules the load the user-visible dead air goes from 5 s to
+/// 10 s. That is the trade: 5 s more silence in the case where the current
+/// behaviour throws away the turn's replay protection having learned NOTHING
+/// about the store. It buys nothing at all in the `Asked` case, which is why
+/// it is not granted there.
+pub(crate) const KEY_STORE_NEVER_ASKED_EXTENSION: Duration = Duration::from_secs(5);
+
 /// Lazily caches a successfully loaded key for one engine. Backend failures
 /// are not cached, so unlocking the configured store can make a later retry
 /// succeed without restarting Core.
@@ -405,6 +438,11 @@ struct PendingKeyLoad {
     /// whichever caller's wait expires. An `Arc` rather than a return value
     /// because the answer is needed precisely when the load has NOT returned.
     asked: Arc<AtomicBool>,
+    /// Whether this load has already been granted its one
+    /// [`KEY_STORE_NEVER_ASKED_EXTENSION`]. Carried on the LOAD and not on the
+    /// caller, because the extension is a property of "this load has not
+    /// reached the store yet" — a second caller must not buy a second one.
+    extended: bool,
     rx: mpsc::Receiver<Result<ConfidentialBlobKey, RecoveryConfidentialError>>,
 }
 
@@ -431,6 +469,19 @@ enum KeySource {
     /// wayland#1302 measured 104 times against a healthy store.
     #[cfg(any(test, feature = "test-utils"))]
     StarvedForTest,
+    /// A load this host was SLOW to schedule, that then reaches the store and
+    /// gets an answer — the same starvation as above, except that the thread
+    /// eventually runs. It is the only shape that tells granting
+    /// [`KEY_STORE_NEVER_ASKED_EXTENSION`] apart from not granting it:
+    /// `StarvedForTest` never answers, so it times out either way.
+    ///
+    /// `cfg(test)` only, not `test-utils`: every other fixture here is
+    /// re-exported through an `Engine::use_*` wrapper in `engine.rs`, which is
+    /// a `SOURCE_INPUTS` file. This one is needed by a unit test in this
+    /// module and nothing else, so it is scoped to where it is used rather
+    /// than dragging a corpus regeneration along behind it.
+    #[cfg(test)]
+    LateButAnsweringForTest,
     /// Backend selection refuses. The one production shape that reaches the
     /// degrade notice carrying a store report (wayland#1302 c3).
     #[cfg(any(test, feature = "test-utils"))]
@@ -581,6 +632,17 @@ impl RecoveryRequestProtector {
         }
     }
 
+    /// A protector whose key load reaches the store only AFTER the turn
+    /// budget has expired, and then gets an answer. Grades
+    /// [`KEY_STORE_NEVER_ASKED_EXTENSION`].
+    #[cfg(test)]
+    pub(crate) fn with_late_key_store_for_test() -> Self {
+        Self {
+            state: Mutex::new(ProtectorState::default()),
+            key_source: KeySource::LateButAnsweringForTest,
+        }
+    }
+
     /// A protector whose key load never reaches the store, for grading what
     /// is said when the wait expires with the store untouched.
     #[cfg(any(test, feature = "test-utils"))]
@@ -664,15 +726,37 @@ impl RecoveryRequestProtector {
                 // on the clock and waits out the remainder.
                 Err(mpsc::TryRecvError::Empty) => {
                     let remaining = budget.saturating_sub(pending.started.elapsed());
+                    let mut pending = pending;
                     match pending.rx.recv_timeout(remaining) {
                         Ok(Ok(key)) => return Ok(key),
                         Ok(Err(error)) if pending.create || !create => return Err(error),
                         Ok(Err(_)) => {}
                         Err(mpsc::RecvTimeoutError::Timeout) => {
+                            // wayland#1289. The load still has not reached the
+                            // store, so this expiry says nothing about the
+                            // store — grant its one extension, if this load
+                            // has not already had it.
+                            let mut waited = budget;
+                            if !pending.extended && pending.reach() == KeyStoreReach::NeverAsked {
+                                pending.extended = true;
+                                match pending.rx.recv_timeout(KEY_STORE_NEVER_ASKED_EXTENSION) {
+                                    Ok(Ok(key)) => return Ok(key),
+                                    Ok(Err(error)) if pending.create || !create => {
+                                        return Err(error);
+                                    }
+                                    Ok(Err(_)) => {}
+                                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                                        waited += KEY_STORE_NEVER_ASKED_EXTENSION;
+                                    }
+                                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                                        return Err(key_load_machinery_failed());
+                                    }
+                                }
+                            }
                             let reach = pending.reach();
                             state.pending = Some(pending);
                             return Err(RecoveryConfidentialError::KeyStoreTimedOut {
-                                waited: budget,
+                                waited,
                                 reach,
                                 backend,
                             });
@@ -698,16 +782,36 @@ impl RecoveryRequestProtector {
         match rx.recv_timeout(budget) {
             Ok(result) => result,
             Err(mpsc::RecvTimeoutError::Timeout) => {
+                // wayland#1289. The budget is a wall-clock deadline on a
+                // thread that has to be scheduled; if it expired without the
+                // store having been asked, it measured this host and not the
+                // store. Grant exactly one extension for that, and none at
+                // all when the store WAS asked and stayed silent.
+                let mut waited = budget;
+                let mut extended = false;
+                if !asked.load(Ordering::Acquire) {
+                    extended = true;
+                    match rx.recv_timeout(KEY_STORE_NEVER_ASKED_EXTENSION) {
+                        Ok(result) => return result,
+                        Err(mpsc::RecvTimeoutError::Timeout) => {
+                            waited += KEY_STORE_NEVER_ASKED_EXTENSION;
+                        }
+                        Err(mpsc::RecvTimeoutError::Disconnected) => {
+                            return Err(key_load_machinery_failed());
+                        }
+                    }
+                }
                 let pending = PendingKeyLoad {
                     create,
                     asked,
+                    extended,
                     rx,
                     started,
                 };
                 let reach = pending.reach();
                 state.pending = Some(pending);
                 Err(RecoveryConfidentialError::KeyStoreTimedOut {
-                    waited: budget,
+                    waited,
                     reach,
                     backend,
                 })
@@ -751,6 +855,16 @@ impl RecoveryRequestProtector {
                 loop {
                     std::thread::park();
                 }
+            }),
+            // Marks LATE: past the turn budget, comfortably inside the
+            // extension. The answer is a real store answer — "this profile
+            // has no key" — so a caller that receives it has demonstrably had
+            // the store's word, which a timeout can never be mistaken for.
+            #[cfg(test)]
+            KeySource::LateButAnsweringForTest => Box::new(move || {
+                std::thread::sleep(KEY_STORE_ACQUIRE_BUDGET + Duration::from_millis(750));
+                asked.store(true, Ordering::Release);
+                Err(RecoveryConfidentialError::MissingRecoveryKey)
             }),
             #[cfg(any(test, feature = "test-utils"))]
             KeySource::SelectionRefusedForTest => Box::new(move || {
@@ -1113,7 +1227,14 @@ mod tests {
         assert_eq!(
             starved,
             Err(RecoveryConfidentialError::KeyStoreTimedOut {
-                waited: KEY_STORE_ACQUIRE_BUDGET,
+                // wayland#1289: a load that never reached the store is granted
+                // one KEY_STORE_NEVER_ASKED_EXTENSION before it is given up
+                // on, and the message reports what was ACTUALLY spent. The
+                // `asked` arm above still reports the bare budget — that
+                // contrast is the non-vacuity guard on the extension, and if
+                // this fix ever leaked into the Asked path that assertion,
+                // not this one, is what fails.
+                waited: KEY_STORE_ACQUIRE_BUDGET + KEY_STORE_NEVER_ASKED_EXTENSION,
                 reach: KeyStoreReach::NeverAsked,
                 backend,
             }),
@@ -1163,6 +1284,49 @@ mod tests {
                 "the message must name the configured backend, got {message:?}"
             );
         }
+    }
+
+    /// wayland#1289 — a load the host was slow to SCHEDULE gets one bounded
+    /// extension, and the store's answer reaches the caller instead of a
+    /// timeout that was never about the store.
+    ///
+    /// The fixture reaches the store 5.75s in, i.e. past
+    /// [`KEY_STORE_ACQUIRE_BUDGET`] and inside
+    /// [`KEY_STORE_NEVER_ASKED_EXTENSION`], and then answers
+    /// `MissingRecoveryKey` — a real store ANSWER, which a timeout can never
+    /// be mistaken for. Before the extension this call returned
+    /// `KeyStoreTimedOut { reach: NeverAsked }` at 5s: it gave up on a load
+    /// that was about to succeed, having learned nothing about the store, and
+    /// spent the turn's replay protection to do it.
+    ///
+    /// The paired NON-VACUITY assertion lives in
+    /// `both_key_store_timeout_causes_are_told_apart`: its wedged arm sets
+    /// `asked` and never answers, and still reports `waited:
+    /// KEY_STORE_ACQUIRE_BUDGET`. If the extension ever leaked into the
+    /// `Asked` path — which would double the give-up time on a genuinely
+    /// wedged keychain — that test fails and this one would not notice.
+    #[test]
+    fn a_load_the_host_was_slow_to_schedule_is_given_one_bounded_extension() {
+        let started = std::time::Instant::now();
+        let late =
+            RecoveryRequestProtector::with_late_key_store_for_test().preflight(&Config::default());
+        let took = started.elapsed();
+
+        assert_eq!(
+            late,
+            Err(RecoveryConfidentialError::MissingRecoveryKey),
+            "the extension must deliver the store's own answer, not a timeout; got {late:?} \
+             after {took:?}"
+        );
+        assert!(
+            took >= KEY_STORE_ACQUIRE_BUDGET,
+            "the answer arrived before the budget even expired, so this run did not \
+             exercise the extension at all and its pass is vacuous: took {took:?}"
+        );
+        assert!(
+            took < KEY_STORE_ACQUIRE_BUDGET + KEY_STORE_NEVER_ASKED_EXTENSION,
+            "the extension is ONE bounded wait, not an unbounded one: took {took:?}"
+        );
     }
 
     #[test]
