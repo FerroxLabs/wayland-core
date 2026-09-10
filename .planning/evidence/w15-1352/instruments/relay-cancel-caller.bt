@@ -1,0 +1,16 @@
+// w15/relay1352 c1 instrument v2 (debug binary d0819d10, no frame pointers).
+// At function entry [rsp] holds the return address, which names the DIRECT
+// caller of overload() without unwinding: send_retained (wait budget spent)
+// versus RelaySink::emit_text_delta_async (aggregate refused retain()).
+// The aggregate counter lives in the static wcore_acp::bounded::global::USED
+// (file vaddr 0xb310b08); load base = ip - 0x3aa5940 at this probe.
+uprobe:/root/w15-leak2/bin/fix/wayland-core:"_ZN9wcore_acp7bounded15Sender$LT$E$GT$8overload17h972145050330e7aaE"
+{
+  $ret = *(uint64 *)reg("sp");
+  $base = reg("ip") - 0x3aa5940;
+  $used = $base + 0xb310b08;
+  printf("OVERLOAD ns=%llu tid=%d caller=%s used_words=%llu,%llu,%llu,%llu\n",
+         nsecs, tid, usym($ret),
+         *(uint64 *)($used), *(uint64 *)($used + 8),
+         *(uint64 *)($used + 16), *(uint64 *)($used + 24));
+}

@@ -1,0 +1,7 @@
+arm=fixdbg-c8-16m-optional start utc=2026-09-10T15:50:56Z loadavg=30.87 29.74 30.31 bin_sha=70f44e05cb52d548 conc=8 cycles=16 durability=optional bytes=16777216
+arm=fixdbg-c8-16m-optional exit=0 end utc=2026-09-10T15:51:52Z loadavg=36.51 31.42 30.85
+arm=fixdbg-c32-16m-optional start utc=2026-09-10T15:51:52Z loadavg=36.51 31.42 30.85 bin_sha=70f44e05cb52d548 conc=32 cycles=32 durability=optional bytes=16777216
+arm=fixdbg-c32-16m-optional exit=0 end utc=2026-09-10T15:52:36Z loadavg=51.92 36.45 32.59
+arm=fixdbg-c1-16m-optional start utc=2026-09-10T15:52:36Z loadavg=51.92 36.45 32.59 bin_sha=70f44e05cb52d548 conc=1 cycles=3 durability=optional bytes=16777216
+arm=fixdbg-c1-16m-optional exit=0 end utc=2026-09-10T15:53:59Z loadavg=37.96 35.60 32.61
+queue_state=done

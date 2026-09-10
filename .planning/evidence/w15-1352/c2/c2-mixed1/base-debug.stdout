@@ -1,0 +1,44 @@
+{"index": 0, "concurrency": 8, "fast_pass": 2, "fast_rows": 4, "stage1": 2, "stage2": 0, "rows_pass": 6, "quiescent_rss_bytes": 161906688, "rss_peak_bytes": 1056141312}
+{"index": 1, "concurrency": 8, "fast_pass": 4, "fast_rows": 4, "stage1": 0, "stage2": 0, "rows_pass": 8, "quiescent_rss_bytes": 168214528, "rss_peak_bytes": 1544081408}
+{"index": 2, "concurrency": 32, "fast_pass": 0, "fast_rows": 16, "stage1": 16, "stage2": 0, "rows_pass": 16, "quiescent_rss_bytes": 212226048, "rss_peak_bytes": 913866752}
+{"index": 3, "concurrency": 8, "fast_pass": 4, "fast_rows": 4, "stage1": 0, "stage2": 0, "rows_pass": 8, "quiescent_rss_bytes": 207224832, "rss_peak_bytes": 1647243264}
+{"index": 4, "concurrency": 8, "fast_pass": 4, "fast_rows": 4, "stage1": 0, "stage2": 0, "rows_pass": 8, "quiescent_rss_bytes": 206323712, "rss_peak_bytes": 1530146816}
+{"index": 5, "concurrency": 8, "fast_pass": 2, "fast_rows": 4, "stage1": 2, "stage2": 0, "rows_pass": 6, "quiescent_rss_bytes": 205463552, "rss_peak_bytes": 1076195328}
+{"index": 6, "concurrency": 32, "fast_pass": 1, "fast_rows": 16, "stage1": 15, "stage2": 0, "rows_pass": 17, "quiescent_rss_bytes": 212627456, "rss_peak_bytes": 1025519616}
+{"index": 7, "concurrency": 8, "fast_pass": 0, "fast_rows": 4, "stage1": 4, "stage2": 0, "rows_pass": 4, "quiescent_rss_bytes": 207790080, "rss_peak_bytes": 731938816}
+{"index": 8, "concurrency": 8, "fast_pass": 0, "fast_rows": 4, "stage1": 4, "stage2": 0, "rows_pass": 4, "quiescent_rss_bytes": 207085568, "rss_peak_bytes": 694915072}
+{"index": 9, "concurrency": 8, "fast_pass": 1, "fast_rows": 4, "stage1": 3, "stage2": 0, "rows_pass": 5, "quiescent_rss_bytes": 208392192, "rss_peak_bytes": 964145152}
+{
+  "receipt": "/root/w15-relay1352/c2-mixed1/base-debug/receipt.json",
+  "completed": true,
+  "error": null,
+  "summary": {
+    "by_concurrency": {
+      "8": {
+        "fast_rows": 32,
+        "fast_pass": 17,
+        "stage1_relay_overloaded": 15,
+        "stage2_delivery_overloaded": 0,
+        "other_fast_failures": 0,
+        "fast_turn_ms_median": 22799.830875359476,
+        "slow_disconnected_rows": 32,
+        "slow_disconnected_pass": 32
+      },
+      "32": {
+        "fast_rows": 32,
+        "fast_pass": 1,
+        "stage1_relay_overloaded": 31,
+        "stage2_delivery_overloaded": 0,
+        "other_fast_failures": 0,
+        "fast_turn_ms_median": 3601.52068734169,
+        "slow_disconnected_rows": 32,
+        "slow_disconnected_pass": 32
+      }
+    },
+    "rss_peak_bytes": 1647243264,
+    "quiescent_rss_first": 161906688,
+    "quiescent_rss_last": 208392192,
+    "quiescent_rss_max": 212627456,
+    "all_sessions_quiesced": true
+  }
+}

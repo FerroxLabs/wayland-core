@@ -1,0 +1,14 @@
+queue start utc=2026-09-10T15:30:52Z
+arm=rel-base-b1 start utc=2026-09-10T15:30:52Z loadavg=29.35 28.80 29.12 bin_sha=9b2e24f204f0fa18 conc=1 cycles=5 durability=on bytes=16777216
+arm=rel-base-b1 exit=0 end utc=2026-09-10T15:31:13Z loadavg=28.48 28.64 29.06
+arm=rel-3530-b1 start utc=2026-09-10T15:31:13Z loadavg=28.48 28.64 29.06 bin_sha=0f3d81cf47b0c04f conc=1 cycles=5 durability=on bytes=16777216
+arm=rel-3530-b1 exit=0 end utc=2026-09-10T15:31:27Z loadavg=28.32 28.59 29.03
+arm=dbg-base-b1 start utc=2026-09-10T15:31:27Z loadavg=28.32 28.59 29.03 bin_sha=d0819d10b693ee1c conc=1 cycles=5 durability=on bytes=16777216
+arm=dbg-base-b1 exit=0 end utc=2026-09-10T15:33:40Z loadavg=30.50 29.47 29.31
+arm=rel-base-b2 start utc=2026-09-10T15:33:40Z loadavg=30.50 29.47 29.31 bin_sha=9b2e24f204f0fa18 conc=1 cycles=5 durability=on bytes=16777216
+arm=rel-base-b2 exit=0 end utc=2026-09-10T15:34:01Z loadavg=30.77 29.63 29.37
+arm=rel-3530-b2 start utc=2026-09-10T15:34:01Z loadavg=30.77 29.63 29.37 bin_sha=0f3d81cf47b0c04f conc=1 cycles=5 durability=on bytes=16777216
+arm=rel-3530-b2 exit=0 end utc=2026-09-10T15:34:14Z loadavg=30.66 29.64 29.37
+arm=dbg-base-b2 start utc=2026-09-10T15:34:14Z loadavg=30.66 29.64 29.37 bin_sha=d0819d10b693ee1c conc=1 cycles=5 durability=on bytes=16777216
+arm=dbg-base-b2 exit=0 end utc=2026-09-10T15:36:33Z loadavg=31.59 31.34 30.11
+queue state=done utc=2026-09-10T15:36:33Z

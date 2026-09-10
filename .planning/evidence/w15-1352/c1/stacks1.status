@@ -1,0 +1,8 @@
+state=starting utc=2026-09-10T15:13:09Z loadavg=28.70 28.73 28.32
+binary_sha256=d0819d10b693ee1c6420041ca3d2ba4c54bc7a15121b22e74a4fe20b5f8d9cb0
+bpftrace_pid=1158795
+attached_utc=2026-09-10T15:13:12Z
+armA_start loadavg=28.64 28.72 28.32
+armA_exit=0 loadavg=32.58 29.54 28.59 utc=2026-09-10T15:13:23Z
+armB_exit=0 loadavg=32.97 30.26 28.91 utc=2026-09-10T15:14:43Z
+state=done utc=2026-09-10T15:14:49Z

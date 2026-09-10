@@ -1,0 +1,4199 @@
+{
+  "driver": "w15-relay1352-mixed",
+  "source": "008d88ce960322967adcef7637b44a5cfad44207",
+  "binary_sha256": "d0819d10b693ee1c6420041ca3d2ba4c54bc7a15121b22e74a4fe20b5f8d9cb0",
+  "driver_sha256": "16a408541bdaf8ad74f24503b03618bd6c15549344b22a34e2c6c797ecaf6a53",
+  "label": "base-debug",
+  "started": "2026-09-10T15:56:49.285345+00:00",
+  "platform": "Linux-6.8.0-101-generic-x86_64-with-glibc2.39",
+  "cpu_count": 96,
+  "loadavg_start": [
+    35.8232421875,
+    35.55126953125,
+    33.07568359375
+  ],
+  "composition": {
+    "8": [
+      "fast",
+      "fast",
+      "fast",
+      "fast",
+      "slow",
+      "slow",
+      "disconnected",
+      "disconnected"
+    ],
+    "32": [
+      "fast",
+      "fast",
+      "fast",
+      "fast",
+      "fast",
+      "fast",
+      "fast",
+      "fast",
+      "fast",
+      "fast",
+      "fast",
+      "fast",
+      "fast",
+      "fast",
+      "fast",
+      "fast",
+      "slow",
+      "slow",
+      "slow",
+      "slow",
+      "slow",
+      "slow",
+      "slow",
+      "slow",
+      "disconnected",
+      "disconnected",
+      "disconnected",
+      "disconnected",
+      "disconnected",
+      "disconnected",
+      "disconnected",
+      "disconnected"
+    ]
+  },
+  "schedule": "8,8,32,8,8,8,32,8,8,8",
+  "text_bytes": 16777216,
+  "chunk_bytes": 32768,
+  "batches": [
+    {
+      "index": 0,
+      "concurrency": 8,
+      "loadavg_before": [
+        35.8232421875,
+        35.55126953125,
+        33.07568359375
+      ],
+      "sessions_after": [],
+      "active_fixture_after": [],
+      "quiescent_rss_bytes": 161906688,
+      "rss_peak_bytes": 1056141312,
+      "fast_pass": 2,
+      "fast_rows": 4,
+      "stage1": 2,
+      "stage2": 0,
+      "rows_pass": 6
+    },
+    {
+      "index": 1,
+      "concurrency": 8,
+      "loadavg_before": [
+        40.03662109375,
+        36.64990234375,
+        33.5244140625
+      ],
+      "sessions_after": [],
+      "active_fixture_after": [],
+      "quiescent_rss_bytes": 168214528,
+      "rss_peak_bytes": 1544081408,
+      "fast_pass": 4,
+      "fast_rows": 4,
+      "stage1": 0,
+      "stage2": 0,
+      "rows_pass": 8
+    },
+    {
+      "index": 2,
+      "concurrency": 32,
+      "loadavg_before": [
+        46.39599609375,
+        38.57958984375,
+        34.2705078125
+      ],
+      "sessions_after": [],
+      "active_fixture_after": [],
+      "quiescent_rss_bytes": 212226048,
+      "rss_peak_bytes": 913866752,
+      "fast_pass": 0,
+      "fast_rows": 16,
+      "stage1": 16,
+      "stage2": 0,
+      "rows_pass": 16
+    },
+    {
+      "index": 3,
+      "concurrency": 8,
+      "loadavg_before": [
+        47.23876953125,
+        39.021484375,
+        34.4609375
+      ],
+      "sessions_after": [],
+      "active_fixture_after": [],
+      "quiescent_rss_bytes": 207224832,
+      "rss_peak_bytes": 1647243264,
+      "fast_pass": 4,
+      "fast_rows": 4,
+      "stage1": 0,
+      "stage2": 0,
+      "rows_pass": 8
+    },
+    {
+      "index": 4,
+      "concurrency": 8,
+      "loadavg_before": [
+        69.35302734375,
+        45.7431640625,
+        36.91552734375
+      ],
+      "sessions_after": [],
+      "active_fixture_after": [],
+      "quiescent_rss_bytes": 206323712,
+      "rss_peak_bytes": 1530146816,
+      "fast_pass": 4,
+      "fast_rows": 4,
+      "stage1": 0,
+      "stage2": 0,
+      "rows_pass": 8
+    },
+    {
+      "index": 5,
+      "concurrency": 8,
+      "loadavg_before": [
+        58.50927734375,
+        45.869140625,
+        37.2978515625
+      ],
+      "sessions_after": [],
+      "active_fixture_after": [],
+      "quiescent_rss_bytes": 205463552,
+      "rss_peak_bytes": 1076195328,
+      "fast_pass": 2,
+      "fast_rows": 4,
+      "stage1": 2,
+      "stage2": 0,
+      "rows_pass": 6
+    },
+    {
+      "index": 6,
+      "concurrency": 32,
+      "loadavg_before": [
+        47.7802734375,
+        44.5029296875,
+        37.1162109375
+      ],
+      "sessions_after": [],
+      "active_fixture_after": [],
+      "quiescent_rss_bytes": 212627456,
+      "rss_peak_bytes": 1025519616,
+      "fast_pass": 1,
+      "fast_rows": 16,
+      "stage1": 15,
+      "stage2": 0,
+      "rows_pass": 17
+    },
+    {
+      "index": 7,
+      "concurrency": 8,
+      "loadavg_before": [
+        41.3115234375,
+        43.30712890625,
+        36.9560546875
+      ],
+      "sessions_after": [],
+      "active_fixture_after": [],
+      "quiescent_rss_bytes": 207790080,
+      "rss_peak_bytes": 731938816,
+      "fast_pass": 0,
+      "fast_rows": 4,
+      "stage1": 4,
+      "stage2": 0,
+      "rows_pass": 4
+    },
+    {
+      "index": 8,
+      "concurrency": 8,
+      "loadavg_before": [
+        39.4306640625,
+        42.8359375,
+        36.87060546875
+      ],
+      "sessions_after": [],
+      "active_fixture_after": [],
+      "quiescent_rss_bytes": 207085568,
+      "rss_peak_bytes": 694915072,
+      "fast_pass": 0,
+      "fast_rows": 4,
+      "stage1": 4,
+      "stage2": 0,
+      "rows_pass": 4
+    },
+    {
+      "index": 9,
+      "concurrency": 8,
+      "loadavg_before": [
+        37.89404296875,
+        42.39599609375,
+        36.791015625
+      ],
+      "sessions_after": [],
+      "active_fixture_after": [],
+      "quiescent_rss_bytes": 208392192,
+      "rss_peak_bytes": 964145152,
+      "fast_pass": 1,
+      "fast_rows": 4,
+      "stage1": 3,
+      "stage2": 0,
+      "rows_pass": 5
+    }
+  ],
+  "rows": [
+    {
+      "batch": 0,
+      "concurrency": 8,
+      "marker": "fastc3af8e6064484883b9494e43854dc4ad",
+      "session": "8658e3f8-9f72-4657-8f00-9e59162e0352",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 513,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 16777216,
+      "terminal_count": 1,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 23184.273295104504,
+      "fixture_active_before_delete": false,
+      "delete_status": 204,
+      "delete_ms": 4770.88919095695,
+      "get_after_delete_status": 404,
+      "cycle_ms": 27958.719458431005,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 0,
+      "concurrency": 8,
+      "marker": "faste48084705f1141989922a7fea20a1dae",
+      "session": "52e44d90-cdd4-4593-b580-122c6ca8c370",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 328,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 10715136,
+      "terminal_count": 1,
+      "errors": [
+        {
+          "kind": "error",
+          "error": {
+            "code": -32003,
+            "message": "protocol relay overloaded; turn cancelled without truncating structured events",
+            "data": {
+              "retryable": true
+            }
+          },
+          "turn_id": "e2045383-48c4-49db-871a-38c3f45d2ea5"
+        }
+      ],
+      "error_class": "stage1_relay_overloaded",
+      "turn_ms": 5218.535320833325,
+      "fixture_active_before_delete": false,
+      "delete_status": 204,
+      "delete_ms": 2268.7834072858095,
+      "get_after_delete_status": 404,
+      "cycle_ms": 7491.203501820564,
+      "pass": false,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 0,
+      "concurrency": 8,
+      "marker": "fast31a3eb724dc84ab09c1275740377430b",
+      "session": "10f8a5f8-639f-48e2-bda4-a6d2ebb305c1",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 513,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 16777216,
+      "terminal_count": 1,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 23126.62637233734,
+      "fixture_active_before_delete": false,
+      "delete_status": 204,
+      "delete_ms": 4728.011855855584,
+      "get_after_delete_status": 404,
+      "cycle_ms": 27858.52826014161,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 0,
+      "concurrency": 8,
+      "marker": "fast02e72093c8b64daa88b631b96db54215",
+      "session": "05e01e1b-28d2-48d2-b0bc-425dd49fe729",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 327,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 10682368,
+      "terminal_count": 1,
+      "errors": [
+        {
+          "kind": "error",
+          "error": {
+            "code": -32003,
+            "message": "protocol relay overloaded; turn cancelled without truncating structured events",
+            "data": {
+              "retryable": true
+            }
+          },
+          "turn_id": "fccf801f-9faf-40b0-802c-5956fff9b259"
+        }
+      ],
+      "error_class": "stage1_relay_overloaded",
+      "turn_ms": 5885.029235854745,
+      "fixture_active_before_delete": false,
+      "delete_status": 204,
+      "delete_ms": 1502.0282845944166,
+      "get_after_delete_status": 404,
+      "cycle_ms": 7390.989609062672,
+      "pass": false,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 0,
+      "concurrency": 8,
+      "marker": "held1167b7cef44542188d65f9c79245315b",
+      "session": "84a3a6e1-b89e-4a82-b201-2b70a1edad2e",
+      "reader": "slow",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 7040.056003257632,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 768.6631232500076,
+      "get_after_delete_status": 404,
+      "cycle_ms": 7813.196236267686,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 4325376
+      }
+    },
+    {
+      "batch": 0,
+      "concurrency": 8,
+      "marker": "held18a62848863e4cc3810bf147c351e1ba",
+      "session": "d1a7ab6a-a130-49fe-90a6-d4638d833a82",
+      "reader": "slow",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 7028.991596773267,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 752.248503267765,
+      "get_after_delete_status": 404,
+      "cycle_ms": 7784.500941634178,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 4751360
+      }
+    },
+    {
+      "batch": 0,
+      "concurrency": 8,
+      "marker": "heldb30a82b2deaf492dab11c8c30688fbf0",
+      "session": "7168aca4-78ea-42cd-88b3-4abd0d36950b",
+      "reader": "disconnected",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "fixture_dispatch_observed": true,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 2008.673982694745,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 28.44213880598545,
+      "get_after_delete_status": 404,
+      "cycle_ms": 2041.8295357376337,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 98304
+      }
+    },
+    {
+      "batch": 0,
+      "concurrency": 8,
+      "marker": "heldcc2b69b5d9154f10a379c746af3ad2e4",
+      "session": "1597b0a5-d7b6-4b3a-99b9-731db6eb7691",
+      "reader": "disconnected",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "fixture_dispatch_observed": true,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 2030.8729242533445,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 41.182246059179306,
+      "get_after_delete_status": 404,
+      "cycle_ms": 2076.2975234538317,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 98304
+      }
+    },
+    {
+      "batch": 1,
+      "concurrency": 8,
+      "marker": "fast392cde2884aa491daf71dd48ed943c56",
+      "session": "f582c36b-17d2-484e-8867-f8a6685d26c7",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 513,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 16777216,
+      "terminal_count": 1,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 22824.019763618708,
+      "fixture_active_before_delete": false,
+      "delete_status": 204,
+      "delete_ms": 4737.260518595576,
+      "get_after_delete_status": 404,
+      "cycle_ms": 27565.249752253294,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 1,
+      "concurrency": 8,
+      "marker": "fast7ca9b74045594c6892de1c494fec1ed2",
+      "session": "c6747945-cec7-4668-b564-4961947f0464",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 513,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 16777216,
+      "terminal_count": 1,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 22865.74395932257,
+      "fixture_active_before_delete": false,
+      "delete_status": 204,
+      "delete_ms": 4745.655385777354,
+      "get_after_delete_status": 404,
+      "cycle_ms": 27615.39915204048,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 1,
+      "concurrency": 8,
+      "marker": "fast63529567315b44909914af6fbbc1c80c",
+      "session": "b4a11d9e-9c32-4e0e-849a-05f3915a22b1",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 513,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 16777216,
+      "terminal_count": 1,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 22888.122219592333,
+      "fixture_active_before_delete": false,
+      "delete_status": 204,
+      "delete_ms": 4800.622953101993,
+      "get_after_delete_status": 404,
+      "cycle_ms": 27692.58219562471,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 1,
+      "concurrency": 8,
+      "marker": "fast4a68540094e240e0bec5110c0aabc3e2",
+      "session": "67df641a-cd37-425e-853f-98f912441215",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 513,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 16777216,
+      "terminal_count": 1,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 22775.641987100244,
+      "fixture_active_before_delete": false,
+      "delete_status": 204,
+      "delete_ms": 4730.059899389744,
+      "get_after_delete_status": 404,
+      "cycle_ms": 27509.979344904423,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 1,
+      "concurrency": 8,
+      "marker": "held9e0c17004daa415eab0ad6919ef9b424",
+      "session": "0777b986-6795-46ca-a62f-79ff6b900716",
+      "reader": "slow",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 7000.182695686817,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 761.0113434493542,
+      "get_after_delete_status": 404,
+      "cycle_ms": 7765.79662412405,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 4784128
+      }
+    },
+    {
+      "batch": 1,
+      "concurrency": 8,
+      "marker": "helda26835871f5a4bb1b73a2eeae4f2d446",
+      "session": "ade422e9-a0a7-4589-8d35-f658f4752e71",
+      "reader": "slow",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 7016.74834266305,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 780.6002534925938,
+      "get_after_delete_status": 404,
+      "cycle_ms": 7802.911331877112,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 4784128
+      }
+    },
+    {
+      "batch": 1,
+      "concurrency": 8,
+      "marker": "held32af904845ff408bb6653019e51941ba",
+      "session": "301bf7fe-4259-4deb-ae02-9aa8bf4d10ff",
+      "reader": "disconnected",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "fixture_dispatch_observed": true,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 2018.4409637004137,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 45.506032183766365,
+      "get_after_delete_status": 404,
+      "cycle_ms": 2069.1281519830227,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 98304
+      }
+    },
+    {
+      "batch": 1,
+      "concurrency": 8,
+      "marker": "held7e9df0d2047d4ba0b0baf90883e8f6f3",
+      "session": "faa4ec25-90bf-41ac-ad59-6bc71d04e539",
+      "reader": "disconnected",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "fixture_dispatch_observed": true,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 2006.7399367690086,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 49.70281384885311,
+      "get_after_delete_status": 404,
+      "cycle_ms": 2066.0888087004423,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 98304
+      }
+    },
+    {
+      "batch": 2,
+      "concurrency": 32,
+      "marker": "fastd903ac0f358b4817a1bcb1c3c8bc22a5",
+      "session": "983aa858-5057-4a36-91eb-eade3399c5b9",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 37,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 1179648,
+      "terminal_count": 1,
+      "errors": [
+        {
+          "kind": "error",
+          "error": {
+            "code": -32003,
+            "message": "protocol relay overloaded; turn cancelled without truncating structured events",
+            "data": {
+              "retryable": true
+            }
+          },
+          "turn_id": "389e5f37-e1a4-40ff-ad71-07728a545353"
+        }
+      ],
+      "error_class": "stage1_relay_overloaded",
+      "turn_ms": 3585.543468594551,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 763.0146369338036,
+      "get_after_delete_status": 404,
+      "cycle_ms": 4352.429524064064,
+      "pass": false,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 15532032
+      }
+    },
+    {
+      "batch": 2,
+      "concurrency": 32,
+      "marker": "fast20d29d144f4d495cae5d9c700282b70e",
+      "session": "89420fd0-087e-4525-a76f-be203152b812",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 36,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 1146880,
+      "terminal_count": 1,
+      "errors": [
+        {
+          "kind": "error",
+          "error": {
+            "code": -32003,
+            "message": "protocol relay overloaded; turn cancelled without truncating structured events",
+            "data": {
+              "retryable": true
+            }
+          },
+          "turn_id": "2493a1b5-44a8-4513-bcb9-c6c13280655a"
+        }
+      ],
+      "error_class": "stage1_relay_overloaded",
+      "turn_ms": 3581.949271261692,
+      "fixture_active_before_delete": false,
+      "delete_status": 204,
+      "delete_ms": 838.1062429398298,
+      "get_after_delete_status": 404,
+      "cycle_ms": 4437.602918595076,
+      "pass": false,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 2,
+      "concurrency": 32,
+      "marker": "fastc9e660850249425c976a47d950469209",
+      "session": "7adceee0-6346-4f86-a192-24fbd75fff0e",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 39,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 1245184,
+      "terminal_count": 1,
+      "errors": [
+        {
+          "kind": "error",
+          "error": {
+            "code": -32003,
+            "message": "protocol relay overloaded; turn cancelled without truncating structured events",
+            "data": {
+              "retryable": true
+            }
+          },
+          "turn_id": "215441c8-a849-4218-8ebe-12a47f7e6f06"
+        }
+      ],
+      "error_class": "stage1_relay_overloaded",
+      "turn_ms": 3603.218659758568,
+      "fixture_active_before_delete": false,
+      "delete_status": 204,
+      "delete_ms": 979.3990030884743,
+      "get_after_delete_status": 404,
+      "cycle_ms": 4612.049842253327,
+      "pass": false,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 2,
+      "concurrency": 32,
+      "marker": "fast0eb747ecebc348eeb714c724737b22f9",
+      "session": "dce11776-a084-42d9-a1bc-5b6ead4e453d",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 40,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 1277952,
+      "terminal_count": 1,
+      "errors": [
+        {
+          "kind": "error",
+          "error": {
+            "code": -32003,
+            "message": "protocol relay overloaded; turn cancelled without truncating structured events",
+            "data": {
+              "retryable": true
+            }
+          },
+          "turn_id": "293432de-a9bb-42a7-8efa-1d5f8dcde656"
+        }
+      ],
+      "error_class": "stage1_relay_overloaded",
+      "turn_ms": 3610.643906518817,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 919.1223438829184,
+      "get_after_delete_status": 404,
+      "cycle_ms": 4534.099305048585,
+      "pass": false,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16187392
+      }
+    },
+    {
+      "batch": 2,
+      "concurrency": 32,
+      "marker": "fasta4428cdc0b834f65abb030d16bcadf0f",
+      "session": "e0110b2b-a266-4af0-bd52-658eb7b3e7ee",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 36,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 1146880,
+      "terminal_count": 1,
+      "errors": [
+        {
+          "kind": "error",
+          "error": {
+            "code": -32003,
+            "message": "protocol relay overloaded; turn cancelled without truncating structured events",
+            "data": {
+              "retryable": true
+            }
+          },
+          "turn_id": "7f42e3d3-17a0-4e4c-9aff-b155931b1d8a"
+        }
+      ],
+      "error_class": "stage1_relay_overloaded",
+      "turn_ms": 3611.3492399454117,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 845.8343856036663,
+      "get_after_delete_status": 404,
+      "cycle_ms": 4463.04696239531,
+      "pass": false,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 15892480
+      }
+    },
+    {
+      "batch": 2,
+      "concurrency": 32,
+      "marker": "fastb707eb42bd9146428894d40f22d765e5",
+      "session": "141ee440-b7ba-44ee-b5d7-0d6083bddbdd",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 36,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 1146880,
+      "terminal_count": 1,
+      "errors": [
+        {
+          "kind": "error",
+          "error": {
+            "code": -32003,
+            "message": "protocol relay overloaded; turn cancelled without truncating structured events",
+            "data": {
+              "retryable": true
+            }
+          },
+          "turn_id": "7004d89d-f77a-44f5-8882-13c7ae540213"
+        }
+      ],
+      "error_class": "stage1_relay_overloaded",
+      "turn_ms": 3586.4490438252687,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 923.2528284192085,
+      "get_after_delete_status": 404,
+      "cycle_ms": 4514.102939516306,
+      "pass": false,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 15958016
+      }
+    },
+    {
+      "batch": 2,
+      "concurrency": 32,
+      "marker": "fastb60e7afa606049afa807d3c0a622d71a",
+      "session": "b5a4a9d2-e9a3-4dd8-b532-6caf5c97aa59",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 37,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 1179648,
+      "terminal_count": 1,
+      "errors": [
+        {
+          "kind": "error",
+          "error": {
+            "code": -32003,
+            "message": "protocol relay overloaded; turn cancelled without truncating structured events",
+            "data": {
+              "retryable": true
+            }
+          },
+          "turn_id": "9110996c-eebb-4545-be0d-188fe82f8415"
+        }
+      ],
+      "error_class": "stage1_relay_overloaded",
+      "turn_ms": 3604.1040662676096,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 842.1753142029047,
+      "get_after_delete_status": 404,
+      "cycle_ms": 4461.585806682706,
+      "pass": false,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 15826944
+      }
+    },
+    {
+      "batch": 2,
+      "concurrency": 32,
+      "marker": "fast7d05c7ea64b24817892626372e40ba01",
+      "session": "5f6d6dd3-ce22-4b73-8ae7-14a971e75fcb",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 38,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 1212416,
+      "terminal_count": 1,
+      "errors": [
+        {
+          "kind": "error",
+          "error": {
+            "code": -32003,
+            "message": "protocol relay overloaded; turn cancelled without truncating structured events",
+            "data": {
+              "retryable": true
+            }
+          },
+          "turn_id": "4af811a1-cd4c-4726-b2d8-9dd054f7a67c"
+        }
+      ],
+      "error_class": "stage1_relay_overloaded",
+      "turn_ms": 3608.5629742592573,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 822.2102243453264,
+      "get_after_delete_status": 404,
+      "cycle_ms": 4447.078686207533,
+      "pass": false,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16252928
+      }
+    },
+    {
+      "batch": 2,
+      "concurrency": 32,
+      "marker": "fast8051251fe9834ee18fa8527e4ec52c47",
+      "session": "5652a582-58c1-45c3-82b1-f3877ed945f8",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 85,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 2752512,
+      "terminal_count": 1,
+      "errors": [
+        {
+          "kind": "error",
+          "error": {
+            "code": -32003,
+            "message": "protocol relay overloaded; turn cancelled without truncating structured events",
+            "data": {
+              "retryable": true
+            }
+          },
+          "turn_id": "42a03554-1fa2-4e33-946c-842b37d92646"
+        }
+      ],
+      "error_class": "stage1_relay_overloaded",
+      "turn_ms": 4590.072935447097,
+      "fixture_active_before_delete": false,
+      "delete_status": 204,
+      "delete_ms": 929.2838759720325,
+      "get_after_delete_status": 404,
+      "cycle_ms": 5522.646717727184,
+      "pass": false,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 2,
+      "concurrency": 32,
+      "marker": "fasta1680675c7bd4a8c95cb92e8bdfab00a",
+      "session": "16af8b92-a883-47fa-898a-19b8e725d5f4",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 90,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 2916352,
+      "terminal_count": 1,
+      "errors": [
+        {
+          "kind": "error",
+          "error": {
+            "code": -32003,
+            "message": "protocol relay overloaded; turn cancelled without truncating structured events",
+            "data": {
+              "retryable": true
+            }
+          },
+          "turn_id": "8608ce4f-abb5-4dc0-9189-cbbb1363e2f3"
+        }
+      ],
+      "error_class": "stage1_relay_overloaded",
+      "turn_ms": 4665.501682087779,
+      "fixture_active_before_delete": false,
+      "delete_status": 204,
+      "delete_ms": 987.5969681888819,
+      "get_after_delete_status": 404,
+      "cycle_ms": 5657.089842483401,
+      "pass": false,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 2,
+      "concurrency": 32,
+      "marker": "fast6b700b16ff9a49a29f65ce5da2bb8124",
+      "session": "28e5e091-e8c3-466d-9099-6ea405cd85ae",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 36,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 1146880,
+      "terminal_count": 1,
+      "errors": [
+        {
+          "kind": "error",
+          "error": {
+            "code": -32003,
+            "message": "protocol relay overloaded; turn cancelled without truncating structured events",
+            "data": {
+              "retryable": true
+            }
+          },
+          "turn_id": "3d5d72e5-8d72-44f2-ac9d-0bafdd5e02e6"
+        }
+      ],
+      "error_class": "stage1_relay_overloaded",
+      "turn_ms": 3613.8765458017588,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 880.9572588652372,
+      "get_after_delete_status": 404,
+      "cycle_ms": 4509.308023378253,
+      "pass": false,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 15564800
+      }
+    },
+    {
+      "batch": 2,
+      "concurrency": 32,
+      "marker": "fast1da37d3711da4fe489bc69efa93ee9cc",
+      "session": "324c08e7-67bc-4f04-b712-aba379a061eb",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 93,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 3014656,
+      "terminal_count": 1,
+      "errors": [
+        {
+          "kind": "error",
+          "error": {
+            "code": -32003,
+            "message": "protocol relay overloaded; turn cancelled without truncating structured events",
+            "data": {
+              "retryable": true
+            }
+          },
+          "turn_id": "097194c2-5fc2-4f46-a8aa-a00d2432af30"
+        }
+      ],
+      "error_class": "stage1_relay_overloaded",
+      "turn_ms": 4972.661117091775,
+      "fixture_active_before_delete": false,
+      "delete_status": 204,
+      "delete_ms": 664.6482031792402,
+      "get_after_delete_status": 404,
+      "cycle_ms": 5643.127262592316,
+      "pass": false,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 2,
+      "concurrency": 32,
+      "marker": "fast811131d18f8046dd857c9bc951efed21",
+      "session": "77760e23-3f4c-49e5-9bcb-ae64da8a5afd",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 39,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 1245184,
+      "terminal_count": 1,
+      "errors": [
+        {
+          "kind": "error",
+          "error": {
+            "code": -32003,
+            "message": "protocol relay overloaded; turn cancelled without truncating structured events",
+            "data": {
+              "retryable": true
+            }
+          },
+          "turn_id": "a3d7c305-e77a-4e6a-a7f9-1715b8e9c300"
+        }
+      ],
+      "error_class": "stage1_relay_overloaded",
+      "turn_ms": 3604.089304804802,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 954.5553848147392,
+      "get_after_delete_status": 404,
+      "cycle_ms": 4579.79972101748,
+      "pass": false,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 15663104
+      }
+    },
+    {
+      "batch": 2,
+      "concurrency": 32,
+      "marker": "fast8eee8d3615e549278f6ebc571c1d87d8",
+      "session": "61bf9246-3cf8-4cb0-8113-7f91fab5c271",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 37,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 1179648,
+      "terminal_count": 1,
+      "errors": [
+        {
+          "kind": "error",
+          "error": {
+            "code": -32003,
+            "message": "protocol relay overloaded; turn cancelled without truncating structured events",
+            "data": {
+              "retryable": true
+            }
+          },
+          "turn_id": "1304bc37-5387-479e-a72c-eefd957a9cb9"
+        }
+      ],
+      "error_class": "stage1_relay_overloaded",
+      "turn_ms": 3583.443747833371,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 1003.5851523280144,
+      "get_after_delete_status": 404,
+      "cycle_ms": 4605.992889031768,
+      "pass": false,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16023552
+      }
+    },
+    {
+      "batch": 2,
+      "concurrency": 32,
+      "marker": "fast278c789dcadb459d83967c22a5ebe4bb",
+      "session": "01be7b60-0f8d-4134-a9b5-01ca9685a743",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 39,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 1245184,
+      "terminal_count": 1,
+      "errors": [
+        {
+          "kind": "error",
+          "error": {
+            "code": -32003,
+            "message": "protocol relay overloaded; turn cancelled without truncating structured events",
+            "data": {
+              "retryable": true
+            }
+          },
+          "turn_id": "d813048a-8e41-4689-a214-4e7db82b7da8"
+        }
+      ],
+      "error_class": "stage1_relay_overloaded",
+      "turn_ms": 3603.85874658823,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 791.5440760552883,
+      "get_after_delete_status": 404,
+      "cycle_ms": 4415.984284132719,
+      "pass": false,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 15269888
+      }
+    },
+    {
+      "batch": 2,
+      "concurrency": 32,
+      "marker": "fast792b267c48804475b8296985d0e42e6b",
+      "session": "12676edb-bb39-45d9-960b-68158133668a",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 42,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 1343488,
+      "terminal_count": 1,
+      "errors": [
+        {
+          "kind": "error",
+          "error": {
+            "code": -32003,
+            "message": "protocol relay overloaded; turn cancelled without truncating structured events",
+            "data": {
+              "retryable": true
+            }
+          },
+          "turn_id": "59f11edf-2384-4025-8baf-55490c345f98"
+        }
+      ],
+      "error_class": "stage1_relay_overloaded",
+      "turn_ms": 3599.8227149248123,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 1001.5465375036001,
+      "get_after_delete_status": 404,
+      "cycle_ms": 4605.597471818328,
+      "pass": false,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 15794176
+      }
+    },
+    {
+      "batch": 2,
+      "concurrency": 32,
+      "marker": "heldc067b3e817de4003af46e0ee3f367a58",
+      "session": "d5b24a16-da82-4b25-84ca-182166bf4f4c",
+      "reader": "slow",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 7147.211784496903,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 1007.3296539485455,
+      "get_after_delete_status": 404,
+      "cycle_ms": 8162.790795788169,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 4358144
+      }
+    },
+    {
+      "batch": 2,
+      "concurrency": 32,
+      "marker": "held43706469e39b47eb94df53fd419e5ea9",
+      "session": "a0135a07-1e99-4c13-b5b8-4b64110c3a0d",
+      "reader": "slow",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 7105.496875941753,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 1732.953803613782,
+      "get_after_delete_status": 404,
+      "cycle_ms": 8842.730747535825,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 4128768
+      }
+    },
+    {
+      "batch": 2,
+      "concurrency": 32,
+      "marker": "held492e49aa4431469f95413cebb7f36a6f",
+      "session": "8e0a69a6-3f4a-41f0-8b66-399de980608f",
+      "reader": "slow",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 7078.903941437602,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 1089.682487770915,
+      "get_after_delete_status": 404,
+      "cycle_ms": 8173.226524144411,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 4161536
+      }
+    },
+    {
+      "batch": 2,
+      "concurrency": 32,
+      "marker": "heldc3f93f552b574be787cfd3624b71fa74",
+      "session": "934997ca-8f76-4813-adb6-1ffd5a8ea978",
+      "reader": "slow",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 7144.866364076734,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 937.8288313746452,
+      "get_after_delete_status": 404,
+      "cycle_ms": 8086.041979491711,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 4390912
+      }
+    },
+    {
+      "batch": 2,
+      "concurrency": 32,
+      "marker": "heldc118cec993154663848e2977f61751ae",
+      "session": "e09d3c59-6af4-4451-b694-0a2d583f4a54",
+      "reader": "slow",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 7050.902236253023,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 1029.1010700166225,
+      "get_after_delete_status": 404,
+      "cycle_ms": 8083.280149847269,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 4358144
+      }
+    },
+    {
+      "batch": 2,
+      "concurrency": 32,
+      "marker": "heldcea897f951f741dc8c1f8702aed5b873",
+      "session": "65bd470e-dca9-4688-999b-1e6c96fadef5",
+      "reader": "slow",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 8144.279012456536,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 1104.0105000138283,
+      "get_after_delete_status": 404,
+      "cycle_ms": 9251.44075974822,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 5013504
+      }
+    },
+    {
+      "batch": 2,
+      "concurrency": 32,
+      "marker": "held62672a97e5de4abda7ae65da8de143a5",
+      "session": "d0da8e69-ca3e-4248-a671-b0e16b507b0f",
+      "reader": "slow",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 8153.238091617823,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 994.3369664251804,
+      "get_after_delete_status": 404,
+      "cycle_ms": 9156.620535999537,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 4980736
+      }
+    },
+    {
+      "batch": 2,
+      "concurrency": 32,
+      "marker": "held3411b9a8dcce4547bda8c5a4f5470ea8",
+      "session": "06a84fc4-dd55-4911-aadb-b9d689d55d2e",
+      "reader": "slow",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 7132.463628426194,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 1053.4846540540457,
+      "get_after_delete_status": 404,
+      "cycle_ms": 8188.947807997465,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 4980736
+      }
+    },
+    {
+      "batch": 2,
+      "concurrency": 32,
+      "marker": "held3493eba934064e7fbdd3512b1bc8f1dd",
+      "session": "71ec675c-aacb-41fc-bd3e-5aaeed156868",
+      "reader": "disconnected",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "fixture_dispatch_observed": true,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 2021.5271841734648,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 55.42789585888386,
+      "get_after_delete_status": 404,
+      "cycle_ms": 2121.6788198798895,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 98304
+      }
+    },
+    {
+      "batch": 2,
+      "concurrency": 32,
+      "marker": "held5827f7dca4e249dc8ad7cec521b78e4f",
+      "session": "4d065570-76a0-4838-80e7-82728e677115",
+      "reader": "disconnected",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "fixture_dispatch_observed": true,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 3042.0288667082787,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 228.39092835783958,
+      "get_after_delete_status": 404,
+      "cycle_ms": 3274.1859685629606,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 98304
+      }
+    },
+    {
+      "batch": 2,
+      "concurrency": 32,
+      "marker": "held033299052d074201aa3d29d1a01c4e85",
+      "session": "7584b7bb-4aad-42a1-9f6d-e21bdc3a2f54",
+      "reader": "disconnected",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "fixture_dispatch_observed": true,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 2001.1361110955477,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 41.18930548429489,
+      "get_after_delete_status": 404,
+      "cycle_ms": 2054.6687953174114,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 98304
+      }
+    },
+    {
+      "batch": 2,
+      "concurrency": 32,
+      "marker": "held3c6adc58ac2846278d4fe6778c9ab7cd",
+      "session": "d9310a2a-2971-4dd3-abbe-21e129d1e719",
+      "reader": "disconnected",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "fixture_dispatch_observed": true,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 3040.9947354346514,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 181.5995592623949,
+      "get_after_delete_status": 404,
+      "cycle_ms": 3272.4980674684048,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 98304
+      }
+    },
+    {
+      "batch": 2,
+      "concurrency": 32,
+      "marker": "held9f8f3032c3a947d2b7911e09d8c0cfba",
+      "session": "0b618cc6-31cc-4cb3-950f-4131c3c07640",
+      "reader": "disconnected",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "fixture_dispatch_observed": true,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 2032.0691503584385,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 110.25689542293549,
+      "get_after_delete_status": 404,
+      "cycle_ms": 2150.753876194358,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 98304
+      }
+    },
+    {
+      "batch": 2,
+      "concurrency": 32,
+      "marker": "heldaa94d626d5c74d908e66ae7598479073",
+      "session": "c46c863a-aa72-4d42-9e84-3431412eb323",
+      "reader": "disconnected",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "fixture_dispatch_observed": true,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 2091.187896206975,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 136.33024133741856,
+      "get_after_delete_status": 404,
+      "cycle_ms": 2240.957710891962,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 131072
+      }
+    },
+    {
+      "batch": 2,
+      "concurrency": 32,
+      "marker": "held6f8555aa923048a4a2ba012ba3be797e",
+      "session": "7d0b1b92-7a32-4aa7-90f9-b85555aa52f3",
+      "reader": "disconnected",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "fixture_dispatch_observed": true,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 2019.569218158722,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 94.6336891502142,
+      "get_after_delete_status": 404,
+      "cycle_ms": 2148.523598909378,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 98304
+      }
+    },
+    {
+      "batch": 2,
+      "concurrency": 32,
+      "marker": "held0b73877ce40646289e7c72dc9b7c425c",
+      "session": "a96cdd9a-c772-491f-add9-ee34b4b74fec",
+      "reader": "disconnected",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "fixture_dispatch_observed": true,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 2021.2866514921188,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 69.26022842526436,
+      "get_after_delete_status": 404,
+      "cycle_ms": 2145.807210355997,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 98304
+      }
+    },
+    {
+      "batch": 3,
+      "concurrency": 8,
+      "marker": "fast492c404120c649e19d961ee36a09d181",
+      "session": "195133b4-c0ef-499a-99ba-642ccc108c55",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 513,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 16777216,
+      "terminal_count": 1,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 32982.89041407406,
+      "fixture_active_before_delete": false,
+      "delete_status": 204,
+      "delete_ms": 6710.024442523718,
+      "get_after_delete_status": 404,
+      "cycle_ms": 39700.2207711339,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 3,
+      "concurrency": 8,
+      "marker": "fasta9ec8074ba91497988310085a6e107d4",
+      "session": "73373807-867f-495a-bf2e-c4bcc2452259",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 513,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 16777216,
+      "terminal_count": 1,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 32799.61002059281,
+      "fixture_active_before_delete": false,
+      "delete_status": 204,
+      "delete_ms": 6784.613432362676,
+      "get_after_delete_status": 404,
+      "cycle_ms": 39596.628692001104,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 3,
+      "concurrency": 8,
+      "marker": "fast46e1a7af2ab04a5a9659539214c94d09",
+      "session": "bae665f8-4554-4e22-a936-2ce4391c9de5",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 513,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 16777216,
+      "terminal_count": 1,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 33234.12651754916,
+      "fixture_active_before_delete": false,
+      "delete_status": 204,
+      "delete_ms": 7075.134575366974,
+      "get_after_delete_status": 404,
+      "cycle_ms": 40322.10325449705,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 3,
+      "concurrency": 8,
+      "marker": "fast3ed85011748345988c09ac7e1337ebd8",
+      "session": "6d7ae53d-142d-42f8-be8a-187fd4f4dedb",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 513,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 16777216,
+      "terminal_count": 1,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 33084.357015788555,
+      "fixture_active_before_delete": false,
+      "delete_status": 204,
+      "delete_ms": 6781.408665701747,
+      "get_after_delete_status": 404,
+      "cycle_ms": 39875.540878623724,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 3,
+      "concurrency": 8,
+      "marker": "held27333a05730a444799bd406276ac0433",
+      "session": "fe6ef069-e9ae-4eb3-abcd-fa56e9e4c2c6",
+      "reader": "slow",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 7858.521692454815,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 1757.7201034873724,
+      "get_after_delete_status": 404,
+      "cycle_ms": 9625.143509358168,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 4096000
+      }
+    },
+    {
+      "batch": 3,
+      "concurrency": 8,
+      "marker": "held5ec9390dc2174b69a71b0851a3279beb",
+      "session": "0e1be0d3-231c-4585-b19f-7afd8bca50c4",
+      "reader": "slow",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 7864.460963755846,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 1143.0150903761387,
+      "get_after_delete_status": 404,
+      "cycle_ms": 9014.276888221502,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 4358144
+      }
+    },
+    {
+      "batch": 3,
+      "concurrency": 8,
+      "marker": "heldc27a970082d0405bbf28a9a931cf6d62",
+      "session": "38bc8b34-5cb3-4390-aef8-140626731853",
+      "reader": "disconnected",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "fixture_dispatch_observed": true,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 2796.633368358016,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 89.33446183800697,
+      "get_after_delete_status": 404,
+      "cycle_ms": 2907.3669761419296,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 131072
+      }
+    },
+    {
+      "batch": 3,
+      "concurrency": 8,
+      "marker": "held960918f98a3b468a8d6593ae9c9259d4",
+      "session": "8bd8dd99-1c33-41b0-beeb-ecc73e80a6dc",
+      "reader": "disconnected",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "fixture_dispatch_observed": true,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 2773.157484829426,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 93.91755796968937,
+      "get_after_delete_status": 404,
+      "cycle_ms": 2903.116812929511,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 98304
+      }
+    },
+    {
+      "batch": 4,
+      "concurrency": 8,
+      "marker": "fastc0b97cd5bada4ba896045454aa9b9054",
+      "session": "aaa25c69-1eff-434f-83ba-71301c24d1f4",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 513,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 16777216,
+      "terminal_count": 1,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 29015.433149412274,
+      "fixture_active_before_delete": false,
+      "delete_status": 204,
+      "delete_ms": 4838.918337598443,
+      "get_after_delete_status": 404,
+      "cycle_ms": 33858.02900418639,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 4,
+      "concurrency": 8,
+      "marker": "fast8f1de031a59d4930bbe0c6e1a1b9b448",
+      "session": "571be559-986f-483e-83fd-53b3593da78d",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 513,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 16777216,
+      "terminal_count": 1,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 28965.15321172774,
+      "fixture_active_before_delete": false,
+      "delete_status": 204,
+      "delete_ms": 4738.352343440056,
+      "get_after_delete_status": 404,
+      "cycle_ms": 33710.26748046279,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 4,
+      "concurrency": 8,
+      "marker": "fast8aece380156a4982b749e8eec9b3e250",
+      "session": "9c6fde28-96fe-4134-84d9-dd918b502db8",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 513,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 16777216,
+      "terminal_count": 1,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 28900.727989152074,
+      "fixture_active_before_delete": false,
+      "delete_status": 204,
+      "delete_ms": 4797.816028818488,
+      "get_after_delete_status": 404,
+      "cycle_ms": 33705.150907859206,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 4,
+      "concurrency": 8,
+      "marker": "fastdc9756bb1ef54eb487188f7e7ff9e684",
+      "session": "dc1201da-916c-4f70-8a75-12de8c23a721",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 513,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 16777216,
+      "terminal_count": 1,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 28982.901273295283,
+      "fixture_active_before_delete": false,
+      "delete_status": 204,
+      "delete_ms": 4813.378103077412,
+      "get_after_delete_status": 404,
+      "cycle_ms": 33802.25810967386,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 4,
+      "concurrency": 8,
+      "marker": "heldd747b93e9fd040e3bc3d8abc52b2df86",
+      "session": "f132cb69-a95f-45ca-af79-bd7da14f8f2b",
+      "reader": "slow",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 8077.184358611703,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 1089.2390124499798,
+      "get_after_delete_status": 404,
+      "cycle_ms": 9174.731561914086,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 4325376
+      }
+    },
+    {
+      "batch": 4,
+      "concurrency": 8,
+      "marker": "held579678d7a43f47c8b9a83777f2da639d",
+      "session": "bba854e4-9835-4ed9-8f98-34734260e09c",
+      "reader": "slow",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 8080.753363668919,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 1074.640130624175,
+      "get_after_delete_status": 404,
+      "cycle_ms": 9162.246340885758,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 4947968
+      }
+    },
+    {
+      "batch": 4,
+      "concurrency": 8,
+      "marker": "held9a83f295c21a43af856dc1b9e4dd0b33",
+      "session": "206f9853-2d63-4b66-8fda-41ed6303f278",
+      "reader": "disconnected",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "fixture_dispatch_observed": true,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 3011.574376374483,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 192.08651222288609,
+      "get_after_delete_status": 404,
+      "cycle_ms": 3216.7533058673143,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 163840
+      }
+    },
+    {
+      "batch": 4,
+      "concurrency": 8,
+      "marker": "heldd10fa419167f4c9ead8df3a9baa8c7b1",
+      "session": "36f37bf4-91d0-4ebc-a27f-4e4da8d8bd87",
+      "reader": "disconnected",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "fixture_dispatch_observed": true,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 2991.2913274019957,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 212.8694336861372,
+      "get_after_delete_status": 404,
+      "cycle_ms": 3215.005539357662,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 131072
+      }
+    },
+    {
+      "batch": 5,
+      "concurrency": 8,
+      "marker": "fastc61dcf108ccb410196d67a6100453531",
+      "session": "26342c4c-5493-4b91-b205-2a0b2cfc3922",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 256,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 8355840,
+      "terminal_count": 1,
+      "errors": [
+        {
+          "kind": "error",
+          "error": {
+            "code": -32003,
+            "message": "protocol relay overloaded; turn cancelled without truncating structured events",
+            "data": {
+              "retryable": true
+            }
+          },
+          "turn_id": "0892ea52-3276-4a87-8f85-cde2e8608e28"
+        }
+      ],
+      "error_class": "stage1_relay_overloaded",
+      "turn_ms": 4670.745057985187,
+      "fixture_active_before_delete": false,
+      "delete_status": 204,
+      "delete_ms": 1704.6970557421446,
+      "get_after_delete_status": 404,
+      "cycle_ms": 6378.912098705769,
+      "pass": false,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 5,
+      "concurrency": 8,
+      "marker": "fast1bdaab0d7ec04000a472026b5b6c2265",
+      "session": "55d7dfa0-9cff-4d4d-9fc6-e05773eb3b64",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 513,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 16777216,
+      "terminal_count": 1,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 23879.08578850329,
+      "fixture_active_before_delete": false,
+      "delete_status": 204,
+      "delete_ms": 4781.231258064508,
+      "get_after_delete_status": 404,
+      "cycle_ms": 28663.499135524035,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 5,
+      "concurrency": 8,
+      "marker": "fastf75cb45ee2c7473f90983f07c09c855b",
+      "session": "ccd5f4f7-6674-49b1-812b-92f39a17d3c5",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 513,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 16777216,
+      "terminal_count": 1,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 24077.0700071007,
+      "fixture_active_before_delete": false,
+      "delete_status": 204,
+      "delete_ms": 4829.137267544866,
+      "get_after_delete_status": 404,
+      "cycle_ms": 28909.97152775526,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 5,
+      "concurrency": 8,
+      "marker": "fastfeae7336c40741bf8894a194baebb667",
+      "session": "8fe417c9-b5b7-448e-a64b-71c47c51cd71",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 248,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 8093696,
+      "terminal_count": 1,
+      "errors": [
+        {
+          "kind": "error",
+          "error": {
+            "code": -32003,
+            "message": "protocol relay overloaded; turn cancelled without truncating structured events",
+            "data": {
+              "retryable": true
+            }
+          },
+          "turn_id": "4f9a0fef-c850-465d-bebf-a61e2ce5d570"
+        }
+      ],
+      "error_class": "stage1_relay_overloaded",
+      "turn_ms": 5126.580690965056,
+      "fixture_active_before_delete": false,
+      "delete_status": 204,
+      "delete_ms": 1273.6098784953356,
+      "get_after_delete_status": 404,
+      "cycle_ms": 6404.068510979414,
+      "pass": false,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 5,
+      "concurrency": 8,
+      "marker": "held4f39749cacff499aa8a44e7fa16d959a",
+      "session": "d1732dcb-06a3-4ac7-9cd5-f5835300fed3",
+      "reader": "slow",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 7093.776622787118,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 813.8728365302086,
+      "get_after_delete_status": 404,
+      "cycle_ms": 7911.444667726755,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 4194304
+      }
+    },
+    {
+      "batch": 5,
+      "concurrency": 8,
+      "marker": "held8f885caa828a49c4a7ad08bc2893bab9",
+      "session": "9028c44e-ac92-4799-8c84-d7bbc5535281",
+      "reader": "slow",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 7070.089990273118,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 845.5287963151932,
+      "get_after_delete_status": 404,
+      "cycle_ms": 7918.996391817927,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 4194304
+      }
+    },
+    {
+      "batch": 5,
+      "concurrency": 8,
+      "marker": "held085d5d8fa0ae4c79bdcd4b743935c501",
+      "session": "b3a0ac9c-2298-429e-940b-bb8620b4cad7",
+      "reader": "disconnected",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "fixture_dispatch_observed": true,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 2059.52201038599,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 42.287083342671394,
+      "get_after_delete_status": 404,
+      "cycle_ms": 2106.9232393056154,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 98304
+      }
+    },
+    {
+      "batch": 5,
+      "concurrency": 8,
+      "marker": "held843bb2922cd145fbb2ce6611c19ec2b1",
+      "session": "1ed79390-8bff-450f-bd7d-6a27d0ae888a",
+      "reader": "disconnected",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "fixture_dispatch_observed": true,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 2061.6382509469986,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 53.58855053782463,
+      "get_after_delete_status": 404,
+      "cycle_ms": 2118.787484243512,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 98304
+      }
+    },
+    {
+      "batch": 6,
+      "concurrency": 32,
+      "marker": "fast0f23f1ff4645419a92fb3f005caf2dc4",
+      "session": "2fb2f7bd-2c4f-4480-a91b-ac4d34d8a4ca",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 48,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 1540096,
+      "terminal_count": 1,
+      "errors": [
+        {
+          "kind": "error",
+          "error": {
+            "code": -32003,
+            "message": "protocol relay overloaded; turn cancelled without truncating structured events",
+            "data": {
+              "retryable": true
+            }
+          },
+          "turn_id": "36de82f2-5923-462b-92aa-0b68387a042f"
+        }
+      ],
+      "error_class": "stage1_relay_overloaded",
+      "turn_ms": 3525.478634983301,
+      "fixture_active_before_delete": false,
+      "delete_status": 204,
+      "delete_ms": 973.6251272261143,
+      "get_after_delete_status": 404,
+      "cycle_ms": 4502.035539597273,
+      "pass": false,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 6,
+      "concurrency": 32,
+      "marker": "fast25e448851f334be38e754d9321d706b4",
+      "session": "e886d327-96c1-45c7-85e1-eee3f498f21a",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 73,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 2359296,
+      "terminal_count": 1,
+      "errors": [
+        {
+          "kind": "error",
+          "error": {
+            "code": -32003,
+            "message": "protocol relay overloaded; turn cancelled without truncating structured events",
+            "data": {
+              "retryable": true
+            }
+          },
+          "turn_id": "31db3d54-2c8a-4f31-b9b8-c1a8ea1d97ca"
+        }
+      ],
+      "error_class": "stage1_relay_overloaded",
+      "turn_ms": 4519.165128469467,
+      "fixture_active_before_delete": false,
+      "delete_status": 204,
+      "delete_ms": 1030.1710367202759,
+      "get_after_delete_status": 404,
+      "cycle_ms": 5552.371840924025,
+      "pass": false,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 6,
+      "concurrency": 32,
+      "marker": "fast58e1133c13a34bb4a9e27cbf0d12537a",
+      "session": "04072d97-0c8d-43f3-a073-3ea97a901d55",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 45,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 1441792,
+      "terminal_count": 1,
+      "errors": [
+        {
+          "kind": "error",
+          "error": {
+            "code": -32003,
+            "message": "protocol relay overloaded; turn cancelled without truncating structured events",
+            "data": {
+              "retryable": true
+            }
+          },
+          "turn_id": "3f8d142a-855d-4bfb-9e3f-94d64e9fe8c7"
+        }
+      ],
+      "error_class": "stage1_relay_overloaded",
+      "turn_ms": 3553.692592307925,
+      "fixture_active_before_delete": false,
+      "delete_status": 204,
+      "delete_ms": 893.1153733283281,
+      "get_after_delete_status": 404,
+      "cycle_ms": 4468.657033517957,
+      "pass": false,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 6,
+      "concurrency": 32,
+      "marker": "fast611ca7050d644474a6b999e7cb2e2063",
+      "session": "33593285-50ee-4017-8789-b3905c954b6e",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 48,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 1540096,
+      "terminal_count": 1,
+      "errors": [
+        {
+          "kind": "error",
+          "error": {
+            "code": -32003,
+            "message": "protocol relay overloaded; turn cancelled without truncating structured events",
+            "data": {
+              "retryable": true
+            }
+          },
+          "turn_id": "59eb35d7-10df-4940-b3b4-6409fc867fd2"
+        }
+      ],
+      "error_class": "stage1_relay_overloaded",
+      "turn_ms": 3557.194968685508,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 790.8662334084511,
+      "get_after_delete_status": 404,
+      "cycle_ms": 4367.367779836059,
+      "pass": false,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 6,
+      "concurrency": 32,
+      "marker": "fastcfe3f3a702074996bc17f8bbef4edc6c",
+      "session": "e7859ea0-1515-4d32-8427-74849c7c308a",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 78,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 2523136,
+      "terminal_count": 1,
+      "errors": [
+        {
+          "kind": "error",
+          "error": {
+            "code": -32003,
+            "message": "protocol relay overloaded; turn cancelled without truncating structured events",
+            "data": {
+              "retryable": true
+            }
+          },
+          "turn_id": "a224f2f9-eedb-4355-98c2-761b9cb82ac6"
+        }
+      ],
+      "error_class": "stage1_relay_overloaded",
+      "turn_ms": 4857.799598947167,
+      "fixture_active_before_delete": false,
+      "delete_status": 204,
+      "delete_ms": 670.6375237554312,
+      "get_after_delete_status": 404,
+      "cycle_ms": 5530.8616906404495,
+      "pass": false,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 6,
+      "concurrency": 32,
+      "marker": "fast266132d39abe4f8b9407d7ef0ea8fe6d",
+      "session": "90ec7c15-12f3-442e-991d-6c9176a3a03e",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 76,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 2457600,
+      "terminal_count": 1,
+      "errors": [
+        {
+          "kind": "error",
+          "error": {
+            "code": -32003,
+            "message": "protocol relay overloaded; turn cancelled without truncating structured events",
+            "data": {
+              "retryable": true
+            }
+          },
+          "turn_id": "cae6efc0-99bf-4c63-92b4-95537ab23428"
+        }
+      ],
+      "error_class": "stage1_relay_overloaded",
+      "turn_ms": 4830.258939415216,
+      "fixture_active_before_delete": false,
+      "delete_status": 204,
+      "delete_ms": 693.6962958425283,
+      "get_after_delete_status": 404,
+      "cycle_ms": 5527.787111699581,
+      "pass": false,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 6,
+      "concurrency": 32,
+      "marker": "fasta848eb641c53492fbf9a8b8861e314f9",
+      "session": "6cfa648d-f520-4443-8a45-f739beaeaf1a",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 47,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 1507328,
+      "terminal_count": 1,
+      "errors": [
+        {
+          "kind": "error",
+          "error": {
+            "code": -32003,
+            "message": "protocol relay overloaded; turn cancelled without truncating structured events",
+            "data": {
+              "retryable": true
+            }
+          },
+          "turn_id": "106b4c55-5ce5-4237-87e3-c2a3a52e775f"
+        }
+      ],
+      "error_class": "stage1_relay_overloaded",
+      "turn_ms": 3536.573762074113,
+      "fixture_active_before_delete": false,
+      "delete_status": 204,
+      "delete_ms": 840.2384202927351,
+      "get_after_delete_status": 404,
+      "cycle_ms": 4414.267282932997,
+      "pass": false,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 6,
+      "concurrency": 32,
+      "marker": "fastc2ba0e4dd9ff489c8fec94f46138f5db",
+      "session": "3783cf75-fc3b-4d1c-887e-e79b4de1675a",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 49,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 1572864,
+      "terminal_count": 1,
+      "errors": [
+        {
+          "kind": "error",
+          "error": {
+            "code": -32003,
+            "message": "protocol relay overloaded; turn cancelled without truncating structured events",
+            "data": {
+              "retryable": true
+            }
+          },
+          "turn_id": "c59a0b64-d46d-4d41-8be9-0e4671a058d6"
+        }
+      ],
+      "error_class": "stage1_relay_overloaded",
+      "turn_ms": 3535.2694019675255,
+      "fixture_active_before_delete": false,
+      "delete_status": 204,
+      "delete_ms": 927.3361656814814,
+      "get_after_delete_status": 404,
+      "cycle_ms": 4466.5735848248005,
+      "pass": false,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 6,
+      "concurrency": 32,
+      "marker": "fast64e4ad11f3b04729a43c5a78b3039d8a",
+      "session": "59ab17b2-fee9-402b-89c0-8c6854b047c3",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 45,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 1441792,
+      "terminal_count": 1,
+      "errors": [
+        {
+          "kind": "error",
+          "error": {
+            "code": -32003,
+            "message": "protocol relay overloaded; turn cancelled without truncating structured events",
+            "data": {
+              "retryable": true
+            }
+          },
+          "turn_id": "e080fcee-8736-499b-960c-656e1309120b"
+        }
+      ],
+      "error_class": "stage1_relay_overloaded",
+      "turn_ms": 3529.6469163149595,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 895.3328505158424,
+      "get_after_delete_status": 404,
+      "cycle_ms": 4464.9440590292215,
+      "pass": false,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16154624
+      }
+    },
+    {
+      "batch": 6,
+      "concurrency": 32,
+      "marker": "fast12043465f914447e8acc4dc23eb13451",
+      "session": "cef1a2cc-ef2b-4c9e-8a46-7418ca94f542",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 46,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 1474560,
+      "terminal_count": 1,
+      "errors": [
+        {
+          "kind": "error",
+          "error": {
+            "code": -32003,
+            "message": "protocol relay overloaded; turn cancelled without truncating structured events",
+            "data": {
+              "retryable": true
+            }
+          },
+          "turn_id": "1a8ee535-eb69-4e1c-8819-333eabbd8de1"
+        }
+      ],
+      "error_class": "stage1_relay_overloaded",
+      "turn_ms": 3534.806923940778,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 947.2447093576193,
+      "get_after_delete_status": 404,
+      "cycle_ms": 4496.425203979015,
+      "pass": false,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 15335424
+      }
+    },
+    {
+      "batch": 6,
+      "concurrency": 32,
+      "marker": "fast3ba15b265bd441edaa9264146d32bbbb",
+      "session": "4e013f5a-5fd1-456e-b37e-0453a2abb34d",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 47,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 1507328,
+      "terminal_count": 1,
+      "errors": [
+        {
+          "kind": "error",
+          "error": {
+            "code": -32003,
+            "message": "protocol relay overloaded; turn cancelled without truncating structured events",
+            "data": {
+              "retryable": true
+            }
+          },
+          "turn_id": "401d1267-6d43-4fbe-b691-4e9df31d6e29"
+        }
+      ],
+      "error_class": "stage1_relay_overloaded",
+      "turn_ms": 3550.7584679871798,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 858.9084651321173,
+      "get_after_delete_status": 404,
+      "cycle_ms": 4463.806979358196,
+      "pass": false,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 15368192
+      }
+    },
+    {
+      "batch": 6,
+      "concurrency": 32,
+      "marker": "fast0e54c0a1d1524252aa4a048189f873b7",
+      "session": "f9476416-1195-4453-b651-3411f20a4e4e",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 46,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 1474560,
+      "terminal_count": 1,
+      "errors": [
+        {
+          "kind": "error",
+          "error": {
+            "code": -32003,
+            "message": "protocol relay overloaded; turn cancelled without truncating structured events",
+            "data": {
+              "retryable": true
+            }
+          },
+          "turn_id": "37f82017-a67b-4e30-a948-f2278ab4c7f7"
+        }
+      ],
+      "error_class": "stage1_relay_overloaded",
+      "turn_ms": 3564.147911965847,
+      "fixture_active_before_delete": false,
+      "delete_status": 204,
+      "delete_ms": 957.8233249485493,
+      "get_after_delete_status": 404,
+      "cycle_ms": 4529.34692427516,
+      "pass": false,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 6,
+      "concurrency": 32,
+      "marker": "fast7a74bd006d1e4880b88e71b43e14c4fd",
+      "session": "5fbdc6fc-1d55-4917-854d-b46131b8e605",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 513,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 16777216,
+      "terminal_count": 1,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 25844.3535361439,
+      "fixture_active_before_delete": false,
+      "delete_status": 204,
+      "delete_ms": 4791.124863550067,
+      "get_after_delete_status": 404,
+      "cycle_ms": 30638.813575729728,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 6,
+      "concurrency": 32,
+      "marker": "fast1f7c5187c5d440df84cfdfae86b17793",
+      "session": "19cadb12-376c-464c-99b5-9bf402666f72",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 73,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 2359296,
+      "terminal_count": 1,
+      "errors": [
+        {
+          "kind": "error",
+          "error": {
+            "code": -32003,
+            "message": "protocol relay overloaded; turn cancelled without truncating structured events",
+            "data": {
+              "retryable": true
+            }
+          },
+          "turn_id": "65cbdfb6-536b-4871-a769-7bf6ddc29795"
+        }
+      ],
+      "error_class": "stage1_relay_overloaded",
+      "turn_ms": 4501.736180856824,
+      "fixture_active_before_delete": false,
+      "delete_status": 204,
+      "delete_ms": 904.106991365552,
+      "get_after_delete_status": 404,
+      "cycle_ms": 5408.988535404205,
+      "pass": false,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 6,
+      "concurrency": 32,
+      "marker": "fastd774a7a02afc43faaac594b0acba6c12",
+      "session": "b6c308c4-7071-482c-9705-f54bfc21411d",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 46,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 1474560,
+      "terminal_count": 1,
+      "errors": [
+        {
+          "kind": "error",
+          "error": {
+            "code": -32003,
+            "message": "protocol relay overloaded; turn cancelled without truncating structured events",
+            "data": {
+              "retryable": true
+            }
+          },
+          "turn_id": "1760605b-3385-44f4-b915-0ed9f1b08f34"
+        }
+      ],
+      "error_class": "stage1_relay_overloaded",
+      "turn_ms": 3538.670014590025,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 849.6286999434233,
+      "get_after_delete_status": 404,
+      "cycle_ms": 4443.272033706307,
+      "pass": false,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 15302656
+      }
+    },
+    {
+      "batch": 6,
+      "concurrency": 32,
+      "marker": "faste0728be253724930abfc260befe8f011",
+      "session": "36f1db5a-1b52-4c4a-9578-ba8b39684bf0",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 46,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 1474560,
+      "terminal_count": 1,
+      "errors": [
+        {
+          "kind": "error",
+          "error": {
+            "code": -32003,
+            "message": "protocol relay overloaded; turn cancelled without truncating structured events",
+            "data": {
+              "retryable": true
+            }
+          },
+          "turn_id": "4bf0039f-f656-43c5-a1e5-d2bed9f97952"
+        }
+      ],
+      "error_class": "stage1_relay_overloaded",
+      "turn_ms": 3522.9660365730524,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 832.4663806706667,
+      "get_after_delete_status": 404,
+      "cycle_ms": 4374.195571988821,
+      "pass": false,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16711680
+      }
+    },
+    {
+      "batch": 6,
+      "concurrency": 32,
+      "marker": "heldbfd8643ed7154ac9becff1ebb304c65f",
+      "session": "1cb26412-5ccb-4bf4-a759-6682378e6a48",
+      "reader": "slow",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 7049.850882962346,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 798.4026148915291,
+      "get_after_delete_status": 404,
+      "cycle_ms": 7853.259375318885,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 4161536
+      }
+    },
+    {
+      "batch": 6,
+      "concurrency": 32,
+      "marker": "heldb657ee13e32e4730b142e40b174ae9c3",
+      "session": "7692b194-1694-476d-8c49-65fa58a6bf57",
+      "reader": "slow",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 6976.559953764081,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 769.0562512725592,
+      "get_after_delete_status": 404,
+      "cycle_ms": 7749.4653929024935,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 4292608
+      }
+    },
+    {
+      "batch": 6,
+      "concurrency": 32,
+      "marker": "held7ef71085938d409bb393054dfe4032d7",
+      "session": "2635e2d6-03db-4a25-8cad-b2e0d1de86a6",
+      "reader": "slow",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 7013.630043715239,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 757.4452720582485,
+      "get_after_delete_status": 404,
+      "cycle_ms": 7775.338519364595,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 4718592
+      }
+    },
+    {
+      "batch": 6,
+      "concurrency": 32,
+      "marker": "heldbfa61e3dbc5e4e6b9b0d14504512daed",
+      "session": "acf4b1c2-3f71-4afc-967e-de45aa8da51d",
+      "reader": "slow",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 8117.623088881373,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 816.4069652557373,
+      "get_after_delete_status": 404,
+      "cycle_ms": 8939.687570556998,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 4227072
+      }
+    },
+    {
+      "batch": 6,
+      "concurrency": 32,
+      "marker": "heldf9fe548a587e4a3ab44d8c3d20254210",
+      "session": "f5338520-df0e-4f45-9641-4e21cae1c68b",
+      "reader": "slow",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 6989.110013470054,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 1201.8782682716846,
+      "get_after_delete_status": 404,
+      "cycle_ms": 8195.921091362834,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 4325376
+      }
+    },
+    {
+      "batch": 6,
+      "concurrency": 32,
+      "marker": "held7b49e0f0ad7a40c7b44e4d8d8b3e8261",
+      "session": "b04c1cc3-bc1f-457b-9dc3-e26c70b94474",
+      "reader": "slow",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 7051.937276497483,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 792.6352135837078,
+      "get_after_delete_status": 404,
+      "cycle_ms": 7850.558441132307,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 4292608
+      }
+    },
+    {
+      "batch": 6,
+      "concurrency": 32,
+      "marker": "heldfb809060edb24c6a95d804862b0adec3",
+      "session": "6ecc257e-8589-4262-be44-1d93efc19d5b",
+      "reader": "slow",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 9086.857039481401,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 824.3156000971794,
+      "get_after_delete_status": 404,
+      "cycle_ms": 9915.365064516664,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 4849664
+      }
+    },
+    {
+      "batch": 6,
+      "concurrency": 32,
+      "marker": "helde3ae4f5543394c3fa7cb07d55529a098",
+      "session": "9a85d222-4149-4d80-afdf-150ca86a1037",
+      "reader": "slow",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 6975.8956134319305,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 799.7530177235603,
+      "get_after_delete_status": 404,
+      "cycle_ms": 7780.813422054052,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 4751360
+      }
+    },
+    {
+      "batch": 6,
+      "concurrency": 32,
+      "marker": "held2aa56b3826744859b52ef04e21e19b31",
+      "session": "c4306d0c-2d11-4b15-9128-68d0e9ba53be",
+      "reader": "disconnected",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "fixture_dispatch_observed": true,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 2001.6377121210098,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 122.8892058134079,
+      "get_after_delete_status": 404,
+      "cycle_ms": 2135.26258058846,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 98304
+      }
+    },
+    {
+      "batch": 6,
+      "concurrency": 32,
+      "marker": "heldea691ac02201470abefec33a584fc085",
+      "session": "4eaa1f25-c954-4891-aa84-129b73df0d91",
+      "reader": "disconnected",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "fixture_dispatch_observed": true,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 3020.930204540491,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 167.46647469699383,
+      "get_after_delete_status": 404,
+      "cycle_ms": 3195.58210298419,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 98304
+      }
+    },
+    {
+      "batch": 6,
+      "concurrency": 32,
+      "marker": "held2dda1bf055664a9896236a0357acc107",
+      "session": "26b8c0db-5e50-4f16-b3c4-4fd328d8569f",
+      "reader": "disconnected",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "fixture_dispatch_observed": true,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 1966.0976082086563,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 83.24043452739716,
+      "get_after_delete_status": 404,
+      "cycle_ms": 2080.1258739084005,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 98304
+      }
+    },
+    {
+      "batch": 6,
+      "concurrency": 32,
+      "marker": "helde6b4d21e237b489c92f007716ca1548a",
+      "session": "be2c5aea-0f51-4082-b74b-e4d9be0fc436",
+      "reader": "disconnected",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "fixture_dispatch_observed": true,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 1952.3143991827965,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 53.571321070194244,
+      "get_after_delete_status": 404,
+      "cycle_ms": 2056.8779315799475,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 98304
+      }
+    },
+    {
+      "batch": 6,
+      "concurrency": 32,
+      "marker": "held0e8b782caca64cbc8f83882ffb025b75",
+      "session": "6a767bc6-10bb-408e-8a05-314abfc03b24",
+      "reader": "disconnected",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "fixture_dispatch_observed": true,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 1994.6905560791492,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 104.00453023612499,
+      "get_after_delete_status": 404,
+      "cycle_ms": 2127.356167882681,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 98304
+      }
+    },
+    {
+      "batch": 6,
+      "concurrency": 32,
+      "marker": "held80aba6f2c15949d299e3356260f9ce82",
+      "session": "d069d6f0-817f-4b22-ba4a-b7f3ece5c314",
+      "reader": "disconnected",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "fixture_dispatch_observed": true,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 1989.8713547736406,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 83.23696069419384,
+      "get_after_delete_status": 404,
+      "cycle_ms": 2125.9302757680416,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 98304
+      }
+    },
+    {
+      "batch": 6,
+      "concurrency": 32,
+      "marker": "held5f74018f3d3c4cb597004c9d2692eb20",
+      "session": "dbf1f539-5d04-4162-93b6-5787e4e47cdb",
+      "reader": "disconnected",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "fixture_dispatch_observed": true,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 3027.02740393579,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 117.08777211606503,
+      "get_after_delete_status": 404,
+      "cycle_ms": 3189.0990398824215,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 98304
+      }
+    },
+    {
+      "batch": 6,
+      "concurrency": 32,
+      "marker": "held2457eb92f2ed4a63b78e7f03ff909cd6",
+      "session": "0545165f-565f-43df-9517-509bb7cac686",
+      "reader": "disconnected",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "fixture_dispatch_observed": true,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 1960.4251198470592,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 60.506317764520645,
+      "get_after_delete_status": 404,
+      "cycle_ms": 2052.2198919206858,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 98304
+      }
+    },
+    {
+      "batch": 7,
+      "concurrency": 8,
+      "marker": "fastde18cc0081ae4b78a502cf6b9eeb8cb1",
+      "session": "bec62058-0318-4e5b-b445-77caa44fde8e",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 231,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 7536640,
+      "terminal_count": 1,
+      "errors": [
+        {
+          "kind": "error",
+          "error": {
+            "code": -32003,
+            "message": "protocol relay overloaded; turn cancelled without truncating structured events",
+            "data": {
+              "retryable": true
+            }
+          },
+          "turn_id": "8d45cbca-6666-4262-9d3c-78c26418314e"
+        }
+      ],
+      "error_class": "stage1_relay_overloaded",
+      "turn_ms": 4302.95929685235,
+      "fixture_active_before_delete": false,
+      "delete_status": 204,
+      "delete_ms": 1750.6325840950012,
+      "get_after_delete_status": 404,
+      "cycle_ms": 6056.058000773191,
+      "pass": false,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 7,
+      "concurrency": 8,
+      "marker": "fast003e4fb1b155467d8524f0a6bf3dfc35",
+      "session": "49d616d0-becb-4ca5-8d8e-5325586b2ab7",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 232,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 7569408,
+      "terminal_count": 1,
+      "errors": [
+        {
+          "kind": "error",
+          "error": {
+            "code": -32003,
+            "message": "protocol relay overloaded; turn cancelled without truncating structured events",
+            "data": {
+              "retryable": true
+            }
+          },
+          "turn_id": "e663166c-e8e8-47c8-a8f1-a6eab174ba3d"
+        }
+      ],
+      "error_class": "stage1_relay_overloaded",
+      "turn_ms": 4311.862234026194,
+      "fixture_active_before_delete": false,
+      "delete_status": 204,
+      "delete_ms": 1790.6824592500925,
+      "get_after_delete_status": 404,
+      "cycle_ms": 6105.464121326804,
+      "pass": false,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 7,
+      "concurrency": 8,
+      "marker": "fast45eb9594c67c41a28dfda1f519aec59d",
+      "session": "ee47bd6c-d0e0-4f69-8f0d-b97a27c52adc",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 215,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 7012352,
+      "terminal_count": 1,
+      "errors": [
+        {
+          "kind": "error",
+          "error": {
+            "code": -32003,
+            "message": "protocol relay overloaded; turn cancelled without truncating structured events",
+            "data": {
+              "retryable": true
+            }
+          },
+          "turn_id": "60e83f47-64c9-43df-8c8d-935e475091d2"
+        }
+      ],
+      "error_class": "stage1_relay_overloaded",
+      "turn_ms": 4211.305167526007,
+      "fixture_active_before_delete": false,
+      "delete_status": 204,
+      "delete_ms": 1690.2339793741703,
+      "get_after_delete_status": 404,
+      "cycle_ms": 5904.857711866498,
+      "pass": false,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 7,
+      "concurrency": 8,
+      "marker": "fastd5026d646d504f2d840fa5c7d9be9ef6",
+      "session": "42e46bc6-6eca-4730-8dbd-fc433d53a9fa",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 211,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 6881280,
+      "terminal_count": 1,
+      "errors": [
+        {
+          "kind": "error",
+          "error": {
+            "code": -32003,
+            "message": "protocol relay overloaded; turn cancelled without truncating structured events",
+            "data": {
+              "retryable": true
+            }
+          },
+          "turn_id": "322adbe8-685e-4481-af8e-c6e80f7e0792"
+        }
+      ],
+      "error_class": "stage1_relay_overloaded",
+      "turn_ms": 4180.2951116114855,
+      "fixture_active_before_delete": false,
+      "delete_status": 204,
+      "delete_ms": 1699.1259660571814,
+      "get_after_delete_status": 404,
+      "cycle_ms": 5882.884444668889,
+      "pass": false,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 7,
+      "concurrency": 8,
+      "marker": "held5a3b5f8a90274c45adef147ca90c26a8",
+      "session": "6d6e7565-99b7-4bd4-82f8-ba0f65b61fba",
+      "reader": "slow",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 6982.758646830916,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 864.8719415068626,
+      "get_after_delete_status": 404,
+      "cycle_ms": 7851.3414561748505,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 4784128
+      }
+    },
+    {
+      "batch": 7,
+      "concurrency": 8,
+      "marker": "held0499010d41334e8ebac3693761bfce41",
+      "session": "8f7b40e8-8af4-46da-86a5-fdf55ed82f6c",
+      "reader": "slow",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 6965.035350993276,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 784.4267338514328,
+      "get_after_delete_status": 404,
+      "cycle_ms": 7754.280153661966,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 4784128
+      }
+    },
+    {
+      "batch": 7,
+      "concurrency": 8,
+      "marker": "held0c3483ba8ec74fb5924af2c58f2526d0",
+      "session": "309efefc-37f8-4853-b556-dc026a51e31a",
+      "reader": "disconnected",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "fixture_dispatch_observed": true,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 1971.4523516595364,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 50.79153552651405,
+      "get_after_delete_status": 404,
+      "cycle_ms": 2026.3164676725864,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 98304
+      }
+    },
+    {
+      "batch": 7,
+      "concurrency": 8,
+      "marker": "heldc774dc8db95f419d8c4fbb515f3a3bf0",
+      "session": "f04bb22f-83ed-4548-aafb-dc6b46654c90",
+      "reader": "disconnected",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "fixture_dispatch_observed": true,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 1953.6970872431993,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 47.36906476318836,
+      "get_after_delete_status": 404,
+      "cycle_ms": 2004.8813205212355,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 98304
+      }
+    },
+    {
+      "batch": 8,
+      "concurrency": 8,
+      "marker": "fast3b457faf40934516aa18dfb27f8cbef4",
+      "session": "b5fc15c0-9abc-4004-b31b-f2c85b8cc8a3",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 205,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 6684672,
+      "terminal_count": 1,
+      "errors": [
+        {
+          "kind": "error",
+          "error": {
+            "code": -32003,
+            "message": "protocol relay overloaded; turn cancelled without truncating structured events",
+            "data": {
+              "retryable": true
+            }
+          },
+          "turn_id": "57e8ac0e-ad5d-4483-9193-32c3cc2efc7d"
+        }
+      ],
+      "error_class": "stage1_relay_overloaded",
+      "turn_ms": 4428.863290697336,
+      "fixture_active_before_delete": false,
+      "delete_status": 204,
+      "delete_ms": 1145.7758694887161,
+      "get_after_delete_status": 404,
+      "cycle_ms": 5579.094083979726,
+      "pass": false,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 8,
+      "concurrency": 8,
+      "marker": "fastb5579e5f234147c492b555e16fc56378",
+      "session": "b3860785-9742-44a4-aeb8-8c80b943eca7",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 204,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 6651904,
+      "terminal_count": 1,
+      "errors": [
+        {
+          "kind": "error",
+          "error": {
+            "code": -32003,
+            "message": "protocol relay overloaded; turn cancelled without truncating structured events",
+            "data": {
+              "retryable": true
+            }
+          },
+          "turn_id": "a2d25f7b-0301-4a0e-9c89-d4e99b1b9926"
+        }
+      ],
+      "error_class": "stage1_relay_overloaded",
+      "turn_ms": 4425.507698208094,
+      "fixture_active_before_delete": false,
+      "delete_status": 204,
+      "delete_ms": 1095.0141660869122,
+      "get_after_delete_status": 404,
+      "cycle_ms": 5524.721311405301,
+      "pass": false,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 8,
+      "concurrency": 8,
+      "marker": "fasta086516daa634637a59e06a175b6f26f",
+      "session": "0bd41765-f37a-4b8b-8a4d-2b01e7860563",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 205,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 6684672,
+      "terminal_count": 1,
+      "errors": [
+        {
+          "kind": "error",
+          "error": {
+            "code": -32003,
+            "message": "protocol relay overloaded; turn cancelled without truncating structured events",
+            "data": {
+              "retryable": true
+            }
+          },
+          "turn_id": "fe55d697-ab7f-4240-bb9f-c33230ba3c76"
+        }
+      ],
+      "error_class": "stage1_relay_overloaded",
+      "turn_ms": 4427.780287340283,
+      "fixture_active_before_delete": false,
+      "delete_status": 204,
+      "delete_ms": 1120.1547961682081,
+      "get_after_delete_status": 404,
+      "cycle_ms": 5552.715698257089,
+      "pass": false,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 8,
+      "concurrency": 8,
+      "marker": "fast19640172907d491284837d1e35edfdbe",
+      "session": "dc1712b6-7486-469e-a626-2c66df921030",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 208,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 6782976,
+      "terminal_count": 1,
+      "errors": [
+        {
+          "kind": "error",
+          "error": {
+            "code": -32003,
+            "message": "protocol relay overloaded; turn cancelled without truncating structured events",
+            "data": {
+              "retryable": true
+            }
+          },
+          "turn_id": "7b7e4633-4e08-4fd4-82e0-23e6e32a350a"
+        }
+      ],
+      "error_class": "stage1_relay_overloaded",
+      "turn_ms": 4432.378375902772,
+      "fixture_active_before_delete": false,
+      "delete_status": 204,
+      "delete_ms": 1170.3119557350874,
+      "get_after_delete_status": 404,
+      "cycle_ms": 5605.798151344061,
+      "pass": false,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 8,
+      "concurrency": 8,
+      "marker": "held1ef986af0d284e0e9ef8aaf919a92fac",
+      "session": "16bfc4f5-4c9e-4f86-8aaa-b8c4f8cf4faa",
+      "reader": "slow",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 7028.920931741595,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 833.9231591671705,
+      "get_after_delete_status": 404,
+      "cycle_ms": 7867.197498679161,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 4784128
+      }
+    },
+    {
+      "batch": 8,
+      "concurrency": 8,
+      "marker": "held528b7ba6190149ca8e38388b2629d658",
+      "session": "9166e344-a53a-4813-8ba1-537792f8ecd8",
+      "reader": "slow",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 7043.625675141811,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 751.9026510417461,
+      "get_after_delete_status": 404,
+      "cycle_ms": 7798.839371651411,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 4751360
+      }
+    },
+    {
+      "batch": 8,
+      "concurrency": 8,
+      "marker": "heldaaefce14a2a84cc086c51ffdddd25bc3",
+      "session": "4b008b7a-2a7c-4878-8a73-91d47b8a2005",
+      "reader": "disconnected",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "fixture_dispatch_observed": true,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 2011.2184323370457,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 40.94655066728592,
+      "get_after_delete_status": 404,
+      "cycle_ms": 2062.792157754302,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 98304
+      }
+    },
+    {
+      "batch": 8,
+      "concurrency": 8,
+      "marker": "heldbc1fb998a4f14e8bbbd937d4257f11ed",
+      "session": "9a4d4c93-79bc-4bcc-86e1-bb98df743d6e",
+      "reader": "disconnected",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "fixture_dispatch_observed": true,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 2024.256156757474,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 46.15380056202412,
+      "get_after_delete_status": 404,
+      "cycle_ms": 2074.680618941784,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 98304
+      }
+    },
+    {
+      "batch": 9,
+      "concurrency": 8,
+      "marker": "fast64fad83a009940909397d0a209285ca6",
+      "session": "7800dd1a-4654-4cf4-9c64-6d8acf62fcb2",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 244,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 7962624,
+      "terminal_count": 1,
+      "errors": [
+        {
+          "kind": "error",
+          "error": {
+            "code": -32003,
+            "message": "protocol relay overloaded; turn cancelled without truncating structured events",
+            "data": {
+              "retryable": true
+            }
+          },
+          "turn_id": "c0038cab-79ae-463c-bc2c-15a0e04a6dd5"
+        }
+      ],
+      "error_class": "stage1_relay_overloaded",
+      "turn_ms": 4957.327138632536,
+      "fixture_active_before_delete": false,
+      "delete_status": 204,
+      "delete_ms": 1330.056257545948,
+      "get_after_delete_status": 404,
+      "cycle_ms": 6290.892092511058,
+      "pass": false,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 9,
+      "concurrency": 8,
+      "marker": "fast8f3d09a44bb84f2d8b40314ef73407e8",
+      "session": "2ad3acdd-3150-4a0d-8aca-cd2a75f9dc5f",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 513,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 16777216,
+      "terminal_count": 1,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 23215.253189206123,
+      "fixture_active_before_delete": false,
+      "delete_status": 204,
+      "delete_ms": 4795.16913369298,
+      "get_after_delete_status": 404,
+      "cycle_ms": 28013.878157362342,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 9,
+      "concurrency": 8,
+      "marker": "fast4547f9bf4f194760866a43a0c8750846",
+      "session": "1ee805d3-c16a-4dbc-a585-5b2a7f377881",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 215,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 7012352,
+      "terminal_count": 1,
+      "errors": [
+        {
+          "kind": "error",
+          "error": {
+            "code": -32003,
+            "message": "protocol relay overloaded; turn cancelled without truncating structured events",
+            "data": {
+              "retryable": true
+            }
+          },
+          "turn_id": "a167f6c7-148a-4941-bfb7-766b9b0de592"
+        }
+      ],
+      "error_class": "stage1_relay_overloaded",
+      "turn_ms": 4240.318672731519,
+      "fixture_active_before_delete": false,
+      "delete_status": 204,
+      "delete_ms": 1751.364704221487,
+      "get_after_delete_status": 404,
+      "cycle_ms": 5996.049158275127,
+      "pass": false,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 9,
+      "concurrency": 8,
+      "marker": "fast8077604b03004f5781ed4cc68c717e6f",
+      "session": "861c31c9-b8b3-41df-8e23-172bc54abb9d",
+      "reader": "fast",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 233,
+      "largest_encoded_event_bytes": 32799,
+      "received_text_bytes": 7602176,
+      "terminal_count": 1,
+      "errors": [
+        {
+          "kind": "error",
+          "error": {
+            "code": -32003,
+            "message": "protocol relay overloaded; turn cancelled without truncating structured events",
+            "data": {
+              "retryable": true
+            }
+          },
+          "turn_id": "d4466e7a-eabc-4328-ab96-8c92757521d8"
+        }
+      ],
+      "error_class": "stage1_relay_overloaded",
+      "turn_ms": 4359.365591779351,
+      "fixture_active_before_delete": false,
+      "delete_status": 204,
+      "delete_ms": 1802.3934606462717,
+      "get_after_delete_status": 404,
+      "cycle_ms": 6166.091792285442,
+      "pass": false,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 16777216
+      }
+    },
+    {
+      "batch": 9,
+      "concurrency": 8,
+      "marker": "held1aa2e3b3dc0d4ff98addffcf55de850e",
+      "session": "104e01ea-8f05-4299-9592-3bf9ec7c6fd8",
+      "reader": "slow",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 7037.84654289484,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 801.0064028203487,
+      "get_after_delete_status": 404,
+      "cycle_ms": 7843.832621350884,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 4816896
+      }
+    },
+    {
+      "batch": 9,
+      "concurrency": 8,
+      "marker": "held65c89150230a41cf860e7a2e43e3186d",
+      "session": "1e3eb22b-b92e-4cec-8c60-61e5f24a9342",
+      "reader": "slow",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 7046.685352921486,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 779.8384204506874,
+      "get_after_delete_status": 404,
+      "cycle_ms": 7830.686936154962,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 4784128
+      }
+    },
+    {
+      "batch": 9,
+      "concurrency": 8,
+      "marker": "held7b1ad31fc577462391c6c592e161c31f",
+      "session": "ca618ee0-2c4b-4a82-b4b5-2e43c68d9753",
+      "reader": "disconnected",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "fixture_dispatch_observed": true,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 2038.7181285768747,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 39.49918784201145,
+      "get_after_delete_status": 404,
+      "cycle_ms": 2083.766920492053,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 98304
+      }
+    },
+    {
+      "batch": 9,
+      "concurrency": 8,
+      "marker": "heldd882479374e74e3b88fea4e57b2883cd",
+      "session": "719ec690-0808-4f33-8c9f-79c0290ff66f",
+      "reader": "disconnected",
+      "text_bytes": 16777216,
+      "prompt_status": 200,
+      "fixture_dispatch_observed": true,
+      "events_read": 0,
+      "largest_encoded_event_bytes": 0,
+      "received_text_bytes": 0,
+      "terminal_count": 0,
+      "errors": [],
+      "error_class": null,
+      "turn_ms": 2014.8828085511923,
+      "fixture_active_before_delete": true,
+      "delete_status": 204,
+      "delete_ms": 47.03959636390209,
+      "get_after_delete_status": 404,
+      "cycle_ms": 2071.3268648833036,
+      "pass": true,
+      "fixture_completion": {
+        "requested_text_bytes": 16777216,
+        "sent_text_bytes": 98304
+      }
+    }
+  ],
+  "build_info": "wayland-core 0.13.14 (source 008d88ce960322967adcef7637b44a5cfad44207)\n",
+  "core_pid": 1973313,
+  "rss_at_ready": 80326656,
+  "summary": {
+    "by_concurrency": {
+      "8": {
+        "fast_rows": 32,
+        "fast_pass": 17,
+        "stage1_relay_overloaded": 15,
+        "stage2_delivery_overloaded": 0,
+        "other_fast_failures": 0,
+        "fast_turn_ms_median": 22799.830875359476,
+        "slow_disconnected_rows": 32,
+        "slow_disconnected_pass": 32
+      },
+      "32": {
+        "fast_rows": 32,
+        "fast_pass": 1,
+        "stage1_relay_overloaded": 31,
+        "stage2_delivery_overloaded": 0,
+        "other_fast_failures": 0,
+        "fast_turn_ms_median": 3601.52068734169,
+        "slow_disconnected_rows": 32,
+        "slow_disconnected_pass": 32
+      }
+    },
+    "rss_peak_bytes": 1647243264,
+    "quiescent_rss_first": 161906688,
+    "quiescent_rss_last": 208392192,
+    "quiescent_rss_max": 212627456,
+    "all_sessions_quiesced": true
+  },
+  "completed": true,
+  "loadavg_end": [
+    34.22607421875,
+    41.09375,
+    36.5361328125
+  ],
+  "finished": "2026-09-10T16:01:02.066009+00:00"
+}

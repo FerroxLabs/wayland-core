@@ -1,0 +1,244 @@
+From 784419c4b710076d68c759dfe2d3635aa31b1a4f Mon Sep 17 00:00:00 2001
+From: ci <sean@seandonahoe.com>
+Date: Thu, 10 Sep 2026 22:26:57 +0700
+Subject: [PATCH] diag(acp): time relay recorder, delivery and wait budget
+
+---
+ crates/wcore-acp/src/bounded.rs | 27 +++++++++++
+ crates/wcore-acp/src/server.rs  | 85 ++++++++++++++++++++++++++++-----
+ 2 files changed, 101 insertions(+), 11 deletions(-)
+
+diff --git a/crates/wcore-acp/src/bounded.rs b/crates/wcore-acp/src/bounded.rs
+index 764719565..c8903e519 100644
+--- a/crates/wcore-acp/src/bounded.rs
++++ b/crates/wcore-acp/src/bounded.rs
+@@ -58,6 +58,11 @@ struct State<E> {
+     overflow: bool,
+     closed: bool,
+     senders: usize,
++    diag_waits: u64,
++    diag_waited: Duration,
++    diag_pops: u64,
++    diag_max_bytes: usize,
++    diag_created: std::time::Instant,
+ }
+ struct Shared<E> {
+     state: Mutex<State<E>>,
+@@ -88,6 +93,11 @@ pub fn channel<E: Serialize>(terminal: E) -> Result<(Sender<E>, Receiver<E>), &'
+             overflow: false,
+             closed: false,
+             senders: 1,
++            diag_waits: 0,
++            diag_waited: Duration::ZERO,
++            diag_pops: 0,
++            diag_max_bytes: 0,
++            diag_created: std::time::Instant::now(),
+         }),
+         wake: AtomicWaker::new(),
+         on_overflow: Mutex::new(None),
+@@ -212,6 +222,7 @@ impl<E: Serialize> Sender<E> {
+                     && state.bytes + size + state.reserved <= LIVE_BYTES
+                 {
+                     state.bytes += size;
++                    state.diag_max_bytes = state.diag_max_bytes.max(state.bytes);
+                     state
+                         .queue
+                         .push_back((pending.take().expect("pending event"), size));
+@@ -235,6 +246,11 @@ impl<E: Serialize> Sender<E> {
+                 _ = &mut changed => true,
+                 _ = tokio::time::sleep(*wait_budget) => false,
+             };
++            {
++                let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
++                state.diag_waits += 1;
++                state.diag_waited += started.elapsed();
++            }
+             *wait_budget = wait_budget.saturating_sub(started.elapsed());
+             if !available {
+                 self.overload();
+@@ -279,6 +295,7 @@ impl<E> Receiver<E> {
+         }
+         if let Some((event, size)) = state.queue.pop_front() {
+             state.bytes -= size;
++            state.diag_pops += 1;
+             *global().lock().unwrap_or_else(|e| e.into_inner()) -= size;
+             capacity_changed().notify_waiters();
+             return Poll::Ready(Some(event));
+@@ -296,6 +313,16 @@ impl<E> Receiver<E> {
+ impl<E> Drop for Receiver<E> {
+     fn drop(&mut self) {
+         let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
++        eprintln!(
++            "W15DIAG channel type={} life_ms={} waits={} waited_ms={} pops={} max_bytes={} overflow={}",
++            std::any::type_name::<E>(),
++            state.diag_created.elapsed().as_millis(),
++            state.diag_waits,
++            state.diag_waited.as_millis(),
++            state.diag_pops,
++            state.diag_max_bytes,
++            state.overflow
++        );
+         *global().lock().unwrap_or_else(|e| e.into_inner()) -= state.bytes + state.reserved;
+         state.queue.clear();
+         state.bytes = 0;
+diff --git a/crates/wcore-acp/src/server.rs b/crates/wcore-acp/src/server.rs
+index a2b2e70e6..7b6aa1fb9 100644
+--- a/crates/wcore-acp/src/server.rs
++++ b/crates/wcore-acp/src/server.rs
+@@ -453,11 +453,21 @@ impl AcpServer {
+                 tokio::spawn(async move {
+                     let _delivery = delivery;
+                     let mut wait_budget = std::time::Duration::from_secs(1);
++                    let (mut d_pos, mut d_rwait, mut d_rhold, mut d_send, mut d_n) = (
++                        std::time::Duration::ZERO,
++                        std::time::Duration::ZERO,
++                        std::time::Duration::ZERO,
++                        std::time::Duration::ZERO,
++                        0u64,
++                    );
+                     loop {
+                         // Close cancels the engine, whose terminal must follow
+                         // already-recorded frames. Only real delivery pressure
+                         // detaches this queue; it retains the one-second bound.
++                        let t_pos = std::time::Instant::now();
+                         let position = positions_rx.recv().await;
++                        d_pos += t_pos.elapsed();
++                        d_n += 1;
+                         let Some(position) = position else {
+                             break;
+                         };
+@@ -470,14 +480,20 @@ impl AcpServer {
+                             break;
+                         };
+                         let event = {
++                            let t_rwait = std::time::Instant::now();
+                             let logs = events.read().await;
+-                            logs.get(&session_id)
++                            d_rwait += t_rwait.elapsed();
++                            let t_rhold = std::time::Instant::now();
++                            let found = logs
++                                .get(&session_id)
+                                 .and_then(|log| log.next_after(&cursor).ok().flatten())
+                                 .and_then(|event| {
+                                     crate::bounded::retain(&event.event)
+                                         .ok()
+                                         .map(|charge| (event.event.clone(), charge))
+-                                })
++                                });
++                            d_rhold += t_rhold.elapsed();
++                            found
+                         };
+                         drop(cursor);
+                         drop(position_charge);
+@@ -489,17 +505,27 @@ impl AcpServer {
+                             &event,
+                             MessageEvent::Done { .. } | MessageEvent::Error { .. }
+                         );
+-                        if tx
++                        let t_send = std::time::Instant::now();
++                        let sent = tx
+                             .send_retained(event, charge, &mut wait_budget, std::future::pending())
+-                            .await
+-                            .is_err()
+-                        {
++                            .await;
++                        d_send += t_send.elapsed();
++                        if sent.is_err() {
+                             break;
+                         }
+                         if terminal {
+                             break;
+                         }
+                     }
++                    eprintln!(
++                        "W15DIAG delivery session={} events={} positions_wait_ms={} read_wait_ms={} read_hold_ms={} send_ms={}",
++                        session_id,
++                        d_n,
++                        d_pos.as_millis(),
++                        d_rwait.as_millis(),
++                        d_rhold.as_millis(),
++                        d_send.as_millis()
++                    );
+                 });
+                 (Some(positions_tx), Some(rx))
+             }
+@@ -513,15 +539,30 @@ impl AcpServer {
+             let _turn_slot = turn_slot;
+             let mut upstream = upstream;
+             let mut oversized = false;
+-            while let Some(ev) = upstream.next().await {
++            let (mut r_up, mut r_size, mut r_wwait, mut r_whold, mut r_yield, mut r_n) = (
++                std::time::Duration::ZERO,
++                std::time::Duration::ZERO,
++                std::time::Duration::ZERO,
++                std::time::Duration::ZERO,
++                std::time::Duration::ZERO,
++                0u64,
++            );
++            loop {
++                let t_up = std::time::Instant::now();
++                let Some(ev) = upstream.next().await else {
++                    break;
++                };
++                r_up += t_up.elapsed();
++                r_n += 1;
+                 if oversized {
+                     continue;
+                 }
+-                let ev = if serde_json::to_vec(&ev)
++                let t_size = std::time::Instant::now();
++                let first_size = serde_json::to_vec(&ev)
+                     .map(|v| v.len())
+-                    .unwrap_or(usize::MAX)
+-                    > crate::bounded::EVENT_BYTES
+-                {
++                    .unwrap_or(usize::MAX);
++                r_size += t_size.elapsed();
++                let ev = if first_size > crate::bounded::EVENT_BYTES {
+                     oversized = true;
+                     MessageEvent::Error {
+                         error: crate::protocol::JsonRpcError {
+@@ -535,7 +576,11 @@ impl AcpServer {
+                     ev
+                 };
+                 let cursor = {
++                    let t_wwait = std::time::Instant::now();
+                     let mut guard = events.write().await;
++                    r_wwait += t_wwait.elapsed();
++                    let t_whold = std::time::Instant::now();
++                    let _hold = DiagHold(&mut r_whold, t_whold);
+                     let cursor = if let Some(log) = guard.get_mut(&session_id) {
+                         let size = serde_json::to_vec(&ev)
+                             .map(|v| v.len())
+@@ -585,10 +630,28 @@ impl AcpServer {
+                         // before this producer fills their retained cursor window.
+                         // This never waits for reader capacity; detached replay
+                         // recording continues without this cooperation point.
++                        let t_yield = std::time::Instant::now();
+                         tokio::task::yield_now().await;
++                        r_yield += t_yield.elapsed();
+                     }
+                 }
+             }
++            eprintln!(
++                "W15DIAG recorder session={} events={} upstream_ms={} size_ms={} write_wait_ms={} write_hold_ms={} yield_ms={}",
++                session_id,
++                r_n,
++                r_up.as_millis(),
++                r_size.as_millis(),
++                r_wwait.as_millis(),
++                r_whold.as_millis(),
++                r_yield.as_millis()
++            );
++            struct DiagHold<'a>(&'a mut std::time::Duration, std::time::Instant);
++            impl Drop for DiagHold<'_> {
++                fn drop(&mut self) {
++                    *self.0 += self.1.elapsed();
++                }
++            }
+         });
+         match rx {
+             Some(rx) => Box::pin(futures::stream::unfold(rx, |mut rx| async move {
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,0 +1,40 @@
+W15DIAG recorder session=aa75970d-3450-4c37-b4fd-3fa4f8024f4a events=83 upstream_ms=1992 size_ms=113 write_wait_ms=1116 write_hold_ms=111 yield_ms=62
+W15DIAG channel type=wcore_protocol::events::ProtocolEvent life_ms=3398 waits=1074 waited_ms=1000 pops=83 max_bytes=1018257 overflow=true
+W15DIAG recorder session=d5df91d1-3014-42cd-9b02-e3c2bc647238 events=82 upstream_ms=1998 size_ms=110 write_wait_ms=1139 write_hold_ms=104 yield_ms=49
+W15DIAG channel type=wcore_protocol::events::ProtocolEvent life_ms=3404 waits=1076 waited_ms=999 pops=82 max_bytes=1018257 overflow=true
+W15DIAG delivery session=aa75970d-3450-4c37-b4fd-3fa4f8024f4a events=83 positions_wait_ms=2166 read_wait_ms=1131 read_hold_ms=107 send_ms=0
+W15DIAG channel type=wcore_acp::server::AcpServer::tee_into_log::DeliveryPosition life_ms=3407 waits=0 waited_ms=0 pops=83 max_bytes=0 overflow=false
+W15DIAG channel type=wcore_acp::protocol::MessageEvent life_ms=3407 waits=0 waited_ms=0 pops=83 max_bytes=32799 overflow=false
+W15DIAG delivery session=d5df91d1-3014-42cd-9b02-e3c2bc647238 events=82 positions_wait_ms=2173 read_wait_ms=1121 read_hold_ms=114 send_ms=0
+W15DIAG channel type=wcore_acp::server::AcpServer::tee_into_log::DeliveryPosition life_ms=3411 waits=0 waited_ms=0 pops=82 max_bytes=0 overflow=false
+W15DIAG channel type=wcore_acp::protocol::MessageEvent life_ms=3411 waits=0 waited_ms=0 pops=82 max_bytes=32799 overflow=false
+W15DIAG recorder session=ef9f2e3f-d215-4742-92ee-e9fac10437ec events=85 upstream_ms=1993 size_ms=111 write_wait_ms=1133 write_hold_ms=107 yield_ms=68
+W15DIAG channel type=wcore_protocol::events::ProtocolEvent life_ms=3416 waits=1036 waited_ms=999 pops=85 max_bytes=1018257 overflow=true
+W15DIAG delivery session=ef9f2e3f-d215-4742-92ee-e9fac10437ec events=85 positions_wait_ms=2164 read_wait_ms=1144 read_hold_ms=114 send_ms=0
+W15DIAG channel type=wcore_acp::server::AcpServer::tee_into_log::DeliveryPosition life_ms=3425 waits=0 waited_ms=0 pops=85 max_bytes=0 overflow=false
+W15DIAG channel type=wcore_acp::protocol::MessageEvent life_ms=3425 waits=0 waited_ms=0 pops=85 max_bytes=32799 overflow=false
+W15DIAG recorder session=5831d1ee-8003-41d9-91d9-3d3e737a2d1e events=82 upstream_ms=2028 size_ms=106 write_wait_ms=1584 write_hold_ms=104 yield_ms=50
+W15DIAG channel type=wcore_protocol::events::ProtocolEvent life_ms=3875 waits=1069 waited_ms=1000 pops=82 max_bytes=1018257 overflow=true
+W15DIAG delivery session=5831d1ee-8003-41d9-91d9-3d3e737a2d1e events=82 positions_wait_ms=2662 read_wait_ms=1115 read_hold_ms=102 send_ms=0
+W15DIAG channel type=wcore_acp::server::AcpServer::tee_into_log::DeliveryPosition life_ms=3883 waits=0 waited_ms=0 pops=82 max_bytes=0 overflow=false
+W15DIAG channel type=wcore_acp::protocol::MessageEvent life_ms=3883 waits=0 waited_ms=0 pops=82 max_bytes=32799 overflow=false
+W15DIAG delivery session=8b60471c-0575-48ad-9133-13103605bd64 events=86 positions_wait_ms=2172 read_wait_ms=1597 read_hold_ms=112 send_ms=0
+W15DIAG channel type=wcore_acp::server::AcpServer::tee_into_log::DeliveryPosition life_ms=3884 waits=0 waited_ms=0 pops=86 max_bytes=0 overflow=false
+W15DIAG delivery session=2909ec0c-b15a-4210-8780-e2ae662a90c2 events=88 positions_wait_ms=2140 read_wait_ms=1631 read_hold_ms=110 send_ms=0
+W15DIAG channel type=wcore_acp::server::AcpServer::tee_into_log::DeliveryPosition life_ms=3884 waits=0 waited_ms=0 pops=88 max_bytes=0 overflow=false
+W15DIAG channel type=wcore_acp::protocol::MessageEvent life_ms=3884 waits=0 waited_ms=0 pops=86 max_bytes=32799 overflow=false
+W15DIAG recorder session=2909ec0c-b15a-4210-8780-e2ae662a90c2 events=88 upstream_ms=1999 size_ms=106 write_wait_ms=1630 write_hold_ms=108 yield_ms=37
+W15DIAG channel type=wcore_protocol::events::ProtocolEvent life_ms=3884 waits=1023 waited_ms=1001 pops=88 max_bytes=1018257 overflow=true
+W15DIAG delivery session=becbc743-bb3b-4df8-b745-ded565254af4 events=83 positions_wait_ms=2644 read_wait_ms=1132 read_hold_ms=105 send_ms=0
+W15DIAG channel type=wcore_acp::server::AcpServer::tee_into_log::DeliveryPosition life_ms=3885 waits=0 waited_ms=0 pops=83 max_bytes=0 overflow=false
+W15DIAG channel type=wcore_acp::protocol::MessageEvent life_ms=3885 waits=0 waited_ms=0 pops=83 max_bytes=32799 overflow=false
+W15DIAG channel type=wcore_acp::protocol::MessageEvent life_ms=3885 waits=0 waited_ms=0 pops=88 max_bytes=32799 overflow=false
+W15DIAG recorder session=8b60471c-0575-48ad-9133-13103605bd64 events=86 upstream_ms=2006 size_ms=119 write_wait_ms=1597 write_hold_ms=113 yield_ms=46
+W15DIAG channel type=wcore_protocol::events::ProtocolEvent life_ms=3885 waits=1123 waited_ms=999 pops=86 max_bytes=1018257 overflow=true
+W15DIAG recorder session=becbc743-bb3b-4df8-b745-ded565254af4 events=83 upstream_ms=2000 size_ms=107 write_wait_ms=1300 write_hold_ms=105 yield_ms=369
+W15DIAG channel type=wcore_protocol::events::ProtocolEvent life_ms=3885 waits=951 waited_ms=1000 pops=83 max_bytes=1018257 overflow=true
+W15DIAG delivery session=ab2efc37-04bb-4ca5-8ace-73d0f61104d0 events=85 positions_wait_ms=2214 read_wait_ms=1559 read_hold_ms=110 send_ms=0
+W15DIAG channel type=wcore_acp::server::AcpServer::tee_into_log::DeliveryPosition life_ms=3886 waits=0 waited_ms=0 pops=85 max_bytes=0 overflow=false
+W15DIAG recorder session=ab2efc37-04bb-4ca5-8ace-73d0f61104d0 events=85 upstream_ms=2023 size_ms=107 write_wait_ms=1604 write_hold_ms=107 yield_ms=42
+W15DIAG channel type=wcore_protocol::events::ProtocolEvent life_ms=3886 waits=1072 waited_ms=1000 pops=85 max_bytes=1018257 overflow=true
+W15DIAG channel type=wcore_acp::protocol::MessageEvent life_ms=3887 waits=0 waited_ms=0 pops=85 max_bytes=32799 overflow=false

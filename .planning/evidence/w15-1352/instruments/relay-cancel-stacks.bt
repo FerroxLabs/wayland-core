@@ -1,0 +1,12 @@
+// w15/relay1352 c1 instrument: which path cancels a relay turn.
+// overload() runs from send_retained (wait budget spent), from RelaySink when
+// retain() is refused by the aggregate, and from server delivery. A sync
+// send() overflow runs the on_overflow callback inline WITHOUT overload(), so
+// CancellationToken::cancel with no preceding overload names that path.
+uprobe:/root/w15-leak2/bin/fix/wayland-core:"_ZN9wcore_acp7bounded15Sender$LT$E$GT$8overload17h972145050330e7aaE",
+uprobe:/root/w15-leak2/bin/fix/wayland-core:"_ZN9wcore_acp7bounded15Sender$LT$E$GT$8overload17ha8596e5f8ab50239E",
+uprobe:/root/w15-leak2/bin/fix/wayland-core:"_ZN10tokio_util4sync18cancellation_token17CancellationToken6cancel17h5d1b1b951734cb34E"
+{
+  printf("EVENT ns=%llu tid=%d probe=%s\n", nsecs, tid, probe);
+  printf("%s\n", ustack(perf, 18));
+}

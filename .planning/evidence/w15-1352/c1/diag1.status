@@ -1,0 +1,5 @@
+arm=diag-c1-16m-optional start utc=2026-09-10T15:29:22Z loadavg=26.27 28.46 29.06 bin_sha=e5566d15e77bc0e3 conc=1 cycles=3 durability=optional bytes=16777216
+arm=diag-c1-16m-optional exit=0 end utc=2026-09-10T15:30:45Z loadavg=29.03 28.73 29.10
+arm=diag-c8-16m-optional start utc=2026-09-10T15:30:45Z loadavg=29.03 28.73 29.10 bin_sha=e5566d15e77bc0e3 conc=8 cycles=8 durability=optional bytes=16777216
+arm=diag-c8-16m-optional exit=0 end utc=2026-09-10T15:30:51Z loadavg=29.35 28.80 29.12
+queue_state=done

@@ -1,0 +1,15 @@
+W15DIAG delivery session=5f81eac7-5e2a-4190-bf51-0032f2a69050 events=513 positions_wait_ms=22057 read_wait_ms=0 read_hold_ms=698 send_ms=3
+W15DIAG channel type=wcore_acp::server::AcpServer::tee_into_log::DeliveryPosition life_ms=22765 waits=0 waited_ms=0 pops=513 max_bytes=0 overflow=false
+W15DIAG channel type=wcore_acp::protocol::MessageEvent life_ms=22765 waits=0 waited_ms=0 pops=513 max_bytes=65598 overflow=false
+W15DIAG recorder session=5f81eac7-5e2a-4190-bf51-0032f2a69050 events=513 upstream_ms=20391 size_ms=684 write_wait_ms=4 write_hold_ms=671 yield_ms=1006
+W15DIAG channel type=wcore_protocol::events::ProtocolEvent life_ms=22765 waits=0 waited_ms=0 pops=516 max_bytes=98541 overflow=false
+W15DIAG delivery session=5b12f135-81fa-470d-b49c-1288dc9f3c34 events=513 positions_wait_ms=22014 read_wait_ms=0 read_hold_ms=675 send_ms=3
+W15DIAG channel type=wcore_acp::server::AcpServer::tee_into_log::DeliveryPosition life_ms=22697 waits=0 waited_ms=0 pops=513 max_bytes=0 overflow=false
+W15DIAG channel type=wcore_acp::protocol::MessageEvent life_ms=22697 waits=0 waited_ms=0 pops=513 max_bytes=32799 overflow=false
+W15DIAG recorder session=5b12f135-81fa-470d-b49c-1288dc9f3c34 events=513 upstream_ms=20334 size_ms=677 write_wait_ms=52 write_hold_ms=668 yield_ms=956
+W15DIAG channel type=wcore_protocol::events::ProtocolEvent life_ms=22698 waits=0 waited_ms=0 pops=516 max_bytes=164235 overflow=false
+W15DIAG delivery session=6152398e-98c7-491e-89d6-842109fccad6 events=513 positions_wait_ms=21476 read_wait_ms=0 read_hold_ms=727 send_ms=3
+W15DIAG channel type=wcore_acp::server::AcpServer::tee_into_log::DeliveryPosition life_ms=22212 waits=0 waited_ms=0 pops=513 max_bytes=0 overflow=false
+W15DIAG channel type=wcore_acp::protocol::MessageEvent life_ms=22212 waits=0 waited_ms=0 pops=513 max_bytes=32799 overflow=false
+W15DIAG recorder session=6152398e-98c7-491e-89d6-842109fccad6 events=513 upstream_ms=19919 size_ms=718 write_wait_ms=16 write_hold_ms=695 yield_ms=854
+W15DIAG channel type=wcore_protocol::events::ProtocolEvent life_ms=22213 waits=0 waited_ms=0 pops=516 max_bytes=262776 overflow=false

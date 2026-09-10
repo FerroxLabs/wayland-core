@@ -1,0 +1,24 @@
+wayland#1352 binaries. Host hetzner-dsm. Builds via tools/remote-proof.py slot parallel-1.
+Each built here has a receipt with remote_exit 0 and "complete": true.
+
+label            source (build-info)                        cargo args                                                      sha256
+base-debug       008d88ce960322967adcef7637b44a5cfad44207   build --bin wayland-core (w15/leak2 lane; code = cd85dac88      d0819d10b693ee1c6420041ca3d2ba4c54bc7a15121b22e74a4fe20b5f8d9cb0
+                                                            except one line in crates/wcore-cli/tests/f14_sigkill_recovery.rs)
+base-release     cd85dac8872eedace6fbbd6421e2acdf4f2f0f60   build --locked --release --features voice -p wcore-cli -j 6     9b2e24f204f0fa18d0e418f487558a351e47550a80e9ef855178153988f27a0d
+src3530-release  3530199fb757f3fcefecf9e40ba820775b867d84   build --locked --release --features voice -p wcore-cli -j 6     0f3d81cf47b0c04fb955fe8ffc4d3673b5f654cf8a30bd620a786400bc4e4085
+diag-debug       784419c4b710076d68c759dfe2d3635aa31b1a4f   build --bin wayland-core (branch w15/relay1352-diag, instrument) e5566d15e77bc0e3154e8324f79a8028796ed471a1b1c5bf05a5fd9de8efc212
+fix-debug        671109fa92f83c129700790c1dedf79c244ea693   build --bin wayland-core                                        70f44e05cb52d5484eb4d6f94a8ff951165e8bccea3feab12baaab7f812372ec
+fix-release      671109fa92f83c129700790c1dedf79c244ea693   build --locked --release --features voice -p wcore-cli -j 6     d73cb6232e17429c4b3fa0c9def9ef3411587f50b2965eae5f6b669124f9d6e1
+
+Ancestry: 3530199fb is NOT an ancestor of cd85dac88 (merge-base 0cdd998ad). Fingerprinted by
+content, not by log: `git diff 3530199fb cd85dac88 -- crates/wcore-acp/src/bounded.rs
+crates/wcore-cli/src/acp_engine.rs` is EMPTY; the relay/ACP diff between the two is
+server.rs (6 lines, a `zip` refactor), acp_engine/lifecycle.rs (+7, idle malloc_trim) and
+lifecycle_tests.rs. The src3530 rebuild is not byte-identical to the soak's c68855d5 binary
+(different build root); both report the same build-info source.
+
+Proof receipts (stabilization evidence dir):
+  cd85dac88 release build   proof-1789052969-9610.json
+  3530199fb release build   proof-1789053557-23559.json
+  784419c4b diag build      remote_exit 0, complete true (duration 70.8 s)
+  671109fa9 debug + release remote_exit 0, complete true (26.3 s / 370.7 s)

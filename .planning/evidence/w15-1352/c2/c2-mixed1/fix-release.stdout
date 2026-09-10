@@ -1,0 +1,44 @@
+{"index": 0, "concurrency": 8, "fast_pass": 4, "fast_rows": 4, "stage1": 0, "stage2": 0, "rows_pass": 8, "quiescent_rss_bytes": 76595200, "rss_peak_bytes": 1315520512}
+{"index": 1, "concurrency": 8, "fast_pass": 4, "fast_rows": 4, "stage1": 0, "stage2": 0, "rows_pass": 8, "quiescent_rss_bytes": 76865536, "rss_peak_bytes": 1416581120}
+{"index": 2, "concurrency": 32, "fast_pass": 16, "fast_rows": 16, "stage1": 0, "stage2": 0, "rows_pass": 32, "quiescent_rss_bytes": 102182912, "rss_peak_bytes": 4292141056}
+{"index": 3, "concurrency": 8, "fast_pass": 4, "fast_rows": 4, "stage1": 0, "stage2": 0, "rows_pass": 8, "quiescent_rss_bytes": 103350272, "rss_peak_bytes": 1557270528}
+{"index": 4, "concurrency": 8, "fast_pass": 4, "fast_rows": 4, "stage1": 0, "stage2": 0, "rows_pass": 8, "quiescent_rss_bytes": 101367808, "rss_peak_bytes": 1664098304}
+{"index": 5, "concurrency": 8, "fast_pass": 4, "fast_rows": 4, "stage1": 0, "stage2": 0, "rows_pass": 8, "quiescent_rss_bytes": 101335040, "rss_peak_bytes": 1668337664}
+{"index": 6, "concurrency": 32, "fast_pass": 16, "fast_rows": 16, "stage1": 0, "stage2": 0, "rows_pass": 32, "quiescent_rss_bytes": 110313472, "rss_peak_bytes": 4069941248}
+{"index": 7, "concurrency": 8, "fast_pass": 4, "fast_rows": 4, "stage1": 0, "stage2": 0, "rows_pass": 8, "quiescent_rss_bytes": 108826624, "rss_peak_bytes": 1743507456}
+{"index": 8, "concurrency": 8, "fast_pass": 4, "fast_rows": 4, "stage1": 0, "stage2": 0, "rows_pass": 8, "quiescent_rss_bytes": 111230976, "rss_peak_bytes": 1646706688}
+{"index": 9, "concurrency": 8, "fast_pass": 4, "fast_rows": 4, "stage1": 0, "stage2": 0, "rows_pass": 8, "quiescent_rss_bytes": 108220416, "rss_peak_bytes": 1840205824}
+{
+  "receipt": "/root/w15-relay1352/c2-mixed1/fix-release/receipt.json",
+  "completed": true,
+  "error": null,
+  "summary": {
+    "by_concurrency": {
+      "8": {
+        "fast_rows": 32,
+        "fast_pass": 32,
+        "stage1_relay_overloaded": 0,
+        "stage2_delivery_overloaded": 0,
+        "other_fast_failures": 0,
+        "fast_turn_ms_median": 3871.9531213864684,
+        "slow_disconnected_rows": 32,
+        "slow_disconnected_pass": 32
+      },
+      "32": {
+        "fast_rows": 32,
+        "fast_pass": 32,
+        "stage1_relay_overloaded": 0,
+        "stage2_delivery_overloaded": 0,
+        "other_fast_failures": 0,
+        "fast_turn_ms_median": 7675.273596309125,
+        "slow_disconnected_rows": 32,
+        "slow_disconnected_pass": 32
+      }
+    },
+    "rss_peak_bytes": 4292141056,
+    "quiescent_rss_first": 76595200,
+    "quiescent_rss_last": 108220416,
+    "quiescent_rss_max": 111230976,
+    "all_sessions_quiesced": true
+  }
+}

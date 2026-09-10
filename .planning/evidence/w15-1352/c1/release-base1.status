@@ -1,0 +1,8 @@
+queue start utc=2026-09-10T15:19:11Z
+arm=rel-c8-16m-optional start utc=2026-09-10T15:19:11Z loadavg=27.66 29.68 29.07 bin_sha=9b2e24f204f0fa18 conc=8 cycles=16 durability=optional bytes=16777216
+arm=rel-c8-16m-optional exit=0 end utc=2026-09-10T15:19:19Z loadavg=27.53 29.62 29.05
+arm=rel-c32-16m-optional start utc=2026-09-10T15:19:19Z loadavg=27.53 29.62 29.05 bin_sha=9b2e24f204f0fa18 conc=32 cycles=32 durability=optional bytes=16777216
+arm=rel-c32-16m-optional exit=0 end utc=2026-09-10T15:19:33Z loadavg=33.04 30.74 29.43
+arm=rel-c1-16m-on start utc=2026-09-10T15:19:33Z loadavg=33.04 30.74 29.43 bin_sha=9b2e24f204f0fa18 conc=1 cycles=10 durability=on bytes=16777216
+arm=rel-c1-16m-on exit=0 end utc=2026-09-10T15:20:07Z loadavg=32.99 30.97 29.55
+queue state=done utc=2026-09-10T15:20:07Z

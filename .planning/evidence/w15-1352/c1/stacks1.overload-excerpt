@@ -1,0 +1,40 @@
+EVENT ns=15206572652597240 tid=1159873 probe=uprobe:/root/w15-leak2/bin/fix/wayland-core:_ZN9wcore_acp7bounded15Sender$LT$E$GT$8overload17h972145050330e7aaE
+
+	606eaeba6940 wcore_acp::bounded::Sender$LT$E$GT$::overload::h972145050330e7aa+0 (/root/w15-leak2/bin/fix/wayland-core)
+	7dc036c9cb84 0x7dc036c9cb84 ([unknown])
+--
+EVENT ns=15206572661564884 tid=1159877 probe=uprobe:/root/w15-leak2/bin/fix/wayland-core:_ZN9wcore_acp7bounded15Sender$LT$E$GT$8overload17h972145050330e7aaE
+
+	606eaeba6940 wcore_acp::bounded::Sender$LT$E$GT$::overload::h972145050330e7aa+0 (/root/w15-leak2/bin/fix/wayland-core)
+	7dc036c9cb84 0x7dc036c9cb84 ([unknown])
+--
+EVENT ns=15206572674890425 tid=1159855 probe=uprobe:/root/w15-leak2/bin/fix/wayland-core:_ZN9wcore_acp7bounded15Sender$LT$E$GT$8overload17h972145050330e7aaE
+
+	606eaeba6940 wcore_acp::bounded::Sender$LT$E$GT$::overload::h972145050330e7aa+0 (/root/w15-leak2/bin/fix/wayland-core)
+	7dc036c9cb84 0x7dc036c9cb84 ([unknown])
+--
+EVENT ns=15206572693590148 tid=1159862 probe=uprobe:/root/w15-leak2/bin/fix/wayland-core:_ZN9wcore_acp7bounded15Sender$LT$E$GT$8overload17h972145050330e7aaE
+
+	606eaeba6940 wcore_acp::bounded::Sender$LT$E$GT$::overload::h972145050330e7aa+0 (/root/w15-leak2/bin/fix/wayland-core)
+	7dc036c9cb84 0x7dc036c9cb84 ([unknown])
+--
+EVENT ns=15206572700604735 tid=1159882 probe=uprobe:/root/w15-leak2/bin/fix/wayland-core:_ZN9wcore_acp7bounded15Sender$LT$E$GT$8overload17h972145050330e7aaE
+
+	606eaeba6940 wcore_acp::bounded::Sender$LT$E$GT$::overload::h972145050330e7aa+0 (/root/w15-leak2/bin/fix/wayland-core)
+	7dc036c9cb84 0x7dc036c9cb84 ([unknown])
+--
+EVENT ns=15206572705298439 tid=1159874 probe=uprobe:/root/w15-leak2/bin/fix/wayland-core:_ZN9wcore_acp7bounded15Sender$LT$E$GT$8overload17h972145050330e7aaE
+
+	606eaeba6940 0x606eaeba6940 ([unknown])
+	7dc036c9cb84 0x7dc036c9cb84 ([unknown])
+--
+EVENT ns=15206572719861077 tid=1159876 probe=uprobe:/root/w15-leak2/bin/fix/wayland-core:_ZN9wcore_acp7bounded15Sender$LT$E$GT$8overload17h972145050330e7aaE
+
+	606eaeba6940 wcore_acp::bounded::Sender$LT$E$GT$::overload::h972145050330e7aa+0 (/root/w15-leak2/bin/fix/wayland-core)
+	7dc036c9cb84 0x7dc036c9cb84 ([unknown])
+--
+EVENT ns=15206572723560431 tid=1159881 probe=uprobe:/root/w15-leak2/bin/fix/wayland-core:_ZN9wcore_acp7bounded15Sender$LT$E$GT$8overload17h972145050330e7aaE
+
+	606eaeba6940 wcore_acp::bounded::Sender$LT$E$GT$::overload::h972145050330e7aa+0 (/root/w15-leak2/bin/fix/wayland-core)
+	7dc036c9cb84 0x7dc036c9cb84 ([unknown])
+--

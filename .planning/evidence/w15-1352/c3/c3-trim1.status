@@ -1,0 +1,16 @@
+queue start utc=2026-09-10T15:41:57Z
+arm=rel-base-b1 start utc=2026-09-10T15:41:57Z loadavg=28.37 32.37 31.50 extra=
+arm=rel-base-b1 exit=0 end utc=2026-09-10T15:42:11Z loadavg=27.91 32.08 31.41
+arm=rel-base-trim-b1 start utc=2026-09-10T15:42:11Z loadavg=27.91 32.08 31.41 extra=GLIBC_TUNABLES=glibc.malloc.trim_threshold=268435456
+arm=rel-base-trim-b1 exit=0 end utc=2026-09-10T15:42:24Z loadavg=27.86 31.93 31.37
+arm=rel-3530-b1 start utc=2026-09-10T15:42:24Z loadavg=27.86 31.93 31.37 extra=
+arm=rel-3530-b1 exit=0 end utc=2026-09-10T15:42:38Z loadavg=27.65 31.68 31.30
+arm=rel-base-b2 start utc=2026-09-10T15:42:38Z loadavg=27.65 31.68 31.30 extra=
+arm=rel-base-b2 exit=0 end utc=2026-09-10T15:42:52Z loadavg=27.76 31.50 31.25
+arm=rel-base-trim-b2 start utc=2026-09-10T15:42:52Z loadavg=27.76 31.50 31.25 extra=GLIBC_TUNABLES=glibc.malloc.trim_threshold=268435456
+arm=rel-base-trim-b2 exit=0 end utc=2026-09-10T15:43:04Z loadavg=29.64 31.77 31.33
+arm=rel-3530-b2 start utc=2026-09-10T15:43:04Z loadavg=29.64 31.77 31.33 extra=
+arm=rel-3530-b2 exit=0 end utc=2026-09-10T15:43:17Z loadavg=29.14 31.55 31.27
+strace start utc=2026-09-10T15:43:17Z
+strace exit=0 utc=2026-09-10T15:43:27Z
+queue state=done utc=2026-09-10T15:43:27Z
