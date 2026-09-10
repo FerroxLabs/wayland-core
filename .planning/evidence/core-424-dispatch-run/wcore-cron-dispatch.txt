@@ -1,0 +1,55 @@
+core#424 c2 -- the fix produces real data, read from the ARTIFACT
+=================================================================
+
+Run          FerroxLabs/wayland-core actions run 34438249721
+event        workflow_dispatch   (the FIRST in this workflow's history; the
+             94 runs before it are all event=schedule)
+headSha      fdf4b1e1c9b39efe260c94e29d34c452d637825f
+created      2026-09-10T04:42:57Z
+leg          mutants / wcore-cron -- conclusion success
+artifact     mutants-log-wcore-cron, id 10138518656, 2013514 bytes
+             sha256(zip) e3df58c2b07e88b0cd38d1606cbfcd2c76c09be3de6586253cf7c28e7229d567
+file read    .blackboard/E2E-MUTATION-BASELINE/wcore-cron.log (line 134)
+             sha256 3730c32cd5a51ad37d9c0027b5152293cc511a69c5498cdfe965279e1922283b
+
+THE SUMMARY LINE, verbatim from the artifact:
+
+339 mutants tested in 28m: 64 missed, 196 caught, 77 unviable, 2 timeouts
+
+Exactly ONE line in that log matches `^[0-9]+ mutants tested in ` (grep -c = 1),
+so the match is not an artefact of a loose pattern.
+
+Corroborating files in the same artifact, counted not quoted:
+  mutants.out/caught.txt    196 lines
+  mutants.out/missed.txt     64 lines
+  mutants.out/timeout.txt      2 lines
+196 + 64 + 2 = 262 viable mutants tested; 339 - 262 = 77 unviable. The summary
+line and the per-outcome files agree, so neither is a stale copy of the other.
+
+CATCH RATE: 196 / 262 viable = 74.8%. Against all 339 generated it is 57.8%.
+The first figure is the one that means anything -- an unviable mutant is one
+that does not compile, so no test could have caught it.
+
+The baseline the leg measured for itself, from
+.blackboard/E2E-MUTATION-BASELINE/wcore-cron-baseline.json in the same artifact:
+
+  {"crate": "wcore-cron", "measured": true, "build_seconds": 116,
+   "test_seconds": 4, "censored_by_timeout_flag": false,
+   "timeout_multiplier": 5, "minimum_test_timeout": 90,
+   "raw": "ok       Unmutated baseline in 116s build + 4s test",
+   "run_id": "34438249721", "runner_os": "macOS"}
+
+WHAT THIS DOES NOT ESTABLISH, stated rather than glossed:
+
+1. It is ONE leg. wcore-agent, wcore-config, wcore-providers and wcore-cli were
+   still in_progress when this file was written. core#451 c1 is about all five
+   and is NOT closed by this.
+2. The 64-row missed set is BYTE-IDENTICAL to run 33844721279's missed set
+   (diff of the two sorted missed.txt files is empty). That is EXPECTED and is
+   not a finding about test quality: crates/wcore-cron/tests/store_hardening.rs
+   and trigger_arithmetic.rs -- the 14 tests written for core#449 -- are absent
+   from fdf4b1e1c (`git ls-tree -r fdf4b1e1c -- crates/wcore-cron/tests/` lists
+   five files, neither of them). This run graded a tree that does not contain
+   them, so it says nothing in either direction about whether they kill.
+   core#449 c1 therefore still owes a mutation run on a tree that HAS them.
+3. A produced baseline is not coverage. 64 mutants survive wcore-cron's suite.
