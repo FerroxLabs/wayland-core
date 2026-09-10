@@ -115,14 +115,17 @@ impl SessionLifecycle {
                     engine.close_session(&session_id).await?;
                 }
                 lifecycle.await_recording().await;
-                let mut sessions = server.sessions.write().await;
-                let mut events = server.events.write().await;
-                sessions.remove(&session_id);
-                if let Some(log) = events.remove(&session_id) {
-                    // Recording has finished, so this is the log's final size;
-                    // its history leaves the cross-session total with it.
-                    let retained = super::lock_log(&log).retained_bytes();
-                    super::account_retained(&server.retained_total, retained, 0);
+                let removed = {
+                    let mut sessions = server.sessions.write().await;
+                    let mut events = server.events.write().await;
+                    sessions.remove(&session_id);
+                    events.remove(&session_id)
+                };
+                if let Some(log) = removed {
+                    // Recording has finished. Retire the log outside the map
+                    // lock, emptying it under its own lock, so an evictor that
+                    // already chose it cannot give its bytes back a second time.
+                    super::forget_log(&log, &server.retained);
                 }
                 Ok::<(), AcpError>(())
             })

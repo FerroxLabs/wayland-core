@@ -120,16 +120,15 @@ pub struct AcpServer {
     /// what was successfully delivered would retain everything except the
     /// events that matter.
     ///
-    /// Each log has its OWN lock (#1352). The map lock is taken only to add or
-    /// find a log, never per event, so one session's recording, delivery or
-    /// resume cannot make another session's recorder wait.
+    /// Each log has its OWN lock (#1352). A running turn's recorder and
+    /// delivery task look their log up once, when the turn starts, and never
+    /// touch this map again; per event each takes only its own log's lock.
+    /// Above [`RETAINED_HISTORY_BYTES`] a recorder also reads this map once per
+    /// eviction and locks one victim log; [`evict_for_append`] states what that
+    /// can wait on.
     events: Arc<RwLock<HashMap<String, SharedLog>>>,
-    /// Encoded bytes retained across every session log, kept exact under each
-    /// log's lock and enforced against [`RETAINED_HISTORY_BYTES`].
-    retained_total: Arc<std::sync::atomic::AtomicUsize>,
-    /// Serializes cross-session eviction so two recorders over the cap never
-    /// evict more than the cap requires.
-    eviction: Arc<tokio::sync::Mutex<()>>,
+    /// Encoded bytes retained across every session log. See [`RetainedHistory`].
+    retained: Arc<RetainedHistory>,
     /// Retained events per session stream. See [`Self::with_event_retention`].
     event_retention: usize,
     /// Bounded ledger backing the `Idempotency-Key` header on the mutating
@@ -211,8 +210,7 @@ impl AcpServer {
             instance_id: uuid::Uuid::new_v4().to_string(),
             sessions: Arc::new(RwLock::new(HashMap::new())),
             events: Arc::new(RwLock::new(HashMap::new())),
-            retained_total: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            eviction: Arc::new(tokio::sync::Mutex::new(())),
+            retained: Arc::new(RetainedHistory::default()),
             event_retention: crate::cursor::DEFAULT_RETENTION,
             commands: Arc::new(RwLock::new(CommandLedger::new())),
             role_policy: None,
@@ -527,8 +525,7 @@ impl AcpServer {
             None => (None, None),
         };
         let events = Arc::clone(&self.events);
-        let retained_total = Arc::clone(&self.retained_total);
-        let eviction = Arc::clone(&self.eviction);
+        let retained = Arc::clone(&self.retained);
         let session_id = session_id.to_string();
         let recording = lifecycle.stream();
         tokio::spawn(async move {
@@ -565,19 +562,16 @@ impl AcpServer {
                     (ev, encoded)
                 };
                 let cursor = log.as_ref().map(|log| {
-                    let mut log = lock_log(log);
-                    let before = log.retained_bytes();
-                    let position = log.append_encoded(ev, size);
-                    account_retained(&retained_total, before, log.retained_bytes());
-                    Cursor {
-                        stream_id: log.stream_id().to_string(),
-                        position: position - 1,
-                    }
+                    log.mutate(&retained, |log| {
+                        let position = log.append_encoded(ev, size);
+                        Cursor {
+                            stream_id: log.stream_id().to_string(),
+                            position: position - 1,
+                        }
+                    })
                 });
-                if retained_total.load(std::sync::atomic::Ordering::Acquire)
-                    > RETAINED_HISTORY_BYTES
-                {
-                    evict_to_cap(&events, &retained_total, &eviction).await;
+                if retained.over_cap() {
+                    evict_for_append(&events, &retained, size).await;
                 }
                 // Only tiny bounded positions cross this handoff. Never wait
                 // for live delivery while draining the real protocol relay.
@@ -640,62 +634,154 @@ impl AcpServer {
     // ── Command idempotency on the request path ───────────────────────────
 }
 
-/// One session's event log behind its own lock. See [`AcpServer::events`].
-type SharedLog = Arc<std::sync::Mutex<EventLog<MessageEvent>>>;
-
-/// Retained replay history across every session before the largest log is
-/// trimmed. Unchanged by #1352, which only moved where it is enforced.
-const RETAINED_HISTORY_BYTES: usize = 64 * 1024 * 1024;
-
-/// No caller awaits while holding a log lock. Its critical sections are O(1)
-/// apart from cloning this session's own events (one per delivery, a resume
-/// tail in `events_since`), so the longest can delay only this session.
-fn lock_log(log: &SharedLog) -> std::sync::MutexGuard<'_, EventLog<MessageEvent>> {
-    log.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+/// One session's event log behind its own lock, with its retained bytes
+/// mirrored in an atomic so eviction can compare logs without locking any of
+/// them. See [`AcpServer::events`].
+struct SessionLog {
+    log: std::sync::Mutex<EventLog<MessageEvent>>,
+    retained: std::sync::atomic::AtomicUsize,
 }
 
-/// Apply one log's retained-byte change, observed under that log's lock, to
-/// the cross-session total.
-fn account_retained(total: &std::sync::atomic::AtomicUsize, before: usize, after: usize) {
-    use std::sync::atomic::Ordering;
-    if after >= before {
-        total.fetch_add(after - before, Ordering::AcqRel);
-    } else {
-        total.fetch_sub(before - after, Ordering::AcqRel);
+type SharedLog = Arc<SessionLog>;
+
+impl SessionLog {
+    fn new(log: EventLog<MessageEvent>) -> Self {
+        Self {
+            retained: std::sync::atomic::AtomicUsize::new(log.retained_bytes()),
+            log: std::sync::Mutex::new(log),
+        }
+    }
+
+    /// The ONLY way a log's retained bytes change. The change and its byte
+    /// delta -- to this log's mirror and to the cross-session total -- happen
+    /// under this log's lock, so a log can only ever give back bytes it added,
+    /// and once no change is in flight the total equals what the logs retain.
+    fn mutate<T>(
+        &self,
+        history: &RetainedHistory,
+        change: impl FnOnce(&mut EventLog<MessageEvent>) -> T,
+    ) -> T {
+        let mut log = self
+            .log
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let before = log.retained_bytes();
+        let out = change(&mut log);
+        let after = log.retained_bytes();
+        self.retained
+            .store(after, std::sync::atomic::Ordering::Release);
+        history.account(before, after);
+        out
     }
 }
 
-/// Trim retained history to [`RETAINED_HISTORY_BYTES`], always from the
-/// largest retained log. Positions are session-local, so comparing them would
-/// starve newly started streams; reclaiming from the largest history shares
-/// the byte budget. Only evictors wait on `eviction`, and each log is locked
-/// only for an O(1) read or pop, so a session under the cap never waits here.
-async fn evict_to_cap(
+/// Retained replay history across every session before the largest log is
+/// trimmed. The value is unchanged by #1352.
+const RETAINED_HISTORY_BYTES: usize = 64 * 1024 * 1024;
+
+/// Encoded bytes retained across every session log.
+#[derive(Default)]
+struct RetainedHistory {
+    total: std::sync::atomic::AtomicUsize,
+}
+
+impl RetainedHistory {
+    fn over_cap(&self) -> bool {
+        self.total.load(std::sync::atomic::Ordering::Acquire) > RETAINED_HISTORY_BYTES
+    }
+
+    /// Apply one log's byte change, observed under that log's lock.
+    fn account(&self, before: usize, after: usize) {
+        use std::sync::atomic::Ordering;
+        if after >= before {
+            self.total.fetch_add(after - before, Ordering::AcqRel);
+            return;
+        }
+        let freed = before - after;
+        let subtracted = self
+            .total
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |total| {
+                total.checked_sub(freed)
+            });
+        if subtracted.is_err() {
+            // Unreachable while every change goes through `SessionLog::mutate`
+            // and a retired log is emptied through it (see `forget_log`).
+            // Reaching here means the total drifted below the logs it counts:
+            // fail a debug build outright, and report it in release rather
+            // than wrap to a value that would evict every log on every append.
+            if cfg!(debug_assertions) {
+                panic!("retained history total would underflow by {freed} bytes");
+            }
+            tracing::error!(
+                freed,
+                "retained history accounting drifted below the logs it counts; clamped at zero"
+            );
+            self.total.store(0, Ordering::Release);
+        }
+    }
+}
+
+/// For READING a log. No caller awaits while holding it, and nothing is
+/// encoded under it. Its critical sections are O(1) apart from cloning this
+/// session's own events: one per delivered event, and a whole retained tail
+/// (up to 8 MiB) in `events_since`. Those can delay this session and, above
+/// the cap, a recorder evicting from this same log. Changes go through
+/// [`SessionLog::mutate`] instead.
+fn lock_log(log: &SharedLog) -> std::sync::MutexGuard<'_, EventLog<MessageEvent>> {
+    log.log
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Retire a log that has just left the map: empty it under its own lock and
+/// give its bytes back. An evictor that chose this log before it left then
+/// pops nothing and gives nothing back, so its bytes cannot be charged twice.
+fn forget_log(log: &SessionLog, history: &RetainedHistory) {
+    log.mutate(history, |log| while log.evict_oldest() {});
+}
+
+/// Pay for one append that left retained history over
+/// [`RETAINED_HISTORY_BYTES`]: trim the largest log, one event at a time,
+/// until the total is back at or under the cap or this call has freed as many
+/// bytes as its own append added. Positions are session-local, so comparing
+/// them would starve newly started streams; reclaiming from the largest
+/// history shares the byte budget.
+///
+/// Bounds, stated rather than implied. No lock serializes evictors: each finds
+/// the largest log from the per-log atomics without locking any log, then
+/// locks only that victim for one O(1) pop, so a recorder never waits for
+/// another recorder's eviction work and never frees more than it added. The
+/// total can therefore sit above the cap by the appends still in flight -- at
+/// most one event (at most 1 MiB) per recording session -- and below it by at
+/// most one event per concurrent evictor; once appends stop it is at or under
+/// the cap. What an eviction can wait on: one read of the map per call (a
+/// create or close holding it for write delays that by one insert or remove),
+/// and the victim's lock (a resume cloning that log's tail delays the pop).
+async fn evict_for_append(
     events: &RwLock<HashMap<String, SharedLog>>,
-    total: &std::sync::atomic::AtomicUsize,
-    eviction: &tokio::sync::Mutex<()>,
+    history: &RetainedHistory,
+    appended: usize,
 ) {
     use std::sync::atomic::Ordering;
-    let _serialized = eviction.lock().await;
     let logs: Vec<SharedLog> = events.read().await.values().cloned().collect();
-    while total.load(Ordering::Acquire) > RETAINED_HISTORY_BYTES {
+    let mut freed = 0usize;
+    while freed < appended.max(1) && history.over_cap() {
         let victim = logs
             .iter()
-            .filter_map(|log| {
-                let guard = lock_log(log);
-                (guard.retained_len() > 0).then(|| (guard.retained_bytes(), log))
-            })
+            .map(|log| (log.retained.load(Ordering::Acquire), log))
+            .filter(|(bytes, _)| *bytes > 0)
             .max_by_key(|(bytes, _)| *bytes)
             .map(|(_, log)| log);
         let Some(victim) = victim else {
             break;
         };
         #[cfg(test)]
-        eviction_tests::pause_at_eviction_gate(total).await;
-        let mut victim = lock_log(victim);
-        let before = victim.retained_bytes();
-        victim.evict_oldest();
-        account_retained(total, before, victim.retained_bytes());
+        eviction_tests::pause_at_eviction_gate(&history.total).await;
+        freed += victim.mutate(history, |log| {
+            let before = log.retained_bytes();
+            log.evict_oldest();
+            before - log.retained_bytes()
+        });
     }
 }
 
@@ -778,7 +864,7 @@ impl HttpHandler for AcpServer {
         // message could not tell "no events yet" from "no such session".
         self.events.write().await.insert(
             id.clone(),
-            Arc::new(std::sync::Mutex::new(EventLog::with_capacity(
+            Arc::new(SessionLog::new(EventLog::with_capacity(
                 self.stream_id_for(&id),
                 self.event_retention,
             ))),
@@ -801,8 +887,7 @@ impl HttpHandler for AcpServer {
             if let Err(e) = opened {
                 self.sessions.write().await.remove(&id);
                 if let Some(log) = self.events.write().await.remove(&id) {
-                    let retained = lock_log(&log).retained_bytes();
-                    account_retained(&self.retained_total, retained, 0);
+                    forget_log(&log, &self.retained);
                 }
                 return Err(e);
             }

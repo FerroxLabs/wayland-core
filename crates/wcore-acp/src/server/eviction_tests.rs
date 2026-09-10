@@ -39,7 +39,7 @@ pub(super) async fn pause_at_eviction_gate(total: &AtomicUsize) {
 
 impl AcpServer {
     fn retained_total_key(&self) -> usize {
-        Arc::as_ptr(&self.retained_total) as usize
+        &self.retained.total as *const AtomicUsize as usize
     }
 
     /// Pause this server's next eviction once it has chosen a victim. The first
@@ -59,7 +59,7 @@ impl AcpServer {
     async fn retained_accounting(&self) -> (usize, usize) {
         let logs: Vec<SharedLog> = self.events.read().await.values().cloned().collect();
         let sum = logs.iter().map(|log| lock_log(log).retained_bytes()).sum();
-        (self.retained_total.load(Ordering::Acquire), sum)
+        (self.retained.total.load(Ordering::Acquire), sum)
     }
 }
 
