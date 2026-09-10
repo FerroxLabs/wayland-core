@@ -97,6 +97,14 @@ struct CoreProcess {
     stdout: Lines<BufReader<ChildStdout>>,
     stderr: Arc<Mutex<Vec<u8>>>,
     stderr_task: JoinHandle<()>,
+    /// Every protocol frame this process has decoded, in arrival order.
+    ///
+    /// `next_type` returns one frame and drops the rest on the floor, which is
+    /// right for a wait but wrong for an assertion about something that arrives
+    /// BESIDE what you are waiting for -- a per-turn `info` notice, say. Keeping
+    /// them lets a test ask "did this run also say X?" without a second stream
+    /// reader racing the first for the same pipe.
+    seen: Vec<Value>,
 }
 
 impl CoreProcess {
@@ -196,6 +204,7 @@ impl CoreProcess {
             stdout,
             stderr,
             stderr_task,
+            seen: Vec::new(),
         };
         let ready = process.next_type("ready").await;
         assert_eq!(
@@ -248,6 +257,7 @@ impl CoreProcess {
             let Ok(event) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
+            self.seen.push(event.clone());
             if event.get("type").and_then(Value::as_str) == Some(expected) {
                 return event;
             }
@@ -263,6 +273,21 @@ impl CoreProcess {
                 "Core refused the command while waiting for {expected}: {event}"
             );
         }
+    }
+
+    /// Did any frame already decoded carry `needle` in its `message`?
+    ///
+    /// Past tense on purpose: this asks about frames that have ALREADY arrived,
+    /// so it can never block and can never invent a wait that changes the run
+    /// it is measuring.
+    #[cfg(target_os = "linux")]
+    fn seen_message_containing(&self, needle: &str) -> Option<&Value> {
+        self.seen.iter().find(|event| {
+            event
+                .get("message")
+                .and_then(Value::as_str)
+                .is_some_and(|message| message.contains(needle))
+        })
     }
 
     /// Wait for an `info` frame whose message contains `needle`.
@@ -1371,6 +1396,7 @@ async fn spawn_keyless(mut command: Command) -> (CoreProcess, Value) {
         stdout,
         stderr,
         stderr_task,
+        seen: Vec::new(),
     };
     let ready = process.next_type("ready").await;
     (process, ready)
@@ -3225,6 +3251,11 @@ async fn w1290_the_credential_store_alone_decides_whether_a_provider_checkpoint_
     send_message(&mut control, "f14-1290-control", prompt).await;
     wait_for_requests(&control_fixture, 1).await;
     assert_eq!(control.next_type("text_delta").await["text"], partial);
+    // Did THIS turn degrade? Read from the frames already decoded, so the
+    // question cannot change the run it asks about.
+    let control_degrade = control
+        .seen_message_containing("crash replay protection is OFF")
+        .map(|frame| frame["message"].as_str().unwrap_or_default().to_string());
     let _control_diagnostics = control.sigkill().await;
     let control_evidence = preserve_crash_evidence(&control_env);
     let (control_count, control_census) =
@@ -3257,6 +3288,9 @@ async fn w1290_the_credential_store_alone_decides_whether_a_provider_checkpoint_
     assert_eq!(notice["msg_id"], "f14-1290-keyless");
     wait_for_requests(&keyless_fixture, 1).await;
     assert_eq!(keyless.next_type("text_delta").await["text"], partial);
+    let keyless_degrade = keyless
+        .seen_message_containing("crash replay protection is OFF")
+        .map(|frame| frame["message"].as_str().unwrap_or_default().to_string());
     let _keyless_diagnostics = keyless.sigkill().await;
     let keyless_evidence = preserve_crash_evidence(&keyless_env);
     let (keyless_count, keyless_census) =
@@ -3267,7 +3301,9 @@ async fn w1290_the_credential_store_alone_decides_whether_a_provider_checkpoint_
     assert_eq!(
         control_count, 1,
         "the control arm must write exactly one provider-dispatch checkpoint, or arm B's \
-         zero grades nothing.\nCONTROL {control_census}\nKEYLESS {keyless_census}"
+         zero grades nothing.\nCONTROL degrade notice: {control_degrade:?}\nCONTROL \
+         {control_census}\nKEYLESS degrade notice: {keyless_degrade:?}\nKEYLESS \
+         {keyless_census}"
     );
     assert_eq!(
         keyless_count, 0,
