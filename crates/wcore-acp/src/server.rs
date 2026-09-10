@@ -36,6 +36,8 @@ use crate::roster::AgentRoster;
 use crate::transport::HttpHandler;
 
 mod commands;
+#[cfg(test)]
+mod eviction_tests;
 mod lifecycle;
 use lifecycle::{SessionLifecycle, wait_for_close};
 
@@ -688,6 +690,8 @@ async fn evict_to_cap(
         let Some(victim) = victim else {
             break;
         };
+        #[cfg(test)]
+        eviction_tests::pause_at_eviction_gate(total).await;
         let mut victim = lock_log(victim);
         let before = victim.retained_bytes();
         victim.evict_oldest();

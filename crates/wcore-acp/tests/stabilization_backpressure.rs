@@ -36,6 +36,11 @@ impl TurnEngine for Burst {
         Ok(Box::pin(stream::iter(events)))
     }
 }
+/// Covers the REPLAY-GAP detach only: this 16 MiB turn overruns the 8 MiB
+/// per-log cap, so delivery finds its next event already evicted and detaches.
+/// It never reaches the delivery wait budget and would pass without one; the
+/// budget is covered by
+/// `a_reader_that_stops_reading_is_detached_by_its_wait_budget_beside_a_fast_one`.
 #[tokio::test]
 async fn slow_reader_has_explicit_overload_while_replay_retains_bounded_tail() {
     let server = AcpServer::new().with_turn_engine(Arc::new(Burst {
@@ -300,12 +305,18 @@ async fn aggregate_replay_pressure_preserves_a_late_stream_first_event() {
 
 /// wayland#1352 c2 guard: the repair must not become "never cancel". While a
 /// keeping-up reader in one session drains a full 16 MiB turn without any
-/// error, a reader in ANOTHER session that stops reading is still detached
-/// with its explicit overload terminal, and its record stays resumable.
-#[tokio::test]
-async fn a_stalled_reader_is_still_detached_while_another_sessions_reader_keeps_up() {
+/// error, a reader in ANOTHER session that stops reading is still detached by
+/// its one-second delivery wait budget.
+///
+/// Reworked after review: the first version stalled a 16 MiB turn, which
+/// overran the 8 MiB per-log cap, so the reader was detached by a replay gap
+/// and the test passed with the budget removed. Here the stalled turn is
+/// 4 MiB, its whole history is still retained when it is detached (so no
+/// replay gap exists), and time is paused, so only the budget can detach it.
+#[tokio::test(start_paused = true)]
+async fn a_reader_that_stops_reading_is_detached_by_its_wait_budget_beside_a_fast_one() {
     let stalled_server = AcpServer::new().with_turn_engine(Arc::new(Burst {
-        chunks: 64,
+        chunks: 16,
         chunk_bytes: 256 * 1024,
     }));
     // Same session and log ownership, different fixture output.
@@ -331,6 +342,7 @@ async fn a_stalled_reader_is_still_detached_while_another_sessions_reader_keeps_
         .unwrap()
         .session_id;
 
+    let stalled_genesis = stalled_server.event_tip(&stalled).await.unwrap();
     let stalled_response = stalled_server
         .send_message(MessageSendRequest {
             session_id: stalled.clone(),
@@ -372,33 +384,41 @@ async fn a_stalled_reader_is_still_detached_while_another_sessions_reader_keeps_
         Some(MessageEvent::Done { .. })
     ));
 
-    // Only now does the stalled reader look at its stream.
     tokio::time::timeout(Duration::from_secs(10), async {
-        while stalled_server.event_tip(&stalled).await.unwrap().position < 65 {
+        while stalled_server.event_tip(&stalled).await.unwrap().position < 17 {
             tokio::task::yield_now().await;
         }
     })
     .await
     .expect("the stalled session's recording completes without its reader");
+    // Still without reading, let well over one second of (paused) time pass.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let replay = stalled_server
+        .events_since(&stalled, &stalled_genesis)
+        .await
+        .expect("the whole stalled turn is still retained, so no replay gap exists");
+    assert_eq!(replay.events.len(), 17);
+
+    // Only now does the stalled reader look at its stream.
     let stalled_frames: Vec<_> = stalled_response.collect().await;
+    let stalled_text: usize = stalled_frames
+        .iter()
+        .map(|frame| match frame {
+            MessageEvent::TextDelta { text } => text.len(),
+            _ => 0,
+        })
+        .sum();
     assert!(
         stalled_frames
             .iter()
             .any(|frame| matches!(frame, MessageEvent::Error { .. })),
-        "a reader that did not keep up is still detached explicitly"
+        "a reader that stopped reading is detached by its wait budget: {} frames",
+        stalled_frames.len()
     );
-    let tip = stalled_server.event_tip(&stalled).await.unwrap();
-    let tail = stalled_server
-        .events_since(
-            &stalled,
-            &Cursor {
-                stream_id: tip.stream_id,
-                position: 64,
-            },
-        )
-        .await
-        .unwrap();
-    assert!(matches!(tail.events[0].event, MessageEvent::Done { .. }));
+    assert!(
+        stalled_text < 16 * 256 * 1024,
+        "the detach must drop undelivered frames, not deliver them late: {stalled_text}"
+    );
     stalled_server.delete_session(stalled).await.unwrap();
     fast_server.delete_session(fast).await.unwrap();
 }
