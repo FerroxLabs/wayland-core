@@ -1,0 +1,3 @@
+error: cannot update the lock file /root/waylandcore-stabilization-20260905/slots/parallel-1/source/Cargo.lock because --locked was passed to prevent this
+help: to generate the lock file without accessing the network, remove the --locked flag and use --offline instead.
+error: command `/root/.rustup/toolchains/1.95.0-x86_64-unknown-linux-gnu/bin/cargo metadata '--format-version=1' --all-features --filter-platform x86_64-unknown-linux-gnu --locked` failed with exit status: 101

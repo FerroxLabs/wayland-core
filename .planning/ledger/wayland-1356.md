@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "ACP serve detaches a keeping-up reader at stage 2 when large events are followed by small ones"
 status: open
-last_verified_commit: 7222f23be
+last_verified_commit: 581178a4b
 criteria:
   - id: c1
     text: "The mechanism is NAMED with the instrument that named it (which limit fired, at what reader position), with a deterministic red test that does not depend on load."
@@ -17,7 +17,7 @@ criteria:
     state: not-met
     evidence: ""
     owner: core
-    note: "NOT MET, filed 2026-09-10."
+    note: "NOT MET, filed 2026-09-10. Repair on w15/stage2-1356, in process only; the churn arm is HELD until the wayland#1349 soak lane reports done, so there are no live numbers for this row yet. A LIMIT WAS REMOVED, not raised: 47e4a0d7a dropped the per-turn positions handoff that refused the 259th position against LIVE_EVENTS 256 (the 256-position run-ahead cap). A reader's lag is now bounded only by the session log's replay window (DEFAULT_RETENTION 1,024 events, 8 MiB per log, under the 64 MiB retained-history cap); a reader whose next event of its own turn is no longer retained is detached, as is one that spends its one-second wait budget. Memory stays bounded: no per-event queue replaces the cap, only a watch count plus a (turn, seq) tag per retained entry. 47e4a0d7a leaked events across overlapping turns on one session (red: bccdbab16, crates/wcore-acp/tests/stage2_turn_scoping.rs, and the turn_id check in stabilization_acp_lifecycle assert_one_terminal); fixed by 4ab69b043, which delivers only its own turn's tagged entries. Lagging-reader guard: a_reader_that_falls_out_of_the_replay_window_is_detached_and_cannot_resume, isolated budget, detached through the replay gap, not the budget."
   - id: c3
     text: "If the limit is shown to be correct behaviour (the reader was not keeping up by the protocol's own definition), that is shown with numbers AND the host-facing resume path is demonstrated working for exactly this case, so the detach costs the user nothing."
     state: not-met

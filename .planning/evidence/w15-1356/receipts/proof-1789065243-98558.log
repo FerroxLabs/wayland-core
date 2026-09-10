@@ -1,0 +1,35 @@
+   Compiling wcore-cli v0.13.14 (/root/waylandcore-stabilization-20260905/slots/parallel-1/source/crates/wcore-cli)
+   Compiling wcore-acp v0.13.14 (/root/waylandcore-stabilization-20260905/slots/parallel-1/source/crates/wcore-acp)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 20.13s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+────────────
+ Nextest run ID 39c32221-a250-49d6-81df-6abfb1dc8bcc with nextest profile: default
+    Starting 3 tests across 1 binary
+        FAIL [   0.125s] (1/3) wcore-cli::stabilization_acp_lifecycle delete_cancels_a_queued_turn_before_it_reaches_the_provider
+  stdout ───
+
+    running 1 test
+    test delete_cancels_a_queued_turn_before_it_reaches_the_provider ... FAILED
+
+    failures:
+
+    failures:
+        delete_cancels_a_queued_turn_before_it_reaches_the_provider
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.11s
+
+  stderr ───
+
+    thread 'delete_cancels_a_queued_turn_before_it_reaches_the_provider' (1803122) panicked at crates/wcore-cli/tests/stabilization_acp_lifecycle.rs:261:5:
+    assertion `left != right` failed: each stream must end at its own turn's terminal
+      left: "5093fd33-8db5-4213-adb3-2047f435c301"
+     right: "5093fd33-8db5-4213-adb3-2047f435c301"
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        PASS [   0.126s] (2/3) wcore-cli::stabilization_acp_lifecycle delete_acknowledgement_waits_for_admitted_provider_cancellation
+        PASS [   0.127s] (3/3) wcore-cli::stabilization_acp_lifecycle open_session_control_completes_the_same_held_provider
+────────────
+     Summary [   0.128s] 3 tests run: 2 passed, 1 failed, 0 skipped
+        FAIL [   0.125s] (1/3) wcore-cli::stabilization_acp_lifecycle delete_cancels_a_queued_turn_before_it_reaches_the_provider
+error: test run failed

@@ -1,0 +1,161 @@
+   Compiling wcore-cli v0.13.14 (/root/waylandcore-stabilization-20260905/slots/parallel-1/source/crates/wcore-cli)
+   Compiling wcore-acp v0.13.14 (/root/waylandcore-stabilization-20260905/slots/parallel-1/source/crates/wcore-acp)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 19.83s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+────────────
+ Nextest run ID c506ffc2-a941-401a-ab9c-fa54021085ce with nextest profile: default
+    Starting 151 tests across 8 binaries (2 tests skipped)
+        PASS [   0.006s] (  1/151) wcore-cli::acp_gate_d012 support::pty::pty_diagnostics_tests::c_a_stalled_child_is_named_as_a_silent_terminal
+        PASS [   0.006s] (  2/151) wcore-cli::acp_gate_d012 support::pty::pty_diagnostics_tests::e_a_thread_that_got_its_polls_is_named_scheduled
+        PASS [   0.006s] (  3/151) wcore-cli::acp_gate_d012 support::pty::pty_diagnostics_tests::b_recently_arrived_bytes_extend_the_wait
+        PASS [   0.013s] (  4/151) wcore-cli::acp_engine_turn support::proving_ground::record::tests::redact_leaves_normal_text_alone
+        PASS [   0.013s] (  5/151) wcore-cli::acp_engine_turn support::pty::pty_diagnostics_tests::a_control_a_silent_terminal_does_not_extend
+        PASS [   0.014s] (  6/151) wcore-cli::acp_engine_turn support::proving_ground::record::tests::redact_multiple_keys_in_one_string
+        PASS [   0.014s] (  7/151) wcore-cli::acp_engine_turn support::proving_ground::record::tests::redact_xai_key
+        PASS [   0.014s] (  8/151) wcore-cli::acp_engine_turn support::pty::pty_diagnostics_tests::a_pending_input_extends_the_wait
+        PASS [   0.014s] (  9/151) wcore-cli::acp_engine_turn support::mock_llm::self_tests::text_fixture_is_parser_conformant
+        PASS [   0.014s] ( 10/151) wcore-cli::acp_engine_turn support::proving_ground::record::tests::redact_openai_key
+        PASS [   0.014s] ( 11/151) wcore-cli::acp_engine_turn support::mock_llm::self_tests::truncated_stream_is_detected
+        PASS [   0.018s] ( 12/151) wcore-cli::acp_gate_d012 support::proving_ground::record::tests::redact_xai_key
+        PASS [   0.018s] ( 13/151) wcore-cli::acp_engine_turn support::mock_llm::self_tests::tool_use_fixture_is_parser_conformant
+        PASS [   0.018s] ( 14/151) wcore-cli::acp_gate_d012 support::pty::pty_diagnostics_tests::b_control_unknown_pending_is_not_evidence
+        PASS [   0.018s] ( 15/151) wcore-cli::acp_gate_d012 support::pty::pty_diagnostics_tests::c_control_a_painting_child_is_named_as_a_live_terminal
+        PASS [   0.019s] ( 16/151) wcore-cli::acp_gate_d012 support::proving_ground::record::tests::redact_openai_key
+        PASS [   0.019s] ( 17/151) wcore-cli::acp_gate_d012 support::pty::pty_diagnostics_tests::d_unread_bytes_are_named_as_a_stale_screen
+        PASS [   0.019s] ( 18/151) wcore-cli::acp_gate_d012 support::pty::pty_diagnostics_tests::b_control_the_extension_is_capped
+        PASS [   0.020s] ( 19/151) wcore-cli::acp_gate_d012 support::pty::pty_diagnostics_tests::a_control_a_silent_terminal_does_not_extend
+        PASS [   0.021s] ( 20/151) wcore-cli::acp_engine_turn support::mock_llm::self_tests::every_builder_body_is_parser_conformant
+        PASS [   0.007s] ( 21/151) wcore-cli::headless_acp_boot support::mock_llm::self_tests::every_builder_body_is_parser_conformant
+        PASS [   0.027s] ( 22/151) wcore-cli::acp_engine_turn support::pty::pty_diagnostics_tests::b_recently_arrived_bytes_extend_the_wait
+        PASS [   0.007s] ( 23/151) wcore-cli::headless_acp_boot support::mock_llm::self_tests::text_fixture_is_parser_conformant
+        PASS [   0.006s] ( 24/151) wcore-cli::headless_acp_boot support::mock_llm::self_tests::tool_use_fixture_is_parser_conformant
+        PASS [   0.015s] ( 25/151) wcore-cli::acp_mcp_tool_selection support::proving_ground::record::tests::redact_multiple_keys_in_one_string
+        PASS [   0.028s] ( 26/151) wcore-cli::acp_engine_turn support::pty::pty_diagnostics_tests::e_control_a_thread_denied_its_polls_is_named_starved
+        PASS [   0.015s] ( 27/151) wcore-cli::acp_tool_selection support::pty::pty_diagnostics_tests::e_a_thread_that_got_its_polls_is_named_scheduled
+        PASS [   0.015s] ( 28/151) wcore-cli::acp_tool_selection support::pty::pty_diagnostics_tests::c_control_a_painting_child_is_named_as_a_live_terminal
+        PASS [   0.028s] ( 29/151) wcore-cli::acp_engine_turn support::pty::pty_diagnostics_tests::f_control_a_slow_prefix_reports_uniform_starvation
+        PASS [   0.015s] ( 30/151) wcore-cli::acp_tool_selection support::pty::pty_diagnostics_tests::d_unread_bytes_are_named_as_a_stale_screen
+        PASS [   0.029s] ( 31/151) wcore-cli::acp_engine_turn support::pty::pty_diagnostics_tests::b_control_the_extension_is_capped
+        PASS [   0.015s] ( 32/151) wcore-cli::acp_tool_selection support::pty::pty_diagnostics_tests::f_a_fast_prefix_refutes_process_wide_starvation
+        PASS [   0.015s] ( 33/151) wcore-cli::acp_tool_selection support::pty::pty_diagnostics_tests::e_control_a_thread_denied_its_polls_is_named_starved
+        PASS [   0.015s] ( 34/151) wcore-cli::acp_tool_selection support::pty::pty_diagnostics_tests::f_control_a_slow_prefix_reports_uniform_starvation
+        PASS [   0.032s] ( 35/151) wcore-cli::acp_engine_turn support::pty::pty_diagnostics_tests::c_control_a_painting_child_is_named_as_a_live_terminal
+        PASS [   0.032s] ( 36/151) wcore-cli::acp_gate_d012 support::pty::pty_diagnostics_tests::a_pending_input_extends_the_wait
+        PASS [   0.032s] ( 37/151) wcore-cli::acp_engine_turn support::pty::pty_diagnostics_tests::d_unread_bytes_are_named_as_a_stale_screen
+        PASS [   0.006s] ( 38/151) wcore-cli::headless_acp_boot support::proving_ground::record::tests::redact_leaves_normal_text_alone
+        PASS [   0.006s] ( 39/151) wcore-cli::headless_acp_boot support::mock_llm::self_tests::truncated_stream_is_detected
+        PASS [   0.005s] ( 40/151) wcore-cli::headless_acp_boot support::proving_ground::record::tests::redact_openai_key
+        PASS [   0.006s] ( 41/151) wcore-cli::headless_acp_boot support::proving_ground::record::tests::redact_multiple_keys_in_one_string
+        PASS [   0.005s] ( 42/151) wcore-cli::headless_acp_boot support::proving_ground::record::tests::redact_xai_key
+        PASS [   0.016s] ( 43/151) wcore-cli::acp_tool_selection support::pty::pty_diagnostics_tests::h_control_the_last_screen_survives
+        PASS [   0.006s] ( 44/151) wcore-cli::headless_acp_boot support::pty::pty_diagnostics_tests::a_pending_input_extends_the_wait
+        PASS [   0.006s] ( 45/151) wcore-cli::headless_acp_boot support::pty::pty_diagnostics_tests::a_control_a_silent_terminal_does_not_extend
+        PASS [   0.017s] ( 46/151) wcore-cli::acp_tool_selection support::pty::pty_diagnostics_tests::g_the_step_timeline_names_every_satisfied_wait
+        PASS [   0.006s] ( 47/151) wcore-cli::headless_acp_boot support::pty::pty_diagnostics_tests::b_control_unknown_pending_is_not_evidence
+        PASS [   0.007s] ( 48/151) wcore-cli::headless_acp_boot support::pty::pty_diagnostics_tests::b_control_the_extension_is_capped
+        PASS [   0.006s] ( 49/151) wcore-cli::headless_acp_boot support::pty::pty_diagnostics_tests::b_recently_arrived_bytes_extend_the_wait
+        PASS [   0.006s] ( 50/151) wcore-cli::headless_acp_boot support::pty::pty_diagnostics_tests::c_control_a_painting_child_is_named_as_a_live_terminal
+        PASS [   0.006s] ( 51/151) wcore-cli::headless_acp_boot support::pty::pty_diagnostics_tests::c_a_stalled_child_is_named_as_a_silent_terminal
+        PASS [   0.018s] ( 52/151) wcore-cli::acp_tool_selection support::pty::pty_diagnostics_tests::g_the_caller_context_reaches_the_failure_text
+        PASS [   0.007s] ( 53/151) wcore-cli::headless_acp_boot support::pty::pty_diagnostics_tests::e_a_thread_that_got_its_polls_is_named_scheduled
+        PASS [   0.008s] ( 54/151) wcore-cli::headless_acp_boot support::pty::pty_diagnostics_tests::e_control_a_thread_denied_its_polls_is_named_starved
+        PASS [   0.007s] ( 55/151) wcore-cli::headless_acp_boot support::pty::pty_diagnostics_tests::g_the_step_timeline_names_every_satisfied_wait
+        PASS [   0.011s] ( 56/151) wcore-cli::headless_acp_boot support::pty::pty_diagnostics_tests::d_unread_bytes_are_named_as_a_stale_screen
+        PASS [   0.009s] ( 57/151) wcore-cli::headless_acp_boot support::pty::pty_diagnostics_tests::f_control_a_slow_prefix_reports_uniform_starvation
+        PASS [   0.009s] ( 58/151) wcore-cli::headless_acp_boot support::pty::pty_diagnostics_tests::h_control_the_last_screen_survives
+        PASS [   0.009s] ( 59/151) wcore-cli::headless_acp_boot support::pty::pty_diagnostics_tests::g_the_caller_context_reaches_the_failure_text
+        PASS [   0.029s] ( 60/151) wcore-cli::acp_gate_d012 support::proving_ground::record::tests::redact_leaves_normal_text_alone
+        PASS [   0.043s] ( 61/151) wcore-cli::acp_engine_turn support::pty::pty_diagnostics_tests::e_a_thread_that_got_its_polls_is_named_scheduled
+        PASS [   0.011s] ( 62/151) wcore-cli::headless_acp_boot support::pty::pty_diagnostics_tests::f_a_fast_prefix_refutes_process_wide_starvation
+        PASS [   0.051s] ( 63/151) wcore-cli::acp_mcp_tool_selection support::pty::pty_diagnostics_tests::e_a_thread_that_got_its_polls_is_named_scheduled
+        PASS [   0.053s] ( 64/151) wcore-cli::acp_gate_d012 support::pty::pty_diagnostics_tests::f_a_fast_prefix_refutes_process_wide_starvation
+        PASS [   0.052s] ( 65/151) wcore-cli::acp_tool_selection support::pty::pty_diagnostics_tests::b_control_unknown_pending_is_not_evidence
+        PASS [   0.052s] ( 66/151) wcore-cli::acp_gate_d012 support::mock_llm::self_tests::text_fixture_is_parser_conformant
+        PASS [   0.052s] ( 67/151) wcore-cli::acp_gate_d012 support::pty::pty_diagnostics_tests::g_the_step_timeline_names_every_satisfied_wait
+        PASS [   0.053s] ( 68/151) wcore-cli::acp_mcp_tool_selection support::pty::pty_diagnostics_tests::b_control_the_extension_is_capped
+        PASS [   0.053s] ( 69/151) wcore-cli::acp_mcp_tool_selection support::pty::pty_diagnostics_tests::d_unread_bytes_are_named_as_a_stale_screen
+        PASS [   0.054s] ( 70/151) wcore-cli::acp_mcp_tool_selection support::pty::pty_diagnostics_tests::c_a_stalled_child_is_named_as_a_silent_terminal
+        PASS [   0.055s] ( 71/151) wcore-cli::acp_gate_d012 support::mock_llm::self_tests::tool_use_fixture_is_parser_conformant
+        PASS [   0.056s] ( 72/151) wcore-cli::acp_mcp_tool_selection support::proving_ground::record::tests::redact_openai_key
+        PASS [   0.057s] ( 73/151) wcore-cli::acp_gate_d012 support::pty::pty_diagnostics_tests::h_control_the_last_screen_survives
+        PASS [   0.057s] ( 74/151) wcore-cli::acp_mcp_tool_selection support::pty::pty_diagnostics_tests::c_control_a_painting_child_is_named_as_a_live_terminal
+        PASS [   0.070s] ( 75/151) wcore-cli::acp_engine_turn support::pty::pty_diagnostics_tests::c_a_stalled_child_is_named_as_a_silent_terminal
+        PASS [   0.058s] ( 76/151) wcore-cli::acp_tool_selection support::proving_ground::record::tests::redact_leaves_normal_text_alone
+        PASS [   0.069s] ( 77/151) wcore-cli::acp_engine_turn support::pty::pty_diagnostics_tests::g_the_step_timeline_names_every_satisfied_wait
+        PASS [   0.059s] ( 78/151) wcore-cli::acp_gate_d012 support::pty::pty_diagnostics_tests::g_the_caller_context_reaches_the_failure_text
+        PASS [   0.059s] ( 79/151) wcore-cli::acp_gate_d012 support::mock_llm::self_tests::every_builder_body_is_parser_conformant
+        PASS [   0.059s] ( 80/151) wcore-cli::acp_tool_selection support::mock_llm::self_tests::every_builder_body_is_parser_conformant
+        PASS [   0.062s] ( 81/151) wcore-cli::acp_gate_d012 support::mock_llm::self_tests::truncated_stream_is_detected
+        PASS [   0.039s] ( 82/151) wcore-cli::stabilization_acp_failed_bootstrap bootstrap_child
+        PASS [   0.062s] ( 83/151) wcore-cli::acp_gate_d012 support::pty::pty_diagnostics_tests::e_control_a_thread_denied_its_polls_is_named_starved
+        PASS [   0.061s] ( 84/151) wcore-cli::acp_mcp_tool_selection support::mock_llm::self_tests::every_builder_body_is_parser_conformant
+        PASS [   0.061s] ( 85/151) wcore-cli::acp_tool_selection support::mock_llm::self_tests::truncated_stream_is_detected
+        PASS [   0.062s] ( 86/151) wcore-cli::acp_gate_d012 support::pty::pty_diagnostics_tests::f_control_a_slow_prefix_reports_uniform_starvation
+        PASS [   0.062s] ( 87/151) wcore-cli::acp_gate_d012 support::proving_ground::record::tests::redact_multiple_keys_in_one_string
+        PASS [   0.063s] ( 88/151) wcore-cli::acp_tool_selection support::pty::pty_diagnostics_tests::a_pending_input_extends_the_wait
+        PASS [   0.043s] ( 89/151) wcore-cli::stabilization_acp_durable mock_llm::self_tests::truncated_stream_is_detected
+        PASS [   0.044s] ( 90/151) wcore-cli::stabilization_acp_durable mock_llm::self_tests::every_builder_body_is_parser_conformant
+        PASS [   0.065s] ( 91/151) wcore-cli::acp_mcp_tool_selection support::pty::pty_diagnostics_tests::b_control_unknown_pending_is_not_evidence
+        PASS [   0.065s] ( 92/151) wcore-cli::acp_tool_selection support::mock_llm::self_tests::text_fixture_is_parser_conformant
+        PASS [   0.065s] ( 93/151) wcore-cli::acp_tool_selection support::pty::pty_diagnostics_tests::c_a_stalled_child_is_named_as_a_silent_terminal
+        PASS [   0.065s] ( 94/151) wcore-cli::acp_mcp_tool_selection support::pty::pty_diagnostics_tests::a_control_a_silent_terminal_does_not_extend
+        PASS [   0.045s] ( 95/151) wcore-cli::stabilization_acp_durable mock_llm::self_tests::text_fixture_is_parser_conformant
+        PASS [   0.048s] ( 96/151) wcore-cli::acp_engine_turn zero_execution_guard
+        PASS [   0.049s] ( 97/151) wcore-cli::acp_mcp_tool_selection support::mock_llm::self_tests::tool_use_fixture_is_parser_conformant
+        PASS [   0.051s] ( 98/151) wcore-cli::acp_tool_selection support::pty::pty_diagnostics_tests::b_recently_arrived_bytes_extend_the_wait
+        PASS [   0.051s] ( 99/151) wcore-cli::acp_mcp_tool_selection support::pty::pty_diagnostics_tests::f_a_fast_prefix_refutes_process_wide_starvation
+        PASS [   0.040s] (100/151) wcore-cli::acp_tool_selection an_empty_selection_leaves_the_persona_allowlist_alone
+        PASS [   0.049s] (101/151) wcore-cli::stabilization_acp_durable mock_llm::self_tests::tool_use_fixture_is_parser_conformant
+        PASS [   0.052s] (102/151) wcore-cli::acp_mcp_tool_selection support::proving_ground::record::tests::redact_leaves_normal_text_alone
+        PASS [   0.041s] (103/151) wcore-cli::acp_tool_selection support::proving_ground::record::tests::redact_openai_key
+        PASS [   0.072s] (104/151) wcore-cli::acp_engine_turn support::pty::pty_diagnostics_tests::g_the_caller_context_reaches_the_failure_text
+        PASS [   0.053s] (105/151) wcore-cli::acp_tool_selection support::proving_ground::record::tests::redact_multiple_keys_in_one_string
+        PASS [   0.084s] (106/151) wcore-cli::acp_engine_turn support::pty::pty_diagnostics_tests::f_a_fast_prefix_refutes_process_wide_starvation
+        PASS [   0.072s] (107/151) wcore-cli::acp_engine_turn support::pty::pty_diagnostics_tests::h_control_the_last_screen_survives
+        PASS [   0.053s] (108/151) wcore-cli::acp_mcp_tool_selection support::pty::pty_diagnostics_tests::h_control_the_last_screen_survives
+        PASS [   0.085s] (109/151) wcore-cli::acp_engine_turn support::pty::pty_diagnostics_tests::b_control_unknown_pending_is_not_evidence
+        PASS [   0.053s] (110/151) wcore-cli::acp_mcp_tool_selection support::pty::pty_diagnostics_tests::f_control_a_slow_prefix_reports_uniform_starvation
+        PASS [   0.054s] (111/151) wcore-cli::acp_mcp_tool_selection support::mock_llm::self_tests::text_fixture_is_parser_conformant
+        PASS [   0.054s] (112/151) wcore-cli::acp_mcp_tool_selection support::pty::pty_diagnostics_tests::b_recently_arrived_bytes_extend_the_wait
+        PASS [   0.054s] (113/151) wcore-cli::acp_mcp_tool_selection support::pty::pty_diagnostics_tests::e_control_a_thread_denied_its_polls_is_named_starved
+        PASS [   0.055s] (114/151) wcore-cli::acp_tool_selection a_selection_without_a_persona_becomes_the_allowlist
+        PASS [   0.055s] (115/151) wcore-cli::acp_tool_selection support::mock_llm::self_tests::tool_use_fixture_is_parser_conformant
+        PASS [   0.044s] (116/151) wcore-cli::acp_tool_selection a_selection_can_only_narrow_a_persona_never_widen_it
+        PASS [   0.074s] (117/151) wcore-cli::acp_mcp_tool_selection support::pty::pty_diagnostics_tests::g_the_caller_context_reaches_the_failure_text
+        PASS [   0.055s] (118/151) wcore-cli::acp_mcp_tool_selection support::pty::pty_diagnostics_tests::g_the_step_timeline_names_every_satisfied_wait
+        PASS [   0.055s] (119/151) wcore-cli::acp_tool_selection a_disjoint_selection_falls_back_to_the_persona_not_to_allow_all
+        PASS [   0.055s] (120/151) wcore-cli::acp_tool_selection a_selection_is_normalized_to_a_set
+        PASS [   0.055s] (121/151) wcore-cli::acp_tool_selection support::pty::pty_diagnostics_tests::a_control_a_silent_terminal_does_not_extend
+        PASS [   0.056s] (122/151) wcore-cli::acp_tool_selection support::pty::pty_diagnostics_tests::b_control_the_extension_is_capped
+        PASS [   0.056s] (123/151) wcore-cli::acp_tool_selection support::proving_ground::record::tests::redact_xai_key
+        PASS [   0.056s] (124/151) wcore-cli::acp_mcp_tool_selection support::mock_llm::self_tests::truncated_stream_is_detected
+        PASS [   0.056s] (125/151) wcore-cli::acp_mcp_tool_selection support::pty::pty_diagnostics_tests::a_pending_input_extends_the_wait
+        PASS [   0.056s] (126/151) wcore-cli::acp_mcp_tool_selection support::proving_ground::record::tests::redact_xai_key
+        PASS [   0.109s] (127/151) wcore-cli::stabilization_acp_failed_bootstrap w02_failed_plugin_handshake_keeps_cleanup_owner
+        PASS [   0.114s] (128/151) wcore-cli::stabilization_acp_failed_bootstrap w02_failed_bootstrap_can_delete_loaded_plugin_resources
+        PASS [   0.144s] (129/151) wcore-cli::stabilization_acp_lifecycle delete_acknowledgement_waits_for_admitted_provider_cancellation
+        PASS [   0.164s] (130/151) wcore-cli::headless_acp_boot headless_serve_boots_reports_its_key_store_and_exposes_only_health
+        PASS [   0.150s] (131/151) wcore-cli::stabilization_acp_durable w02_delete_cancels_real_pending_write_approval_without_effect
+        PASS [   0.154s] (132/151) wcore-cli::stabilization_acp_lifecycle open_session_control_completes_the_same_held_provider
+        PASS [   0.154s] (133/151) wcore-cli::stabilization_acp_lifecycle delete_cancels_a_queued_turn_before_it_reaches_the_provider
+        PASS [   0.179s] (134/151) wcore-cli::stabilization_acp_durable w02_real_write_approval_positive_control_executes_after_resolution
+        PASS [   0.181s] (135/151) wcore-cli::stabilization_acp_failed_bootstrap w02_successful_bootstrap_delete_reaps_loaded_plugin
+        PASS [   0.217s] (136/151) wcore-cli::headless_acp_boot an_interactive_first_run_still_prints_the_key
+        PASS [   0.361s] (137/151) wcore-cli::acp_tool_selection a_selected_tool_set_narrows_what_the_engine_offers
+        PASS [   0.364s] (138/151) wcore-cli::acp_mcp_tool_selection the_switch_travels_from_session_create_to_the_engine
+        PASS [   0.366s] (139/151) wcore-cli::acp_mcp_tool_selection a_selection_can_never_widen_what_the_config_allowed
+        PASS [   0.352s] (140/151) wcore-cli::acp_tool_selection an_empty_selection_leaves_the_full_registry_intact
+        PASS [   0.385s] (141/151) wcore-cli::acp_tool_selection a_later_turn_cannot_silently_change_the_selection
+        PASS [   0.388s] (142/151) wcore-cli::acp_mcp_tool_selection a_selection_for_an_unconfigured_server_is_inert
+        PASS [   0.391s] (143/151) wcore-cli::acp_mcp_tool_selection control_an_unselected_server_contributes_every_tool
+        PASS [   0.403s] (144/151) wcore-cli::acp_mcp_tool_selection a_switched_off_mcp_tool_is_not_offered_over_acp
+        PASS [   0.406s] (145/151) wcore-cli::acp_tool_selection a_deselected_tool_refuses_a_hallucinated_call
+        PASS [   0.432s] (146/151) wcore-cli::acp_mcp_tool_selection an_empty_selection_disables_every_tool_on_that_server
+        PASS [   0.515s] (147/151) wcore-cli::acp_tool_selection the_same_call_is_dispatched_when_nothing_is_deselected
+        PASS [   2.187s] (148/151) wcore-cli::stabilization_acp_durable w02_delete_releases_real_durable_writer_and_preserves_history
+        PASS [   2.286s] (149/151) wcore-cli::acp_gate_d012 d012_json_stream_force_does_not_gate_write
+        PASS [   2.272s] (150/151) wcore-cli::stabilization_acp_durable process_cleanup::w02_delete_during_real_mcp_tool_reaps_child_and_retains_unknown_effect
+        PASS [   2.296s] (151/151) wcore-cli::acp_gate_d012 d012_json_stream_gated_write_emits_approval_before_execution
+────────────
+     Summary [   2.309s] 151 tests run: 151 passed, 2 skipped

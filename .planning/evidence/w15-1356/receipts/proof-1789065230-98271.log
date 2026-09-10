@@ -1,0 +1,30 @@
+   Compiling wcore-acp v0.13.14 (/root/waylandcore-stabilization-20260905/slots/parallel-1/source/crates/wcore-acp)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.77s
+────────────
+ Nextest run ID c03c81b9-b1d7-4be0-87f9-b385849e54de with nextest profile: default
+    Starting 1 test across 1 binary
+        FAIL [   0.005s] (1/1) wcore-acp::stage2_turn_scoping overlapping_turns_on_one_session_each_deliver_only_their_own_events
+  stdout ───
+
+    running 1 test
+    test overlapping_turns_on_one_session_each_deliver_only_their_own_events ... FAILED
+
+    failures:
+
+    failures:
+        overlapping_turns_on_one_session_each_deliver_only_their_own_events
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'overlapping_turns_on_one_session_each_deliver_only_their_own_events' (1793688) panicked at crates/wcore-acp/tests/stage2_turn_scoping.rs:167:5:
+    assertion `left == right` failed: B's stream: [TextDelta { text: "A-2" }, Done { stop_reason: "end_turn", turn_id: "c5fdda94-0cef-4b84-9a78-71c13ec8d998" }]
+      left: ["A-2"]
+     right: ["B-1"]
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   0.008s] 1 test run: 0 passed, 1 failed, 0 skipped
+        FAIL [   0.005s] (1/1) wcore-acp::stage2_turn_scoping overlapping_turns_on_one_session_each_deliver_only_their_own_events
+error: test run failed
