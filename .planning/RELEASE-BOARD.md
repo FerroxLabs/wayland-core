@@ -9,12 +9,11 @@ Owners come from each ledger's `owner:` on its UNMET criteria — the
 owner is read, not assigned, so a row cannot claim an owner the
 ledger does not.
 
-Blocking issues: 14   Outstanding criteria: 19
+Blocking issues: 13   Outstanding criteria: 17
 
 | Issue | Owner | Outstanding | Title |
 |---|---|---:|---|
-| FerroxLabs/wayland#1244 | core | 1 | The live /model-switch leg of the spend-audit keying proof needs a PTY-driven TUI run |
-| FerroxLabs/wayland#1272 | core | 2 | 0.13.12 release board: all 32 blocking issues mapped to an owner (17 in flight, 15 unassigned) |
+| FerroxLabs/wayland#1272 | core | 1 | 0.13.12 release board: all 32 blocking issues mapped to an owner (17 in flight, 15 unassigned) |
 | FerroxLabs/wayland#1284 | core | 1 | Flaky on macOS only: the_live_backend_timeout_bounds compares two wall-clock samples taken under different load |
 | FerroxLabs/wayland#1285 | core | 1 | Two more macOS-only retry flakes: harness_tui_flow resume_repaints and wcore-mcp f016_real_spawn |
 | FerroxLabs/wayland#1286 | core | 1 | macOS retry-flake cluster: redundant_walk_root_is_not_walked_twice is the 5th member; discovery is one per CI cycle |
