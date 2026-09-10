@@ -316,6 +316,9 @@ pub struct SessionJournal {
     /// touches it (wayland#1353). Deliberately NOT the writer lock: appends never
     /// wait on a checkpoint store.
     checkpoint_quota: Arc<Mutex<CheckpointQuota>>,
+    /// Temporaries this handle family's stores are writing, so a cleanup never
+    /// removes a live one (wayland#1357). Shared by clones, like the quota.
+    checkpoint_temporaries: Arc<LiveCheckpointTemporaries>,
 }
 
 pub(crate) struct CommittedJournalAuthority {
@@ -483,6 +486,7 @@ impl SessionJournal {
         Ok(Self {
             inner: Arc::new(Mutex::new(JournalWriter::open(path, session_id)?)),
             checkpoint_quota: Arc::default(),
+            checkpoint_temporaries: Arc::default(),
         })
     }
 
@@ -785,7 +789,13 @@ impl SessionJournal {
             )?;
         }
 
-        remove_stale_checkpoint_temps(directory, digest, path.exists())?;
+        remove_stale_checkpoint_temps(
+            directory,
+            digest,
+            path.exists(),
+            &self.checkpoint_temporaries,
+            None,
+        )?;
 
         if path.exists() {
             self.load_effect_checkpoint(digest)?;
@@ -798,11 +808,15 @@ impl SessionJournal {
         let session_bytes = scan_checkpoint_quota(directory)?;
         admission.admit(session_bytes, contents.len() as u64)?;
 
-        let temporary = directory.join(format!(
+        let temporary_name = format!(
             ".{digest}.{}.{}.tmp",
             std::process::id(),
             uuid::Uuid::new_v4()
-        ));
+        );
+        let temporary = directory.join(&temporary_name);
+        // Live before the file exists, until this store returns (wayland#1357).
+        let _live_temporary =
+            LiveCheckpointTemporary::register(&self.checkpoint_temporaries, temporary_name);
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -883,6 +897,8 @@ impl SessionJournal {
                     path.parent().expect("checkpoint path has a parent"),
                     digest,
                     true,
+                    &self.checkpoint_temporaries,
+                    Some(&metadata),
                 )?;
                 metadata = std::fs::symlink_metadata(&path).map_err(|source| JournalError::Io {
                     path: path.clone(),
@@ -1362,8 +1378,27 @@ impl Drop for CheckpointAdmission<'_> {
 /// listing and BEFORE any statement that follows the scan. That is what lets a
 /// test run another store's whole publication inside that gap, so moving the
 /// released snapshot to after the scan cannot hide from it (wayland#1353).
+///
+/// An entry another store removes between the listing and its stat is gone, not
+/// an error (wayland#1357), so the directory is listed again. Every rescan is
+/// still taken after the admission's released snapshot, so rescanning cannot
+/// weaken the quota. The bound only stops a directory that never holds still
+/// from spinning; reaching it fails closed, as a vanished entry always did.
 fn scan_checkpoint_quota(directory: &Path) -> Result<u64, JournalError> {
-    let scanned = checkpoint_directory_bytes(directory)?;
+    const MAX_SCANS: usize = 8;
+    let mut scans = 1;
+    let scanned = loop {
+        match checkpoint_directory_bytes(directory) {
+            Err(JournalError::Io { path, source })
+                if source.kind() == std::io::ErrorKind::NotFound
+                    && path.as_path() != directory
+                    && scans < MAX_SCANS =>
+            {
+                scans += 1;
+            }
+            result => break result?,
+        }
+    };
     #[cfg(test)]
     quota_race_gate::after_quota_scan(directory);
     Ok(scanned)
@@ -1584,10 +1619,83 @@ fn effect_checkpoint_directory_for(journal_path: &Path) -> Result<PathBuf, Journ
     Ok(journal_path.with_file_name(format!(".{file_name}.effects")))
 }
 
+/// Names of the checkpoint temporaries this journal handle is writing right now.
+///
+/// Every store into a session's checkpoint directory runs through one handle
+/// family, whose clones share this set: the writer lease refuses an independent
+/// open of the same journal, in this process or another. So a `.{digest}.*.tmp`
+/// whose name is NOT in the set belongs to no live store; it was left by a crash,
+/// or its store is already done with it. No process id or file age is consulted
+/// (wayland#1357).
+type LiveCheckpointTemporaries = Mutex<std::collections::HashSet<String>>;
+
+/// Insert, remove and lookup cannot leave the set half-updated, so a poisoned
+/// lock is recovered rather than refused.
+fn lock_live_temporaries(
+    live: &LiveCheckpointTemporaries,
+) -> std::sync::MutexGuard<'_, std::collections::HashSet<String>> {
+    live.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// One store's temporary, registered as live for as long as the store holds it.
+///
+/// Registered BEFORE the file is created, so no cleanup can list the file while
+/// it is unregistered; unregistered on every exit, unwind included, so a file a
+/// failed store leaves behind becomes cleanable.
+struct LiveCheckpointTemporary<'a> {
+    live: &'a LiveCheckpointTemporaries,
+    name: String,
+}
+
+impl<'a> LiveCheckpointTemporary<'a> {
+    fn register(live: &'a LiveCheckpointTemporaries, name: String) -> Self {
+        lock_live_temporaries(live).insert(name.clone());
+        Self { live, name }
+    }
+}
+
+impl Drop for LiveCheckpointTemporary<'_> {
+    fn drop(&mut self) {
+        lock_live_temporaries(self.live).remove(&self.name);
+    }
+}
+
+/// Whether `candidate` is another hard link to the file `published` describes.
+#[cfg(unix)]
+fn is_link_to_published_checkpoint(
+    candidate: &std::fs::Metadata,
+    published: Option<&std::fs::Metadata>,
+) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    published.is_some_and(|published| {
+        published.dev() == candidate.dev() && published.ino() == candidate.ino()
+    })
+}
+
+/// Only Unix exposes file identity through std metadata, and only Unix loads
+/// run the redundant-link cleanup, so elsewhere nothing is a redundant link.
+#[cfg(not(unix))]
+fn is_link_to_published_checkpoint(
+    _candidate: &std::fs::Metadata,
+    _published: Option<&std::fs::Metadata>,
+) -> bool {
+    false
+}
+
+/// Remove the stale `.{digest}.*.tmp` files of one checkpoint.
+///
+/// A temporary another LIVE store is writing is left alone, or that store's hard
+/// link would fail (wayland#1357). The one exception is a live temporary that is
+/// already a second hard link to `published_checkpoint`: removing that name only
+/// drops a redundant link, which its store ignores. An entry that is gone by the
+/// time it is examined or removed is simply gone.
 fn remove_stale_checkpoint_temps(
     directory: &Path,
     digest: &str,
     published: bool,
+    live: &LiveCheckpointTemporaries,
+    published_checkpoint: Option<&std::fs::Metadata>,
 ) -> Result<(), JournalError> {
     let prefix = format!(".{digest}.");
     let entries = std::fs::read_dir(directory).map_err(|source| JournalError::Io {
@@ -1609,28 +1717,30 @@ fn remove_stale_checkpoint_temps(
         #[cfg(test)]
         quota_race_gate::reached(quota_race_gate::Point::CleanupListed, directory, None);
         let path = entry.path();
-        let metadata = std::fs::symlink_metadata(&path).map_err(|source| JournalError::Io {
-            path: path.clone(),
-            source,
-        })?;
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(source) => return Err(JournalError::Io { path, source }),
+        };
         if metadata.is_dir() {
             return Err(JournalError::InvalidTransition(format!(
                 "filesystem effect checkpoint temporary path is a directory: {}",
                 path.display()
             )));
         }
+        if lock_live_temporaries(live).contains(name)
+            && !is_link_to_published_checkpoint(&metadata, published_checkpoint)
+        {
+            continue;
+        }
         #[cfg(test)]
         quota_race_gate::reached(quota_race_gate::Point::CleanupStatted, directory, None);
-        if published {
-            std::fs::remove_file(&path).map_err(|source| JournalError::Io {
-                path: path.clone(),
-                source,
-            })?;
-        } else if metadata.file_type().is_symlink() || metadata.is_file() {
-            std::fs::remove_file(&path).map_err(|source| JournalError::Io {
-                path: path.clone(),
-                source,
-            })?;
+        if published || metadata.file_type().is_symlink() || metadata.is_file() {
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+                Err(source) => return Err(JournalError::Io { path, source }),
+            }
         }
     }
     Ok(())
