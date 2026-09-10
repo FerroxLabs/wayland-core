@@ -1,0 +1,48 @@
+core#434 c4 -- the two things that are NOT MEASURED, recorded
+==============================================================
+
+This file exists because c4's record USED to live inside
+.config/flaky-allowlist.txt line 89, and that entry was DELETED at
+integration on 2026-09-10 when c3 was met. Deleting the entry was correct --
+the assertion that flaked no longer exists -- but the entry also carried the
+only written record of what c4 asks to be recorded. Moving the record here
+keeps c3's deletion and c4's record from being mutually exclusive; the
+alternative was to keep a dead allowlist line alive purely as a ledger anchor,
+which is how allowlists rot.
+
+1. THE RATE IS NOT MEASURED.
+   Observed ONCE, on Windows (CI (Array)) in run 33713740549, 0.601s, at
+   quarantine_console_authority_windows.rs:602:5 -- `left Some("false")` against
+   a pinned `Some("true")` on SHARES_USER_CONSOLE_AFTER -- and RETRIED INTO A
+   PASS, across the twelve runs in which `report` failed continuously.
+   NOT reproduced on SeanDesktop, and that green is explicitly REFUSED as
+   counter-evidence: that box has an interactive session, which is exactly the
+   condition the hypothesis says HIDES the failure. A green from a host that
+   cannot exhibit the failure is not evidence about the failure.
+
+2. THE _EXPLICIT ARM HAS NOT BEEN OBSERVED TO MOVE.
+   In no stored artifact has SHARES_USER_CONSOLE_AFTER_EXPLICIT been anything
+   but `true`. That is the reason the #338 c2 escape is described as STILL OPEN
+   rather than as intermittent. As of 5e585f88a the pin is ANCHORED on this arm
+   rather than on the parent-donated one, so this is now load-bearing rather
+   than a spare observation -- and it still has not been observed to move.
+
+WHAT WOULD FALSIFY c4: a rate being measured, or the _EXPLICIT arm moving,
+without this row being re-graded.
+
+WHAT CHANGED AT 5e585f88a, so this file is not read as the whole story:
+c1 and c2 are met. The three residual pins now hang on the explicit-pid route
+(ATTACH_BY_EXPLICIT_PID / SHARES_USER_CONSOLE_AFTER_EXPLICIT / CONOUT_AFTER_EXPLICIT)
+instead of AttachConsole(ATTACH_PARENT_PROCESS); the parent-donated arm is kept
+but asserted only where it is live, and otherwise prints
+`PARENT_DONATED_ARM=QUIET ... and this is NOT evidence that the #338 c2
+residual closed`. Every residual message renders through `residual_arms()`,
+which names BOTH arms plus the rule, so a failure can no longer be read as
+"the residual closed" while the same payload shows it open.
+
+A SECOND FALSE-"CLOSED" ROUTE was found and fixed in the same pass, and is
+recorded here because it was found BY READING, not by observing it fire:
+`shares_console_with_driver()` used a fixed 64-entry buffer, and
+GetConsoleProcessList writes nothing and returns the REQUIRED SIZE when a
+console has more clients than that. No console with >64 clients was
+constructed, so this is a defect closed on inspection, not on a reproduction.
