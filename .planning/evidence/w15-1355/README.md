@@ -13,7 +13,8 @@ sha256 and checked by content (below). Every iteration is one libtest process
 |---|---|---|---|
 | `9cd1e5a2d` | `w15/idxlock1355` | tests + `cfg(test)` seams only, lock unchanged | yes |
 | `e1c3bf704` | `w15/idxlock1355` | the repair | yes |
-| `516a6b3c2` | `w15/idxlock1355-red-c2` | RED ARM: fix tree with the in-process queue removed | NEVER |
+| `0d0edc54c` | `w15/idxlock1355` | review follow-up: sentinel released on unwind, kill-on-drop test child, doc corrections | yes |
+| `516a6b3c2` | `w15/idxlock1355-red-c2` | RED ARM: fix tree with the in-process slot removed | NEVER |
 | `439d54417` | `w15/idxlock1355-red-harness` | RED ARM: fix tree with the old unwinding join shape | NEVER |
 
 `crates/wcore-agent/src/session.rs` is the only source file touched. No
@@ -75,20 +76,22 @@ reproduced here.
 
 ## c2: the repair, and the proof that exclusion held
 
-Repair (`e1c3bf704`): writers in this process queue on a per-canonical-directory
-slot (`InProcessIndexLock`). The slot is taken BEFORE the sentinel and released
-only AFTER the sentinel has been removed. The wait is bounded by the same 30 s
-the sentinel treats as proof of a dead holder; a waiter that reaches the bound
-errors and never steals. Only the head of the queue touches the sentinel, so no
-in-process writer can meet, steal or delete another's sentinel. Cross-process
-behaviour (1 s budget, 30 s stale steal) is unchanged.
+Repair (`e1c3bf704`): writers in this process share a per-canonical-directory
+in-process slot (`InProcessIndexLock`). The slot is taken BEFORE the sentinel
+and released only AFTER the sentinel has been removed. The wait is bounded by
+the same 30 s the sentinel treats as proof of a dead holder; a waiter that
+reaches the bound errors and never steals. Only the slot's holder touches the
+sentinel, so no in-process writer can meet, steal or delete another's sentinel.
+The sentinel's own rules (1 s budget, 30 s stale steal) are unchanged, but the
+slot changes cross-process fairness and caller blocking; see "Trades" below.
+The slot is not a FIFO queue.
 
 Deterministic arms of `test_1355_writer_waits_out_an_in_process_hold_past_one_second`:
 
 | source | result | receipt |
 |---|---|---|
 | `9cd1e5a2d` (no fix) | RED, `Could not acquire index lock after 1s` | remote_exit 101, status `6aa4e42a` |
-| `516a6b3c2` (fix minus the queue) | RED, same message | remote_exit 101, status `7cd7b4cc` |
+| `516a6b3c2` (fix minus the slot) | RED, same message | remote_exit 101, status `7cd7b4cc` |
 | `e1c3bf704` (fix) | green | remote_exit 0, status `14f2bc53` |
 
 At `e1c3bf704` the full `cargo test -p wcore-agent --lib` passed 2744, failed 0
@@ -168,6 +171,24 @@ The `.config/flaky-allowlist.txt` row for `test_f033_index_lock_parallel`
 shared-process lib step honours no allowlist, so the row never protected the
 check it reddened.
 
+## Trades the repair makes (disclosed after review of `e1c3bf704`)
+
+- The in-process slot is not FIFO. A writer arriving at a release can take it
+  ahead of the waiter that release woke, and waiters that were not woken
+  re-check every 50 ms. What is guaranteed is exclusion and the 30 s bound.
+- Cross-process fairness got worse. The next in-process writer takes the
+  sentinel within microseconds of its release, while a writer in another
+  process polls every 10 ms on a 1 s budget. A busy process can starve another
+  process's writer, and `engine.rs:22165` then logs and drops that update.
+- Callers block longer, deliberately. `persist_first_message`
+  (`engine.rs:14160`, inside `async fn run_inner_impl`) and `update_index_for`
+  (`engine.rs:22165`) run synchronously on async-runtime worker threads. Under
+  an fsync stall a waiter now blocks for up to about 30 s instead of failing
+  after 1 s: a durable index write waits for the disk.
+- Against a fresh foreign sentinel, in-process waiters now fail one after
+  another, the k-th after about k seconds and at most 30 s, instead of all of
+  them after about 1 s.
+
 ## Residuals, stated
 
 - Writers in DIFFERENT processes still get the sentinel's fixed 1 s budget;
@@ -175,8 +196,12 @@ check it reddened.
 - Between processes, the stale steal (two waiters judging one stale sentinel)
   and release by path after a hold over 30 s can still admit two holders.
   Unchanged, and pre-existing.
-- A panic inside the index closure still leaks the sentinel until it is stale
-  (pre-existing). The in-process slot is released on unwind.
+- Changed at `0d0edc54c` after review: a panic inside the index closure used to
+  leave this process's own sentinel for 30 s while releasing the in-process
+  slot, so every later writer here failed on its 1 s budget. Release is now a
+  `Drop` guard: sentinel first, slot second, on every path. Test
+  `test_1355_a_panic_inside_the_index_lock_releases_the_sentinel`. RECEIPTS
+  PENDING a build slot.
 - `with_wal_lock` uses the same sentinel and the same 1 s in-process budget,
   and was not touched.
 - Not run on Windows or macOS; no `cfg(windows)` code changed.
