@@ -82,6 +82,25 @@ fn open_pty() -> (OwnedFd, OwnedFd) {
         )
     };
     assert_eq!(rc, 0, "openpty failed: {}", std::io::Error::last_os_error());
+    // #1309: `openpty` does NOT set FD_CLOEXEC, and these arms run in parallel,
+    // so without this every arm's pty ends up inherited by every LATER arm's
+    // child. MEASURED at 12f9d1094 before this line existed: the two arms whose
+    // child answers immediately reaped it after 0.050s and then waited a further
+    // 1.952s for the master to report a terminal condition — 2.002s in total,
+    // which is exactly when the two BUDGET arms' children exited and dropped the
+    // slave they had inherited. That is the mechanism behind "the child exited"
+    // not meaning "the transcript is complete", and it is a property of this
+    // harness rather than of the product. The child's own stdin/stderr are
+    // `dup2`'d from these fds during spawn, which clears the flag on the copies,
+    // so closing on exec costs the child nothing.
+    for fd in [master, slave] {
+        // SAFETY: `openpty` returned 0, so `fd` is a live descriptor we own.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        assert_ne!(flags, -1, "F_GETFD: {}", std::io::Error::last_os_error());
+        // SAFETY: same fd; only the close-on-exec bit is added.
+        let rc = unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) };
+        assert_ne!(rc, -1, "F_SETFD: {}", std::io::Error::last_os_error());
+    }
     // SAFETY: `openpty` returned 0, so both fds are fresh and owned by us.
     unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) }
 }
