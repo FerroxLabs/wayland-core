@@ -192,3 +192,33 @@ on the Mac. Run it on hetzner through the adapter: assert HEAD, take
 `flock build.lock`, `vx just push`, write a `.status` receipt.
 **READ THE `.status` RECEIPT, NEVER THE SSH EXIT CODE.** The ssh wrapper has
 already reported 0 over a push whose receipt said `EXIT_CODE=1`.
+
+## Both PR-only checks are now pre-verified (2026-09-10)
+
+Neither has to wait for the PR any more, so no required check first executes
+there:
+
+- **`scan`** — dispatched via `gh workflow run osv-scan.yml --ref <ref>`,
+  run 34474477558, **success**.
+- **`Bench regression (linux)`** — reproduced off CI on hetzner at the merged
+  tree `9d9fde501`:
+  `WCORE_PROOF_SLOT=default python3 tools/remote-proof.py worktrees/release-0.13.14 run -p wcore-eval --bin wcore-eval-bench -- --floor 0.7`
+  → `remote_exit 0`, `"complete": true`, **`bench: 30/30 passed (ratio 1.0000,
+  floor 0.7000) -> OK`** (tool_routing 8/8, arithmetic 8/8, recall 8/8,
+  file_ops 6/6).
+
+CONFIRMED THE HARD WAY, and worth recording: CI run 34474108078 on a lane
+branch cut at `5715b2b35` failed at step 26 `Clippy (warnings = errors)` — the
+five `doc_overindented_list_items` in
+`crates/wcore-cli/tests/quarantine_console_authority_windows.rs` from
+`ad329925d`, a commit no CI run had ever linted. Fixed at `bbf1ecb09`. That red
+would have failed the release push, and nothing but running the gate would have
+found it.
+
+### The ledger anchor test is weaker than it looks
+`check-criteria-ledger.py` requires `last_verified_commit` to be an ANCESTOR of
+HEAD. That does NOT mean it is at or after the work being graded: core#401's
+anchor was left at `5715b2b35`, which passed the ancestor test while predating
+the repair, so a reader re-deriving the grading would have built a tree without
+it. Re-anchored to `6bc595704`. All 206 ledger anchors are ancestors of HEAD;
+the pre-fix case is the one the gate cannot see.
