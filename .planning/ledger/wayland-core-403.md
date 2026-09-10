@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "The workspace --lib suite is not ten-times-clean: an ephemeral-port race and three single-sample wall-clock ratios (core#373 c5 remainder)"
 status: open
-last_verified_commit: 706597208
+last_verified_commit: 17f4bc1bf
 criteria:
   - id: c1
     text: "The three `bash::tests` ratio assertions no longer turn on a single wall-clock sample, and the `trusted_local` -> `contained` mutation still reds `a_workspace_that_does_not_walk_cancels_promptly_even_on_a_large_tree` with `cargo check` rc=0 recorded before the red is believed."
