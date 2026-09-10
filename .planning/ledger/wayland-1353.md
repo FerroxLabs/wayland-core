@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "Concurrent effect-checkpoint stores can jointly exceed the session quota"
 status: open
-last_verified_commit: d0d69d361
+last_verified_commit: 5d43c200d
 criteria:
   - id: c1
     text: "Concurrent stores into one checkpoint directory cannot jointly exceed the session quota: the probe test goes GREEN with the repair and RED with the repair removed (a red arm from history); a store the quota refuses still fails closed and a store that fits still succeeds."

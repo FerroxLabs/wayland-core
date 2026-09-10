@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "Concurrent effect-checkpoint stores fail spuriously on each other's temporary files"
 status: open
-last_verified_commit: 8e9cf00dc
+last_verified_commit: d2da18500
 criteria:
   - id: c1
     text: "Both failures are reproduced deterministically by tests that force the interleaving, red on the current code: two same-digest stores, and a store whose scan races another store's temp removal."
@@ -21,7 +21,7 @@ criteria:
   - id: c3
     text: "The c1 tests are green, with a red arm from history for each repair."
     state: met
-    evidence: "commit:4c8bb5219"
+    evidence: "commit:2effffbe8"
     owner: core
     note: "MET 2026-09-10. RED FROM HISTORY: 2302378f5 (c1). GREEN: 4c8bb5219 and 8e9cf00dc (c2). ONE RED ARM PER REPAIR, scratch branches never to merge, each one line on the repair confirmed by git diff, remote_exit 101, each failing ONLY its own test: w15/quota1357-red-registry e4c4a1312 (nothing registered live) -> T1 and T2 only; w15/quota1357-red-link 00a86f25b (a live temporary kept even when it only links the published checkpoint) -> T5 only, 'checkpoint has unsafe links or permissions'; w15/quota1357-red-stat ab62ce134 (NotFound before cleanup's stat is an error) -> T3 at CleanupListed only; w15/quota1357-red-remove 735ed9618 (NotFound before cleanup's removal is an error) -> T3 at CleanupStatted only, its first stage passing; w15/quota1357-red-rescan 6d3cb5909 (no rescan) -> T4 only; w15/quota1357-red-dead 6ea729fad on 8e9cf00dc (cleanup treats every temporary as live) -> T6 only, 'published=false: the crash-left temporary was not removed', with effect_checkpoint_repairs_crash_after_publication_link GREEN. INSTRUMENT GAP: a `-- checkpoint` libtest filter silently skips T3, T4 and a #1353 ordering test (their names lack the word), so every run counted here names its tests. Evidence: .planning/evidence/w15-1357/README.md."
 ---
