@@ -12073,6 +12073,43 @@ impl AgentEngine {
             return Ok(());
         }
 
+        // FerroxLabs/wayland#1116 — WRITE THE IGNORANCE DOWN BEFORE ENDING THE
+        // TURN, rather than refusing to end it.
+        //
+        // Without these four steps this verb reached
+        // `terminalize_interrupted_turn_for_cancellation` with the interrupted
+        // turn's effects still `Running` / `Unknown`, and that routine refuses:
+        // "interrupted turn cannot be cancelled until started external outcomes
+        // are reconciled". A host that had just crash-recovered therefore got
+        // `resume_turn refused: …` plus
+        // `session_recovery_unavailable{reason:"unknown_critical_state"}` and
+        // the session stayed wedged in-app with no verb that could end it —
+        // #1116 as filed.
+        //
+        // The TUI and `--resume` never had that problem, because both go
+        // through `settle_interrupted_turn_for_resume`, which admits the
+        // unobserved effects first. Two implementations of one word, and only
+        // the one the Desktop host can reach was broken. This is the same
+        // sequence, in the same order, for the same reason — see that method
+        // for why the order is forced.
+        //
+        // NOTHING here promotes an attempt to a landed effect or demotes it to
+        // one that never happened. `admit_unobserved_effects` resolves an
+        // unknown tool to `Failed` carrying
+        // `INTERRUPTED_EFFECT_UNOBSERVED` — "the effect may or may not have
+        // landed" — and `abandon_unobserved_provider_attempts` writes
+        // `PROVIDER_OUTCOME_ABANDONED_UNOBSERVED` with the digest of the bytes
+        // actually captured and leaves the stream unfinished. An unknown CHILD
+        // or DELIVERY is deliberately still not admitted by either path, so
+        // this verb still refuses for those, and must: releasing a possibly-
+        // booked external effect as settled is how one interruption becomes two
+        // charges.
+        self.admit_interrupted_tool_starts(turn_id).await?;
+        self.reconcile_authoritative_filesystem_effects("abandon_interrupted_turn")
+            .await?;
+        self.admit_unobserved_effects(turn_id).await?;
+        self.abandon_nonterminal_hook_phases(turn_id).await?;
+
         // The turn IS terminated, so it takes the same terminal receipt and the
         // same journal event as a cancellation. Reusing `TurnCancelled` keeps
         // the journal format unchanged: a new variant would have to be readable

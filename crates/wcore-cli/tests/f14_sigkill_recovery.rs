@@ -3311,3 +3311,147 @@ async fn w1290_the_credential_store_alone_decides_whether_a_provider_checkpoint_
          `left: 0` this ticket was re-founded on.\nKEYLESS {keyless_census}"
     );
 }
+
+/// FerroxLabs/wayland#1116 c1 — **a crash-interrupted session must be ENDABLE
+/// through the host wire, and ending it must record what is unknown rather
+/// than refuse.**
+///
+/// The ticket's title says "no abandon verb on the host wire". That diagnosis
+/// is out of date: `ResumeTurnAction::Abandon` has been on the wire since
+/// `wcore-protocol/src/commands.rs:697-704`, the corpus publishes it in
+/// `host-command.schema.json`, and `manifest.json` declares
+/// `turn_abandon_v1: available`. The verb EXISTS. What it did on the exact
+/// state a crash leaves behind was refuse:
+/// `terminalize_interrupted_turn_for_cancellation` (`engine.rs`) answers
+/// `ReconciliationRequired` while any provider attempt or tool of the turn is
+/// `Unknown` / `Running`, and `handle_resume_turn` turns that into
+/// `resume_turn refused: interrupted turn cannot be cancelled until started
+/// external outcomes are reconciled` followed by
+/// `session_recovery_unavailable{reason:"unknown_critical_state"}`. The turn
+/// stayed interrupted and the session stayed wedged — which is the symptom
+/// #1116 reports, arrived at from a different cause than its title names.
+///
+/// The TUI and `--resume` never hit it, because both route through
+/// `settle_interrupted_turn_for_resume`, which admits the unobserved effects
+/// first. One word, two implementations, and only the one the Desktop host can
+/// reach was broken.
+///
+/// **The half of the criterion that is easy to fake is the second half**, so it
+/// is asserted on the durable record rather than on the wire: the provider
+/// request that was physically dispatched and whose outcome nobody saw must
+/// come back as `failed` with the prose that says the provider may have served
+/// it, and with the digest of the bytes that did arrive. An abandon that
+/// reported it `not_started`, or `succeeded`, or that dropped the receipt
+/// entirely, would end the session just as tidily and would be the data-loss
+/// this whole file exists to prevent.
+///
+/// RED ARM, run: with the four admission calls removed from
+/// `abandon_interrupted_turn`, this test fails at the `stream_end` wait with
+/// `Core refused the command while waiting for stream_end` carrying that
+/// refusal string.
+#[tokio::test]
+async fn wayland1116_host_wire_abandon_ends_a_crash_interrupted_turn_and_keeps_the_unknown() {
+    let partial = "F14-1116-PARTIAL-BEFORE-THE-CRASH";
+    let fixture = OpenAiFixtureScript::new([
+        OpenAiStep::text_then_stall(partial, 60_000),
+        OpenAiStep::text("F14-1116-MUST-NOT-REDISPATCH-AFTER-ABANDON"),
+    ])
+    .start()
+    .await
+    .expect("start #1116 abandon fixture");
+    let env = environment(&fixture);
+    let vault = VaultSecret::new();
+    let session_id = "f1400000000000000000000000001116";
+
+    // A REAL crash, mid-stream, with the request already at the provider.
+    let mut first = CoreProcess::launch(&env, &fixture, &vault, session_id, false).await;
+    send_message(&mut first, "f14-1116-msg", "dispatch, then die").await;
+    wait_for_requests(&fixture, 1).await;
+    assert_eq!(first.next_type("text_delta").await["text"], partial);
+    let _first_diagnostics = first.sigkill().await;
+
+    // The session comes back WEDGED. Both halves are asserted, because an
+    // abandon that succeeded against an already-clean session would prove
+    // nothing at all.
+    let mut resumed = CoreProcess::launch(&env, &fixture, &vault, session_id, true).await;
+    let before = resync_current(&mut resumed, session_id, "f14-1116-before").await;
+    assert_eq!(
+        before["lifecycle"], "suspended",
+        "the crash must leave the session suspended, or this test grades a clean \
+         session: {before}"
+    );
+    assert_eq!(
+        before["pending_turn"]["reconcile_reason"], "provider_outcome_unknown",
+        "the wedge must be the UNKNOWN-outcome one this criterion is about: {before}"
+    );
+    let turn_id = before["pending_turn"]["turn_id"].clone();
+    assert!(
+        turn_id.is_string(),
+        "no interrupted turn to abandon: {before}"
+    );
+
+    // THE VERB, over the host wire, exactly as the Desktop recovery surface
+    // sends it.
+    resumed
+        .send(json!({
+            "type": "resume_turn",
+            "recovery_version": 1,
+            "request_id": "f14-1116-abandon",
+            "session_id": session_id,
+            "turn_id": turn_id,
+            "cursor": before["cursor"],
+            "action": "abandon",
+        }))
+        .await;
+
+    // `next_type` panics on an `error` frame while it waits, so a refusal fails
+    // here by name rather than by timeout.
+    let terminal = resumed.next_type("stream_end").await;
+    assert_eq!(terminal["finish_reason"], "stop", "{terminal}");
+    let lifecycle = resumed.next_type("turn_recovery_lifecycle").await;
+    assert_eq!(lifecycle["turn_id"], turn_id);
+    assert_eq!(lifecycle["lifecycle"], "cancelled", "{lifecycle}");
+
+    // ENDED, not merely answered: the session can take the next message.
+    let after = resync_current(&mut resumed, session_id, "f14-1116-after").await;
+    assert_eq!(
+        after["lifecycle"], "ready",
+        "an abandoned turn must leave the session usable, which is the whole \
+         complaint in #1116: {after}"
+    );
+    assert!(after["pending_turn"].is_null(), "{after}");
+    assert_ne!(after["cursor"], before["cursor"]);
+
+    // THE OUTCOME THAT MUST SURVIVE THE ABANDON.
+    let events = journal_events(env.home(), session_id);
+    let receipt = events
+        .iter()
+        .rev()
+        .find(|event| {
+            event["type"] == "provider_attempt_finished_v2"
+                || event["type"] == "provider_attempt_finished"
+        })
+        .unwrap_or_else(|| {
+            panic!("the dispatched attempt must take a durable receipt: {events:?}")
+        });
+    assert_eq!(
+        receipt["outcome"]["status"], "failed",
+        "an abandon must never record a dispatched request as not-started or \
+         succeeded: {receipt}"
+    );
+    assert!(
+        receipt["outcome"]["error"].as_str().is_some_and(
+            |error| error.contains("may have served it in full, in part, or not at all")
+        ),
+        "the receipt must say IN WORDS that the provider's outcome is unknown: {receipt}"
+    );
+    assert!(
+        receipt["response_digest"].is_string(),
+        "a partial capture must pin the bytes it captured: {receipt}"
+    );
+
+    // And abandoning must not re-dispatch: the fixture's second step is never
+    // consumed.
+    assert_provider_request_count_stable(&fixture, 1).await;
+    let _resumed_diagnostics = resumed.sigkill().await;
+}
