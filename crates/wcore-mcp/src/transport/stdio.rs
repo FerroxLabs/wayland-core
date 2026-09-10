@@ -284,32 +284,111 @@ fn kill_process_group(process_group_id: u32) -> std::io::Result<()> {
 /// a PID anchor across the group signal is the same discipline
 /// `wcore-eval-scenarios` uses deliberately (`WNOWAIT`), so the ordering
 /// stays as it is and the corpse case is discriminated instead.
+///
+/// # Why the census is re-taken rather than believed on the first read
+///
+/// The two probes are TAKEN AT TWO MOMENTS and they do not share a predicate.
+/// `kill(-pgid, SIGKILL)` answers for the members the kernel was willing to
+/// signal *at that instant*; the census counts members whose `p_stat` is not
+/// `SZOMB` *a few microseconds later*. A member that the kernel declined to
+/// signal because it is already on its way out of `exit(2)` has not yet
+/// reached `SZOMB`, so the first statement says "nothing to signal" (EPERM)
+/// and the second says "one live member" — about the same process, in the
+/// same group, with no survivor anywhere.
+///
+/// Read on a single sample, that disagreement fails CLOSED and reports a
+/// containment failure that did not happen. It is the whole of the
+/// `f016_real_spawn_uses_sanitized_launch_context` flake (gh#1285): all seven
+/// macOS occurrences in census W carry the same payload, byte-identical apart
+/// from the pid, and it is this error raised out of `close()` — never a spawn
+/// or a request failure. That fixture is `read line; printf ...`, i.e. a
+/// server that exits the instant it has answered, so `close()` signals its
+/// group while the shell is still unwinding. The sibling test
+/// `close_after_the_server_exits_on_its_own_is_not_an_error` never flaked
+/// because it polls the census to `Live(0)` BEFORE calling `close()` — it
+/// waits out the very window this function used to read as a failure.
+///
+/// So the census is re-taken until it settles or the budget below expires.
+/// This does not weaken the guard: a member that is genuinely alive and that
+/// this process is not permitted to signal does not become `SZOMB` and does
+/// not leave the group, so it is still reported — just later. The exact XNU
+/// bookkeeping that makes `killpg` skip an exiting member (whether it is the
+/// `P_LIST_EXITED` / `P_WEXIT` transition or something else) is deliberately
+/// NOT asserted here: the repair depends only on the two observations being
+/// separated in time, which is measurable from userspace, and not on which
+/// kernel flag causes the skip.
 #[cfg(unix)]
 fn classify_group_kill_failure(
     process_group_id: u32,
     error: std::io::Error,
 ) -> std::io::Result<()> {
-    use wcore_types::process_liveness::{ProcessGroupCensus, process_group_census};
-
     match error.raw_os_error() {
         Some(libc::ESRCH) => Ok(()),
-        Some(libc::EPERM) => match process_group_census(process_group_id) {
+        Some(libc::EPERM) => settle_group_census(process_group_id),
+        _ => Err(error),
+    }
+}
+
+/// How long [`classify_group_kill_failure`] keeps re-reading the census before
+/// it calls a member that is still there a containment failure.
+///
+/// Sized from the mechanism rather than from taste. The window being absorbed
+/// is one process's transit from "kernel will no longer signal it" to
+/// "`p_stat == SZOMB`", which is kernel bookkeeping on an already-doomed
+/// process and does not wait on any userspace work. Half a second is orders of
+/// magnitude more than that transit needs even on a 3-vCPU hosted runner under
+/// full load, and it is short enough that the one path that pays it in full —
+/// a real surviving descendant, which is an error either way — is not
+/// noticeably slower to report.
+///
+/// Nothing pays this in the common case: a torn-down group answers `Live(0)`
+/// on the first read and returns immediately.
+#[cfg(unix)]
+const GROUP_TEARDOWN_SETTLE_BUDGET: Duration = Duration::from_millis(500);
+
+/// Gap between census reads inside [`GROUP_TEARDOWN_SETTLE_BUDGET`]. Short
+/// enough that the racy case costs microseconds rather than the whole budget.
+#[cfg(unix)]
+const GROUP_TEARDOWN_SETTLE_POLL: Duration = Duration::from_millis(2);
+
+/// Re-read the group census until it holds nothing that can execute, or until
+/// [`GROUP_TEARDOWN_SETTLE_BUDGET`] expires.
+///
+/// `Indeterminate` is NOT retried: the two cases that produce it here — group
+/// 0 (the caller's own group, which the census refuses to answer for) and a
+/// `kinfo_proc` layout self-check failure — are properties of the question, not
+/// states that settle. Retrying them would spend the budget to arrive at the
+/// same answer. Cannot see, so cannot excuse, immediately.
+#[cfg(unix)]
+fn settle_group_census(process_group_id: u32) -> std::io::Result<()> {
+    use wcore_types::process_liveness::{ProcessGroupCensus, process_group_census};
+
+    let deadline = std::time::Instant::now() + GROUP_TEARDOWN_SETTLE_BUDGET;
+    loop {
+        match process_group_census(process_group_id) {
             // Nothing left that can execute — the corpse leader is not a
             // member that survived. Teardown completed.
-            ProcessGroupCensus::Live(0) => Ok(()),
-            ProcessGroupCensus::Live(live) => Err(std::io::Error::other(format!(
-                "SIGKILL to MCP process group {process_group_id} was refused with EPERM and \
-                 the group still holds {live} LIVE member(s); containment has failed, not \
-                 completed"
-            ))),
+            ProcessGroupCensus::Live(0) => return Ok(()),
+            ProcessGroupCensus::Live(live) => {
+                if std::time::Instant::now() >= deadline {
+                    let budget = GROUP_TEARDOWN_SETTLE_BUDGET.as_millis();
+                    return Err(std::io::Error::other(format!(
+                        "SIGKILL to MCP process group {process_group_id} was refused with \
+                         EPERM and the group still holds {live} LIVE member(s) after \
+                         {budget}ms of settling; containment has failed, not completed"
+                    )));
+                }
+                std::thread::sleep(GROUP_TEARDOWN_SETTLE_POLL);
+            }
             // Cannot see, so cannot excuse.
-            ProcessGroupCensus::Indeterminate(why) => Err(std::io::Error::other(format!(
-                "SIGKILL to MCP process group {process_group_id} was refused with EPERM and \
-                 the group could not be enumerated to establish whether anything survived: \
-                 {why}"
-            ))),
-        },
-        _ => Err(error),
+            ProcessGroupCensus::Indeterminate(why) => {
+                return Err(std::io::Error::other(format!(
+                    "SIGKILL to MCP process group {process_group_id} was refused with EPERM \
+                     and the group could not be enumerated to establish whether anything \
+                     survived: {why}"
+                )));
+            }
+        }
     }
 }
 
@@ -1645,10 +1724,74 @@ mod tests {
         reap(child);
     }
 
+    /// gh#1285 — `f016_real_spawn_uses_sanitized_launch_context`, which is the
+    /// SAME classifier call made WITHOUT the `await_census` above.
+    ///
+    /// The test directly above waits for the census to reach `Live(0)` before
+    /// classifying, and so never sees the window; the product path does not
+    /// wait, and `close()` on a server that exits the instant it has answered
+    /// lands squarely inside it. All seven macOS occurrences of that flake in
+    /// census W are this call returning the "still holds 1 LIVE member(s)"
+    /// error out of `transport.close()`.
+    ///
+    /// So: classify with NO settling wait of the test's own, the way the
+    /// product does. Repeated because the window is a race and one sample on a
+    /// fast host would be a coin toss rather than a test — with the settle
+    /// removed from `settle_group_census` this fails on the first iteration
+    /// that catches the leader before it is `SZOMB`, which is most of them.
+    ///
+    /// `window_hits` is REPORTED and deliberately NOT asserted. Asserting it
+    /// would make the test red on any host quick enough to reap the leader
+    /// between `spawn` and the first census — a gate that fails for being
+    /// fast. It is printed so a CI log says whether this run exercised the
+    /// window at all, instead of leaving a green that might be vacuous.
+    #[test]
+    fn eperm_over_a_group_that_has_not_yet_settled_is_not_a_containment_failure() {
+        use wcore_types::process_liveness::{ProcessGroupCensus, process_group_census};
+
+        const ITERATIONS: usize = 16;
+        let mut window_hits = 0usize;
+        // Anchors are held to the end of the test: reaping a leader frees its
+        // PID, and a freed PID is a PGID the kernel may hand to the next
+        // iteration's `sh`, which would make the census read a group this test
+        // no longer owns.
+        let mut anchors = Vec::with_capacity(ITERATIONS);
+
+        for _ in 0..ITERATIONS {
+            let child = spawn_group_leader("exit 0");
+            let pgid = child.id();
+            if matches!(process_group_census(pgid), ProcessGroupCensus::Live(live) if live > 0) {
+                window_hits += 1;
+            }
+            classify_group_kill_failure(pgid, std::io::Error::from_raw_os_error(libc::EPERM))
+                .expect(
+                    "a group whose only member has not finished exiting must be settled, not \
+                     reported as a containment failure",
+                );
+            anchors.push(child);
+        }
+
+        eprintln!(
+            "unsettled-census window observed in {window_hits}/{ITERATIONS} iterations \
+             (0 means this host reaped every leader before the first census; the test is \
+             then vacuous on this run, not passing)"
+        );
+
+        for child in anchors {
+            reap(child);
+        }
+    }
+
     /// Non-vacuity. The tolerance above must not extend to a group that
     /// genuinely still holds something that can execute — that is a real
     /// containment failure and must stay an error. Without this the fix
     /// would be strictly worse than the bug it closes.
+    ///
+    /// This is also the guard on the settle loop added for gh#1285: `sleep 30`
+    /// is still there when `GROUP_TEARDOWN_SETTLE_BUDGET` expires, so the
+    /// error is still raised — half a second later than it used to be, which
+    /// is what this test now costs. A settle that swallowed a real survivor
+    /// would fail HERE.
     #[test]
     fn eperm_with_a_live_group_member_is_a_containment_failure() {
         let child = spawn_group_leader("sleep 30");
