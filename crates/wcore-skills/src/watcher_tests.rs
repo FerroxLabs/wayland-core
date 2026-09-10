@@ -20,7 +20,7 @@
 /// (300 ms window + 300 ms platform margin).  Tests that expect *no*
 /// notification wait 800 ms to be safe.
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -45,9 +45,54 @@ fn make_visible_test_dir(name: &str) -> (PathBuf, TempDirGuard) {
         std::env::temp_dir()
     };
     let dir = base.join(format!("wcore_watcher_test_{name}_{id}"));
-    fs::create_dir_all(&dir).expect("failed to create test dir");
+    expect_fs(fs::create_dir_all(&dir), "create test dir", &dir);
     let guard = TempDirGuard(dir.clone());
     (dir, guard)
+}
+
+/// Report WHICH component of a path is missing when a filesystem call fails.
+///
+/// `ERROR_PATH_NOT_FOUND` (3) and `ERROR_FILE_NOT_FOUND` (2) are DISTINCT on
+/// Windows: 3 means a directory component is missing rather than the leaf
+/// file. A bare `unwrap` on a filesystem `Result` discards the path, so the
+/// only thing the artifact could say was `Os { code: 3, kind: NotFound }` --
+/// which is how four sibling failures in run 33751975177 were unreadable
+/// (wayland#1308 c1).
+///
+/// The walk stops at the first missing component, because everything below a
+/// missing directory is missing for the same reason and listing it adds noise
+/// rather than information.
+#[track_caller]
+fn expect_fs<T>(result: std::io::Result<T>, what: &str, path: &Path) -> T {
+    match result {
+        Ok(value) => value,
+        Err(error) => panic!(
+            "{what} on {} failed: {error}\n{}",
+            path.display(),
+            first_missing_component(path)
+        ),
+    }
+}
+
+fn first_missing_component(path: &Path) -> String {
+    let mut walked = PathBuf::new();
+    let mut report = String::from("path components:");
+    for component in path.components() {
+        walked.push(component);
+        let exists = walked.exists();
+        report.push_str(&format!(
+            "\n  {:<7} {}",
+            if exists { "present" } else { "MISSING" },
+            walked.display()
+        ));
+        if !exists {
+            report.push_str("\n  ^ this component is the one that is gone");
+            return report;
+        }
+    }
+    report
+        .push_str("\n  every component exists NOW -- it was recreated, or the leaf is the problem");
+    report
 }
 
 /// RAII guard that removes the test directory on drop.
@@ -247,7 +292,7 @@ async fn tc06_file_modify_triggers_notification() {
     let version_before = *rx.borrow_and_update();
 
     // Modify the file.
-    fs::write(&skill_file, "# modified").unwrap();
+    expect_fs(fs::write(&skill_file, "# modified"), "modify", &skill_file);
 
     let result = timeout(Duration::from_millis(DEBOUNCE_EXPECT_MS), rx.changed()).await;
 
@@ -282,7 +327,7 @@ async fn tc07_file_delete_triggers_notification() {
     let version_before = *rx.borrow_and_update();
 
     // Delete the file.
-    fs::remove_file(&skill_file).unwrap();
+    expect_fs(fs::remove_file(&skill_file), "delete", &skill_file);
 
     let result = timeout(Duration::from_millis(DEBOUNCE_EXPECT_MS), rx.changed()).await;
 
@@ -317,7 +362,8 @@ async fn tc08_file_rename_triggers_notification() {
     let version_before = *rx.borrow_and_update();
 
     // Rename the file.
-    fs::rename(&old_file, dir.join("SKILL.md")).unwrap();
+    let renamed = dir.join("SKILL.md");
+    expect_fs(fs::rename(&old_file, &renamed), "rename", &old_file);
 
     let result = timeout(Duration::from_millis(DEBOUNCE_EXPECT_MS), rx.changed()).await;
 
@@ -350,7 +396,8 @@ async fn tc09_debounce_coalesces_multiple_events() {
 
     // Write 5 files rapidly (within ~50 ms total).
     for i in 0..5u32 {
-        fs::write(dir.join(format!("skill_{i}.md")), format!("# skill {i}")).unwrap();
+        let each = dir.join(format!("skill_{i}.md"));
+        expect_fs(fs::write(&each, format!("# skill {i}")), "write", &each);
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
