@@ -1,0 +1,244 @@
+# Retry-flake POPULATION census, on a schedule. FerroxLabs/wayland#1286 c1.
+#
+# ── WHY A SCHEDULED WORKFLOW AND NOT ANOTHER GATE ──────────────────────────
+#
+# `.github/scripts/grade-retry-flakes.sh` already fails the `report` job for a
+# `<flakyFailure>` whose test is not on `.config/flaky-allowlist.txt`. It works,
+# and it is REACTIVE BY CONSTRUCTION: it grades one run, in that run, so the
+# only signal that ever reaches a human is that gate reddening because an
+# unlisted test happened to flake in the run somebody was looking at. Discovery
+# is therefore one member per CI cycle and the allowlist ends up tracking
+# whichever member fired. wayland#1286 c1 clause 2 - "so the allowlist stops
+# being written reactively" - is about the WRITING PROCESS, and no per-run gate
+# can satisfy it.
+#
+# This workflow inverts the direction. It measures the POPULATION on a cadence
+# and emits the two outputs nothing else produces:
+#
+#   COVERAGE MISSES  every test with incidence > 0 and no live allowlist line,
+#                    with its rate, BEFORE it reddens a run.
+#   DEAD ENTRIES     every allowlist line with zero observations in the window,
+#                    flagged for DELETION at expiry rather than renewal.
+#
+# Entries then get written from a rate with a denominator instead of from a
+# single payload, which is the whole content of that clause.
+#
+# ── WHY THIS IS A REPORT AND NOT A MERGE GATE ──────────────────────────────
+#
+# Coverage misses NEVER fail this job. Failing on them would recreate the exact
+# harm wayland#1169 built the retry gate to stop, at scale: the cheapest way to
+# clear a red list is to paste every name into the allowlist, and N entries
+# added in one commit have no owner, no measurement and no date anybody chose -
+# N unknown flakes converted into N SILENT retries. The list is designed to
+# shrink. So this job reports, and a human writes entries one at a time with a
+# rate behind each.
+#
+# ── WHAT DOES FAIL IT, AND WHY THAT IS NOT DECORATION ──────────────────────
+#
+# A census that measured nothing prints the same zeros as a clean fortnight.
+# Three conditions make the output not-a-measurement, and each fails the job
+# (script exit code 2, asserted in the dedicated gate step below):
+#
+#   1. ZERO executions with a JUnit report in the window. Nothing was read.
+#
+#   2. EXPIRED/UNREADABLE ARTIFACTS above --max-expired-fraction (default 10 %).
+#      An expired artifact is indistinguishable from a leg that did not flake:
+#      both contribute nothing to the numerator, but only one of them should
+#      also have contributed to the denominator. Past that point the census is
+#      measuring GitHub's retention policy rather than the product's flakiness,
+#      and every "0" it prints is contaminated. The hand pass over a 10-day
+#      window saw 338 of 338 artifacts live and ZERO expired, so any non-trivial
+#      expiry fraction on a 14-day window means either the window reached past
+#      retention or artifacts are being deleted - and in both cases the
+#      denominator is quietly wrong in the safe-looking direction.
+#
+#   3. POSITIVE CONTROL: a real number of executions read and ZERO flaky
+#      elements found. The measured base rate is 30 of 104 macos-latest
+#      executions carrying at least one retry-masked failure, so zero across
+#      dozens of executions is far more likely a broken XML path than a clean
+#      window. A parser that silently matches nothing reports perfect health,
+#      and that is the single worst output this tool could produce.
+#
+# There is a fourth, structural failure this file guards separately: the summary
+# gate step below asserts that the rendered Markdown actually CONTAINS its four
+# section headers. A truncated or half-written report that still exits 0 would
+# otherwise publish as a clean census.
+#
+# ── WHAT THE OUTPUT CANNOT TELL YOU ────────────────────────────────────────
+#
+# Everything here is per-execution incidence under `[profile.ci] retries = 2`.
+# It is NOT a `--retries 0` failure rate and no census read from CI history can
+# produce one: turning incidence into a rate needs a bounded job that runs the
+# pinned list at `--retries 0` with n >= 20 per test per platform. The script
+# stamps that sentence on the Markdown header and into the JSON payload so a
+# reader of either alone cannot mistake one for the other.
+
+name: Flake census (wayland#1286)
+
+on:
+  schedule:
+    # Weekly, Monday 06:17 UTC. Off the hour on purpose: the top of the hour is
+    # GitHub's busiest scheduling slot and a cron there is the one most likely
+    # to be delayed or dropped. A dropped run matters here because a census that
+    # does not run is indistinguishable from a census that found nothing.
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+    inputs:
+      days:
+        description: 'Window in days, ending now'
+        required: false
+        default: '14'
+      max_expired_fraction:
+        description: 'Fail if this fraction of artifacts was expired/unreadable'
+        required: false
+        default: '0.10'
+
+permissions:
+  contents: read
+  # Required: the census reads `actions/workflows/ci.yml/runs`,
+  # `actions/runs/<id>/artifacts` and downloads artifact zips. Without this the
+  # `gh api` calls 404 and the run list comes back empty, which the degeneracy
+  # check above turns into a loud failure rather than a silent clean census.
+  actions: read
+
+concurrency:
+  # One census at a time. Two overlapping runs would each pull ~300 artifacts
+  # for no additional information and would race on the API budget.
+  group: flake-census
+  cancel-in-progress: false
+
+jobs:
+  census:
+    name: Retry-flake population census
+    runs-on: ubuntu-latest
+    # ~300 artifacts at ~1.2 MB over a 14-day window measured at roughly four
+    # minutes per 65 artifacts locally, so ~20 minutes of download. 90 is slack
+    # for a slow API day, not an expectation.
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v6
+
+      # The default window. `--days 14` on a WEEKLY cron is deliberate overlap:
+      # if one week's run is delayed or dropped, the next one still covers the
+      # runs the missing one would have seen. A 7-day window on a 7-day cron has
+      # no margin, and the gap it leaves looks exactly like an absence of flakes.
+      - name: Run the census and grade the allowlist
+        id: census
+        env:
+          # `gh` needs a token; the job token has the `actions: read` scope
+          # granted above and nothing more. No secret is read, written or logged
+          # by the script.
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          DAYS='${{ github.event.inputs.days || 14 }}'
+          FRAC='${{ github.event.inputs.max_expired_fraction || 0.10 }}'
+          python3 scripts/flake-census.py \
+            --days "${DAYS}" \
+            --gate \
+            --fail-on-degenerate \
+            --max-expired-fraction "${FRAC}" \
+            --allowlist .config/flaky-allowlist.txt \
+            --cache-dir "${RUNNER_TEMP}/flake-census-cache" \
+            --out-json flake-census.json \
+            --out-md flake-census.md 2>&1 | tee census.log
+          # PIPESTATUS[0], never the tail of the pipe: `cmd | tee` reports tee's
+          # status. Recorded to a file rather than acted on here so that a
+          # non-zero exit cannot short-circuit the summary and artifact steps
+          # below - the evidence must survive the failure that needs it.
+          echo "${PIPESTATUS[0]}" > census.rc
+          echo "rc=$(cat census.rc)" >> "$GITHUB_OUTPUT"
+
+      # Report first, gate second. The two gate outputs are the deliverable, and
+      # they must reach the job summary even when the census is degenerate -
+      # a reader needs to see WHAT was measured in order to judge the failure.
+      - name: Publish the census into the job summary
+        if: always()
+        run: |
+          set -uo pipefail
+          if [ -s flake-census.md ]; then
+            cat flake-census.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "## Flake census produced NO report" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "\`flake-census.md\` is absent or empty. The script did not reach its rendering step; see \`census.log\` in the artifact." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload the census
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flake-census-${{ github.run_id }}
+          path: |
+            flake-census.json
+            flake-census.md
+            census.log
+            census.rc
+          if-no-files-found: warn
+          # 90 days, the maximum. A census whose own artifact expires before the
+          # next few censuses can be compared against it would reintroduce, in
+          # this tool's own evidence, the retention trap the tool exists to
+          # report on.
+          retention-days: 90
+
+      # The gate proper, deliberately separate from the run step so that each
+      # asserted property fails with its own message and so that a non-zero
+      # exit from the script cannot skip the structural checks.
+      #
+      # A census that exits 0 having rendered half a document would otherwise
+      # publish as clean. These four greps are the anti-vacuity check on the
+      # REPORT, as distinct from the script's three checks on the MEASUREMENT.
+      - name: Assert the census is a measurement and the report is complete
+        if: always()
+        run: |
+          set -uo pipefail
+          fail=0
+          rc="$(cat census.rc 2>/dev/null || echo 127)"
+          echo "script exit code: ${rc}"
+
+          if [ ! -s flake-census.md ] || [ ! -s flake-census.json ]; then
+            echo "FAIL: the census produced no report and no JSON."
+            fail=1
+          else
+            for section in \
+              '## Coverage of the window' \
+              '## Denominator per leg' \
+              '## COVERAGE MISSES' \
+              '## DEAD ENTRIES'
+            do
+              if ! grep -qF "${section}" flake-census.md; then
+                echo "FAIL: rendered report is missing the section '${section}' - it is truncated, and a truncated census reads as a clean one."
+                fail=1
+              fi
+            done
+            # The retries sentence is load-bearing, not boilerplate. Without it
+            # a reader takes a 13.0 % incidence for a 13.0 % failure rate at
+            # --retries 0, which it is not and cannot be.
+            if ! grep -qF 'NOT a `--retries 0` failure rate' flake-census.md; then
+              echo "FAIL: the report does not carry the retries=2 caveat, so every rate in it is readable as a --retries 0 rate."
+              fail=1
+            fi
+            echo "--- denominators ---"
+            sed -n '/^## Denominator per leg/,/^## Population/p' flake-census.md
+            echo "--- coverage misses ---"
+            sed -n '/^## COVERAGE MISSES/,/^## DEAD ENTRIES/p' flake-census.md | grep -E '^\|' || echo "(none)"
+          fi
+
+          # Exit 2 from the script is DEGENERATE: zero executions, too many
+          # expired artifacts, or a failed positive control. Any other non-zero
+          # is a crash and is equally fatal. Coverage misses do not appear here
+          # at all - by design, they never fail this job.
+          if [ "${rc}" = "2" ]; then
+            echo "FAIL: the census is DEGENERATE. Its zeros are absence, not health; see the report's top section."
+            fail=1
+          elif [ "${rc}" != "0" ]; then
+            echo "FAIL: scripts/flake-census.py exited ${rc}."
+            fail=1
+          fi
+
+          if [ "${fail}" -ne 0 ]; then
+            echo "GATE: FAILED"
+            exit 1
+          fi
+          echo "GATE: PASSED - the census read a real population; coverage misses and dead entries are reported above and do NOT fail this job."
