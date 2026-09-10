@@ -9,7 +9,7 @@ Owners come from each ledger's `owner:` on its UNMET criteria — the
 owner is read, not assigned, so a row cannot claim an owner the
 ledger does not.
 
-Blocking issues: 40   Outstanding criteria: 97
+Blocking issues: 40   Outstanding criteria: 93
 
 | Issue | Owner | Outstanding | Title |
 |---|---|---:|---|
@@ -38,15 +38,15 @@ Blocking issues: 40   Outstanding criteria: 97
 | FerroxLabs/wayland#1300 | core | 5 | Windows-only: crashed-holder recovery in the chunked credential write lock is bistable (48x), and it is what times out interrupted_rotations_do_not_leak_entries_without_bound |
 | FerroxLabs/wayland#1301 | core | 3 | First Windows retry-flake cluster: a wall-clock ratio guard and a dispatch-budget test at 94% of its kill line (CI (Array)) |
 | FerroxLabs/wayland#1302 | core | 1 | The credential-store timeout tells the operator to repair a keyring that is not broken - 104 reproductions with a healthy store |
-| FerroxLabs/wayland#1303 | core | 2 | Windows: a racing chunked credential write fails outright with ACCESS_DENIED (os error 5), and the caller loses a single-use refresh token |
+| FerroxLabs/wayland#1303 | core | 1 | Windows: a racing chunked credential write fails outright with ACCESS_DENIED (os error 5), and the caller loses a single-use refresh token |
 | FerroxLabs/wayland#1304 | core | 3 | the_streaming_bash_timeout_bounds_the_secret_deny_walk hard-fails ci-linux at ~1 in 9: the manifest walk dominated the deadline and the caller was not told |
 | FerroxLabs/wayland#1308 | core | 4 | Windows: four wcore-skills watcher_tests fail together with ERROR_PATH_NOT_FOUND, and the bare unwrap hides which path |
 | FerroxLabs/wayland#1309 | core | 4 | raw_mode_with_nothing_typed_still_denies: the pty capture ends at the prompt, so a missing denial reason and a truncated read are indistinguishable |
 | FerroxLabs/wayland-core#373 | core | 1 | cargo test --workspace --lib --no-fail-fast cannot be run 10x consecutively: osv_check::tests::ssrf_refusal_is_visible_at_default_log_levels fails ~5% of runs |
 | FerroxLabs/wayland-core#386 | core | 3 | core#325 c2 remainder: one real nightly-windows-soak run with a red sibling |
-| FerroxLabs/wayland-core#401 | core | 3 | an_unknown_window_sizes_the_skill_listing precondition cannot pass in a clean container, so every integ/f13 CI run is red |
+| FerroxLabs/wayland-core#401 | core | 1 | an_unknown_window_sizes_the_skill_listing precondition cannot pass in a clean container, so every integ/f13 CI run is red |
 | FerroxLabs/wayland-core#403 | core | 3 | The workspace --lib suite is not ten-times-clean: an ephemeral-port race and three single-sample wall-clock ratios (core#373 c5 remainder) |
-| FerroxLabs/wayland-core#404 | core | 2 | A ci-linux cancellation at the 120-minute budget destroys the JUnit evidence the run already produced |
+| FerroxLabs/wayland-core#404 | core | 1 | A ci-linux cancellation at the 120-minute budget destroys the JUnit evidence the run already produced |
 | FerroxLabs/wayland-core#413 | core | 3 | The DENY_CACHE_MAX_DIRS branch of deny_cache is ungraded and needs 100,001 directories to reach (split from #398 c5) |
 | FerroxLabs/wayland-core#415 | core | 2 | Close the quarantine console bypass with a restricting-SID token, without removing the feature (from #389 c1) |
 | FerroxLabs/wayland-core#424 | core | 2 | mutants-nightly has produced zero data in 87 runs: every leg dies in ~30s on a missing target/ parent, and the step exits 0 so it can never go red |
