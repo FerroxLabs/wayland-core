@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "Windows: a racing chunked credential write fails outright with ACCESS_DENIED (os error 5), and the caller loses a single-use refresh token"
 status: open
-last_verified_commit: bdd687b29
+last_verified_commit: 5faceff7a
 criteria:
   - id: c1
     text: "The Windows file operation that answers ERROR_ACCESS_DENIED is identified BY FRAME rather than inferred, and the answer distinguishes lock acquisition from manifest publish."

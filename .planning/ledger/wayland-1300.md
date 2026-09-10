@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "Windows-only: crashed-holder recovery in the chunked credential write lock is bistable (48x), and it is what times out interrupted_rotations_do_not_leak_entries_without_bound"
 status: open
-last_verified_commit: bdd687b29
+last_verified_commit: 5faceff7a
 criteria:
   - id: c1
     text: "On Windows at --retries 0, n>=20, the per-crash-round recovery cost of credentials::chunk_crash_injection::* has a max/min spread below 3x. Today it is 48.2x for interrupted_rotations and 25x across the sibling sweeps inside a single run."
