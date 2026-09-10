@@ -9247,6 +9247,7 @@ dependencies = [
  "windows-sys 0.59.0",
  "wiremock",
  "workspace-hack",
+ "zeroize",
 ]
 
 [[package]]

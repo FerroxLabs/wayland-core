@@ -128,6 +128,9 @@ reqwest.workspace = true
 # Wave SD: SHA-256 for FileHistory.byte_digest (replacing collidable
 # 64-bit DefaultHasher). Closes SECURITY MAJOR #17.
 sha2.workspace = true
+# wayland#1349: wipe the transient environment copies hashed into a
+# confidential-key load's single-flight identity (`recovery_confidential`).
+zeroize.workspace = true
 
 # Sec6: ed25519 plugin signature verification
 ed25519-dalek.workspace = true

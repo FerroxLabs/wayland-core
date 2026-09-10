@@ -1,11 +1,13 @@
 //! Confidential persistence for exact provider requests used by recovery.
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::Duration;
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use wcore_config::confidential_blob::{
     ConfidentialBlobAad, ConfidentialBlobKey, ConfidentialKeyStoreError,
@@ -14,7 +16,9 @@ use wcore_config::confidential_blob::{
     seal_confidential_blob,
 };
 use wcore_config::config::Config;
-use wcore_config::credentials::{CredentialsBackend, CredentialsError};
+use wcore_config::credentials::{
+    ConfidentialCredentialsStore, CredentialsBackend, CredentialsError, CredentialsStorageConfig,
+};
 
 /// The single source of this identifier is `wcore_config`, so the profile-delete
 /// purge (`purge_profile_confidential_keys`) deletes exactly what this writes.
@@ -412,7 +416,10 @@ pub(crate) struct RecoveryRequestProtector {
 
 #[derive(Default)]
 struct ProtectorState {
-    key: Option<ConfidentialBlobKey>,
+    /// Shared, not copied, with any other engine that received the same
+    /// in-flight load (see [`KeyLoadFlight`]). The key still lives exactly as
+    /// long as the engines holding it: nothing outside an engine retains it.
+    key: Option<Arc<ConfidentialBlobKey>>,
     /// A load that spent the whole of [`KEY_STORE_ACQUIRE_BUDGET`] without
     /// answering and is still outstanding on its own thread.
     ///
@@ -427,32 +434,24 @@ struct ProtectorState {
 }
 
 struct PendingKeyLoad {
-    /// When the load was started, so a later caller's budget can be applied
-    /// as a DEADLINE on this load rather than as a fresh spend. Without it a
-    /// turn that asks from two call sites pays the budget twice.
+    /// When THIS engine began waiting on the load, so a later caller's budget
+    /// can be applied as a DEADLINE rather than as a fresh spend. Without it a
+    /// turn that asks from two call sites pays the budget twice. Per engine,
+    /// not per load: an engine that joined a load another engine started
+    /// still gets its own whole budget.
     started: std::time::Instant,
-    /// Whether the outstanding load was allowed to CREATE the key. A
-    /// read-only load's failure cannot answer a caller that may create one.
-    create: bool,
-    /// Set by the loader thread as it enters the store call, and read by
-    /// whichever caller's wait expires. An `Arc` rather than a return value
-    /// because the answer is needed precisely when the load has NOT returned.
-    asked: Arc<AtomicBool>,
-    /// Whether this load has already been granted its one
-    /// [`KEY_STORE_NEVER_ASKED_EXTENSION`]. Carried on the LOAD and not on the
-    /// caller, because the extension is a property of "this load has not
-    /// reached the store yet" — a second caller must not buy a second one.
+    /// Whether this engine has already been granted its one
+    /// [`KEY_STORE_NEVER_ASKED_EXTENSION`] on this load — a second call site
+    /// of the same engine must not buy a second one.
     extended: bool,
-    rx: mpsc::Receiver<Result<ConfidentialBlobKey, RecoveryConfidentialError>>,
+    /// The outstanding load, possibly shared with other engines whose store
+    /// identity is exactly this one's.
+    flight: Arc<KeyLoadFlight>,
 }
 
 impl PendingKeyLoad {
     fn reach(&self) -> KeyStoreReach {
-        if self.asked.load(Ordering::Acquire) {
-            KeyStoreReach::Asked
-        } else {
-            KeyStoreReach::NeverAsked
-        }
+        self.flight.reach()
     }
 }
 
@@ -486,6 +485,56 @@ enum KeySource {
     /// degrade notice carrying a store report (wayland#1302 c3).
     #[cfg(any(test, feature = "test-utils"))]
     SelectionRefusedForTest,
+    /// A load that SHARES the way a production load does — keyed by the
+    /// production [`KeyLoadIdentity`] — and holds in the store until its gate
+    /// opens, then gives its gate's answer. The only double that can put two
+    /// engines' loads in flight at once on purpose, which is what grading the
+    /// single-flight boundary requires. `cfg(test)` only, for the same reason
+    /// as `LateButAnsweringForTest`.
+    #[cfg(test)]
+    GatedForTest(Arc<TestKeyGate>),
+}
+
+/// The store behind [`KeySource::GatedForTest`]: closed until the test opens
+/// it, and counting how many loads actually reached it.
+#[cfg(test)]
+pub(crate) struct TestKeyGate {
+    open: Mutex<bool>,
+    opened: Condvar,
+    loads: std::sync::atomic::AtomicUsize,
+    answer: Result<[u8; 32], RecoveryConfidentialError>,
+}
+
+#[cfg(test)]
+impl TestKeyGate {
+    pub(crate) fn new(
+        open: bool,
+        answer: Result<[u8; 32], RecoveryConfidentialError>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            open: Mutex::new(open),
+            opened: Condvar::new(),
+            loads: std::sync::atomic::AtomicUsize::new(0),
+            answer,
+        })
+    }
+
+    pub(crate) fn release(&self) {
+        *self.open.lock().unwrap_or_else(PoisonError::into_inner) = true;
+        self.opened.notify_all();
+    }
+
+    pub(crate) fn loads(&self) -> usize {
+        self.loads.load(Ordering::SeqCst)
+    }
+
+    fn hold_until_open(&self) {
+        let open = self.open.lock().unwrap_or_else(PoisonError::into_inner);
+        let _open = self
+            .opened
+            .wait_while(open, |open| !*open)
+            .unwrap_or_else(PoisonError::into_inner);
+    }
 }
 
 impl Default for RecoveryRequestProtector {
@@ -616,10 +665,22 @@ impl RecoveryRequestProtector {
     pub(crate) fn with_test_key(bytes: &[u8; 32]) -> Self {
         Self {
             state: Mutex::new(ProtectorState {
-                key: Some(ConfidentialBlobKey::from_slice(bytes).expect("fixed recovery test key")),
+                key: Some(Arc::new(
+                    ConfidentialBlobKey::from_slice(bytes).expect("fixed recovery test key"),
+                )),
                 pending: None,
             }),
             key_source: KeySource::ConfiguredStore,
+        }
+    }
+
+    /// A protector whose loads share by the production store identity and
+    /// hold until `gate` opens. Grades the single-flight boundary.
+    #[cfg(test)]
+    pub(crate) fn with_gated_key_store_for_test(gate: Arc<TestKeyGate>) -> Self {
+        Self {
+            state: Mutex::new(ProtectorState::default()),
+            key_source: KeySource::GatedForTest(gate),
         }
     }
 
@@ -680,7 +741,7 @@ impl RecoveryRequestProtector {
             let key = self.acquire_key(&mut state, config, create, budget, backend)?;
             state.key = Some(key);
         }
-        operation(state.key.as_ref().ok_or_else(key_load_machinery_failed)?)
+        operation(state.key.as_deref().ok_or_else(key_load_machinery_failed)?)
     }
 
     /// Obtain the key from the configured store, or give up inside
@@ -689,7 +750,13 @@ impl RecoveryRequestProtector {
     /// The load runs on its own thread because the store call is synchronous
     /// and uncancellable: a deadline can only be imposed on the WAIT, never on
     /// the call. That is why a timeout leaves a thread behind, and why the
-    /// receiver is kept in [`ProtectorState::pending`] rather than dropped.
+    /// load is kept in [`ProtectorState::pending`] rather than dropped.
+    ///
+    /// A NEW load is started through [`start_or_join_key_load`], which hands an
+    /// engine a load already in flight for exactly the same store identity
+    /// instead of starting a second one. That is the whole of wayland#1349's
+    /// repair; every wait, budget, extension and authority rule below is
+    /// unchanged and is still applied per engine.
     fn acquire_key(
         &self,
         state: &mut ProtectorState,
@@ -697,9 +764,9 @@ impl RecoveryRequestProtector {
         create: bool,
         budget: Duration,
         backend: &'static str,
-    ) -> Result<ConfidentialBlobKey, RecoveryConfidentialError> {
+    ) -> Result<Arc<ConfidentialBlobKey>, RecoveryConfidentialError> {
         if let Some(pending) = state.pending.take() {
-            match pending.rx.try_recv() {
+            match pending.flight.wait(Duration::ZERO) {
                 // The wedged store finally answered. Adopt it whatever the
                 // outstanding load was allowed to do: a key is a key.
                 Ok(Ok(key)) => return Ok(key),
@@ -707,7 +774,7 @@ impl RecoveryRequestProtector {
                 // outstanding load had at least this caller's authority. A
                 // read-only load reporting "no key stored" does not answer a
                 // caller that is allowed to create one.
-                Ok(Err(error)) if pending.create || !create => return Err(error),
+                Ok(Err(error)) if pending.flight.create || !create => return Err(error),
                 Ok(Err(_)) => {}
                 // Still outstanding. Whether to wait again is the CALLER's
                 // budget to spend, not a fixed policy: a turn passes the
@@ -724,14 +791,14 @@ impl RecoveryRequestProtector {
                 // budget was introduced with. A resume, whose budget is
                 // larger than anything a turn has spent, still has time left
                 // on the clock and waits out the remainder.
-                Err(mpsc::TryRecvError::Empty) => {
+                Err(FlightWait::Outstanding) => {
                     let remaining = budget.saturating_sub(pending.started.elapsed());
                     let mut pending = pending;
-                    match pending.rx.recv_timeout(remaining) {
+                    match pending.flight.wait(remaining) {
                         Ok(Ok(key)) => return Ok(key),
-                        Ok(Err(error)) if pending.create || !create => return Err(error),
+                        Ok(Err(error)) if pending.flight.create || !create => return Err(error),
                         Ok(Err(_)) => {}
-                        Err(mpsc::RecvTimeoutError::Timeout) => {
+                        Err(FlightWait::Outstanding) => {
                             // wayland#1289. The load still has not reached the
                             // store, so this expiry says nothing about the
                             // store — grant its one extension, if this load
@@ -739,16 +806,16 @@ impl RecoveryRequestProtector {
                             let mut waited = budget;
                             if !pending.extended && pending.reach() == KeyStoreReach::NeverAsked {
                                 pending.extended = true;
-                                match pending.rx.recv_timeout(KEY_STORE_NEVER_ASKED_EXTENSION) {
+                                match pending.flight.wait(KEY_STORE_NEVER_ASKED_EXTENSION) {
                                     Ok(Ok(key)) => return Ok(key),
-                                    Ok(Err(error)) if pending.create || !create => {
+                                    Ok(Err(error)) if pending.flight.create || !create => {
                                         return Err(error);
                                     }
                                     Ok(Err(_)) => {}
-                                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                                    Err(FlightWait::Outstanding) => {
                                         waited += KEY_STORE_NEVER_ASKED_EXTENSION;
                                     }
-                                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                                    Err(FlightWait::Abandoned) => {
                                         return Err(key_load_machinery_failed());
                                     }
                                 }
@@ -761,27 +828,20 @@ impl RecoveryRequestProtector {
                                 backend,
                             });
                         }
-                        Err(mpsc::RecvTimeoutError::Disconnected) => {}
+                        Err(FlightWait::Abandoned) => {}
                     }
                 }
-                Err(mpsc::TryRecvError::Disconnected) => {}
+                Err(FlightWait::Abandoned) => {}
             }
         }
-        let (tx, rx) = mpsc::channel();
         let started = std::time::Instant::now();
-        let asked = Arc::new(AtomicBool::new(false));
-        let load = self.key_loader(config, create, Arc::clone(&asked));
-        std::thread::Builder::new()
-            .name("wayland-recovery-key".to_owned())
-            .spawn(move || {
-                // The receiver may be long gone; the send failing is the
-                // normal end of a load nobody waited for.
-                let _ = tx.send(load());
-            })
-            .map_err(|_| key_load_machinery_failed())?;
-        match rx.recv_timeout(budget) {
+        let identity = self.key_load_identity(config, create);
+        let flight = start_or_join_key_load(identity, create, |identity| {
+            self.key_loader(config, create, identity)
+        })?;
+        match flight.wait(budget) {
             Ok(result) => result,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
+            Err(FlightWait::Outstanding) => {
                 // wayland#1289. The budget is a wall-clock deadline on a
                 // thread that has to be scheduled; if it expired without the
                 // store having been asked, it measured this host and not the
@@ -789,24 +849,22 @@ impl RecoveryRequestProtector {
                 // all when the store WAS asked and stayed silent.
                 let mut waited = budget;
                 let mut extended = false;
-                if !asked.load(Ordering::Acquire) {
+                if flight.reach() == KeyStoreReach::NeverAsked {
                     extended = true;
-                    match rx.recv_timeout(KEY_STORE_NEVER_ASKED_EXTENSION) {
+                    match flight.wait(KEY_STORE_NEVER_ASKED_EXTENSION) {
                         Ok(result) => return result,
-                        Err(mpsc::RecvTimeoutError::Timeout) => {
+                        Err(FlightWait::Outstanding) => {
                             waited += KEY_STORE_NEVER_ASKED_EXTENSION;
                         }
-                        Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        Err(FlightWait::Abandoned) => {
                             return Err(key_load_machinery_failed());
                         }
                     }
                 }
                 let pending = PendingKeyLoad {
-                    create,
-                    asked,
-                    extended,
-                    rx,
                     started,
+                    extended,
+                    flight,
                 };
                 let reach = pending.reach();
                 state.pending = Some(pending);
@@ -816,34 +874,72 @@ impl RecoveryRequestProtector {
                     backend,
                 })
             }
-            // The loader thread died without sending. Nothing is known about
+            // The loader thread died without answering. Nothing is known about
             // the key, but nothing is outstanding either.
-            Err(mpsc::RecvTimeoutError::Disconnected) => Err(key_load_machinery_failed()),
+            Err(FlightWait::Abandoned) => Err(key_load_machinery_failed()),
         }
+    }
+
+    /// The identity a load from this protector is shared under, or `None` for
+    /// a load that must run on its own.
+    ///
+    /// Only the production store — and the one test double built to grade it —
+    /// ever shares. Every other double models one engine's store on purpose,
+    /// and the tests that use them grade exactly that.
+    fn key_load_identity(&self, config: &Config, create: bool) -> Option<KeyLoadIdentity> {
+        let source = match &self.key_source {
+            KeySource::ConfiguredStore => KeyLoadSource::ConfiguredStore,
+            #[cfg(test)]
+            KeySource::GatedForTest(_) => KeyLoadSource::GatedForTest,
+            #[cfg(any(test, feature = "test-utils"))]
+            _ => return None,
+        };
+        KeyLoadIdentity::resolve(source, config, create, std::env::current_dir())
     }
 
     fn key_loader(
         &self,
         config: &Config,
         create: bool,
-        asked: Arc<AtomicBool>,
-    ) -> Box<dyn FnOnce() -> Result<ConfidentialBlobKey, RecoveryConfidentialError> + Send> {
-        match self.key_source {
-            KeySource::ConfiguredStore => {
-                // Cloned because the load outlives this call by definition
-                // once it times out. It happens at most once per engine.
-                let config = config.clone();
-                Box::new(move || {
-                    // Marked HERE, on the loader thread, immediately before
-                    // the blocking call and never on the spawning side: the
-                    // whole value of the flag is that a load this host never
-                    // ran cannot have set it.
-                    asked.store(true, Ordering::Release);
-                    load_key_from_configured_store(&config, create)
-                })
-            }
+        identity: Option<&KeyLoadIdentity>,
+    ) -> KeyLoader {
+        match &self.key_source {
+            KeySource::ConfiguredStore => match identity {
+                // A SHARED load reads nothing but its identity. The store
+                // config and the credentials path are the identity's own
+                // captured values, not re-resolved from ambient state, so
+                // what every engine sharing this load compared equal on is
+                // exactly what the load opens.
+                Some(identity) => {
+                    let store_config = identity.store_config();
+                    let credentials_path = identity.credentials_path.clone();
+                    Box::new(move |asked: &AtomicBool| {
+                        // Marked HERE, on the loader thread, immediately
+                        // before the blocking call and never on the spawning
+                        // side: the whole value of the flag is that a load
+                        // this host never ran cannot have set it.
+                        asked.store(true, Ordering::Release);
+                        load_key_from_opened_store(
+                            wcore_config::credentials::open_confidential_store(
+                                &store_config,
+                                &credentials_path,
+                            ),
+                            create,
+                        )
+                    })
+                }
+                None => {
+                    // Cloned because the load outlives this call by definition
+                    // once it times out. It happens at most once per engine.
+                    let config = config.clone();
+                    Box::new(move |asked: &AtomicBool| {
+                        asked.store(true, Ordering::Release);
+                        load_key_from_configured_store(&config, create)
+                    })
+                }
+            },
             #[cfg(any(test, feature = "test-utils"))]
-            KeySource::WedgedForTest => Box::new(move || {
+            KeySource::WedgedForTest => Box::new(move |asked: &AtomicBool| {
                 asked.store(true, Ordering::Release);
                 loop {
                     std::thread::park();
@@ -851,7 +947,7 @@ impl RecoveryRequestProtector {
             }),
             // Deliberately never marks: a load that never reaches the store.
             #[cfg(any(test, feature = "test-utils"))]
-            KeySource::StarvedForTest => Box::new(|| {
+            KeySource::StarvedForTest => Box::new(|_: &AtomicBool| {
                 loop {
                     std::thread::park();
                 }
@@ -861,13 +957,13 @@ impl RecoveryRequestProtector {
             // has no key" — so a caller that receives it has demonstrably had
             // the store's word, which a timeout can never be mistaken for.
             #[cfg(test)]
-            KeySource::LateButAnsweringForTest => Box::new(move || {
+            KeySource::LateButAnsweringForTest => Box::new(move |asked: &AtomicBool| {
                 std::thread::sleep(KEY_STORE_ACQUIRE_BUDGET + Duration::from_millis(750));
                 asked.store(true, Ordering::Release);
                 Err(RecoveryConfidentialError::MissingRecoveryKey)
             }),
             #[cfg(any(test, feature = "test-utils"))]
-            KeySource::SelectionRefusedForTest => Box::new(move || {
+            KeySource::SelectionRefusedForTest => Box::new(move |asked: &AtomicBool| {
                 asked.store(true, Ordering::Release);
                 Err(store_selection_failure(
                     &CredentialsError::BackendUnavailable(
@@ -875,8 +971,302 @@ impl RecoveryRequestProtector {
                     ),
                 ))
             }),
+            #[cfg(test)]
+            KeySource::GatedForTest(gate) => {
+                let gate = Arc::clone(gate);
+                Box::new(move |asked: &AtomicBool| {
+                    gate.loads.fetch_add(1, Ordering::SeqCst);
+                    asked.store(true, Ordering::Release);
+                    gate.hold_until_open();
+                    gate.answer.map(|bytes| {
+                        ConfidentialBlobKey::from_slice(&bytes).expect("fixed gated test key")
+                    })
+                })
+            }
         }
     }
+}
+
+/// The blocking half of a load, run on its own thread by
+/// [`spawn_key_load`].
+type KeyLoader =
+    Box<dyn FnOnce(&AtomicBool) -> Result<ConfidentialBlobKey, RecoveryConfidentialError> + Send>;
+
+// ---------------------------------------------------------------------------
+// Single-flight for key loads — wayland#1349
+// ---------------------------------------------------------------------------
+//
+// THE DEFECT. Every engine owns a `RecoveryRequestProtector`, so every session
+// started its own loader thread, and the file-backed store serialises loads on
+// `credentials.confidential-key.lock`. Under concurrency all but one load per
+// wave outlived its caller's budget, and each one left behind a live thread and
+// a held lock fd. Measured on hetzner-dsm: 462 such threads and 461 such fds
+// after ~461 sessions at concurrency 32, every session already deleted — ZERO of
+// either at concurrency 1. That is the dominant term of the #1349 RSS growth.
+//
+// THE REPAIR is to stop starting loads that are already running: N engines that
+// ask for the key of exactly the same store at the same time share ONE load.
+//
+// WHAT IS SHARED, AND FOR HOW LONG. Only a load that is IN FLIGHT. A flight is
+// removed from the registry the moment it settles — BEFORE its answer is
+// published — so a caller either joins while the load is still running or
+// starts a fresh one. No answer, success or failure, is ever served to a caller
+// that arrived after it was produced: a locked store stays refused on the very
+// next load, and a key is dropped with the last engine holding it exactly as
+// before. This is deliberately NOT a memo of the key per process.
+//
+// THE AUTHORIZATION BOUNDARY. Concurrent engines in one process can have
+// different homes, different stores and different vault unlock states, and a
+// store's refusal is a security verdict. So engines share only when EVERYTHING
+// the load reads compares equal — see `KeyLoadIdentity` — and never on the
+// backend label, which is identical for two different vaults. Anything that
+// cannot be resolved does not share.
+
+/// Which kind of loader a shared identity belongs to, so a test double can
+/// never join a production load or the reverse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyLoadSource {
+    ConfiguredStore,
+    #[cfg(test)]
+    GatedForTest,
+}
+
+/// Everything a configured-store key load reads, resolved at the moment the
+/// load is asked for. Two engines share a load only if these are EQUAL.
+///
+/// Field by field, from what `load_key_from_opened_store` and the credentials
+/// layer beneath it consume:
+///
+/// * `backend` + `service_name` — the whole of `[storage.credentials]`,
+///   including the vault file paths inside `EncryptedFile`. Built back into a
+///   `CredentialsStorageConfig` by struct literal in [`Self::store_config`], so
+///   a field added to that struct fails to compile here until it is considered.
+/// * `credentials_path` — the profile home the store and its backend pin
+///   resolve against (`WAYLAND_HOME` / `XDG_DATA_HOME` / the platform dir).
+/// * `working_directory` — relative paths above resolve against it.
+/// * `environment` — a digest of the COMPLETE process environment, in its own
+///   order. Deliberately not a list of the variables the load is known to read
+///   (`WAYLAND_HOME`, `WAYLAND_VAULT_PASSPHRASE[_FD]`, the keyring's own): a
+///   list would silently miss the next variable someone teaches the store to
+///   read, and fail OPEN. Hashing all of it fails closed — any difference, even
+///   an irrelevant one, only costs a share.
+/// * `create` — a read-only load and a load that may create the key are
+///   different questions with different authority, so they never share.
+/// Not `Debug`, on purpose: nothing about a store's identity needs printing,
+/// and the environment digest has no business in a log line.
+#[derive(PartialEq, Eq)]
+struct KeyLoadIdentity {
+    source: KeyLoadSource,
+    create: bool,
+    backend: CredentialsBackend,
+    service_name: Option<String>,
+    credentials_path: PathBuf,
+    working_directory: PathBuf,
+    environment: [u8; 32],
+}
+
+impl KeyLoadIdentity {
+    /// `None` when any part cannot be resolved; the caller then loads alone.
+    fn resolve(
+        source: KeyLoadSource,
+        config: &Config,
+        create: bool,
+        working_directory: std::io::Result<PathBuf>,
+    ) -> Option<Self> {
+        let working_directory = working_directory.ok()?;
+        Some(Self {
+            source,
+            create,
+            backend: config.storage.credentials.backend.clone(),
+            service_name: config.storage.credentials.service_name.clone(),
+            credentials_path: wcore_config::config::credentials_storage_path(),
+            working_directory,
+            environment: environment_digest(),
+        })
+    }
+
+    fn store_config(&self) -> CredentialsStorageConfig {
+        CredentialsStorageConfig {
+            backend: self.backend.clone(),
+            service_name: self.service_name.clone(),
+        }
+    }
+}
+
+/// SHA-256 over the whole environment, each name and value length-prefixed.
+///
+/// The environment carries secrets (a vault passphrase, provider keys), so the
+/// identity keeps only this digest, and the transient copies `vars_os` hands
+/// out are wiped before they are freed.
+fn environment_digest() -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    for (name, value) in std::env::vars_os() {
+        for part in [name, value] {
+            let bytes = zeroize::Zeroizing::new(part.into_encoded_bytes());
+            hasher.update((bytes.len() as u64).to_be_bytes());
+            hasher.update(bytes.as_slice());
+        }
+    }
+    let mut digest = [0_u8; 32];
+    digest.copy_from_slice(&hasher.finalize());
+    digest
+}
+
+/// One key load, and everything waiting on it.
+struct KeyLoadFlight {
+    /// `None` for a load that was never shareable; such a flight is never
+    /// registered and never joined.
+    identity: Option<KeyLoadIdentity>,
+    /// Whether the load may CREATE the key. A read-only load's failure cannot
+    /// answer a caller that may create one.
+    create: bool,
+    /// Set by the loader thread as it enters the store call, and read by
+    /// whichever caller's wait expires.
+    asked: AtomicBool,
+    outcome: Mutex<FlightOutcome>,
+    settled: Condvar,
+    /// How many callers joined this load rather than starting their own.
+    #[cfg(test)]
+    joined: std::sync::atomic::AtomicUsize,
+}
+
+enum FlightOutcome {
+    Outstanding,
+    Answered(Result<Arc<ConfidentialBlobKey>, RecoveryConfidentialError>),
+    /// The loader thread ended without answering.
+    Abandoned,
+}
+
+/// Why a wait on a flight returned without an answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlightWait {
+    Outstanding,
+    Abandoned,
+}
+
+impl KeyLoadFlight {
+    fn new(identity: Option<KeyLoadIdentity>, create: bool) -> Self {
+        Self {
+            identity,
+            create,
+            asked: AtomicBool::new(false),
+            outcome: Mutex::new(FlightOutcome::Outstanding),
+            settled: Condvar::new(),
+            #[cfg(test)]
+            joined: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn reach(&self) -> KeyStoreReach {
+        if self.asked.load(Ordering::Acquire) {
+            KeyStoreReach::Asked
+        } else {
+            KeyStoreReach::NeverAsked
+        }
+    }
+
+    /// Wait up to `timeout` for the answer. Every waiter receives the same
+    /// answer, as many times as it asks.
+    fn wait(
+        &self,
+        timeout: Duration,
+    ) -> Result<Result<Arc<ConfidentialBlobKey>, RecoveryConfidentialError>, FlightWait> {
+        let outcome = self.outcome.lock().unwrap_or_else(PoisonError::into_inner);
+        let (outcome, _) = self
+            .settled
+            .wait_timeout_while(outcome, timeout, |outcome| {
+                matches!(outcome, FlightOutcome::Outstanding)
+            })
+            .unwrap_or_else(PoisonError::into_inner);
+        match &*outcome {
+            FlightOutcome::Outstanding => Err(FlightWait::Outstanding),
+            FlightOutcome::Abandoned => Err(FlightWait::Abandoned),
+            FlightOutcome::Answered(result) => Ok(result.clone()),
+        }
+    }
+
+    /// Record the answer. Leaves the registry FIRST, so no caller can join a
+    /// load whose answer already exists — see the section comment above.
+    /// Idempotent: only the first settlement is kept.
+    fn settle(&self, answer: FlightOutcome) {
+        if self.identity.is_some()
+            && let Ok(mut in_flight) = KEY_LOADS_IN_FLIGHT.lock()
+        {
+            in_flight.retain(|flight| !std::ptr::eq(Arc::as_ptr(flight), self));
+        }
+        {
+            let mut outcome = self.outcome.lock().unwrap_or_else(PoisonError::into_inner);
+            if matches!(*outcome, FlightOutcome::Outstanding) {
+                *outcome = answer;
+            }
+        }
+        self.settled.notify_all();
+    }
+}
+
+/// Every shareable load currently running in this process.
+static KEY_LOADS_IN_FLIGHT: Mutex<Vec<Arc<KeyLoadFlight>>> = Mutex::new(Vec::new());
+
+/// Join the in-flight load for exactly `identity`, or start one.
+///
+/// Fails CLOSED at every step it cannot vouch for: no identity, or a registry
+/// whose lock is poisoned, both mean an independent load that nobody can join.
+fn start_or_join_key_load(
+    identity: Option<KeyLoadIdentity>,
+    create: bool,
+    make_loader: impl FnOnce(Option<&KeyLoadIdentity>) -> KeyLoader,
+) -> Result<Arc<KeyLoadFlight>, RecoveryConfidentialError> {
+    let Some(identity) = identity else {
+        return spawn_key_load(KeyLoadFlight::new(None, create), make_loader(None));
+    };
+    let Ok(mut in_flight) = KEY_LOADS_IN_FLIGHT.lock() else {
+        return spawn_key_load(KeyLoadFlight::new(None, create), make_loader(None));
+    };
+    if let Some(flight) = in_flight
+        .iter()
+        .find(|flight| flight.identity.as_ref() == Some(&identity))
+    {
+        #[cfg(test)]
+        flight.joined.fetch_add(1, Ordering::SeqCst);
+        return Ok(Arc::clone(flight));
+    }
+    let load = make_loader(Some(&identity));
+    // Spawned while the registry is held, and registered before it is
+    // released: a load that finishes at once blocks in `settle` until it is
+    // registered, so it can never leave a stale entry behind.
+    let flight = spawn_key_load(KeyLoadFlight::new(Some(identity), create), load)?;
+    in_flight.push(Arc::clone(&flight));
+    Ok(flight)
+}
+
+/// Start `load` on its own thread. The thread settles the flight however it
+/// ends, including by panic.
+fn spawn_key_load(
+    flight: KeyLoadFlight,
+    load: KeyLoader,
+) -> Result<Arc<KeyLoadFlight>, RecoveryConfidentialError> {
+    struct SettleOnExit(Arc<KeyLoadFlight>);
+    impl Drop for SettleOnExit {
+        fn drop(&mut self) {
+            self.0.settle(FlightOutcome::Abandoned);
+        }
+    }
+
+    let flight = Arc::new(flight);
+    let for_loader = Arc::clone(&flight);
+    std::thread::Builder::new()
+        .name("wayland-recovery-key".to_owned())
+        .spawn(move || {
+            // Built on the loader thread, so a thread that never started
+            // settles nothing and touches no registry.
+            let settling = SettleOnExit(for_loader);
+            let answer = load(&settling.0.asked);
+            settling
+                .0
+                .settle(FlightOutcome::Answered(answer.map(Arc::new)));
+        })
+        .map_err(|_| key_load_machinery_failed())?;
+    Ok(flight)
 }
 
 /// The blocking half, run on its own thread by
@@ -885,9 +1275,16 @@ fn load_key_from_configured_store(
     config: &Config,
     create: bool,
 ) -> Result<ConfidentialBlobKey, RecoveryConfidentialError> {
-    let store = config
-        .open_confidential_credentials_store()
-        .map_err(|error| store_selection_failure(&error))?;
+    load_key_from_opened_store(config.open_confidential_credentials_store(), create)
+}
+
+/// [`load_key_from_configured_store`] once the store has been opened — the one
+/// body both a private and a shared load run.
+fn load_key_from_opened_store(
+    opened: Result<ConfidentialCredentialsStore, CredentialsError>,
+    create: bool,
+) -> Result<ConfidentialBlobKey, RecoveryConfidentialError> {
+    let store = opened.map_err(|error| store_selection_failure(&error))?;
     let loaded = if create {
         load_or_create_confidential_blob_key(&store, KEY_REF)
     } else {
@@ -1024,6 +1421,7 @@ fn request_aad(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::mpsc;
     use wcore_config::credentials::{CredentialsBackend, CredentialsStorageConfig};
 
     fn binding<'a>() -> PreparedRequestBinding<'a> {
@@ -1043,6 +1441,385 @@ mod tests {
             length_wedge_retried: false,
             posture_authority_digest: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // wayland#1349 — single-flight key loads, and the boundary they must hold
+    // -----------------------------------------------------------------------
+
+    /// The key the UNLOCKED store's load hands out in every test below.
+    const UNLOCKED_KEY: [u8; 32] = [0xA1; 32];
+
+    fn eventually(within: Duration, condition: impl Fn() -> bool) -> bool {
+        let deadline = std::time::Instant::now() + within;
+        loop {
+            if condition() {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Callers joined to in-flight GATED loads. Production loads and every
+    /// other double are excluded, so no concurrently running test can move it.
+    fn gated_joiners() -> usize {
+        KEY_LOADS_IN_FLIGHT
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .filter(|flight| {
+                flight
+                    .identity
+                    .as_ref()
+                    .is_some_and(|identity| identity.source == KeyLoadSource::GatedForTest)
+            })
+            .map(|flight| flight.joined.load(Ordering::SeqCst))
+            .sum()
+    }
+
+    fn vault_config(root: &std::path::Path) -> Config {
+        config_with_backend(CredentialsBackend::EncryptedFile {
+            cipher_path: root.join("credentials.enc"),
+            key_params_path: root.join("credentials.kdf.json"),
+        })
+    }
+
+    fn gated(gate: &Arc<TestKeyGate>) -> RecoveryRequestProtector {
+        RecoveryRequestProtector::with_gated_key_store_for_test(Arc::clone(gate))
+    }
+
+    fn preflight_in_background(
+        protector: RecoveryRequestProtector,
+        config: Config,
+    ) -> mpsc::Receiver<Result<(), RecoveryConfidentialError>> {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(protector.preflight(&config));
+        });
+        rx
+    }
+
+    /// Put the UNLOCKED store's load in flight and hold it there; then ask a
+    /// second, LOCKED store — built by `locked_session` — while it is.
+    /// Returns `(unlocked verdict, locked verdict, whether the locked verdict
+    /// arrived while the unlocked load was still in flight)`.
+    fn race_locked_against_in_flight_unlocked(
+        unlocked_session: impl FnOnce(
+            &Arc<TestKeyGate>,
+        ) -> mpsc::Receiver<Result<(), RecoveryConfidentialError>>,
+        locked_session: impl FnOnce(
+            &Arc<TestKeyGate>,
+        ) -> mpsc::Receiver<Result<(), RecoveryConfidentialError>>,
+    ) -> (
+        Result<(), RecoveryConfidentialError>,
+        Result<(), RecoveryConfidentialError>,
+        bool,
+        usize,
+    ) {
+        let unlocked_gate = TestKeyGate::new(false, Ok(UNLOCKED_KEY));
+        let unlocked_verdict = unlocked_session(&unlocked_gate);
+        assert!(
+            eventually(Duration::from_secs(10), || unlocked_gate.loads() == 1),
+            "the unlocked store's load never reached its store, so nothing was in flight and \
+             this test grades nothing"
+        );
+
+        let locked_gate = TestKeyGate::new(true, Err(read_failure()));
+        let locked_verdict = locked_session(&locked_gate);
+        let early = locked_verdict.recv_timeout(Duration::from_secs(3));
+        let answered_while_in_flight = early.is_ok();
+
+        unlocked_gate.release();
+        let unlocked = unlocked_verdict
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the unlocked session must answer once its store is released");
+        let locked = match early {
+            Ok(verdict) => verdict,
+            Err(_) => locked_verdict
+                .recv_timeout(Duration::from_secs(30))
+                .expect("the locked session must answer"),
+        };
+        (
+            unlocked,
+            locked,
+            answered_while_in_flight,
+            locked_gate.loads(),
+        )
+    }
+
+    fn assert_the_locked_session_was_refused_by_its_own_store(
+        unlocked: Result<(), RecoveryConfidentialError>,
+        locked: Result<(), RecoveryConfidentialError>,
+        answered_while_in_flight: bool,
+        locked_loads: usize,
+    ) {
+        // CONTROL: the unlocked load really did produce a key, so a sharing
+        // defect had something to hand over. Without this the refusal below
+        // could pass because nothing was ever available to leak.
+        assert_eq!(
+            unlocked,
+            Ok(()),
+            "control: the unlocked store's in-flight load must produce a key"
+        );
+        assert_eq!(
+            locked,
+            Err(read_failure()),
+            "AUTHORIZATION BOUNDARY CROSSED: a session whose store refuses was answered with \
+             {locked:?}. It joined another store's in-flight key load instead of being refused \
+             by its own store"
+        );
+        assert!(
+            answered_while_in_flight,
+            "the locked session waited on the unlocked session's in-flight load instead of \
+             asking its own store"
+        );
+        assert_eq!(
+            locked_loads, 1,
+            "the locked session's own store must have been asked exactly once"
+        );
+    }
+
+    /// wayland#1349 — THE AUTHORIZATION BOUNDARY, across two vaults.
+    ///
+    /// Two sessions in one process, two different encrypted vaults with the
+    /// SAME backend label. One vault is unlocked and its key load is in
+    /// flight; the other vault refuses (the wrong-passphrase read failure). The
+    /// refusing session must be refused by its own store — it must NOT be
+    /// handed the key the unlocked session is loading.
+    ///
+    /// Red arm: key the dedupe on the backend label. Both vaults label as "the
+    /// encrypted credentials vault", the locked session joins the unlocked
+    /// session's load, and receives its key.
+    #[test]
+    #[serial_test::serial]
+    fn a_refusing_vault_is_refused_while_another_vaults_key_load_is_in_flight() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let unlocked = vault_config(&dir.path().join("unlocked"));
+        let locked = vault_config(&dir.path().join("locked"));
+        assert_eq!(
+            configured_backend_label(&unlocked),
+            configured_backend_label(&locked),
+            "non-vacuity: the two stores must share a backend LABEL, or a label-keyed dedupe \
+             would keep them apart by accident and this test could not catch it"
+        );
+
+        let (unlocked, locked, answered_while_in_flight, locked_loads) =
+            race_locked_against_in_flight_unlocked(
+                |gate| preflight_in_background(gated(gate), unlocked),
+                |gate| preflight_in_background(gated(gate), locked),
+            );
+        assert_the_locked_session_was_refused_by_its_own_store(
+            unlocked,
+            locked,
+            answered_while_in_flight,
+            locked_loads,
+        );
+    }
+
+    /// wayland#1349 — THE AUTHORIZATION BOUNDARY, across two profile homes.
+    ///
+    /// The isolated-profile shape: the SAME config in both sessions, so even
+    /// the store paths in `[storage.credentials]` are identical, and only the
+    /// profile home the store resolves against differs. A key load in flight
+    /// for one home must never answer a session in the other.
+    ///
+    /// Red arm: key the dedupe on the backend label (both are `auto`).
+    #[test]
+    #[serial_test::serial]
+    fn a_session_in_another_profile_home_never_receives_this_homes_in_flight_key() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let unlocked_home = dir.path().join("unlocked-home");
+        let locked_home = dir.path().join("locked-home");
+        let config = Config::default();
+        let home_probe = std::cell::RefCell::new(None);
+
+        let (unlocked, locked, answered_while_in_flight, locked_loads) =
+            race_locked_against_in_flight_unlocked(
+                |gate| {
+                    *home_probe.borrow_mut() = Some(EnvVarProbe::set(
+                        "WAYLAND_HOME",
+                        unlocked_home.to_str().expect("utf-8 temp path"),
+                    ));
+                    preflight_in_background(gated(gate), config.clone())
+                },
+                |gate| {
+                    // The unlocked session's identity is already captured —
+                    // its load reached the store — so moving the home now is
+                    // exactly a second profile arriving while it is in flight.
+                    drop(home_probe.borrow_mut().take());
+                    *home_probe.borrow_mut() = Some(EnvVarProbe::set(
+                        "WAYLAND_HOME",
+                        locked_home.to_str().expect("utf-8 temp path"),
+                    ));
+                    preflight_in_background(gated(gate), config.clone())
+                },
+            );
+        drop(home_probe.borrow_mut().take());
+        assert_the_locked_session_was_refused_by_its_own_store(
+            unlocked,
+            locked,
+            answered_while_in_flight,
+            locked_loads,
+        );
+    }
+
+    /// wayland#1349 — the leak's shape, collapsed. N sessions asking for the
+    /// key of ONE store at once start ONE load: one loader thread and one
+    /// held key-creation lock, where each used to start its own and strand it.
+    ///
+    /// Also the POSITIVE CONTROL for the two boundary tests above: sharing must
+    /// actually happen, or those tests would pass against an implementation
+    /// that never shares anything. Every session proves it holds the one load's
+    /// key by sealing with it.
+    ///
+    /// Red arm: never share (no identity). 32 loads.
+    #[test]
+    #[serial_test::serial]
+    fn concurrent_sessions_on_one_store_start_one_key_load() {
+        const SESSIONS: usize = 32;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let config = vault_config(dir.path());
+        let gate = TestKeyGate::new(false, Ok(UNLOCKED_KEY));
+        let request = serde_json::json!({"m": 1349});
+
+        let (tx, rx) = mpsc::channel();
+        let start_session = || {
+            let protector = gated(&gate);
+            let config = config.clone();
+            let request = request.clone();
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(protector.seal(&config, &binding(), &request));
+            });
+        };
+        start_session();
+        assert!(
+            eventually(Duration::from_secs(10), || gate.loads() == 1),
+            "the first session's load never reached its store"
+        );
+        for _ in 1..SESSIONS {
+            start_session();
+        }
+        let all_joined = eventually(Duration::from_secs(10), || gated_joiners() == SESSIONS - 1);
+        gate.release();
+        let sealed: Vec<_> = (0..SESSIONS)
+            .map(|_| {
+                rx.recv_timeout(Duration::from_secs(30))
+                    .expect("every session must answer")
+            })
+            .collect();
+
+        assert_eq!(
+            gate.loads(),
+            1,
+            "{SESSIONS} concurrent sessions on one store started {} key loads — one loader \
+             thread and one held lock fd each, which is the wayland#1349 leak",
+            gate.loads()
+        );
+        assert!(
+            all_joined,
+            "the other sessions never joined the in-flight load"
+        );
+        let key = ConfidentialBlobKey::from_slice(&UNLOCKED_KEY).expect("fixed test key");
+        for sealed in sealed {
+            let sealed = sealed.expect("every session must receive the one load's key");
+            assert_eq!(
+                open_with_key(&key, &binding(), &sealed),
+                Ok(request.clone()),
+                "a session sealed with a key that was not the one load's key"
+            );
+        }
+    }
+
+    /// wayland#1349 — only a load IN FLIGHT is shared. Once a load has settled,
+    /// neither its key nor its refusal answers the next session: a store that is
+    /// refusing now is asked and refuses, and a store that recovered is asked
+    /// and answers. This is what separates single-flight from a per-process
+    /// memo, which would defeat drop-at-session-end and pin a stale verdict.
+    ///
+    /// Red arm: keep the settled flight in the registry.
+    #[test]
+    #[serial_test::serial]
+    fn a_settled_key_load_answers_no_later_session() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let config = vault_config(dir.path());
+
+        let unlocked = TestKeyGate::new(true, Ok(UNLOCKED_KEY));
+        assert_eq!(gated(&unlocked).preflight(&config), Ok(()));
+
+        let now_refusing = TestKeyGate::new(true, Err(read_failure()));
+        assert_eq!(
+            gated(&now_refusing).preflight(&config),
+            Err(read_failure()),
+            "a store that refuses NOW must be asked, not answered with a key an earlier \
+             session already loaded"
+        );
+        assert_eq!(now_refusing.loads(), 1);
+
+        let recovered = TestKeyGate::new(true, Ok(UNLOCKED_KEY));
+        assert_eq!(
+            gated(&recovered).preflight(&config),
+            Ok(()),
+            "a store that answers NOW must be asked, not refused on an earlier verdict"
+        );
+        assert_eq!(recovered.loads(), 1);
+    }
+
+    /// wayland#1349 — FAIL CLOSED. What cannot be resolved does not share, and
+    /// a load that may create the key never shares with one that may not.
+    #[test]
+    fn an_unresolvable_or_different_authority_load_is_never_shared() {
+        let config = Config::default();
+        assert!(
+            KeyLoadIdentity::resolve(
+                KeyLoadSource::ConfiguredStore,
+                &config,
+                true,
+                Err(std::io::Error::other("working directory removed")),
+            )
+            .is_none(),
+            "an identity whose working directory cannot be resolved must not be shareable"
+        );
+
+        let may_create = KeyLoadIdentity::resolve(
+            KeyLoadSource::ConfiguredStore,
+            &config,
+            true,
+            Ok(PathBuf::from("/w")),
+        )
+        .expect("resolvable");
+        let read_only = KeyLoadIdentity::resolve(
+            KeyLoadSource::ConfiguredStore,
+            &config,
+            false,
+            Ok(PathBuf::from("/w")),
+        )
+        .expect("resolvable");
+        assert!(
+            may_create != read_only,
+            "a load that may create the key and one that may not must never share"
+        );
+
+        let private = start_or_join_key_load(None, true, |_| {
+            Box::new(|_: &AtomicBool| Err(RecoveryConfidentialError::MissingRecoveryKey))
+        })
+        .expect("a private load starts");
+        assert!(private.identity.is_none());
+        assert!(matches!(
+            private.wait(Duration::from_secs(30)),
+            Ok(Err(RecoveryConfidentialError::MissingRecoveryKey))
+        ));
+        assert!(
+            !KEY_LOADS_IN_FLIGHT
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .iter()
+                .any(|flight| Arc::ptr_eq(flight, &private)),
+            "a load with no identity must never be registered for joining"
+        );
     }
 
     /// The bound on the only blocking call this type makes.
