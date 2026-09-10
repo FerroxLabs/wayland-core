@@ -1,0 +1,194 @@
+# THROWAWAY MEASUREMENT WORKFLOW — lane w15/mac2, release 0.13.14.
+#
+# This file must NEVER reach `main` or the release branch. It exists to buy
+# three measurements that only a real macOS host can produce, and it is
+# deliberately scoped to `measure/**` branches so it cannot fire anywhere else.
+# `ci.yml` does not list `measure/**`, so pushing here costs one macOS runner
+# and nothing else — no Windows self-hosted leg, no full CI matrix.
+#
+# WHAT IT MEASURES, and which ticket each arm settles
+# ---------------------------------------------------
+#  * wayland#1285 / f016_real_spawn_uses_sanitized_launch_context — a `--retries 0`
+#    rate on native macOS, GREEN arm (settle present) against RED arm (settle
+#    budget mutated to 0ms, which restores the exact single-sample behaviour the
+#    flake came from). Plus a C probe that measures the underlying kernel
+#    disagreement directly.
+#  * wayland#1285 / resume_repaints_prior_conversation_into_the_transcript — the
+#    macOS window the repair is owed. n=20 of the whole `harness_tui_flow`
+#    binary at `--retries 0` under parallel nextest, i.e. the condition the
+#    criterion names, not an isolated single-test run.
+#  * wayland#1289 — the macOS arm for the 5s credential-store budget, AND the
+#    A/B of `--profile ci` (where `threads-required = 4` for this binary lives)
+#    against `--profile default` (which every previous measurement of this
+#    failure actually used, so the remedy has never once been in effect).
+#
+# WHY A HOSTED macos-latest RUNNER IS THE RIGHT INSTRUMENT
+# --------------------------------------------------------
+# wayland#1289 established that the failing regime is a 3-4 vCPU host already
+# oversubscribed at nominal `num-cpus`, not a thread-count flag. A hosted macOS
+# runner IS that host. The 96-core Linux box could not summon the regime
+# without degrading other lanes' builds, which is why the previous lane's
+# 5/5 green there distinguished nothing.
+#
+# EVERY ARM IS `--retries 0`. A census can only ever produce a per-execution
+# incidence under `retries = 2`; turning incidence into a rate needs this.
+
+name: w15-mac2 bounded macOS flake measurement B (THROWAWAY)
+
+on:
+  push:
+    branches:
+      - 'measure/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: never
+
+jobs:
+  cli-tui:
+    name: "harness_tui_flow x 20 @ --retries 0"
+    runs-on: macos-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v6
+      - uses: loonghao/vx@v0.9.17
+        with:
+          setup: 'true'
+          cache: 'true'
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Build
+        run: vx cargo nextest run --locked -p wcore-cli --test harness_tui_flow --no-run
+
+      - name: Run
+        run: |
+          set +e
+          set -uo pipefail
+          N=20
+          pass=0; fail=0
+          mkdir -p /tmp/tui
+          for i in $(seq 1 "$N"); do
+            vx cargo nextest run --locked -p wcore-cli --test harness_tui_flow \
+              --profile ci --retries 0 --no-fail-fast --no-tests=fail \
+              > "/tmp/tui/run-${i}.log" 2>&1
+            rc=$?
+            if [ "$rc" = "0" ]; then pass=$((pass+1)); else fail=$((fail+1)); fi
+            echo "invocation ${i}: rc=${rc}"
+          done
+          echo "TUI_INVOCATIONS=${N}"
+          echo "TUI_PASS=${pass}"
+          echo "TUI_FAIL=${fail}"
+
+      - name: Grade
+        if: always()
+        run: |
+          set +e
+          set -uo pipefail
+          for t in resume_repaints_prior_conversation_into_the_transcript \
+                   tui_renders_the_chrome_and_every_tab_on_boot; do
+            failed=$(/usr/bin/grep -l "FAIL .*${t}" /tmp/tui/*.log 2>/dev/null | /usr/bin/wc -l | tr -d ' ')
+            present=$(/usr/bin/grep -l "${t}" /tmp/tui/*.log 2>/dev/null | /usr/bin/wc -l | tr -d ' ')
+            echo "${t}: FAILED=${failed} PRESENT=${present}"
+          done
+          echo "=== the edit-notice assertion the repair added must never fire ==="
+          /usr/bin/grep -h -c 'while I was thinking' /tmp/tui/*.log 2>/dev/null | paste -sd, - || echo "0"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cli-tui-logs
+          path: /tmp/tui
+          retention-days: 7
+
+  # -------------------------------------------------------------------------
+  # wayland#1289: the macOS arm AND the profile A/B.
+  #
+  # `threads-required = 4` for this binary sits under `[[profile.ci.overrides]]`
+  # in .config/nextest.toml. nextest applies a profile's overrides only when
+  # that profile is selected, and `profile.ci` inherits from `profile.default`
+  # rather than the reverse — so every measurement anyone has taken of this
+  # failure, including wayland#1290's n=20 hetzner census, ran with the remedy
+  # NOT IN EFFECT. This job is the first time the two are compared.
+  #
+  # Arms are INTERLEAVED, not run in two blocks. A hosted runner's own load and
+  # thermal state drift over a long job, and two consecutive blocks would
+  # confound that drift with the profile. (An instrument that warms its own
+  # measurement has already cost this release one wrong reproduction.)
+  # -------------------------------------------------------------------------
+  cli-f14:
+    name: "f14_sigkill_recovery A/B: --profile ci vs default @ --retries 0"
+    runs-on: macos-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v6
+      - uses: loonghao/vx@v0.9.17
+        with:
+          setup: 'true'
+          cache: 'true'
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Confirm the remedy is where the ledger says it is
+        run: |
+          set -euo pipefail
+          echo "=== threads-required occurrences for this binary ==="
+          /usr/bin/grep -n "binary(f14_sigkill_recovery)" .config/nextest.toml
+          echo "=== the enclosing profile table ==="
+          /usr/bin/grep -n "^\[\[profile\..*overrides\]\]" .config/nextest.toml | tail -20
+
+      - name: Build
+        run: vx cargo nextest run --locked -p wcore-cli --test f14_sigkill_recovery --no-run
+
+      - name: "Interleaved A/B, 20 invocations per arm"
+        run: |
+          set +e
+          set -uo pipefail
+          N=20
+          mkdir -p /tmp/f14
+          declare -i ci_pass=0 ci_fail=0 def_pass=0 def_fail=0
+          for i in $(seq 1 "$N"); do
+            for arm in ci default; do
+              vx cargo nextest run --locked -p wcore-cli --test f14_sigkill_recovery \
+                --profile "$arm" --retries 0 --no-fail-fast --no-tests=fail \
+                > "/tmp/f14/${arm}-${i}.log" 2>&1
+              rc=$?
+              if [ "$arm" = "ci" ]; then
+                if [ "$rc" = "0" ]; then ci_pass+=1; else ci_fail+=1; fi
+              else
+                if [ "$rc" = "0" ]; then def_pass+=1; else def_fail+=1; fi
+              fi
+              echo "arm=${arm} invocation=${i} rc=${rc}"
+            done
+          done
+          echo "F14_CI_PASS=${ci_pass} F14_CI_FAIL=${ci_fail}"
+          echo "F14_DEFAULT_PASS=${def_pass} F14_DEFAULT_FAIL=${def_fail}"
+
+      - name: Grade the credential-store failure specifically
+        if: always()
+        run: |
+          set +e
+          set -uo pipefail
+          for arm in ci default; do
+            cs=$(/usr/bin/grep -l 'did not answer within' /tmp/f14/${arm}-*.log 2>/dev/null | /usr/bin/wc -l | tr -d ' ')
+            na=$(/usr/bin/grep -l 'NeverAsked\|never asked' /tmp/f14/${arm}-*.log 2>/dev/null | /usr/bin/wc -l | tr -d ' ')
+            present=$(/usr/bin/grep -l 'f14_seed_recoverable_turn_helper\|sigkill_during_tool_execution' /tmp/f14/${arm}-*.log 2>/dev/null | /usr/bin/wc -l | tr -d ' ')
+            echo "arm=${arm} CREDENTIAL_STORE_TIMEOUT_INVOCATIONS=${cs} NEVER_ASKED_INVOCATIONS=${na} SUITE_PRESENT=${present}"
+          done
+          echo "=== which profile nextest actually reported using ==="
+          /usr/bin/grep -h 'nextest profile' /tmp/f14/ci-1.log /tmp/f14/default-1.log 2>/dev/null || true
+          echo "=== first credential-store payload, verbatim ==="
+          /usr/bin/grep -h -B 2 -A 10 'did not answer within' /tmp/f14/*.log 2>/dev/null | head -40 || echo "(none)"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cli-f14-logs
+          path: /tmp/f14
+          retention-days: 7
