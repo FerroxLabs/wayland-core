@@ -310,6 +310,12 @@ type SharedWriter = Arc<Mutex<JournalWriter>>;
 #[derive(Debug, Clone)]
 pub struct SessionJournal {
     inner: SharedWriter,
+    /// Quota admission for this session's effect-checkpoint directory. Clones
+    /// share it and an independent open fails closed, so every in-process store
+    /// into that directory uses this one ledger and no other session's store
+    /// touches it (wayland#1353). Deliberately NOT the writer lock: appends never
+    /// wait on a checkpoint store.
+    checkpoint_quota: Arc<Mutex<CheckpointQuota>>,
 }
 
 pub(crate) struct CommittedJournalAuthority {
@@ -476,6 +482,7 @@ impl SessionJournal {
         let session_id = session_id.into();
         Ok(Self {
             inner: Arc::new(Mutex::new(JournalWriter::open(path, session_id)?)),
+            checkpoint_quota: Arc::default(),
         })
     }
 
@@ -762,15 +769,14 @@ impl SessionJournal {
             self.load_effect_checkpoint(digest)?;
             return Ok(());
         }
+        // The scan and the write it admits are one quota decision (wayland#1353):
+        // the admission is taken BEFORE the scan and is decided against it plus
+        // every store the scan may not have seen.
+        let mut admission = CheckpointAdmission::before_scan(&self.checkpoint_quota);
         let session_bytes = checkpoint_directory_bytes(directory)?;
         #[cfg(test)]
         quota_race_gate::after_quota_scan(directory);
-        if session_bytes.saturating_add(contents.len() as u64) > MAX_EFFECT_CHECKPOINT_SESSION_BYTES
-        {
-            return Err(JournalError::InvalidTransition(format!(
-                "filesystem effect checkpoints exceed the {MAX_EFFECT_CHECKPOINT_SESSION_BYTES}-byte session quota"
-            )));
-        }
+        admission.admit(session_bytes, contents.len() as u64)?;
 
         let temporary = directory.join(format!(
             ".{digest}.{}.{}.tmp",
@@ -804,6 +810,9 @@ impl SessionJournal {
             path: path.clone(),
             source,
         })?;
+        // Published: every later scan sees the checkpoint, so the reservation
+        // can end. Every earlier return ends it through `Drop`.
+        drop(admission);
         self.load_effect_checkpoint(digest)?;
         #[cfg(unix)]
         File::open(directory)
@@ -1232,6 +1241,91 @@ impl CapturedRetirementFile {
                 snapshot::sync_parent_directory(path)
             }
         }
+    }
+}
+
+/// In-process quota ledger for one session's effect-checkpoint directory.
+///
+/// The quota scan reads the directory with no lock held, so by itself it cannot
+/// see a store that was admitted and has not yet published (wayland#1353). Each
+/// store records `released` before it scans and is then decided against the scan
+/// PLUS every reservation still held PLUS every reservation that ended since that
+/// record. However a concurrent store's publication interleaves with the scan, it
+/// is counted at least once: still reserved, released during the scan, or
+/// published before the scan began and so listed by it. It may be counted twice,
+/// which can only refuse a store near the quota, never admit one past it. The
+/// two critical sections are O(1); neither spans the scan or the write, so the
+/// per-store cost the scan carries (wayland#1301) is unchanged.
+#[derive(Debug, Default)]
+struct CheckpointQuota {
+    /// Bytes admitted to stores that have not yet published or failed.
+    reserved: u64,
+    /// Running total of bytes whose reservation has ended. It wraps; only the
+    /// difference between two readings is meaningful.
+    released: u64,
+}
+
+impl CheckpointQuota {
+    /// Every critical section on this ledger is non-panicking integer arithmetic,
+    /// so a poisoned lock cannot hold a half-applied update. It is recovered
+    /// rather than refused, which would wedge the session's quota for good.
+    fn lock(ledger: &Mutex<Self>) -> std::sync::MutexGuard<'_, Self> {
+        ledger
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// One store's claim on its session's checkpoint quota.
+///
+/// Dropping it ends the reservation, on success, error return and unwind alike,
+/// so a failed or panicking store never leaks quota. A process crash takes the
+/// ledger with it, and whatever that store left on disk (a `.{digest}.*.tmp`) is
+/// counted by the next scan instead.
+struct CheckpointAdmission<'a> {
+    ledger: &'a Mutex<CheckpointQuota>,
+    released_before_scan: u64,
+    reserved: u64,
+}
+
+impl<'a> CheckpointAdmission<'a> {
+    /// Must be taken before the directory scan that [`Self::admit`] is given.
+    fn before_scan(ledger: &'a Mutex<CheckpointQuota>) -> Self {
+        let released_before_scan = CheckpointQuota::lock(ledger).released;
+        Self {
+            ledger,
+            released_before_scan,
+            reserved: 0,
+        }
+    }
+
+    /// Reserve `len` bytes, or refuse if the scan plus every store it may have
+    /// missed plus `len` exceeds the session quota.
+    fn admit(&mut self, scanned: u64, len: u64) -> Result<(), JournalError> {
+        let mut ledger = CheckpointQuota::lock(self.ledger);
+        let unseen = ledger
+            .reserved
+            .saturating_add(ledger.released.wrapping_sub(self.released_before_scan));
+        if scanned.saturating_add(unseen).saturating_add(len) > MAX_EFFECT_CHECKPOINT_SESSION_BYTES
+        {
+            return Err(JournalError::InvalidTransition(format!(
+                "filesystem effect checkpoints exceed the {MAX_EFFECT_CHECKPOINT_SESSION_BYTES}-byte session quota"
+            )));
+        }
+        ledger.reserved = ledger.reserved.saturating_add(len);
+        self.reserved = len;
+        Ok(())
+    }
+}
+
+impl Drop for CheckpointAdmission<'_> {
+    fn drop(&mut self) {
+        if self.reserved == 0 {
+            return;
+        }
+        let mut ledger = CheckpointQuota::lock(self.ledger);
+        ledger.reserved = ledger.reserved.saturating_sub(self.reserved);
+        ledger.released = ledger.released.wrapping_add(self.reserved);
     }
 }
 
@@ -4568,6 +4662,178 @@ mod fault_tests {
             !directory.join(loser).exists(),
             "a refused store must leave no published checkpoint"
         );
+    }
+
+    /// wayland#1353 c2: the quota ledger belongs to one session's checkpoint
+    /// directory. Two sessions, each with room for exactly one maximum-size
+    /// checkpoint, store one concurrently. Both must reach the point after the
+    /// scan together (nothing shared serializes them) and both must be accepted
+    /// (a ledger shared across sessions would count the other's reservation and
+    /// refuse one).
+    #[test]
+    fn checkpoint_stores_in_different_sessions_are_neither_serialized_nor_share_a_quota() {
+        let dir = tempfile::tempdir().unwrap();
+        let journals: Vec<SessionJournal> = ["a.journal", "b.journal"]
+            .into_iter()
+            .map(|name| SessionJournal::open(dir.path().join(name), name).unwrap())
+            .collect();
+        let directories: Vec<PathBuf> = journals.iter().map(seeded_checkpoint_directory).collect();
+        assert_ne!(directories[0], directories[1]);
+        for directory in &directories {
+            leave_checkpoint_quota_room(
+                directory,
+                MAX_EFFECT_CHECKPOINT_BYTES + MAX_EFFECT_CHECKPOINT_BYTES / 2,
+            );
+        }
+
+        let payload_len = usize::try_from(MAX_EFFECT_CHECKPOINT_BYTES).unwrap();
+        let gate = quota_race_gate::arm(&[&directories[0], &directories[1]], 2);
+        let handles: Vec<_> = journals
+            .iter()
+            .map(|journal| {
+                let journal = journal.clone();
+                std::thread::spawn(move || {
+                    let payload = vec![0x33_u8; payload_len];
+                    journal.store_effect_checkpoint(&sha256_hex(&payload), &payload)
+                })
+            })
+            .collect();
+        let results: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+        let rendezvous = gate.disarm();
+
+        assert_eq!(
+            rendezvous,
+            quota_race_gate::Rendezvous {
+                passed: 2,
+                timed_out: 0
+            },
+            "a store in one session waited for a store in another: {results:?}"
+        );
+        assert!(
+            results.iter().all(Result::is_ok),
+            "each session had room for its own checkpoint: {results:?}"
+        );
+        for (journal, directory) in journals.iter().zip(&directories) {
+            assert!(
+                checkpoint_directory_bytes(directory).unwrap()
+                    <= MAX_EFFECT_CHECKPOINT_SESSION_BYTES
+            );
+            assert_eq!(CheckpointQuota::lock(&journal.checkpoint_quota).reserved, 0);
+        }
+    }
+
+    /// wayland#1353 c3: a temporary left by a crashed store is still counted by
+    /// the quota scan. It is named for a DIFFERENT digest, so the store's own
+    /// stale-temporary cleanup does not remove it first.
+    #[test]
+    fn crash_left_checkpoint_temporaries_still_count_against_the_session_quota() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = SessionJournal::open(dir.path().join("session.journal"), "session").unwrap();
+        let directory = seeded_checkpoint_directory(&journal);
+        leave_checkpoint_quota_room(&directory, MAX_EFFECT_CHECKPOINT_BYTES);
+
+        let crashed = directory.join(format!(
+            ".{}.4242.{}.tmp",
+            sha256_hex(b"a store that crashed mid-write"),
+            uuid::Uuid::new_v4()
+        ));
+        File::create(&crashed).unwrap().set_len(1).unwrap();
+
+        let payload = vec![0x44_u8; usize::try_from(MAX_EFFECT_CHECKPOINT_BYTES).unwrap()];
+        let digest = sha256_hex(&payload);
+        let refused = journal.store_effect_checkpoint(&digest, &payload);
+        assert!(
+            is_session_quota_refusal(&refused),
+            "one crash-left byte over the quota must refuse the store: {refused:?}"
+        );
+        assert!(
+            crashed.exists(),
+            "the crash-left temporary must not be removed"
+        );
+        assert!(!directory.join(&digest).exists());
+        assert_eq!(CheckpointQuota::lock(&journal.checkpoint_quota).reserved, 0);
+
+        std::fs::remove_file(&crashed).unwrap();
+        journal.store_effect_checkpoint(&digest, &payload).unwrap();
+        assert_eq!(
+            checkpoint_directory_bytes(&directory).unwrap(),
+            MAX_EFFECT_CHECKPOINT_SESSION_BYTES
+        );
+    }
+
+    /// wayland#1353: a store that published and ended its reservation while
+    /// another store was scanning is counted by that other store even though its
+    /// (stale) scan missed the file, and it stops counting for any store that
+    /// begins afterwards, whose scan does see the file.
+    #[test]
+    fn checkpoint_admission_counts_a_store_released_during_the_scan() {
+        let ledger = Mutex::new(CheckpointQuota::default());
+        let cap = MAX_EFFECT_CHECKPOINT_BYTES;
+        let before_either = MAX_EFFECT_CHECKPOINT_SESSION_BYTES - cap - cap / 2;
+
+        let mut slow = CheckpointAdmission::before_scan(&ledger);
+        let mut fast = CheckpointAdmission::before_scan(&ledger);
+        fast.admit(before_either, cap).unwrap();
+        drop(fast);
+        assert_eq!(CheckpointQuota::lock(&ledger).reserved, 0);
+        assert!(
+            slow.admit(before_either, cap).is_err(),
+            "a store released during the scan must still be counted"
+        );
+        drop(slow);
+
+        // A store that begins after `fast` published scans it, and must be able
+        // to take exactly the room that is left: `fast` is not counted again.
+        let mut later = CheckpointAdmission::before_scan(&ledger);
+        later
+            .admit(
+                before_either + cap,
+                MAX_EFFECT_CHECKPOINT_SESSION_BYTES - before_either - cap,
+            )
+            .unwrap();
+        drop(later);
+        assert_eq!(CheckpointQuota::lock(&ledger).reserved, 0);
+    }
+
+    /// wayland#1353 c3: a store that panics after it was admitted must not leak
+    /// its reservation and wedge the session's quota. With room for exactly one
+    /// maximum-size checkpoint, a leaked reservation would refuse the next one.
+    #[test]
+    fn panicking_checkpoint_store_releases_its_quota_reservation() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = SessionJournal::open(dir.path().join("session.journal"), "session").unwrap();
+        let directory = seeded_checkpoint_directory(&journal);
+        let room = MAX_EFFECT_CHECKPOINT_BYTES + MAX_EFFECT_CHECKPOINT_BYTES / 2;
+        leave_checkpoint_quota_room(&directory, room);
+
+        let panicking = {
+            let journal = journal.clone();
+            let directory = directory.clone();
+            std::thread::spawn(move || {
+                let mut admission = CheckpointAdmission::before_scan(&journal.checkpoint_quota);
+                admission
+                    .admit(
+                        checkpoint_directory_bytes(&directory).unwrap(),
+                        MAX_EFFECT_CHECKPOINT_BYTES,
+                    )
+                    .unwrap();
+                assert_eq!(
+                    CheckpointQuota::lock(&journal.checkpoint_quota).reserved,
+                    MAX_EFFECT_CHECKPOINT_BYTES
+                );
+                panic!("checkpoint store died mid-write");
+            })
+        };
+        assert!(panicking.join().is_err());
+        assert_eq!(CheckpointQuota::lock(&journal.checkpoint_quota).reserved, 0);
+
+        let payload = vec![0x55_u8; usize::try_from(MAX_EFFECT_CHECKPOINT_BYTES).unwrap()];
+        journal
+            .store_effect_checkpoint(&sha256_hex(&payload), &payload)
+            .unwrap();
     }
 
     #[test]
