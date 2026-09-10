@@ -12104,7 +12104,11 @@ impl AgentEngine {
         // this verb still refuses for those, and must: releasing a possibly-
         // booked external effect as settled is how one interruption becomes two
         // charges.
-        // RED ARM (temporary, reverted in the next commit).
+        self.admit_interrupted_tool_starts(turn_id).await?;
+        self.reconcile_authoritative_filesystem_effects("abandon_interrupted_turn")
+            .await?;
+        self.admit_unobserved_effects(turn_id).await?;
+        self.abandon_nonterminal_hook_phases(turn_id).await?;
 
         // The turn IS terminated, so it takes the same terminal receipt and the
         // same journal event as a cancellation. Reusing `TurnCancelled` keeps
