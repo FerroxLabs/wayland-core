@@ -2917,6 +2917,10 @@ pub(crate) mod staleness_census {
         )
     }
 
+    /// Test-only: the production path never resets a census it only ever
+    /// reads at a timeout. Kept behind cfg(test) so it is not dead code
+    /// in a release build.
+    #[cfg(test)]
     pub(crate) fn reset() {
         for counter in [
             &STALE,
