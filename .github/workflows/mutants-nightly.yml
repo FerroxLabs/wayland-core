@@ -55,26 +55,35 @@ jobs:
           # tight bound.
           # ─────────────────────────────────────────────────────────────────
           - crate: wcore-cron
+            scope: "in"
             min_test_timeout: 90
             in_place: "false"
             estimated_minutes: 10
 
           - crate: wcore-config
+            scope: "out"
+            out_of_scope_reason: "measured 2026-09-10 run 34438249721: cancelled at 360.4 min against a 90 min estimate"
             min_test_timeout: 180
             in_place: "true"
             estimated_minutes: 90
 
           - crate: wcore-providers
+            scope: "out"
+            out_of_scope_reason: "measured 2026-09-10 run 34438249721: cancelled at 360.7 min against a 160 min estimate"
             min_test_timeout: 60
             in_place: "false"
             estimated_minutes: 160
 
           - crate: wcore-agent
+            scope: "out"
+            out_of_scope_reason: "measured 2026-09-10 run 34438249721: cancelled at 360.3 min; estimate was already 6 hr"
             min_test_timeout: 120
             in_place: "true"
             estimated_minutes: 360
 
           - crate: wcore-cli
+            scope: "out"
+            out_of_scope_reason: "measured 2026-09-10 run 34438249721: cancelled at 360.4 min; estimate was already 6 hr"
             min_test_timeout: 120
             in_place: "true"
             estimated_minutes: 360
@@ -126,8 +135,52 @@ jobs:
             echo "arg=" >> "$GITHUB_OUTPUT"
           fi
 
+      # core#451 c1 -- a leg either produces a summary line or is EXPLICITLY and
+      # DURABLY declared out of scope with a recorded reason. No leg silently
+      # produces nothing. The declaration is written into the uploaded artifact,
+      # not only into the job log, so the artifact a reader downloads says why
+      # it holds no mutants rather than looking like a run that failed quietly.
+      #
+      # WHY THESE FOUR ARE OUT: measured, not assumed. In run 34438249721
+      # (workflow_dispatch, head fdf4b1e1c) wcore-cron finished in 28.2 min and
+      # the other four were CANCELLED at 360.3-360.7 min -- GitHub's 6-hour job
+      # ceiling -- so they tested zero mutants and uploaded no artifact at all.
+      # Two of the four had estimates far under what they actually took
+      # (wcore-config 90 min estimated, wcore-providers 160), so the estimates in
+      # the table above are not a basis for re-enabling them either.
+      #
+      # TO RE-ENABLE ONE: shard it so a shard finishes inside the ceiling, or
+      # move it to a runner without that ceiling, then flip `scope` to "in".
+      # Do NOT flip it back on an estimate.
+      - name: Declare leg scope (core#451 c1)
+        id: scope
+        env:
+          CRATE: ${{ matrix.crate }}
+          SCOPE: ${{ matrix.scope }}
+          REASON: ${{ matrix.out_of_scope_reason }}
+        run: |
+          mkdir -p .blackboard/E2E-MUTATION-BASELINE
+          if [ "$SCOPE" = "out" ]; then
+            if [ -z "$REASON" ]; then
+              echo "::error title=Undeclared out-of-scope leg::${CRATE} is scope=out with no out_of_scope_reason. An undeclared skip is exactly what core#451 c1 forbids."
+              exit 1
+            fi
+            printf '%s\n' \
+              "OUT OF SCOPE: ${CRATE}" \
+              "reason: ${REASON}" \
+              "declared-in: .github/workflows/mutants-nightly.yml (matrix.scope)" \
+              "carrier: FerroxLabs/wayland-core#451" \
+              "This leg tested ZERO mutants by declaration, not by failure." \
+              > ".blackboard/E2E-MUTATION-BASELINE/${CRATE}-OUT-OF-SCOPE.txt"
+            echo "::notice title=Mutation leg out of scope::${CRATE}: ${REASON}"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Run cargo-mutants (${{ matrix.crate }})
         id: mutants
+        if: steps.scope.outputs.skip != 'true'
         env:
           CRATE: ${{ matrix.crate }}
           MIN_TEST_TIMEOUT: ${{ matrix.min_test_timeout }}
@@ -289,6 +342,7 @@ jobs:
         with:
           name: mutants-log-${{ matrix.crate }}
           path: |
+            .blackboard/E2E-MUTATION-BASELINE/${{ matrix.crate }}-OUT-OF-SCOPE.txt
             .blackboard/E2E-MUTATION-BASELINE/${{ matrix.crate }}.log
             .blackboard/E2E-MUTATION-BASELINE/${{ matrix.crate }}-baseline.json
             target/mutants-${{ matrix.crate }}/mutants.out/

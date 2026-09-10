@@ -1,0 +1,69 @@
+core#451 -- the four legs, measured against the ceiling, and the declaration
+=============================================================================
+
+RUN 34438249721, event=workflow_dispatch, head fdf4b1e1c, created
+2026-09-10T04:42:57Z. TERMINAL: the run completed. Per-leg wall time computed
+from the Actions job API (startedAt -> completedAt):
+
+  mutants / wcore-agent       cancelled    360.3 min
+  mutants / wcore-config      cancelled    360.4 min
+  mutants / wcore-cron        success       28.2 min
+  mutants / wcore-providers   cancelled    360.7 min
+  mutants / wcore-cli         cancelled    360.4 min
+
+All four cancellations land in a 0.4-minute band at 360, which is GitHub's
+6-hour job ceiling. They are not four independent slownesses; they are one
+ceiling. None of the four uploaded an artifact, so each tested ZERO mutants and
+left nothing a reader could inspect -- silently producing nothing, which is the
+precise condition c1 forbids.
+
+THE ESTIMATES IN THE WORKFLOW ARE NOT A BASIS FOR RE-ENABLING THEM.
+Two of the four were estimated far under what they took:
+
+  wcore-config     estimated  ~90 min   ->  exceeded 360
+  wcore-providers  estimated ~160 min   ->  exceeded 360
+  wcore-agent      estimated  ~6 hr     ->  exceeded 360 (estimate already at the ceiling)
+  wcore-cli        estimated  ~6 hr     ->  exceeded 360 (estimate already at the ceiling)
+
+A 4x miss on wcore-config is why the re-enable condition below is a measurement
+and not a revised estimate.
+
+WHAT CHANGED (c1's second branch, which the criterion explicitly permits)
+Each matrix entry now carries `scope: in|out`, and an out entry must carry
+`out_of_scope_reason` or the leg FAILS -- an undeclared skip is refused by the
+same step that implements skipping. For an out leg the workflow writes
+`<crate>-OUT-OF-SCOPE.txt` into the uploaded artifact, naming the reason, the
+file the declaration lives in, and the carrier issue, and states in as many
+words: "This leg tested ZERO mutants by declaration, not by failure." The
+declaration is therefore in the ARTIFACT a reader downloads, not only in a job
+log that expires.
+
+SIDE EFFECT, worth stating because it is large: the four out legs no longer
+start cargo-mutants at all, so the nightly stops burning 4 x 6 = 24 hours of
+hosted macOS runner time per run producing nothing.
+
+TO RE-ENABLE A LEG: shard it so a shard finishes inside the ceiling, or move it
+to a runner without that ceiling, then flip `scope` to "in". Do NOT flip it back
+on an estimate.
+
+c2 -- THE TIMEOUT IS DERIVED FROM A MEASUREMENT, FOR THE LEG THAT RUNS
+From the same run's artifact, .blackboard/E2E-MUTATION-BASELINE/
+wcore-cron-baseline.json, verbatim:
+
+  {"crate": "wcore-cron", "measured": true, "build_seconds": 116,
+   "test_seconds": 4, "censored_by_timeout_flag": false,
+   "timeout_multiplier": 5, "minimum_test_timeout": 90,
+   "raw": "ok       Unmutated baseline in 116s build + 4s test",
+   "run_id": "34438249721", "runner_os": "macOS"}
+
+`measured: true` and `censored_by_timeout_flag: false` are the two fields that
+distinguish this from the state core#451 was filed on, where `--timeout` bounded
+the UNMUTATED baseline and censored it on four of five crates. The per-mutant
+timeout is derived from that measured baseline; `min_test_timeout` is a FLOOR
+that only stops a very fast baseline from deriving an unrealistically tight
+bound, not a guessed ceiling.
+
+WHAT c2 DOES NOT ESTABLISH: the floors carried by the four out-of-scope crates
+(180/60/120/120) are not themselves measured. They are moot while those legs do
+not run, and re-enabling one requires the measurement above anyway -- but this
+file does not claim they are grounded, because they are not.
