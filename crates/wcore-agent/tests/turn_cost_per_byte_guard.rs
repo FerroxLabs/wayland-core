@@ -196,6 +196,25 @@ async fn one_turn_costs_about_two_whole_payload_scrub_passes() {
     // BOUNDS are deliberately unchanged — widening them would retire the
     // property the test exists for — and every raw ratio is still printed, so
     // a real shift shows up in the samples before it shows up in the verdict.
+    //
+    // MEASURED 2026-09-10 (wayland#1301 c1) on SeanDesktop, the box that hosts
+    // the `CI (Array)` Windows runner services: 32 cores with 16 CPU spinners
+    // pinned against them, `--retries 0`, n=40 per arm, 3 rounds (fdf4b1e1c)
+    // against 7 (this commit).
+    //
+    //   arm            asserted median            worst margin to a bound
+    //   3 rounds       1.690 .. 2.020, sd 0.070   +0.190
+    //   7 rounds       1.820 .. 2.130, sd 0.058   +0.320
+    //
+    // FAILURE RATE: 0/40 at BOTH arms, so this population did not reproduce
+    // the 1/10 seen on `CI (Array)` and the 1/41 seen on Linux, and it cannot
+    // claim a rate improvement it did not observe. What it measures is the
+    // DISTANCE to failure, on the same box, under the same load. Resampling
+    // every 3-subset of each 7-round run — which holds the load epoch fixed,
+    // where drawing rounds independently would not — a median of 3 came within
+    // +0.030 of a bound over 1400 subsets while the median of 7 of the same
+    // rounds stayed +0.320 away. The individual rounds are as noisy as ever:
+    // 34 of 280 fell outside 1.5..2.5 on their own (min 1.20, max 2.69).
     const ROUNDS: usize = 7;
     let mut ratios: Vec<f64> = Vec::new();
     let (mut small, mut large, mut scrub) = (f64::MAX, f64::MAX, f64::MAX);
