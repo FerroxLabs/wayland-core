@@ -89,8 +89,27 @@ async fn run(ctx: &ToolContext, input: serde_json::Value) -> wcore_types::tool::
 }
 
 /// Naming the secret outright. The measured defect.
+///
+/// THE ONE DIVERGENCE, recorded rather than hidden. The branch asserted
+/// `out.is_error` here — a hard refusal. MEASURED against this tree at
+/// 0602d2da6: that assertion FAILS, and it is the ONLY branch assertion in
+/// this file that does. The payload was
+///
+/// ```text
+/// it must be refused, not empty: diff --git a/.env b/.env
+/// [Git] hunks withheld: .env is denied for content reads in this workspace posture
+/// [Git] 1 file(s)' hunks withheld (.env)
+/// ```
+///
+/// so the secret did NOT come back — the confidentiality assertion above
+/// passed, unchanged — and the tree instead withholds the hunks and names the
+/// file, with `is_error == false`. That shape is deliberate here and pinned by
+/// this tree's own
+/// `git_content_store_deny.rs::a_contained_diff_withholds_a_denied_file_named_in_path`.
+/// The test name is changed to match what is actually asserted; renaming it
+/// `..._is_refused` while asserting withholding would be the lie.
 #[tokio::test]
-async fn diff_pointed_at_a_committed_secret_is_refused() {
+async fn diff_pointed_at_a_committed_secret_does_not_return_it() {
     let (_dir, root) = repo();
     let cwd = root.to_string_lossy().into_owned();
     let ctx = ctx_for(&root);
@@ -106,8 +125,8 @@ async fn diff_pointed_at_a_committed_secret_is_refused() {
         out.content
     );
     assert!(
-        out.is_error,
-        "it must be refused, not empty: {}",
+        out.content.contains("withheld") && out.content.contains(".env"),
+        "it must be withheld and the file named, not silently empty: {}",
         out.content
     );
 
