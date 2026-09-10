@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "Flaky on macOS only: the_live_backend_timeout_bounds compares two wall-clock samples taken under different load"
 status: open
-last_verified_commit: e16de82cd
+last_verified_commit: 6342f1b90
 criteria:
   - id: c1
     text: "The test stops deciding on a ratio between two wall-clock samples taken at different moments under different load, or its allowlist entry is deleted because the ratio was measured stable."
