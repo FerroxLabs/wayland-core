@@ -156,6 +156,22 @@ impl PtyHarness {
     /// by the session-resume journey, which re-boots a second process against
     /// the same `WAYLAND_HOME` to assert the prior conversation is restored.
     fn spawn_with_args(home: &Path, args: &[&str]) -> Self {
+        Self::spawn_with_args_in(home, home, args)
+    }
+
+    /// Like [`spawn_with_args`](Self::spawn_with_args) but runs the binary in
+    /// `cwd` instead of in `home`.
+    ///
+    /// `home` is `WAYLAND_HOME` — config, sessions, memory, channels, cron,
+    /// logs, credentials — and `cwd` is the project the session governs. Every
+    /// other test here passes the same directory for both, which is harmless
+    /// for them and NOT harmless for anything that reads the transcript: the
+    /// file watcher's root is the cwd, so when the two coincide the engine's
+    /// own state writes land inside the watched tree and are surfaced to the
+    /// user as edits they did not make. See
+    /// `resume_repaints_prior_conversation_into_the_transcript` for the
+    /// measurement (gh#1285).
+    fn spawn_with_args_in(home: &Path, cwd: &Path, args: &[&str]) -> Self {
         let pty = native_pty_system()
             .openpty(PtySize {
                 rows: 40,
@@ -186,7 +202,7 @@ impl PtyHarness {
         cmd.env_remove("API_KEY");
         cmd.env_remove("ANTHROPIC_API_KEY");
         cmd.env_remove("OPENAI_API_KEY");
-        cmd.cwd(home);
+        cmd.cwd(cwd);
         let vault = support::vault::configure_pty(&mut cmd);
         let child = OwnedTree::new(pty.slave.spawn_command(cmd).expect("spawn wayland-core"));
         drop(vault);
@@ -535,7 +551,13 @@ const HARNESS_ROWS: u16 = 40;
 const HARNESS_COLS: u16 = 120;
 
 fn boot_to_workspace(home: &Path) -> PtyHarness {
-    let h = PtyHarness::spawn(home);
+    boot_to_workspace_in(home, home)
+}
+
+/// [`boot_to_workspace`] with the project directory separated from
+/// `WAYLAND_HOME`. See [`PtyHarness::spawn_with_args_in`].
+fn boot_to_workspace_in(home: &Path, cwd: &Path) -> PtyHarness {
+    let h = PtyHarness::spawn_with_args_in(home, cwd, &[]);
     h.wait_for(
         |s| s.contains("WAYLAND") && s.contains("Workspace"),
         Duration::from_secs(60),
@@ -1383,9 +1405,48 @@ fn session_save_resume_threads_prior_history_into_the_next_request() {
 /// context (proven by `session_save_resume_threads_prior_history_into_the_next_request`)
 /// AND now rebuilds the transcript via `protocol_bridge::hydrate_history`,
 /// seeded into the initial `App` in `run_tui_mode`.
+///
+/// # gh#1285 — why this runs in its own project directory
+///
+/// This test used to spawn with `cwd == WAYLAND_HOME`, like every other test
+/// in this file, and it was the workspace's most frequent CI flake: 17 of 131
+/// `linux-containerized` executions and 4 of 104 `macos-latest` executions in
+/// the 2026-08-31..2026-09-10 census carried a retry-masked failure. It was
+/// listed as a macOS contention flake. It is NEITHER, and the payloads say so:
+/// every one of the seven distinct failing runs whose JUnit still exists
+/// (33425600515, 33574149322, 33705709380, 33711272322, 33843515833,
+/// 34318072596 on Linux; 33437649161 on macOS) carries the SAME screen —
+///
+/// ```text
+/// ▌ User edited 23 files while I was thinking (`/tmp/.tmpXXXX/memory`,
+/// `/tmp/.tmpXXXX/memory/changelog`, `/tmp/.tmpXXXX/projects`, …
+/// `/tmp/.tmpXXXX/credentials.enc`, …and 3 more) — re-read each before proceeding.
+/// ```
+///
+/// — a SEVENTEEN-ROW notice naming the harness's own `WAYLAND_HOME`. The file
+/// watcher's root is the cwd, so with the two directories merged the engine's
+/// own writes (memory, projects, channels, cron, logs, config.toml,
+/// credentials) are surfaced as edits the user made. The notice is appended to
+/// the transcript, the transcript pane shows its tail, and on a 40-row screen
+/// the earlier user prompt is scrolled out of view. Nothing about the RESUME
+/// failed; the assertion is a viewport assertion and the notice moved the
+/// viewport.
+///
+/// Load matters only in that a slower host writes more state inside the
+/// window, which is why it correlates with contention and why calling it
+/// contention was wrong. On macOS the same notice is LONGER — the
+/// `/private/var/folders/...` paths wrap — so it pushed the assistant marker
+/// off too and the failure surfaced as the 60s `wait_for` instead of at the
+/// user-prompt assertion (run 33437649161).
+///
+/// Separating the two directories removes the cause rather than widening a
+/// deadline: with the watch root outside `WAYLAND_HOME` there is no synthetic
+/// edit notice, and the transcript holds only the two turns this test wrote.
+/// It also matches production, where `WAYLAND_HOME` is never the project.
 #[test]
 fn resume_repaints_prior_conversation_into_the_transcript() {
     let home = TempDir::new().expect("tempdir");
+    let project = TempDir::new().expect("project tempdir");
     let user_marker = "SAVED_TOKEN_42";
     let assistant_marker = "ASSISTANT_REPLY_PERSISTED";
 
@@ -1398,7 +1459,7 @@ fn resume_repaints_prior_conversation_into_the_transcript() {
     seed_config_with_base_url(home.path(), &server.uri());
 
     {
-        let mut h = boot_to_workspace(home.path());
+        let mut h = boot_to_workspace_in(home.path(), project.path());
         h.type_text(&format!("remember {user_marker}"));
         h.send(b"\r");
         h.wait_for(
@@ -1413,18 +1474,32 @@ fn resume_repaints_prior_conversation_into_the_transcript() {
         let _ = h.wait_for_exit(Duration::from_secs(8));
     }
 
-    let h2 = PtyHarness::spawn_with_args(home.path(), &["--continue"]);
-    // The restored assistant reply must repaint into the transcript on resume.
+    let h2 = PtyHarness::spawn_with_args_in(home.path(), project.path(), &["--continue"]);
+    // BOTH halves of the prior conversation must repaint, and they are waited
+    // for TOGETHER. Waiting on the assistant reply and then reading the user
+    // prompt off the very next snapshot made the verdict depend on the order
+    // in which two lines of one repaint reached the screen; nothing in
+    // `hydrate_history` promises that order, and the wait costs nothing when
+    // they arrive in the same frame.
     h2.wait_for(
-        |s| s.contains(assistant_marker),
+        |s| s.contains(assistant_marker) && s.contains(user_marker),
         Duration::from_secs(60),
-        "the resumed transcript to repaint the prior assistant reply",
+        "the resumed transcript to repaint BOTH the prior user prompt \
+         (SAVED_TOKEN_42) and the prior assistant reply",
     );
+    // No synthetic edit notice may appear: this session's project directory is
+    // empty and untouched, so anything claiming the user edited files is the
+    // engine watching its own state — the gh#1285 defect, whose only visible
+    // symptom was the scroll it caused. Asserted rather than left implicit
+    // because the repair is the SEPARATION of cwd from WAYLAND_HOME, and a
+    // future edit that merges them again would otherwise re-arm the flake
+    // silently instead of failing here.
     let restored = h2.screen_text();
     assert!(
-        restored.contains(user_marker),
-        "resumed transcript should also show the prior user prompt ({user_marker}); \
-         screen:\n{restored}"
+        !restored.contains("while I was thinking"),
+        "the resumed transcript carries a synthetic user-edit notice for files \
+         this test never wrote, which is what used to scroll the prior prompt \
+         out of the viewport (gh#1285); screen:\n{restored}"
     );
 
     let mut h2 = h2;
