@@ -146,12 +146,7 @@ impl DurableChildStore {
     }
 
     pub fn inspect(&self, child_id: &ChildId) -> Result<Option<DurableChildRecord>, JournalError> {
-        Ok(self
-            .journal
-            .state()?
-            .children
-            .get(child_id.as_str())
-            .and_then(|child| child.durable.clone()))
+        self.journal.durable_child(child_id.as_str())
     }
 
     pub fn list(&self) -> Result<Vec<DurableChildRecord>, JournalError> {
