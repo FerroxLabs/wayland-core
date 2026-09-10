@@ -6959,6 +6959,22 @@ mod lock_denial_verification {
     }
 }
 
+/// The chunked-write lock, asserted against the races it exists to serialise.
+///
+/// WHAT IS NOT MEASURED HERE, AND IS RECORDED RATHER THAN LEFT IMPLIED
+/// (wayland#1303 c4). The rate of the ERROR_ACCESS_DENIED flake on a HOSTED
+/// Windows runner is UNMEASURED. What exists is a negative control on
+/// SeanDesktop (the `ferrox-win-msvc` host) at `--retries 0`: n=15 with 0
+/// failures at 3.240-4.412s each when the ticket was filed, a further 50
+/// gradings of the losing-writer test across two commits, and 5 runs of the
+/// whole 817-test lib suite at `--retries 0` with zero PermissionDenied. Every
+/// one of those is the same fast, interactive box, so it CANNOT reproduce
+/// hosted-runner full-suite contention, and its green is explicitly refused as
+/// counter-evidence rather than counted as a rate. A real rate needs the
+/// failing environment. This paragraph carried over from
+/// `.config/flaky-allowlist.txt` when wayland#1303 c3 deleted that row; the
+/// record has to outlive the entry, or discharging the debt would erase the
+/// statement of what was never learned.
 #[cfg(test)]
 mod chunk_write_lock_verification {
     use super::*;
