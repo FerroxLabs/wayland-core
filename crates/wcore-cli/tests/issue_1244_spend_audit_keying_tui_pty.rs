@@ -286,6 +286,15 @@ fn the_spend_audit_key_survives_an_in_session_model_switch() {
         run.lines.join("\n")
     );
 
+    // #1244 c1 and c3 both ask for the LINES. Printed on the pass as well as
+    // the failure, so a green run is quotable evidence rather than an
+    // assertion that something was checked. `cargo test -- --nocapture`.
+    println!("--- spend-audit.jsonl, both sides of the /model switch ---");
+    for line in &run.lines {
+        println!("{line}");
+    }
+    println!("--- end ---");
+
     let ids = session_ids(&run);
     let first = &ids[0];
     assert!(
@@ -316,6 +325,11 @@ fn the_audit_key_is_the_session_id_and_not_a_placeholder() {
     let ids = session_ids(&run);
     assert!(!ids.is_empty(), "no audit records:\n{}", run.screen);
     let key = &ids[0];
+    // c2 asks for the two ids QUOTED SIDE BY SIDE.
+    println!("--- c2: the audit key beside the session ids on disk ---");
+    println!("spend-audit.jsonl session_id : {key}");
+    println!("[session] directory entries  : {:?}", run.session_dir_ids);
+    println!("--- end ---");
 
     assert_ne!(
         key,
