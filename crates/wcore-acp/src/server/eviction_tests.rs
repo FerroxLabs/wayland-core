@@ -232,6 +232,100 @@ async fn a_close_between_victim_choice_and_pop_keeps_retained_total_exact() {
     );
 }
 
+/// Second review, MAJOR 1, forced. Several recorders go over the cap, choose
+/// the same largest log and are parked before they pop -- as they are when
+/// that log's lock is held by a resume or a delivery copy. When they are
+/// released, one pop already brings the total back under the cap. The rest
+/// must not trim the largest log any further: over-trimming it destroys the
+/// very retention a lagging reader resumes from.
+#[tokio::test]
+async fn evictors_parked_on_one_victim_trim_it_only_as_far_as_the_cap_needs() {
+    let server = AcpServer::new();
+    // The victim: strictly the largest log, whole, under the 8 MiB per-log cap.
+    let victim = recorded_session(&server, turn(chunks(31, BIG))).await;
+    let mut others = Vec::new();
+    for _ in 0..7 {
+        others.push(recorded_session(&server, turn(chunks(29, BIG))).await);
+    }
+    others.push(recorded_session(&server, turn(chunks(21, BIG))).await);
+    let big_event = serde_json::to_vec(&MessageEvent::TextDelta {
+        text: "x".repeat(BIG),
+    })
+    .unwrap()
+    .len();
+    let (total, sum) = server.retained_accounting().await;
+    assert_eq!(total, sum);
+    assert!(
+        total < RETAINED_HISTORY_BYTES && RETAINED_HISTORY_BYTES - total < big_event,
+        "setup must sit just under the cap: {total}"
+    );
+    let victim_bytes = retained_bytes_of(&server, &victim).await;
+    for id in &others {
+        assert!(retained_bytes_of(&server, id).await < victim_bytes);
+    }
+    let victim_events = {
+        let log = server.events.read().await.get(&victim).cloned().unwrap();
+        lock_log(&log).retained_len()
+    };
+
+    // Four evictors: the first append crosses the cap, the next three keep the
+    // total over it because nothing has been popped yet. Each is parked after
+    // it has chosen its victim.
+    let mut releases = Vec::new();
+    let mut readers = Vec::new();
+    let mut triggers = Vec::new();
+    for bytes in [BIG, 4 * 1024, 4 * 1024, 4 * 1024] {
+        let (reached, release) = server.gate_next_eviction();
+        let trigger_server = server
+            .clone()
+            .with_turn_engine(Arc::new(Script(turn(chunks(1, bytes)))));
+        let trigger = trigger_server
+            .create_session(create_request())
+            .await
+            .unwrap()
+            .session_id;
+        let response = trigger_server.send_message(prompt(&trigger)).await.unwrap();
+        readers.push(tokio::spawn(response.collect::<Vec<_>>()));
+        tokio::time::timeout(Duration::from_secs(60), reached)
+            .await
+            .expect("this trigger's recorder went over the cap and chose a victim")
+            .unwrap();
+        releases.push(release);
+        triggers.push(trigger);
+    }
+    for release in releases {
+        release.send(()).unwrap();
+    }
+    for reader in readers {
+        let frames = tokio::time::timeout(Duration::from_secs(60), reader)
+            .await
+            .expect("each trigger turn finishes")
+            .unwrap();
+        assert!(matches!(frames.last(), Some(MessageEvent::Done { .. })));
+    }
+
+    let (total, sum) = server.retained_accounting().await;
+    assert_eq!(total, sum);
+    let victim_left = {
+        let log = server.events.read().await.get(&victim).cloned().unwrap();
+        lock_log(&log).retained_len()
+    };
+    assert!(
+        victim_left + 1 >= victim_events,
+        "the largest log was trimmed {} events where one was enough",
+        victim_events - victim_left
+    );
+    assert!(
+        total <= RETAINED_HISTORY_BYTES && RETAINED_HISTORY_BYTES - total < big_event,
+        "eviction must stop within one event of the cap, not {} bytes under it",
+        RETAINED_HISTORY_BYTES.saturating_sub(total)
+    );
+    for id in others.into_iter().chain(triggers).chain([victim]) {
+        server.delete_session(id).await.unwrap();
+    }
+    assert_eq!(server.retained_accounting().await, (0, 0));
+}
+
 /// Review BLOCKER 1 in the traffic shape the review named: history held over
 /// the cap by residents while churn sessions record one large burst then many
 /// small deltas and close, on several threads. Whatever the interleaving, the
