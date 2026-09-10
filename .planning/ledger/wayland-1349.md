@@ -24,7 +24,7 @@ criteria:
   - id: c4
     text: "wayland#1324 c2 carries a handoff to this issue, so the programme carrier can be graded without absorbing this failure silently."
     state: met
-    evidence: "file:.planning/ledger/wayland-1324.md:20:    handoff: \"FerroxLabs/wayland#1349\""
+    evidence: "file:.planning/ledger/wayland-1324.md:18:FerroxLabs/wayland#1349"
     owner: core
     note: "MET at d555a28b3. #1324 c2 now names this issue as its carrier. WHY THIS TICKET EXISTS AT ALL: the result lived only in evidence/execution-progress.json, and the release readiness gate counts LEDGER files -- so the largest unmet acceptance result in the programme was structurally invisible to the gate that decides the release. Both trackers were searched open and closed for 'RSS growth soak', 'memory growth' and 'two-hour soak': zero hits in every arm, while a control query in the same session returned core#410 and core#368, so the search works and the zero means absence rather than a broken query."
 ---
