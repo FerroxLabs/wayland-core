@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "Two sessions racing a memory migration both degrade to NullMemory, and the user is never told"
 status: open
-last_verified_commit: 62d1a1348
+last_verified_commit: 632d7c651
 criteria:
   - id: c1
     text: "Two sessions starting concurrently against a memory database that needs a migration BOTH end with a working memory backend rather than one of them on NullMemory -- shown by a test that reproduces the race and REDS without the fix."
