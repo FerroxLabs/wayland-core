@@ -9,7 +9,7 @@ Owners come from each ledger's `owner:` on its UNMET criteria — the
 owner is read, not assigned, so a row cannot claim an owner the
 ledger does not.
 
-Blocking issues: 9   Outstanding criteria: 13
+Blocking issues: 8   Outstanding criteria: 11
 
 | Issue | Owner | Outstanding | Title |
 |---|---|---:|---|
@@ -20,5 +20,4 @@ Blocking issues: 9   Outstanding criteria: 13
 | FerroxLabs/wayland#1301 | core | 2 | First Windows retry-flake cluster: a wall-clock ratio guard and a dispatch-budget test at 94% of its kill line (CI (Array)) |
 | FerroxLabs/wayland#1303 | core | 1 | Windows: a racing chunked credential write fails outright with ACCESS_DENIED (os error 5), and the caller loses a single-use refresh token |
 | FerroxLabs/wayland#1349 | core | 1 | W16 mixed soak fails RSS acceptance twice (41.5x, then 1.83x) with no carrier |
-| FerroxLabs/wayland#1351 | core | 2 | Two sessions racing a memory migration both degrade to NullMemory, and the user is never told |
 | FerroxLabs/wayland-core#404 | core | 1 | A ci-linux cancellation at the 120-minute budget destroys the JUnit evidence the run already produced |
