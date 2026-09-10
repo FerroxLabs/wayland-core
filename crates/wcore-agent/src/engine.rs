@@ -13818,24 +13818,23 @@ impl AgentEngine {
             "this turn cannot be replayed if it is interrupted: the exact provider request is \
              not sealed. The turn IS journaled"
         );
-        self.output.emit_durability_degraded(
-            &format!(
-                "crash replay protection is OFF for this run: {}, so the exact provider \
+        // wayland#1302 c3. Bounded and non-secret by construction: the
+        // diagnostic is drawn from two fixed vocabularies in
+        // `wcore_config::confidential_blob` and never from a backend message.
+        let store_clause = match store_report {
+            Some(report) => format!(" What the store itself reported: {report}."),
+            None => String::new(),
+        };
+        self.output.emit_durability_degraded(&format!(
+            "crash replay protection is OFF for this run: {}, so the exact provider \
              request cannot be sealed. This turn IS being recorded — the journal keeps its \
              provider, tool, approval and delivery boundaries — but if it is interrupted \
              mid-dispatch it will not resume itself; you will be asked to resume, \
-             reconcile or cancel it. {}",
-                cause.condition(),
-                cause.remedy(),
-            ) + &match store_report {
-                // wayland#1302 c3. Bounded and non-secret by construction: the
-                // diagnostic is drawn from two fixed vocabularies in
-                // `wcore_config::confidential_blob` and never from a backend
-                // message.
-                Some(report) => format!(" What the store itself reported: {report}."),
-                None => String::new(),
-            },
-        );
+             reconcile or cancel it. {}{}",
+            cause.condition(),
+            cause.remedy(),
+            store_clause,
+        ));
     }
 
     /// Legacy loop body. `journal_turn_id` is present only for an engine that

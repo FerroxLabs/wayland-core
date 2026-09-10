@@ -762,6 +762,17 @@ mod tests {
         }
     }
 
+    /// `ConfidentialBlobKey` is deliberately not `Debug` — it holds key
+    /// material — so `Result::unwrap_err` is unavailable on these loads.
+    fn expect_failure(
+        result: Result<ConfidentialBlobKey, ConfidentialKeyStoreError>,
+    ) -> ConfidentialKeyStoreError {
+        match result {
+            Ok(_) => panic!("expected a confidential key-store failure"),
+            Err(error) => error,
+        }
+    }
+
     fn test_key(byte: u8) -> ConfidentialBlobKey {
         ConfidentialBlobKey::from_slice(&[byte; KEY_LEN]).unwrap()
     }
@@ -927,7 +938,7 @@ mod tests {
         let store = MemoryCredentialsStore::default();
         let key_ref = "recovery.session-read-only.sealing-key";
 
-        let missing = load_confidential_blob_key_from_store(&store, key_ref).unwrap_err();
+        let missing = expect_failure(load_confidential_blob_key_from_store(&store, key_ref));
         assert_eq!(
             missing.kind(),
             ConfidentialKeyStoreErrorKind::MissingStoredKey
@@ -941,7 +952,7 @@ mod tests {
         assert!(store.values.lock().unwrap().is_empty());
 
         store.put(key_ref, "malformed").unwrap();
-        let malformed = load_confidential_blob_key_from_store(&store, key_ref).unwrap_err();
+        let malformed = expect_failure(load_confidential_blob_key_from_store(&store, key_ref));
         assert_eq!(
             malformed.kind(),
             ConfidentialKeyStoreErrorKind::MalformedStoredKey
@@ -1013,9 +1024,10 @@ mod tests {
         store.put(key_ref, "not-a-canonical-32-byte-key").unwrap();
 
         assert_eq!(
-            load_or_create_confidential_blob_key_from_store(&store, key_ref)
-                .unwrap_err()
-                .kind(),
+            expect_failure(load_or_create_confidential_blob_key_from_store(
+                &store, key_ref
+            ))
+            .kind(),
             ConfidentialKeyStoreErrorKind::MalformedStoredKey
         );
         let rendered = match load_or_create_confidential_blob_key_from_store(&store, key_ref) {
@@ -1092,8 +1104,10 @@ mod tests {
         let key_ref = "recovery.session-sentinel.sealing-key";
 
         for error in [
-            load_confidential_blob_key_from_store(&store, key_ref).unwrap_err(),
-            load_or_create_confidential_blob_key_from_store(&store, key_ref).unwrap_err(),
+            expect_failure(load_confidential_blob_key_from_store(&store, key_ref)),
+            expect_failure(load_or_create_confidential_blob_key_from_store(
+                &store, key_ref,
+            )),
         ] {
             let rendered = error.to_string();
             assert!(
@@ -1136,8 +1150,8 @@ mod tests {
             error: || CredentialsError::BackendUnavailable(SENSITIVE_SENTINEL.to_owned()),
         };
 
-        let named = load_confidential_blob_key_from_store(&keyring, key_ref).unwrap_err();
-        let unnamed = load_confidential_blob_key_from_store(&ambiguous, key_ref).unwrap_err();
+        let named = expect_failure(load_confidential_blob_key_from_store(&keyring, key_ref));
+        let unnamed = expect_failure(load_confidential_blob_key_from_store(&ambiguous, key_ref));
 
         assert_eq!(
             named.diagnostic().class().responding_backend(),
@@ -1164,16 +1178,16 @@ mod tests {
     #[test]
     fn a_locked_store_and_a_healthy_one_render_differently() {
         let key_ref = "recovery.session-distinct.sealing-key";
-        let locked = load_confidential_blob_key_from_store(
+        let locked = expect_failure(load_confidential_blob_key_from_store(
             &FailingCredentialsStore {
                 error: || CredentialsError::Keyring(SENSITIVE_SENTINEL.to_owned()),
             },
             key_ref,
-        )
-        .unwrap_err();
-        let healthy =
-            load_confidential_blob_key_from_store(&MemoryCredentialsStore::default(), key_ref)
-                .unwrap_err();
+        ));
+        let healthy = expect_failure(load_confidential_blob_key_from_store(
+            &MemoryCredentialsStore::default(),
+            key_ref,
+        ));
 
         assert_eq!(locked.kind(), ConfidentialKeyStoreErrorKind::ReadFailed);
         assert_eq!(
@@ -1198,11 +1212,10 @@ mod tests {
     /// `WriteFailed`.
     #[test]
     fn a_refused_write_reports_the_create_step() {
-        let error = load_or_create_confidential_blob_key_from_store(
+        let error = expect_failure(load_or_create_confidential_blob_key_from_store(
             &WriteRefusingCredentialsStore,
             "recovery.session-write.sealing-key",
-        )
-        .unwrap_err();
+        ));
 
         assert_eq!(error.kind(), ConfidentialKeyStoreErrorKind::WriteFailed);
         assert_eq!(
@@ -1221,8 +1234,9 @@ mod tests {
     fn invalid_key_reference_is_rejected_without_store_access() {
         let store = MemoryCredentialsStore::default();
         for key_ref in ["", ".hidden", "recovery/session", "recovery secret"] {
-            let refused =
-                load_or_create_confidential_blob_key_from_store(&store, key_ref).unwrap_err();
+            let refused = expect_failure(load_or_create_confidential_blob_key_from_store(
+                &store, key_ref,
+            ));
             assert_eq!(
                 refused.kind(),
                 ConfidentialKeyStoreErrorKind::InvalidReference
