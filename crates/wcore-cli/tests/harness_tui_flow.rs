@@ -141,20 +141,15 @@ struct PtyHarness {
 }
 
 impl PtyHarness {
-    /// Spawn `wayland-core` on a fresh PTY sized 120x40.
+    /// Spawn `wayland-core` on a fresh PTY sized 120x40 with extra CLI args
+    /// (e.g. `["--continue"]` to resume the most-recent saved session). Used
+    /// by the session-resume journey, which re-boots a second process against
+    /// the same `WAYLAND_HOME` to assert the prior conversation is restored.
     ///
     /// 120 columns is wide enough that the right rail stays visible
     /// (`RAIL_RESPONSIVE_MIN_WIDTH = 100` in `workspace.rs`); the
     /// resize-handling test below shrinks the PTY through that
     /// threshold and re-asserts.
-    fn spawn(home: &Path) -> Self {
-        Self::spawn_with_args(home, &[])
-    }
-
-    /// Like [`spawn`](Self::spawn) but passes extra CLI args to the binary
-    /// (e.g. `["--continue"]` to resume the most-recent saved session). Used
-    /// by the session-resume journey, which re-boots a second process against
-    /// the same `WAYLAND_HOME` to assert the prior conversation is restored.
     fn spawn_with_args(home: &Path, args: &[&str]) -> Self {
         Self::spawn_with_args_in(home, home, args)
     }
