@@ -125,22 +125,44 @@ impl Memory {
         session_id: &str,
         embedder_cfg: &EmbedderConfig,
     ) -> Result<Self> {
-        let session_path = paths::session_db_path(session_id);
-        let project_path = Some(paths::project_db_path(project_root));
-        let global_path = paths::global_db_path().ok_or_else(|| {
+        Self::open_with_config_in(None, project_root, session_id, embedder_cfg).await
+    }
+
+    /// [`open_with_config`] with the memory base directory STATED rather than
+    /// resolved from the ambient environment.
+    ///
+    /// `base = None` is production and every existing caller: identical
+    /// behaviour, resolved through [`paths::memory_base_dir`]. `Some(root)`
+    /// puts this store's five files — the three tier DBs, the audit log and
+    /// the changelogs — under `root`, which is the only way a caller can be
+    /// SURE it is not sharing them with another process. See
+    /// [`paths::memory_base_dir_in`] for why sharing them is a defect and not
+    /// merely untidy.
+    pub async fn open_with_config_in(
+        base: Option<&Path>,
+        project_root: &Path,
+        session_id: &str,
+        embedder_cfg: &EmbedderConfig,
+    ) -> Result<Self> {
+        let session_path = paths::session_db_path_in(base, session_id);
+        let project_path = Some(paths::project_db_path_in(base, project_root));
+        let global_path = paths::global_db_path_in(base).ok_or_else(|| {
             MemoryError::PathValidation("no global memory base dir resolvable".into())
         })?;
 
-        let db = Arc::new(Db::open(session_path, project_path, global_path)?);
-        let audit_path = paths::audit_db_path()
+        let db = Arc::new(
+            Db::open(session_path, project_path, global_path)?
+                .with_memory_base(base.map(Path::to_path_buf)),
+        );
+        let audit_path = paths::audit_db_path_in(base)
             .ok_or_else(|| MemoryError::PathValidation("no audit base dir resolvable".into()))?;
         let audit = Arc::new(AuditLog::open(audit_path)?);
         let gate = Arc::new(MemoryAccessGate::new(audit.clone(), AccessPolicy::empty()));
         let embedder: Arc<dyn Embedder> = build_embedder(embedder_cfg).await?;
         let cdc = Arc::new(CdcWriter::new_with_sinks(
-            paths::changelog_path("session"),
-            paths::changelog_path("project"),
-            paths::changelog_path("global"),
+            paths::changelog_path_in(base, "session"),
+            paths::changelog_path_in(base, "project"),
+            paths::changelog_path_in(base, "global"),
         )?);
         let dispatcher = PartitionDispatcher::new(
             gate.clone(),
@@ -196,7 +218,7 @@ impl Memory {
     /// report (idempotent; safe to call on every bootstrap).
     pub async fn import_legacy_if_present(&self) -> Result<LegacyImportReport> {
         let dir = match self.project_root.as_ref() {
-            Some(root) => paths::auto_memory_dir(root),
+            Some(root) => paths::auto_memory_dir_in(self.db.memory_base(), root),
             None => None,
         };
         match dir {

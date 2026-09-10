@@ -70,11 +70,35 @@ fn null_output() -> Arc<dyn wcore_agent::output::OutputSink> {
     Arc::new(NullSink)
 }
 
+/// This test's own memory root, stated at the call site.
+///
+/// Every test below bootstraps a real `Memory`, and bootstrap opens the
+/// session tier under the placeholder id `boot` — so WITHOUT this, every
+/// concurrently running test process in the workspace opens the same
+/// `<profile home>/memory/sessions/boot.db`. `apply_migrations` is not
+/// serialized across processes: two of them opening a store that still needs a
+/// migration both run the same `ALTER TABLE`, the loser gets `duplicate column
+/// name`, `Memory::open` returns `Err`, and bootstrap falls back to
+/// `NullMemory` — which is not an error any assertion here would name, because
+/// `NullMemory` accepts every write and returns a FRESH id from
+/// `record_episode`. Measured on hetzner-dsm under a full-workspace nextest
+/// run at `--retries 0`: `Migration { version: 5, ... "duplicate column name:
+/// last_latency_ms" }`, and three of this file's five tests red.
+///
+/// It is stated rather than written into `WCORE_MEMORY_DIR` / `WAYLAND_HOME`
+/// deliberately: writing either is a write of a PROCESS GLOBAL that every
+/// concurrent sibling observes, which is the class FerroxLabs/wayland#1233
+/// closed by stating the value at the call site.
+fn memory_root(workdir: &tempfile::TempDir) -> std::path::PathBuf {
+    workdir.path().join("memory-root")
+}
+
 #[tokio::test]
 async fn bootstrap_with_memory_enabled_spawns_decay_scheduler() {
     let cfg = cfg_with_memory(true);
     let workdir = tempfile::TempDir::new().expect("workdir");
     let result = AgentBootstrap::new(cfg, workdir.path().to_str().unwrap(), null_output())
+        .with_memory_root(memory_root(&workdir))
         .build()
         .await
         .expect("bootstrap should succeed with memory enabled");
@@ -110,6 +134,7 @@ async fn bootstrap_with_memory_disabled_spawns_no_scheduler() {
     let disabled_count = {
         let cfg = cfg_with_memory(false);
         let r = AgentBootstrap::new(cfg, workdir.path().to_str().unwrap(), null_output())
+            .with_memory_root(memory_root(&workdir))
             .build()
             .await
             .expect("bootstrap should succeed with memory disabled");
@@ -119,6 +144,7 @@ async fn bootstrap_with_memory_disabled_spawns_no_scheduler() {
     let enabled_count = {
         let cfg = cfg_with_memory(true);
         let r = AgentBootstrap::new(cfg, workdir.path().to_str().unwrap(), null_output())
+            .with_memory_root(memory_root(&workdir))
             .build()
             .await
             .expect("bootstrap should succeed with memory enabled");
@@ -145,6 +171,7 @@ async fn lifecycle_off_keeps_memory_but_omits_legacy_skill_drafter() {
     let workdir = tempfile::TempDir::new().expect("workdir");
 
     let result = AgentBootstrap::new(cfg, workdir.path().to_str().unwrap(), null_output())
+        .with_memory_root(memory_root(&workdir))
         .build()
         .await
         .expect("memory must remain usable when only skill lifecycle is disabled");
@@ -209,6 +236,7 @@ async fn memory_opt_out_records_nothing_at_the_stock_lifecycle_default() {
 
     let workdir = tempfile::TempDir::new().expect("workdir");
     let result = AgentBootstrap::new(cfg, workdir.path().to_str().unwrap(), null_output())
+        .with_memory_root(memory_root(&workdir))
         .build()
         .await
         .expect("bootstrap must still succeed with memory switched off");
@@ -278,6 +306,7 @@ async fn stock_install_still_records() {
     let cfg = cfg_with_memory(true);
     let workdir = tempfile::TempDir::new().expect("workdir");
     let result = AgentBootstrap::new(cfg, workdir.path().to_str().unwrap(), null_output())
+        .with_memory_root(memory_root(&workdir))
         .build()
         .await
         .expect("bootstrap should succeed with memory enabled");
@@ -318,4 +347,83 @@ async fn stock_install_still_records() {
             "`{name}` must be registered on a stock install; registered: {tools:?}"
         );
     }
+}
+
+/// THE KNOWN-POSITIVE CONTROL for the isolation the tests above depend on.
+///
+/// Every one of them would pass just as well if `with_memory_root` were a
+/// no-op and this particular run simply never contended — a green against a
+/// defect that never appeared. This test fails in exactly that case. It writes
+/// through the bootstrapped engine and then reads the episode back out of a
+/// SECOND store opened directly at the stated root: if the engine had actually
+/// opened the ambient profile home, the episode would not be there.
+///
+/// Both halves are load-bearing. The `assert_ne!` proves the stated root is a
+/// DIFFERENT path from the ambient one (a root that happened to resolve to the
+/// shared home would isolate nothing), and the read-back proves it is the one
+/// actually IN USE (a stated root nothing ever opens isolates nothing either).
+#[tokio::test]
+async fn the_stated_memory_root_is_distinct_from_the_ambient_home_and_is_the_one_in_use() {
+    let workdir = tempfile::TempDir::new().expect("workdir");
+    let root = memory_root(&workdir);
+
+    let ambient_boot = wcore_memory::paths::session_db_path("boot")
+        .expect("the ambient profile home must resolve, or this control proves nothing");
+    let stated_boot = wcore_memory::paths::session_db_path_in(Some(&root), "boot")
+        .expect("the stated root resolves");
+    assert_ne!(
+        stated_boot, ambient_boot,
+        "the stated memory root resolved to the SAME file as the shared profile \
+         home, so nothing is isolated"
+    );
+
+    let cfg = cfg_with_memory(true);
+    let result = AgentBootstrap::new(cfg, workdir.path().to_str().unwrap(), null_output())
+        .with_memory_root(&root)
+        .build()
+        .await
+        .expect("bootstrap should succeed with memory enabled");
+
+    let episode = wcore_memory::v2_types::Episode {
+        id: wcore_memory::v2_types::EpisodeId::new(),
+        tier: wcore_memory::v2_types::Tier::Project,
+        ts: 1_700_000_000,
+        episode_type: "stated-root-control".to_string(),
+        summary: "written through an engine whose memory root was stated".to_string(),
+        atomic_facts: Vec::new(),
+        source: "test".to_string(),
+        source_product: "wcore-agent-test".to_string(),
+        session_id: None,
+        project_root: Some(workdir.path().to_string_lossy().into_owned()),
+        decay_score: 1.0,
+        status: wcore_memory::v2_types::EpisodeStatus::Active,
+    };
+    let expected_summary = episode.summary.clone();
+    let episode_id = result
+        .engine
+        .memory_api()
+        .record_episode(episode, wcore_memory::AccessToken::System)
+        .await
+        .expect("a real store must accept the episode");
+    // NullMemory also returns Ok here, with an id of its own — so the write
+    // alone proves nothing and the read below is the whole assertion.
+    drop(result);
+
+    let at_stated_root = wcore_memory::Memory::open_with_config_in(
+        Some(&root),
+        workdir.path(),
+        "boot",
+        &Default::default(),
+    )
+    .await
+    .expect("the stated root must open as a real store");
+    let loaded = at_stated_root
+        .api()
+        .get_episode(&episode_id, wcore_memory::AccessToken::System)
+        .await
+        .expect(
+            "the episode the engine recorded is not under the STATED root — the engine \
+             opened somewhere else, so `with_memory_root` is not doing anything",
+        );
+    assert_eq!(loaded.summary, expected_summary);
 }

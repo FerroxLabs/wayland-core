@@ -47,6 +47,35 @@ pub fn memory_base_dir() -> Option<PathBuf> {
     wcore_config::config::app_config_dir()
 }
 
+/// [`memory_base_dir`] with the base STATED by the caller.
+///
+/// `Some(root)` uses `root` outright and consults no environment variable.
+/// `None` — production, and every caller that does not state one — resolves
+/// the ambient base exactly as before, so nothing about an ordinary install
+/// changes.
+///
+/// # Why the seam exists
+///
+/// Every path below is derived from ONE base, so two processes that resolve
+/// the same base necessarily share `memory.db`, `sessions/<id>.db`,
+/// `audit.db` and the changelogs. `apply_migrations` is not serialized across
+/// processes: two of them opening a fresh store at once both read
+/// `user_version` below the target and both run the same `ALTER TABLE`, and
+/// the loser gets `duplicate column name`, an `Err` from `Memory::open`, and a
+/// silent fall back to `NullMemory`.
+///
+/// The alternative for a caller that needs its own base — writing
+/// `WCORE_MEMORY_DIR` or `WAYLAND_HOME` — is a write of a PROCESS GLOBAL that
+/// every concurrently running sibling observes, which is the class
+/// FerroxLabs/wayland#1233 closed by stating the value at the call site
+/// instead.
+pub fn memory_base_dir_in(base: Option<&Path>) -> Option<PathBuf> {
+    match base {
+        Some(root) => Some(root.to_path_buf()),
+        None => memory_base_dir(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Project-specific memory directory
 // ---------------------------------------------------------------------------
@@ -59,9 +88,15 @@ pub fn memory_base_dir() -> Option<PathBuf> {
 /// produce a safe directory name: all non-alphanumeric characters become
 /// hyphens, and long paths are truncated with a hash suffix for uniqueness.
 pub fn auto_memory_dir(project_root: &Path) -> Option<PathBuf> {
-    let base = memory_base_dir()?;
+    auto_memory_dir_in(None, project_root)
+}
+
+/// [`auto_memory_dir`] under a base the caller states. See
+/// [`memory_base_dir_in`].
+pub fn auto_memory_dir_in(base: Option<&Path>, project_root: &Path) -> Option<PathBuf> {
     Some(
-        base.join("projects")
+        memory_base_dir_in(base)?
+            .join("projects")
             .join(project_key(project_root))
             .join("memory"),
     )
@@ -105,15 +140,31 @@ pub fn memory_entrypoint(memory_dir: &Path) -> PathBuf {
 
 /// Returns the global memory DB path: `<base>/memory/memory.db`.
 pub fn global_db_path() -> Option<PathBuf> {
-    Some(memory_base_dir()?.join("memory").join("memory.db"))
+    global_db_path_in(None)
+}
+
+/// [`global_db_path`] under a base the caller states. See
+/// [`memory_base_dir_in`].
+pub fn global_db_path_in(base: Option<&Path>) -> Option<PathBuf> {
+    Some(memory_base_dir_in(base)?.join("memory").join("memory.db"))
 }
 
 /// Returns the session memory DB path:
 /// `<base>/memory/sessions/<session_id>.db`.
 pub fn session_db_path(session_id: &str) -> Option<PathBuf> {
+    session_db_path_in(None, session_id)
+}
+
+/// [`session_db_path`] under a base the caller states. See
+/// [`memory_base_dir_in`].
+///
+/// This is the path two processes collide on most readily: bootstrap opens
+/// the session tier under the placeholder id `boot` before the real session id
+/// is known, so EVERY process sharing a base opens the same file.
+pub fn session_db_path_in(base: Option<&Path>, session_id: &str) -> Option<PathBuf> {
     let safe = sanitize_path(session_id);
     Some(
-        memory_base_dir()?
+        memory_base_dir_in(base)?
             .join("memory")
             .join("sessions")
             .join(format!("{safe}.db")),
@@ -162,11 +213,18 @@ pub fn legacy_project_db_path(project_root: &Path) -> PathBuf {
 /// `WCORE_MEMORY_DIR`) is the legacy path, which is what the previous
 /// behaviour was everywhere.
 pub fn project_db_path(project_root: &Path) -> PathBuf {
+    project_db_path_in(None, project_root)
+}
+
+/// [`project_db_path`] under a base the caller states. See
+/// [`memory_base_dir_in`]. The legacy in-tree DB still wins when it exists —
+/// that check is about the PROJECT, not about the base.
+pub fn project_db_path_in(base: Option<&Path>, project_root: &Path) -> PathBuf {
     let legacy = legacy_project_db_path(project_root);
     if legacy.exists() {
         return legacy;
     }
-    match auto_memory_dir(project_root) {
+    match auto_memory_dir_in(base, project_root) {
         Some(dir) => dir.join("memory.db"),
         None => legacy,
     }
@@ -174,14 +232,26 @@ pub fn project_db_path(project_root: &Path) -> PathBuf {
 
 /// Returns the audit log DB path: `<base>/memory/audit.db`.
 pub fn audit_db_path() -> Option<PathBuf> {
-    Some(memory_base_dir()?.join("memory").join("audit.db"))
+    audit_db_path_in(None)
+}
+
+/// [`audit_db_path`] under a base the caller states. See
+/// [`memory_base_dir_in`].
+pub fn audit_db_path_in(base: Option<&Path>) -> Option<PathBuf> {
+    Some(memory_base_dir_in(base)?.join("memory").join("audit.db"))
 }
 
 /// Returns the CDC changelog path for a tier:
 /// `<base>/memory/changelog/<tier>.changelog.jsonl`.
 pub fn changelog_path(tier: &str) -> Option<PathBuf> {
+    changelog_path_in(None, tier)
+}
+
+/// [`changelog_path`] under a base the caller states. See
+/// [`memory_base_dir_in`].
+pub fn changelog_path_in(base: Option<&Path>, tier: &str) -> Option<PathBuf> {
     Some(
-        memory_base_dir()?
+        memory_base_dir_in(base)?
             .join("memory")
             .join("changelog")
             .join(format!("{tier}.changelog.jsonl")),

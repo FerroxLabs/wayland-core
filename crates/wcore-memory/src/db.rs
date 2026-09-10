@@ -154,6 +154,13 @@ pub struct Db {
     pub session: RwLock<Option<Arc<TierConn>>>,
     pub project: Option<Arc<TierConn>>,
     pub global: Arc<TierConn>,
+    /// The memory base this pool's paths were resolved under, when the opener
+    /// STATED one. Carried because the session tier is re-resolved later, by
+    /// `rebind_session`, long after the opener has gone: without it that
+    /// rebind would silently fall back to the ambient base and undo the
+    /// isolation the opener asked for. `None` — production — means the
+    /// ambient base, exactly as before.
+    memory_base: Option<PathBuf>,
 }
 
 impl Db {
@@ -164,6 +171,7 @@ impl Db {
             session: RwLock::new(None),
             project: None,
             global: Arc::new(TierConn::open(global_path)?),
+            memory_base: None,
         })
     }
 
@@ -186,7 +194,22 @@ impl Db {
             session: RwLock::new(session),
             project,
             global,
+            memory_base: None,
         })
+    }
+
+    /// Record the memory base these paths were resolved under, so a later
+    /// [`Db::rebind_session`] resolves the new session path under the SAME
+    /// base rather than the ambient one. `None` keeps the ambient behaviour.
+    #[must_use]
+    pub fn with_memory_base(mut self, base: Option<PathBuf>) -> Self {
+        self.memory_base = base;
+        self
+    }
+
+    /// The stated memory base, when the opener stated one.
+    pub fn memory_base(&self) -> Option<&std::path::Path> {
+        self.memory_base.as_deref()
     }
 
     /// In-memory pool (tests).
@@ -195,6 +218,7 @@ impl Db {
             session: RwLock::new(Some(Arc::new(TierConn::open_memory()?))),
             project: Some(Arc::new(TierConn::open_memory()?)),
             global: Arc::new(TierConn::open_memory()?),
+            memory_base: None,
         })
     }
 

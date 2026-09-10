@@ -657,9 +657,12 @@ impl MemoryApi for PartitionDispatcher {
         // scheduler are untouched (they ride the dispatcher Arcs, not the DB
         // handle). Also update the working partition's CDC tag so spillover
         // events carry the real id.
-        let path = crate::paths::session_db_path(session_id).ok_or_else(|| {
-            MemoryError::PathValidation("no session memory DB path resolvable".into())
-        })?;
+        // Under the base the pool was OPENED with, never the ambient one: a
+        // dispatcher opened into a stated base must not silently relocate its
+        // session tier into the shared profile home on the first rebind.
+        let path = crate::paths::session_db_path_in(self.db.memory_base(), session_id).ok_or_else(
+            || MemoryError::PathValidation("no session memory DB path resolvable".into()),
+        )?;
         self.db.rebind_session(path)?;
         self.working.set_session_id(Some(session_id.to_string()));
         Ok(())

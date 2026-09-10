@@ -441,6 +441,10 @@ pub struct AgentBootstrap {
     /// or recurse. Default `false`.
     without_channels: bool,
     outbound_channels_only: bool,
+    /// Root this session's memory stores are opened under. `None` — every
+    /// production caller — resolves the ambient profile home exactly as
+    /// before. `Some` states it outright; see [`Self::with_memory_root`].
+    memory_root: Option<std::path::PathBuf>,
     session_cancel_token: Option<CancellationToken>,
     /// Phase 1B-2 — primary session entry points opt in to spawn the
     /// `InboundSubscriber` that turns inbound channel messages into agent
@@ -635,6 +639,7 @@ impl AgentBootstrap {
             span_sink: None,
             without_channels: false,
             outbound_channels_only: false,
+            memory_root: None,
             session_cancel_token: None,
             enable_inbound_dispatch: false,
             channel_tool_posture: None,
@@ -763,6 +768,37 @@ impl AgentBootstrap {
     /// inbound poller, webhook listener or subscriber.
     pub fn outbound_channels_only(mut self, enabled: bool) -> Self {
         self.outbound_channels_only = enabled;
+        self
+    }
+
+    /// Open this session's memory stores under `root` instead of under the
+    /// ambient profile home.
+    ///
+    /// Production never calls this: with `None` the stores resolve through
+    /// `wcore_memory::paths::memory_base_dir` exactly as they always have, so
+    /// one user's sessions keep sharing one home, which is the point of a
+    /// home.
+    ///
+    /// It exists because that sharing is a DEFECT for a caller that is not a
+    /// user's session — a test process, or any harness that runs several
+    /// engines side by side. Bootstrap opens the session tier under the
+    /// placeholder id `boot`, so every such process opens the SAME
+    /// `<home>/memory/sessions/boot.db`, and `apply_migrations` is not
+    /// serialized across processes: two of them opening a store that still
+    /// needs a migration both run the same `ALTER TABLE`, the loser gets
+    /// `duplicate column name`, `Memory::open` returns `Err`, and this
+    /// bootstrap falls back to `NullMemory` — silently, since the fallback is
+    /// a `tracing::warn!` and nothing installs a subscriber. Measured on
+    /// hetzner-dsm: `Migration { version: 5, ... "duplicate column name:
+    /// last_latency_ms" }`.
+    ///
+    /// The alternative — a test writing `WCORE_MEMORY_DIR` or `WAYLAND_HOME`
+    /// — writes a PROCESS GLOBAL that every concurrent sibling observes, which
+    /// is the class FerroxLabs/wayland#1233 closed by stating the value at the
+    /// call site instead.
+    #[must_use]
+    pub fn with_memory_root(mut self, root: impl Into<std::path::PathBuf>) -> Self {
+        self.memory_root = Some(root.into());
         self
     }
 
@@ -2117,7 +2153,8 @@ impl AgentBootstrap {
             // order or the staleness `CREATE TABLE` fails. v0.6.2 wires
             // neither; this note exists to bank the ordering constraint
             // before the wiring lands.
-            match wcore_memory::Memory::open_with_config(
+            match wcore_memory::Memory::open_with_config_in(
+                self.memory_root.as_deref(),
                 cwd_path,
                 "boot",
                 &self.config.memory.embedder,
