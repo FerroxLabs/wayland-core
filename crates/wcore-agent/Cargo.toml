@@ -237,6 +237,14 @@ piper_tts      = []
 voice          = ["dep:cpal", "dep:hound"]
 
 [dev-dependencies]
+# wayland#1240 c2: `tokio`'s `full` feature does NOT include `test-util`, and
+# `#[tokio::test(start_paused = true)]` needs it. `agents::observer`'s bus
+# tests decide on event ordering, not on wall time, so they run on a VIRTUAL
+# clock that advances only to the next armed timer -- which is what stops the
+# shared-process lib leg reddening them on a scheduling artefact. Enabling the
+# feature changes nothing for tests that never pause: auto-advance is opt-in
+# per test, and `wcore-cli` / `wcore-evolve` already carry the same line.
+tokio = { workspace = true, features = ["test-util"] }
 # Self-reference with test-utils feature so wcore-agent's own
 # integration tests can use ScriptedProvider/TestSink/build_for_test
 # (W7 Pre-flight 0.0d).

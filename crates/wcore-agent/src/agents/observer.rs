@@ -166,17 +166,26 @@ mod tests {
     /// failing in another, which is what makes it a flake rather than a break.
     ///
     /// Bounded so a genuinely broken subscribe fails loudly instead of hanging
-    /// the suite.
+    /// the suite. The bound is a COUNT OF POLLS, not elapsed wall-clock time
+    /// (wayland#1240 c2): a `std::time::Instant` deadline here is a second
+    /// real-time race of exactly the kind this module is removing, and it is
+    /// unreachable under `start_paused`, where it degrades into an unbounded
+    /// spin instead of a loud failure. Under a real clock the poll interval
+    /// makes 10,000 polls the same ~10 s ceiling the old deadline had; under a
+    /// paused clock each poll advances virtual time only, so the ceiling costs
+    /// no wall time at all.
     async fn await_subscribers(bus: &AgentBus, n: usize) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while bus.sender().receiver_count() < n {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "no subscriber installed within 10s (wanted {n}, saw {})",
-                bus.sender().receiver_count(),
-            );
+        const MAX_POLLS: usize = 10_000;
+        for _ in 0..MAX_POLLS {
+            if bus.sender().receiver_count() >= n {
+                return;
+            }
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
+        panic!(
+            "no subscriber installed within {MAX_POLLS} polls (wanted {n}, saw {})",
+            bus.sender().receiver_count(),
+        );
     }
     use super::*;
     use crate::agents::bus::{AgentBus, AgentBusError, now_ms};
@@ -308,7 +317,29 @@ mod tests {
         assert!(matches!(result, Err(AgentBusError::Timeout)));
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    /// wayland#1240: this test used to decide on REAL ELAPSED TIME. The waiter's
+    /// 500 ms deadline starts inside the spawned task, and the publisher only
+    /// runs after `await_subscribers` observes the subscription — a loop whose
+    /// 1 ms `sleep` is a *request*, not a guarantee. On the shared-process lib
+    /// leg (`cargo test`, ~2,700 tests in ONE process on a loaded runner) that
+    /// 1 ms sleep can return hundreds of milliseconds late, the 500 ms deadline
+    /// expires before `Completed` is ever published, and the assertion below
+    /// reds on a scheduling artefact rather than on the behaviour it names.
+    ///
+    /// The fix is the one wayland#1182 applied to the workspace-walk control:
+    /// stop racing the clock. `start_paused` gives the test a VIRTUAL clock
+    /// that advances only to the next armed timer when every task is idle, so
+    /// the sequence is forced: the waiter subscribes and parks, virtual time
+    /// steps to the 1 ms poll (never past it to the 500 ms deadline), the
+    /// publisher runs, and the waiter is woken by the message. Load cannot
+    /// reorder it because no step is a function of wall time.
+    ///
+    /// THE DEADLINE IS NOT MADE UNREACHABLE, which would pass for the wrong
+    /// reason (wayland#1240 c3). `await_completion_times_out_when_completed_is_
+    /// suppressed` below is the same construction with the matching event
+    /// withheld, and it reaches the very same 500 ms deadline on the very same
+    /// virtual clock and returns `Timeout`.
+    #[tokio::test(start_paused = true)]
     async fn await_completion_returns_on_match() {
         let bus = Arc::new(AgentBus::new(16));
         let bus_clone = Arc::clone(&bus);
@@ -321,6 +352,13 @@ mod tests {
         // Wait for the subscription to EXIST rather than sleeping and hoping;
         // see `await_subscribers`. This is the line that flaked.
         await_subscribers(&bus, 1).await;
+        assert_eq!(
+            bus.sender().receiver_count(),
+            1,
+            "the waiter's receiver must be installed before anything is \
+             published — broadcast DROPS messages sent with no receiver, and \
+             this count, not an elapsed duration, is what gates the publish",
+        );
 
         // Publish an unrelated event first, then the matching one.
         bus.publish(AgentMessage::Spawned {
@@ -335,6 +373,46 @@ mod tests {
         });
 
         let got = waiter.await.expect("task did not panic");
-        assert!(matches!(got, Ok(AgentMessage::Completed { .. })));
+        assert!(
+            matches!(got, Ok(AgentMessage::Completed { .. })),
+            "waiter must resolve on the matching Completed event, got {got:?}",
+        );
+    }
+
+    /// RED CONTROL for `await_completion_returns_on_match` (wayland#1240 c3).
+    ///
+    /// Identical construction — same virtual clock, same subscription gate,
+    /// same 500 ms deadline, same unrelated `Spawned` event — with the matching
+    /// `Completed` WITHHELD. If the paused clock had made the deadline
+    /// unreachable, this would hang or resolve `Ok`; instead virtual time runs
+    /// out at the deadline and the waiter returns `Timeout`. That is what makes
+    /// the green arm above evidence about the observer rather than evidence
+    /// that the timer was disarmed.
+    #[tokio::test(start_paused = true)]
+    async fn await_completion_times_out_when_completed_is_suppressed() {
+        let bus = Arc::new(AgentBus::new(16));
+        let bus_clone = Arc::clone(&bus);
+        let waiter = tokio::spawn(async move {
+            bus_clone
+                .await_completion("child", Duration::from_millis(500))
+                .await
+        });
+
+        await_subscribers(&bus, 1).await;
+
+        // The unrelated event MUST NOT resolve the waiter.
+        bus.publish(AgentMessage::Spawned {
+            agent: "child".into(),
+            parent_call_id: None,
+            timestamp_ms: 0,
+        });
+
+        let got = waiter.await.expect("task did not panic");
+        assert!(
+            matches!(got, Err(AgentBusError::Timeout)),
+            "with Completed suppressed the waiter must reach its deadline and \
+             report Timeout — a deadline that cannot be reached would make the \
+             matching-event test pass for the wrong reason, got {got:?}",
+        );
     }
 }

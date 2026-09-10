@@ -2,6 +2,12 @@
 
 use super::*;
 
+/// Floor under the `git config` safety check's wall-clock budget; see
+/// `config_check_limits`. Wide enough that process spawn on a runner at
+/// loadavg 150+ cannot consume it, small enough to still bound a genuinely
+/// wedged `git config`. Never lowers a caller's budget -- only raises it.
+const CONFIG_CHECK_MIN_TIMEOUT: Duration = Duration::from_secs(30);
+
 impl WorktreeManager {
     pub(super) async fn transfer_closure_bytes(&self, pinned_head: &str) -> Result<u64> {
         let output = capture_bounded_process(
@@ -521,6 +527,31 @@ impl WorktreeManager {
         self.ambient_git_env.push((key.to_string(), value.into()));
     }
 
+    /// The budget for the `git config` safety check, which is DELIBERATELY NOT
+    /// the caller's operation budget (wayland#1247 c2).
+    ///
+    /// `self.capture_limits.timeout` is sized for the operation the caller is
+    /// about to run -- a `git worktree add` that may legitimately block. This
+    /// check is not that operation: it is a fixed, local, non-blocking
+    /// `git config --get-regexp` read that runs FIRST, so when the caller's
+    /// budget is small it is the first stage to spend it, and process spawn
+    /// alone can consume the whole thing on a loaded host. That is not a
+    /// hypothetical: at a 200 ms budget `worktree_add_timeout_kills_tree_and_
+    /// reports_preserved_residual` timed out HERE instead of at
+    /// `git worktree add`, so the residual path the caller's next assertion
+    /// reads did not exist yet -- a red naming the wrong cause, chosen by load.
+    ///
+    /// Which stage times out must be a property of the stages, not of the
+    /// host. `max` rather than a plain constant so this can only ever RAISE the
+    /// floor: production passes `GIT_CAPTURE_LIMITS` (120 s), which is already
+    /// above it, so production behaviour is unchanged in both directions.
+    fn config_check_limits(&self) -> CaptureLimits {
+        CaptureLimits {
+            timeout: self.capture_limits.timeout.max(CONFIG_CHECK_MIN_TIMEOUT),
+            ..self.capture_limits
+        }
+    }
+
     pub(super) async fn reject_executable_checkout_config(&self) -> Result<()> {
         self.validate_repo_authority()?;
         // System/global configuration is disabled for every Swarm Git command.
@@ -537,7 +568,7 @@ impl WorktreeManager {
                 "--get-regexp",
                 UNSAFE_CHECKOUT_CONFIG,
             ]);
-            let output = capture_bounded_process(cmd, self.capture_limits, None)
+            let output = capture_bounded_process(cmd, self.config_check_limits(), None)
                 .await
                 .map_err(|error| capture_error("git config safety check", error))?;
             if output.status.success() {

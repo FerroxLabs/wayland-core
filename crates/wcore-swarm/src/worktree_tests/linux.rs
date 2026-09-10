@@ -22,7 +22,14 @@ async fn fixture_git_output(
         CaptureLimits {
             stdout_bytes: 64 * 1024,
             stderr_bytes: 64 * 1024,
-            timeout: Duration::from_secs(5),
+            // 25 s, not 5 s (wayland#1247 c4). This bounds FIXTURE SETUP --
+            // `git init`, `git commit` -- whose duration nothing here asserts,
+            // so a short value buys no signal and only decides whether a
+            // loaded runner reds an unrelated test. 25 s still fits inside
+            // nextest's 60 s hard kill, so a genuinely wedged fixture git
+            // fails with a message instead of a bare harness TIMEOUT; see
+            // `read_child_pid` below, where that trade-off was measured.
+            timeout: Duration::from_secs(25),
         },
         None,
     )
@@ -635,7 +642,15 @@ async fn failed_post_clone_setup_removes_only_the_owned_partial_transaction() {
 async fn wait_until_process_gone(pid: u32) {
     use wcore_types::process_liveness::{process_is_alive, process_liveness};
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    // 25 s, not 3 s (wayland#1247 c4). This is a LIVENESS BACKSTOP, not a
+    // performance assertion: nothing here claims cleanup is fast, only that it
+    // happens. A 3 s bound turned a slow-but-correct reap on a loaded runner
+    // into `process <pid> survived cleanup`, which reads as a containment
+    // failure and is not one. 25 s is the same figure `read_child_pid` below
+    // arrived at, and for the same measured reason -- it fits inside nextest's
+    // 60 s hard kill, so the failure carries this message rather than a bare
+    // harness TIMEOUT that cannot tell a hang from a slow host.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
     while process_is_alive(pid) && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -994,34 +1009,52 @@ async fn worktree_add_timeout_kills_tree_and_reports_preserved_residual() {
         // build host at PPID 1, alive 7d11h, each pinning ~99% of a core.
         // `sleep 2147483647` is portable to plain `sh`; `sleep infinity` is a
         // GNU extension and is deliberately not used.
-        "case \" $* \" in *\" config \"*) exit 1;; esac\nmkdir -p .swarm-worktrees/worker-1\n(sleep 2147483647) &\nchild=$!\necho \"$child\" > \"$WAYLAND_TEST_PID_FILE\"\nwait \"$child\"",
+        "case \" $* \" in *\" config \"*) : > \"$WAYLAND_TEST_CONFIG_ACK\"; exit 1;; esac\nmkdir -p .swarm-worktrees/worker-1\n(sleep 2147483647) &\nchild=$!\necho \"$child\" > \"$WAYLAND_TEST_PID_FILE\"\nwait \"$child\"",
         CaptureLimits {
             stdout_bytes: 4096,
             stderr_bytes: 4096,
-            // 2s, not 200ms, and the reason is not "flaky test needs longer".
-            // This budget is applied to EVERY git invocation, including the
-            // `git config` safety check that the script above answers with an
-            // immediate `exit 1`. At 200ms a loaded runner could spend the whole
-            // budget just spawning that fast stage, so the timeout fired at the
-            // CONFIG stage -- before `mkdir -p .swarm-worktrees/worker-1` had
-            // run, so no residual existed and the residual assertion failed
-            // while the "timed out" assertion still passed (wayland#1247).
-            // Load was choosing which stage the test measured.
+            // WHAT THIS BUDGET NOW BOUNDS, and what it no longer decides.
             //
-            // The stage that is SUPPOSED to time out blocks forever, so it
-            // exceeds any budget; the stage that must NOT time out exits
-            // immediately, so it only needs a margin wide enough that process
-            // spawn cannot eat it. 2s matches the sibling test above.
+            // It used to decide WHICH STAGE timed out. It applied to every git
+            // invocation including the `git config` safety check that runs
+            // first, so at 200 ms a loaded runner spent the whole budget
+            // spawning that fast stage: the timeout fired at CONFIG, before
+            // `mkdir -p .swarm-worktrees/worker-1` had run, and the residual
+            // assertion failed while the "timed out" assertion still passed
+            // (wayland#1247). Load was choosing what the test measured.
+            //
+            // That is FIXED AT ITS CAUSE, not by this number: the safety check
+            // now carries its own floor (`config_check_limits`, 30 s) and can
+            // no longer be starved by a small operation budget, whatever this
+            // value is. `config_safety_check_outlives_a_short_worktree_budget`
+            // below is the control -- it makes the config stage take THREE
+            // TIMES this budget and still reaches `git worktree add`.
+            //
+            // What is left for this value to bound is the stage under test:
+            // spawn, `mkdir`, fork the grandchild, publish its pid, then block
+            // forever. It must clear that setup and nothing more.
             timeout: Duration::from_secs(2),
         },
     )
     .unwrap();
     manager.set_ambient_git_env("WAYLAND_TEST_PID_FILE", pid_file.as_os_str());
+    let config_ack = fixture.path().join("config.ack");
+    manager.set_ambient_git_env("WAYLAND_TEST_CONFIG_ACK", config_ack.as_os_str());
     let error = manager
         .create_worker_tree("worker-1", "swarm/worker-1", "HEAD")
         .await
         .unwrap_err()
         .to_string();
+    // The config stage RAN TO COMPLETION -- an event the fixture records, not
+    // an elapsed duration inferred after the fact. This is the assertion that
+    // makes the stage pin below mean something: without it, "the error is not
+    // a config timeout" is equally true of a run where the config stage never
+    // started.
+    assert!(
+        config_ack.exists(),
+        "the `git config` safety check did not run to completion, so this run \
+         never reached the `git worktree add` stage it exists to measure"
+    );
     // PIN THE STAGE. Asserting only "timed out" cannot tell the intended
     // `git worktree add` timeout from a `git config safety check` timeout, and
     // those are different outcomes: the second means the test never reached the
@@ -1038,6 +1071,66 @@ async fn worktree_add_timeout_kills_tree_and_reports_preserved_residual() {
         "{error}"
     );
     assert!(manager.swarm_root().join("worker-1").is_dir());
+    let pid = read_child_pid(&pid_file).await;
+    wait_until_process_gone(pid).await;
+}
+
+/// CONTROL for wayland#1247 c2: which stage times out is a property of the
+/// stages, not of the host.
+///
+/// The sibling above reds when the `git config` safety check spends the
+/// operation budget before `git worktree add` is ever reached. Under load that
+/// took a runner slow enough to burn 200 ms on a process spawn, which is
+/// exactly the sort of condition a test cannot summon on demand -- so this one
+/// summons it deterministically instead: the config branch sleeps THREE
+/// SECONDS per scope against a TWO SECOND operation budget. On the pre-fix
+/// code, where the check shared `capture_limits`, that is an unconditional
+/// `git config safety check ... timed out`. With the floor in
+/// `config_check_limits` it is not, and control reaches the stage under test.
+///
+/// This is deliberately NOT closed by widening the budget: the budget below is
+/// the same 2 s as the sibling, and it is the CONFIG stage that got its own
+/// floor. Raising this number would make the test pass for the wrong reason.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn config_safety_check_outlives_a_short_worktree_budget() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let pid_file = fixture.path().join("slow-config.pid");
+    let config_ack = fixture.path().join("config.ack");
+    let mut manager = WorktreeManager::new_with_git_script_and_limits(
+        fixture.path(),
+        // `sleep 3` per config scope, against the 2 s budget below. The two
+        // scopes (`--local`, `--worktree`) make it 6 s of config stage in
+        // total, three times the budget the caller set.
+        "case \" $* \" in *\" config \"*) sleep 3; : > \"$WAYLAND_TEST_CONFIG_ACK\"; exit 1;; esac\nmkdir -p .swarm-worktrees/worker-1\n(sleep 2147483647) &\nchild=$!\necho \"$child\" > \"$WAYLAND_TEST_PID_FILE\"\nwait \"$child\"",
+        CaptureLimits {
+            stdout_bytes: 4096,
+            stderr_bytes: 4096,
+            timeout: Duration::from_secs(2),
+        },
+    )
+    .unwrap();
+    manager.set_ambient_git_env("WAYLAND_TEST_PID_FILE", pid_file.as_os_str());
+    manager.set_ambient_git_env("WAYLAND_TEST_CONFIG_ACK", config_ack.as_os_str());
+    let error = manager
+        .create_worker_tree("worker-1", "swarm/worker-1", "HEAD")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        config_ack.exists(),
+        "the config stage was cut short by the operation budget: {error}"
+    );
+    assert!(
+        !error.contains("git config safety check"),
+        "a config stage three times longer than the operation budget still \
+         must not be the stage that times out: {error}"
+    );
+    assert!(error.contains("timed out after"), "{error}");
+    assert!(
+        error.contains("residual worktree path preserved"),
+        "{error}"
+    );
     let pid = read_child_pid(&pid_file).await;
     wait_until_process_gone(pid).await;
 }
@@ -1079,7 +1172,11 @@ async fn cancelled_cleanup_kills_git_and_reports_residual() {
         }
     };
     cancel.cancel();
-    let error = tokio::time::timeout(Duration::from_secs(1), &mut cleanup)
+    // 25 s, not 1 s (wayland#1247 c4). The assertion is that cancellation
+    // UNBLOCKS cleanup, not that it does so within a second; the bound exists
+    // only so a cleanup that never returns fails loudly instead of hanging the
+    // suite. Same 25 s liveness figure as the two backstops above.
+    let error = tokio::time::timeout(Duration::from_secs(25), &mut cleanup)
         .await
         .expect("cleanup remained blocked")
         .unwrap_err()
@@ -1090,4 +1187,119 @@ async fn cancelled_cleanup_kills_git_and_reports_residual() {
     );
     assert!(error.contains(&residual.display().to_string()), "{error}");
     wait_until_process_gone(pid).await;
+}
+
+/// wayland#1247 c4: the FAMILY is closed, not the two instances that were
+/// noticed.
+///
+/// Two hard-coded short deadlines in this file were found one at a time --
+/// `read_child_pid`'s 3 s poll from CI, and `worktree_add_timeout_…`'s budget
+/// on the first reproduction attempt. Finding them one per cycle is the defect;
+/// a grep run once by a human closes today's instances and nothing else. This
+/// test is that grep, run by the suite, so a THIRD one cannot be added quietly.
+///
+/// The rule, and why each half of it is where the line falls:
+///
+/// * A `Duration::from_millis(..)` here is a POLL INTERVAL. It bounds how
+///   often a loop looks, never how long it is allowed to take, so a small
+///   value costs nothing. Capped anyway, because a large one would be a
+///   deadline wearing a poll interval's spelling.
+/// * A `Duration::from_secs(..)` is a DEADLINE. Under `LIVENESS_FLOOR_SECS` it
+///   is a bet on how fast the host is, and this file has lost that bet twice.
+///   The one legitimate exception is a `CaptureLimits { timeout: .. }`, which
+///   is not a bet about the host at all: it is the budget the test is FEEDING
+///   THE PRODUCT to make it time out, i.e. the behaviour under test. Those are
+///   spelled `timeout:` and are exempt for that reason alone.
+#[test]
+fn no_hard_coded_short_deadline_remains_in_this_file() {
+    /// Below this, a `from_secs` deadline is a guess about host speed. 25 s is
+    /// the figure `read_child_pid` measured: wide enough to survive a loaded
+    /// runner, inside nextest's 60 s hard kill so the failure still carries a
+    /// diagnostic.
+    const LIVENESS_FLOOR_SECS: u64 = 25;
+    /// Above this, a `from_millis` value has stopped being a poll interval.
+    const POLL_INTERVAL_CEILING_MS: u64 = 50;
+
+    let source = include_str!("linux.rs");
+    let mut secs_deadlines = 0usize;
+    let mut secs_budgets = 0usize;
+    let mut poll_intervals = 0usize;
+    let mut offenders: Vec<String> = Vec::new();
+
+    for (index, raw) in source.lines().enumerate() {
+        // Prose is not code. A doc comment that QUOTES a deadline must not be
+        // read as one -- that mistake has graded a comment as a live call site
+        // before now.
+        if raw.trim_start().starts_with("//") {
+            continue;
+        }
+        for (unit, ceiling_is_floor) in [("from_secs", true), ("from_millis", false)] {
+            let needle = format!("Duration::{unit}(");
+            let mut cursor = 0usize;
+            while let Some(found) = raw[cursor..].find(&needle) {
+                let start = cursor + found;
+                let arg_start = start + needle.len();
+                let arg_end = match raw[arg_start..].find(')') {
+                    Some(offset) => arg_start + offset,
+                    None => break,
+                };
+                let arg = raw[arg_start..arg_end].trim().replace('_', "");
+                cursor = arg_end;
+                let Ok(value) = arg.parse::<u64>() else {
+                    continue;
+                };
+                let line = index + 1;
+                if ceiling_is_floor {
+                    if raw[..start].trim_end().ends_with("timeout:") {
+                        secs_budgets += 1;
+                        continue;
+                    }
+                    secs_deadlines += 1;
+                    if value < LIVENESS_FLOOR_SECS {
+                        offenders.push(format!(
+                            "linux.rs:{line}: Duration::from_secs({value}) is a deadline \
+                             under the {LIVENESS_FLOOR_SECS}s liveness floor -- either raise \
+                             it or make it a `CaptureLimits {{ timeout: .. }}` budget that \
+                             the test is deliberately feeding the product"
+                        ));
+                    }
+                } else {
+                    poll_intervals += 1;
+                    if value > POLL_INTERVAL_CEILING_MS {
+                        offenders.push(format!(
+                            "linux.rs:{line}: Duration::from_millis({value}) is too long to \
+                             be a poll interval -- if it is a deadline, spell it in seconds \
+                             and clear the {LIVENESS_FLOOR_SECS}s floor"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    // POSITIVE CONTROL. A scanner that matches nothing passes this test while
+    // proving nothing, which is the failure mode a self-grep is most prone to.
+    // Each class must be non-empty, so a change that breaks the scan (a moved
+    // file, a renamed constructor, a `use Duration::*` import shortening the
+    // call) reds here instead of silently certifying an unscanned file.
+    assert!(
+        secs_deadlines >= 3,
+        "scanner found only {secs_deadlines} second-valued deadlines; it has \
+         stopped matching this file"
+    );
+    assert!(
+        secs_budgets >= 2,
+        "scanner found only {secs_budgets} `timeout:` budgets; the exemption \
+         branch is unexercised and the rule above is untested"
+    );
+    assert!(
+        poll_intervals >= 2,
+        "scanner found only {poll_intervals} poll intervals; it has stopped \
+         matching this file"
+    );
+    assert!(
+        offenders.is_empty(),
+        "hard-coded short deadlines remain in this file:\n{}",
+        offenders.join("\n")
+    );
 }
