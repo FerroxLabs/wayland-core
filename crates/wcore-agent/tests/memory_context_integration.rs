@@ -150,8 +150,10 @@ fn tc_7_3_section_ordering() {
     let memory_pos = result
         .find("auto memory")
         .expect("memory section should be present");
+    // #1283 c1: the skills section names no skill, so it is located by its own
+    // fixed text.
     let skills_pos = result
-        .find("test-skill")
+        .find(wcore_agent::context::SKILL_DISCOVERY_SECTION)
         .expect("skills section should be present");
 
     assert!(

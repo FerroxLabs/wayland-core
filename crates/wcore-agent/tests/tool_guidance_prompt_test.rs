@@ -222,9 +222,11 @@ fn tc_4_3_06_order_before_skills() {
     let guidance_pos = result
         .find("# Using your tools")
         .expect("tool guidance should exist");
+    // #1283 c1: the skills section names no skill, so it is located by its own
+    // fixed text.
     let skills_pos = result
-        .find("order-test-skill")
-        .expect("skill should be listed");
+        .find(wcore_agent::context::SKILL_DISCOVERY_SECTION)
+        .expect("the skills section should be present");
 
     assert!(
         guidance_pos < skills_pos,
@@ -326,8 +328,12 @@ fn tc_4_3_07_all_sections_coexist() {
         "memory section should exist"
     );
     assert!(
-        result.contains("coexist-skill"),
-        "skills listing should exist"
+        result.contains(wcore_agent::context::SKILL_DISCOVERY_SECTION),
+        "skills section should exist"
+    );
+    assert!(
+        !result.contains("coexist-skill"),
+        "#1283 c1: the skills section must not name installed skills"
     );
 
     // Verify ordering: intro < guidance < custom < agents.md < memory < skills
@@ -336,7 +342,9 @@ fn tc_4_3_07_all_sections_coexist() {
     let custom_pos = result.find("CUSTOM_COEXIST").unwrap();
     let agents_pos = result.find("PROJECT_RULES_COEXIST").unwrap();
     let memory_pos = result.find("auto memory").unwrap();
-    let skills_pos = result.find("coexist-skill").unwrap();
+    let skills_pos = result
+        .find(wcore_agent::context::SKILL_DISCOVERY_SECTION)
+        .unwrap();
 
     assert!(guidance_pos > intro_pos, "guidance after intro");
     assert!(custom_pos > guidance_pos, "custom after guidance");

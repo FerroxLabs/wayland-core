@@ -167,8 +167,26 @@ fn plant_skill(root: &std::path::Path) {
 }
 
 /// Boot one session through the production path. Returns everything the user
-/// was told plus the system prompt the model was given.
-async fn boot(model: &str, context_window: Option<usize>) -> (Vec<String>, String) {
+/// was told, the system prompt the model was given, and the skills listing the
+/// session's own resolved window buys.
+///
+/// WHY THE LISTING IS RENDERED HERE RATHER THAN READ OUT OF THE PROMPT.
+/// FerroxLabs/wayland#1283 c1 took the per-skill listing out of the boot
+/// prompt: segment 0 now carries fixed Skill discovery instructions and nothing
+/// about which skills are installed, so a budget assertion read off
+/// `engine.system_prompt()` would be an assertion about a string that no longer
+/// varies with the window at all — it would pass on any budget, including the
+/// 8,000-character fabrication #1199 exists to keep out.
+///
+/// What #1199 c2/c3 actually claim is that the session's RESOLVED window
+/// reaches the skills budget instead of a hardcoded `None`. That chain is
+/// intact and is what this returns: `engine.known_context_window()` is the
+/// value the session resolved, `late_mcp.catalog()` is the real catalogue boot
+/// discovered, and `format_skills_section` is the renderer the two surviving
+/// production listing call sites use (`late_mcp.rs`, and the engine's transient
+/// inventory-change block). The hop this no longer covers is boot-prompt
+/// assembly, because there is no listing there to cover.
+async fn boot(model: &str, context_window: Option<usize>) -> (Vec<String>, String, String) {
     let tmp = tempdir().expect("tempdir");
     let root = std::fs::canonicalize(tmp.path()).expect("canonicalize workspace");
     plant_skill(&root);
@@ -189,9 +207,13 @@ async fn boot(model: &str, context_window: Option<usize>) -> (Vec<String>, Strin
     .await
     .expect("bootstrap");
     let prompt = result.engine.system_prompt().to_string();
+    let listing = wcore_agent::context::format_skills_section(
+        &result.late_mcp.catalog().visible(),
+        result.engine.known_context_window(),
+    );
     drop(result);
     let infos = notices.infos.lock().unwrap().clone();
-    (infos, prompt)
+    (infos, prompt, listing)
 }
 
 // -- Bug 1: the fabricated window -------------------------------------------
@@ -201,7 +223,7 @@ async fn boot(model: &str, context_window: Option<usize>) -> (Vec<String>, Strin
 /// session silently measured a 32k model against 200,000.
 #[tokio::test]
 async fn an_unknown_context_window_is_announced_where_the_user_is_looking() {
-    let (infos, _prompt) = boot(UNLISTED_MODEL, None).await;
+    let (infos, _prompt, _listing) = boot(UNLISTED_MODEL, None).await;
 
     let hits: Vec<&String> = infos
         .iter()
@@ -228,7 +250,7 @@ async fn an_unknown_context_window_is_announced_where_the_user_is_looking() {
 /// session whose window IS known must not be told it is unknown.
 #[tokio::test]
 async fn a_known_model_is_not_told_its_window_is_unknown() {
-    let (infos, _prompt) = boot("gpt-4o", None).await;
+    let (infos, _prompt, _listing) = boot("gpt-4o", None).await;
     let hits: Vec<&String> = infos
         .iter()
         .filter(|m| m.to_ascii_lowercase().contains(NOTICE_MARK))
@@ -244,7 +266,7 @@ async fn a_known_model_is_not_told_its_window_is_unknown() {
 /// they must not be nagged about it.
 #[tokio::test]
 async fn an_explicit_operator_window_silences_the_notice() {
-    let (infos, _prompt) = boot(UNLISTED_MODEL, Some(32_768)).await;
+    let (infos, _prompt, _listing) = boot(UNLISTED_MODEL, Some(32_768)).await;
     let hits: Vec<&String> = infos
         .iter()
         .filter(|m| m.to_ascii_lowercase().contains(NOTICE_MARK))
@@ -277,7 +299,7 @@ const TOO_SMALL_MARK: &str = "too small for automatic compaction";
 /// the same band.
 #[tokio::test]
 async fn a_configured_window_too_small_to_compact_in_is_announced() {
-    let (infos, _prompt) = boot(UNLISTED_MODEL, Some(6_000)).await;
+    let (infos, _prompt, _listing) = boot(UNLISTED_MODEL, Some(6_000)).await;
     let hits: Vec<&String> = infos
         .iter()
         .filter(|m| m.contains(TOO_SMALL_MARK))
@@ -309,7 +331,7 @@ async fn a_configured_window_too_small_to_compact_in_is_announced() {
 /// the notice would also pass by firing on every session.
 #[tokio::test]
 async fn a_workable_configured_window_is_not_announced_as_too_small() {
-    let (infos, _prompt) = boot(UNLISTED_MODEL, Some(32_768)).await;
+    let (infos, _prompt, _listing) = boot(UNLISTED_MODEL, Some(32_768)).await;
     let hits: Vec<&String> = infos
         .iter()
         .filter(|m| m.contains(TOO_SMALL_MARK))
@@ -324,7 +346,7 @@ async fn a_workable_configured_window_is_not_announced_as_too_small() {
 // -- Bug 2: the dead skills prompt budget -----------------------------------
 
 /// THE #1150 Bug-2 guard, driven through the production
-/// `AgentBootstrap::build()` prompt.
+/// `AgentBootstrap::build()` session.
 ///
 /// `get_char_budget` is 1% of the window in characters, so a 2,000-token
 /// window buys 80 characters of skill listing and a 1,000,000-token window
@@ -338,17 +360,33 @@ async fn a_workable_configured_window_is_not_announced_as_too_small() {
 /// have installed — the two arms share that ambient catalog exactly.
 #[tokio::test]
 async fn the_bootstrap_prompt_uses_the_real_window_derived_skill_budget() {
-    let (_infos, roomy) = boot(UNLISTED_MODEL, Some(1_000_000)).await;
-    let (_infos, tight) = boot(UNLISTED_MODEL, Some(2_000)).await;
+    let (_infos, roomy_prompt, roomy) = boot(UNLISTED_MODEL, Some(1_000_000)).await;
+    let (_infos, tight_prompt, tight) = boot(UNLISTED_MODEL, Some(2_000)).await;
+
+    // FerroxLabs/wayland#1283 c1, asserted here because this is the file that
+    // used to read the budget off the boot prompt: the boot prompt itself is
+    // now window-INDEPENDENT. Two sessions differing only in the window produce
+    // the same segment 0, and neither names a skill. Without this the port
+    // below would be a silent downgrade rather than a stated one.
+    assert!(
+        !roomy_prompt.contains("issue-1150") && !tight_prompt.contains("issue-1150"),
+        "the boot prompt still names installed skills"
+    );
+    assert_eq!(
+        roomy_prompt.len(),
+        tight_prompt.len(),
+        "the boot prompt's length still moves with the context window, so \
+         something in segment 0 is still sized against it"
+    );
 
     // Precondition: the planted skill reached the listing in BOTH arms, so
     // there is a listing whose size the budget could act on. Without this a
-    // bootstrap that rendered no skills section at all would make the
+    // session that rendered no skills section at all would make the
     // comparison below pass by rendering two empty listings.
-    for (label, prompt) in [("1_000_000", &roomy), ("2_000", &tight)] {
+    for (label, listing) in [("1_000_000", &roomy), ("2_000", &tight)] {
         assert!(
-            prompt.contains("issue-1150"),
-            "precondition: the planted skill never reached the {label}-token prompt"
+            listing.contains("issue-1150"),
+            "precondition: the planted skill never reached the {label}-token listing"
         );
     }
     assert!(
@@ -360,8 +398,8 @@ async fn the_bootstrap_prompt_uses_the_real_window_derived_skill_budget() {
     assert!(
         tight.len() < roomy.len(),
         "an 80-char skills budget must render a SHORTER listing than a 40,000-char one; \
-         identical lengths mean the bootstrap call site is still passing `None` and every \
-         session is on the flat 8,000-char default (tight = {} bytes, roomy = {} bytes)",
+         identical lengths mean the session is still handing the renderer `None` and every \
+         session is on the flat default (tight = {} bytes, roomy = {} bytes)",
         tight.len(),
         roomy.len()
     );
@@ -393,13 +431,13 @@ async fn the_bootstrap_prompt_uses_the_real_window_derived_skill_budget() {
 /// keeps tracking `UNVERIFIED_CONTEXT_WINDOW` if that constant ever moves.
 #[tokio::test]
 async fn an_unknown_window_sizes_the_skill_listing_like_the_window_it_assumes() {
-    let (_infos, unknown) = boot(UNLISTED_MODEL, None).await;
-    let (_infos, assumed) = boot(
+    let (_infos, _unknown_prompt, unknown) = boot(UNLISTED_MODEL, None).await;
+    let (_infos, _assumed_prompt, assumed) = boot(
         UNLISTED_MODEL,
         Some(wcore_config::compact::UNVERIFIED_CONTEXT_WINDOW),
     )
     .await;
-    let (_infos, old_fabrication) = boot(
+    let (_infos, _fab_prompt, old_fabrication) = boot(
         UNLISTED_MODEL,
         Some(wcore_config::compact::DEFAULT_CONTEXT_WINDOW),
     )
@@ -467,13 +505,13 @@ async fn the_fixture_overflows_every_budget_under_test() {
     // rather than asserted from the arithmetic: a 1,000,000-token window must
     // render strictly more than the fabricated 200,000-token one, which must in
     // turn render strictly more than the 32,768 the session assumes.
-    let (_i, huge) = boot(UNLISTED_MODEL, Some(HEADROOM_WINDOW)).await;
-    let (_i, fabricated) = boot(
+    let (_i, _huge_prompt, huge) = boot(UNLISTED_MODEL, Some(HEADROOM_WINDOW)).await;
+    let (_i, _fab_prompt, fabricated) = boot(
         UNLISTED_MODEL,
         Some(wcore_config::compact::DEFAULT_CONTEXT_WINDOW),
     )
     .await;
-    let (_i, assumed) = boot(
+    let (_i, _assumed_prompt, assumed) = boot(
         UNLISTED_MODEL,
         Some(wcore_config::compact::UNVERIFIED_CONTEXT_WINDOW),
     )
@@ -519,7 +557,8 @@ fn plant_host_catalogue(root: &std::path::Path) {
 }
 
 /// Boot exactly like `boot`, with one more catalogue bound beside the fixture's
-/// own. Returns the system prompt.
+/// own. Returns the skills listing the session's resolved window buys — see
+/// `boot` for why that, and not the system prompt.
 async fn boot_with_host_catalogue(model: &str, context_window: Option<usize>) -> String {
     let tmp = tempdir().expect("tempdir");
     let root = std::fs::canonicalize(tmp.path()).expect("canonicalize workspace");
@@ -542,7 +581,10 @@ async fn boot_with_host_catalogue(model: &str, context_window: Option<usize>) ->
     .build()
     .await
     .expect("bootstrap");
-    result.engine.system_prompt().to_string()
+    wcore_agent::context::format_skills_section(
+        &result.late_mcp.catalog().visible(),
+        result.engine.known_context_window(),
+    )
 }
 
 /// #401 c1, the half that is decidable without two machines: the verdict of

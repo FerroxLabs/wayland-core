@@ -1094,7 +1094,9 @@ mod tests {
 
         let agents_pos = result.find("PROJECT_RULES_HERE").unwrap();
         let memory_pos = result.find("auto memory").unwrap();
-        let skills_pos = result.find("test-skill").unwrap();
+        // #1283 c1: the skills section no longer names skills, so the section
+        // is located by its own fixed text instead of by a fixture's name.
+        let skills_pos = result.find(SKILL_DISCOVERY_SECTION).unwrap();
 
         assert!(
             agents_pos < memory_pos,
@@ -1359,7 +1361,8 @@ mod tests {
             false,
         );
         let guidance_pos = result.find("# Using your tools").unwrap();
-        let skills_pos = result.find("guide-test-skill").unwrap();
+        // #1283 c1: located by the section's own fixed text — see above.
+        let skills_pos = result.find(SKILL_DISCOVERY_SECTION).unwrap();
         assert!(
             guidance_pos < skills_pos,
             "tool guidance should appear before skills reminder"
