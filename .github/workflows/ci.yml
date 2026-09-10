@@ -1825,6 +1825,20 @@ jobs:
           python3 scripts/check-test-env-globals.py --self-test
           python3 scripts/check-test-env-globals.py
 
+      # -- state-directory gate (FerroxLabs/wayland#1298 c6) ---------------
+      # The gate above answers RC=0 identically at 6d45bb623, where three
+      # fail_closed_matrix tests deposited four signing seeds and an instance
+      # id into the operator's own config directory, and at 509f4426b where
+      # they no longer do. It cannot see this class: the path is
+      # `registry::state_dir()` falling through to `wayland_config_dir()`,
+      # with no environment variable anywhere on it. This step is the check
+      # that answers differently on the two sides.
+      - name: No test reaches the real state directory unguarded
+        if: ${{ !cancelled() }}
+        run: |
+          python3 scripts/check-test-state-dir-guards.py --self-test
+          python3 scripts/check-test-state-dir-guards.py
+
       # ── message-whitespace gate (FerroxLabs/wayland#1162, defect D22) ──
       # A multi-line message written with `\`-newline continuations gets
       # collapsed onto one source line by a tooling pass, and the SOURCE

@@ -91,6 +91,11 @@ GATES=(
   "armed|python3 scripts/check-no-personal-identifiers.py"
   "armed|python3 scripts/check-test-env-globals.py --self-test"
   "armed|python3 scripts/check-test-env-globals.py"
+  # wayland#1298 c6: the sibling above cannot see this hazard -- it scans for
+  # env writes, and `registry::state_dir()` reaches the operator's real config
+  # directory with no env var on the path.
+  "armed|python3 scripts/check-test-state-dir-guards.py --self-test"
+  "armed|python3 scripts/check-test-state-dir-guards.py"
   "armed|python3 scripts/check-message-whitespace.py --self-test"
   "armed|python3 scripts/check-message-whitespace.py crates"
   # Added 2026-09-04 with the wayland#1254 fix: ci.yml has run this gate
