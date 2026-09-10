@@ -231,6 +231,31 @@ fn reminder_containing<'a>(system: &'a str, mark: &str) -> Option<&'a str> {
     Some(&system[head..end])
 }
 
+/// The whole system prefix, with the ONE field that legitimately differs
+/// between two boots of this fixture — the working directory, a fresh tempdir
+/// per session — replaced by a fixed token.
+///
+/// ARM B COMPARES THIS, NOT AN EXTRACTED BLOCK, AND THE REASON IS A MEASURED
+/// ONE. The first cut of that arm extracted the `<system-reminder>` span
+/// carrying the discovery text and compared spans. Mutant M1 — a per-render
+/// nonce appended to the skills section — was appended AFTER
+/// `</system-reminder>`, landed outside the extracted span, and the arm stayed
+/// GREEN on a tree whose prefix demonstrably churned. A prefix-cache oracle
+/// that reads a sub-span can only see churn it already expected. What an
+/// implicit cache keys on is the whole prefix, so that is what is compared.
+fn prefix_modulo_cwd(system: &str) -> String {
+    let mut out = String::with_capacity(system.len());
+    for line in system.lines() {
+        if line.starts_with("Working directory: ") {
+            out.push_str("Working directory: <CWD>");
+        } else {
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+    out
+}
+
 /// Every `(body, is_error)` tool result carried by a request's message stream.
 fn tool_results(req: &LlmRequest) -> Vec<(String, bool)> {
     req.messages
@@ -611,25 +636,42 @@ async fn the_skills_section_is_identical_across_two_different_catalogues() {
     let small = session(10, "a-skill", vec![plain_answer()], &["What is 2 + 2?"]).await;
     let large = session(1_000, "m-skill", vec![plain_answer()], &["What is 2 + 2?"]).await;
 
+    // Both boots found their own catalogue, or "identical" means "both empty".
     let a = reminder_containing(&small[0].system, MARK_ROUTE)
         .expect("boot A rendered no skills section")
         .to_string();
     let b = reminder_containing(&large[0].system, MARK_ROUTE)
         .expect("boot B rendered no skills section")
         .to_string();
-
-    assert_eq!(
-        a, b,
-        "two boots with different installed skills produced different skills \
-         sections, so the prefix is a function of the catalogue and no \
-         implicit cache written by one session is readable by another"
-    );
     assert!(
-        a.len() > 200,
-        "the skills section is only {} bytes; two empty strings are equal and \
-         measure nothing",
-        a.len()
+        a.len() > 200 && b.len() > 200,
+        "the skills sections are {} and {} bytes; two near-empty strings are \
+         equal and measure nothing",
+        a.len(),
+        b.len()
     );
+
+    // THE ASSERTION: the WHOLE prefix, not the extracted block. See
+    // `prefix_modulo_cwd` for why — an earlier cut compared the block alone and
+    // a real nonce mutant slipped past it by one line.
+    let pa = prefix_modulo_cwd(&small[0].system);
+    let pb = prefix_modulo_cwd(&large[0].system);
+    if pa != pb {
+        let at = pa
+            .char_indices()
+            .zip(pb.chars())
+            .find(|((_, x), y)| x != y)
+            .map(|((i, _), _)| i)
+            .unwrap_or_else(|| pa.len().min(pb.len()));
+        panic!(
+            "two boots with different installed skills produced different \
+             system prefixes, so the prefix is a function of the catalogue and \
+             no implicit cache written by one session is readable by another. \
+             First divergence at byte {at}:\n  A: {:?}\n  B: {:?}",
+            &pa[at.saturating_sub(60)..(at + 120).min(pa.len())],
+            &pb[at.saturating_sub(60)..(at + 120).min(pb.len())],
+        );
+    }
 
     // And neither boot leaked a name into the prefix.
     assert!(
