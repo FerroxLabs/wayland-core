@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "W16 mixed soak fails RSS acceptance twice (41.5x, then 1.83x) with no carrier"
 status: open
-last_verified_commit: 335328967
+last_verified_commit: 5c3028f0e
 criteria:
   - id: c1
     text: "The RSS growth is explained by measurement rather than inferred: the allocation site or retention path responsible for the 5.28 GB growth over 8938 cycles is NAMED, with the instrument that named it. A profile that reproduces the growth is required; a code reading is not sufficient."
@@ -15,7 +15,7 @@ criteria:
     text: "Either the growth is repaired and a fresh 7200-second soak passes the ORIGINAL limits at the same cycle counts, or the limit is changed and the change carries a measured justification for the new number."
     state: not-met
     owner: core
-    note: "The original limits are 127151104 bytes for the mixed profile and 33554432 for the confirmation profile. Raising a limit to turn a red green, with no measurement behind the new value, does not close this -- that is the failure mode the whole programme is graded against. W16_mixed_soak.next still reads 'Await pending bounded memory repair decision; no running soak or scheduled rerun', a decision never recorded as taken, and rounds_remaining is 0."
+    note: "The original limits are 127151104 bytes for the mixed profile and 33554432 for the confirmation profile. Raising a limit to turn a red green, with no measurement behind the new value, does not close this -- that is the failure mode the whole programme is graded against. W16_mixed_soak.next still reads 'Await pending bounded memory repair decision; no running soak or scheduled rerun', a decision never recorded as taken, and rounds_remaining is 0. HOST NAMED 2026-09-10, which this row had never done and which check-live-run-criteria.py caught on its first run against the live tree: the 7200-second soak runs on hetzner-dsm (Linux 6.8.0-101, 96 CPU, 251 GiB; both recorded runs ran there, loadavg 28.0 start / 28.6 end), driven by evidence/mixed-soak353/run2/driver.py. It is a two-hour run on one named box, not a CI job, and no CI leg can produce it."
   - id: c3
     text: "The 10.77% latency observation against the 10% limit is either brought inside the limit or recorded as an explicit, dated disposition on THIS ticket rather than only in the execution record."
     state: met

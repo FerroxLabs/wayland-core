@@ -4,12 +4,12 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "preflight.sh prints PRE-FLIGHT PASSED on a tree CI reds: a gate's self-disclosed downgrade is discarded on the success path"
 status: closed
-last_verified_commit: bee06b19a
+last_verified_commit: 5c3028f0e
 criteria:
   - id: c1
     text: "On a shallow clone of a tree whose full-clone python3 scripts/check-criteria-ledger.py --offline is EXIT=1, bash scripts/preflight.sh does NOT exit 0 and does NOT print PRE-FLIGHT PASSED"
     state: met
-    evidence: "file:scripts/preflight.sh:331:PREFLIGHT CLONE-DEPTH GUARD: this worktree is a SHALLOW clone"
+    evidence: "file:scripts/preflight.sh:353:PREFLIGHT CLONE-DEPTH GUARD: this worktree is a SHALLOW clone"
     owner: core
     note: "MET 2026-09-04 on bc9288da5. THE PRECONDITION WAS BUILT, NOT ASSUMED: a clone of this lane branch with `.planning/ledger/wayland-1088.md`'s last_verified_commit rewritten to an unreachable sha, committed, then re-cloned at --depth 1. Full clone -> `check-criteria-ledger.py --offline` EXIT=1 ('last_verified_commit 0123... is not a commit in this tree'). Shallow clone of that same commit, same working tree -> EXIT=0, 'OK: every ledger file parses'. RED ARM, today's preflight on that shallow clone: every line `ok`, banner `PRE-FLIGHT PASSED`, EXIT=0 -- the defect reproduced on demand. GREEN ARM, this commit's preflight on the identical shallow clone: 'PREFLIGHT CLONE-DEPTH GUARD: this worktree is a SHALLOW clone, and ci.yml gives the same gates a `fetch-depth: 0` checkout', EXIT=2, no banner. The guard is DERIVED, not hard-coded: it reads the same ci-linux region the DRIFT GUARD parses and arms only because `fetch-depth: 0` is set there. It refuses rather than downgrading, because preflight's whole claim is that it predicts CI, and from a shallower checkout than CI's it cannot -- a prediction that cannot be made must not be printed. NOTE FOR THE FOLLOW-UP: the durable form is for check-criteria-ledger.py to return the reserved degraded exit code when it skips sha resolution; that is a change to the gate and is not made here (this lane owns preflight.sh only). Until then the shallow path is closed by refusal, not by rendering."
   - id: c2

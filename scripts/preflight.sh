@@ -107,6 +107,8 @@ GATES=(
   "armed|python3 scripts/check-release-board.py --self-test"
   "armed|python3 scripts/check-message-whitespace.py --self-test"
   "armed|python3 scripts/check-message-whitespace.py crates"
+  "armed|python3 scripts/check-live-run-criteria.py --self-test"
+  "armed|python3 scripts/check-live-run-criteria.py"
   # Added 2026-09-04 with the wayland#1254 fix: ci.yml has run this gate
   # since 0.13.12 and this list did not, so the DRIFT GUARD below was
   # already refusing to run on origin/main. That refusal is the guard
