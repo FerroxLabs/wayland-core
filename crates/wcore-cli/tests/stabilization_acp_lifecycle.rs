@@ -114,7 +114,9 @@ async fn create_session(server: &AcpServer) -> String {
         .session_id
 }
 
-fn assert_one_terminal(frames: &[MessageEvent]) {
+/// One terminal, last, naming its turn. Returns that turn id so a caller with
+/// several streams can check each ended at its own turn (wayland#1356 review).
+fn assert_one_terminal(frames: &[MessageEvent]) -> String {
     let terminal = |event: &&MessageEvent| {
         matches!(
             event,
@@ -122,13 +124,16 @@ fn assert_one_terminal(frames: &[MessageEvent]) {
         )
     };
     assert_eq!(frames.iter().filter(terminal).count(), 1, "{frames:?}");
+    let Some(MessageEvent::Done { turn_id, .. } | MessageEvent::Error { turn_id, .. }) =
+        frames.last()
+    else {
+        panic!("terminal must be last: {frames:?}");
+    };
     assert!(
-        matches!(
-            frames.last(),
-            Some(MessageEvent::Done { .. } | MessageEvent::Error { .. })
-        ),
-        "terminal must be last: {frames:?}"
+        !turn_id.is_empty(),
+        "the terminal names its turn: {frames:?}"
     );
+    turn_id.clone()
 }
 
 #[tokio::test]
@@ -251,8 +256,12 @@ async fn delete_cancels_a_queued_turn_before_it_reaches_the_provider() {
     .await
     .expect("both streams terminate");
     deleted.expect("delete deadline").expect("delete");
-    assert_one_terminal(&first);
-    assert_one_terminal(&queued);
+    let first_turn = assert_one_terminal(&first);
+    let queued_turn = assert_one_terminal(&queued);
+    assert_ne!(
+        first_turn, queued_turn,
+        "each stream must end at its own turn's terminal"
+    );
     assert_eq!(
         provider.entries.load(Ordering::SeqCst),
         1,
