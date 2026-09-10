@@ -1,0 +1,106 @@
+# Every production site that could answer "which host does this URL reach?",
+# and what each one actually does. Owned by FerroxLabs/wayland#1276.
+#
+# ── WHY THIS FILE EXISTS ────────────────────────────────────────────────────
+#
+# `wayland#1211` -> `#1243` -> `#1252` is ONE bug class arriving three times: a
+# hand cut takes everything up to the first `/` and then the last `@` part, and
+# each cut missed a different separator. #1252 closed its three sites by
+# READING all 24 production lines carrying the scheme separator and
+# dispositioning each. That was a measurement, and a measurement is a snapshot:
+# nothing went red when a FOURTH cut was added.
+#
+# `scripts/check-url-authority-cuts.py` turns that snapshot into a standing
+# gate. It enumerates the same total syntactic set, plus a second one that sees
+# a cut carrying no scheme literal at all, and refuses any member this file
+# does not classify.
+#
+# ── WHAT A LINE HERE DOES AND DOES NOT DO ───────────────────────────────────
+#
+# A line is a CLASSIFICATION of one site, not permission for a class. It is
+# keyed on `<path>::<fn>` PLUS a fingerprint of the site's own text, so:
+#
+#   * A second cut added to the same function is a NEW site with a new
+#     fingerprint and reds the gate with this line still sitting here.
+#   * Changing a classified site changes its fingerprint, so the line goes
+#     STALE and the gate fails until somebody re-reads the code. A cut cannot
+#     be edited into a decision under cover of an old disposition.
+#   * A line matching nothing fails as STALE. The list is designed to shrink.
+#   * A line whose reason is missing or shorter than 25 characters is refused
+#     as unparseable rather than read as an exemption.
+#
+# A host-shaped function that reaches `url::Url` / `wcore_types::url_authority`
+# needs NO line: the gate reads the call itself. Hand-copying that fact here
+# would only give it somewhere to rot.
+#
+# ── THE CLASSES ─────────────────────────────────────────────────────────────
+#
+#   parser     answers through url::Url / wcore_types::url_authority
+#   no-host    derives no host from a URL string at this site
+#   display    cuts a host, but only to render it -- decides nothing
+#   test-only  #[cfg(test)] code; ships in no binary an operator runs
+#
+# The first three are wayland#1276 c3's own three. `test-only` is the fourth
+# the enumeration forced: #1252's sweep excluded `crates/*/tests/` but four
+# scheme-separator sites live in `#[cfg(test)]` modules inside `src/`, and
+# calling those "returns no host" would be false -- they do cut a host out of
+# the bundled `providers.toml`. Naming what they are beats mislabelling them.
+#
+# ── FORMAT ──────────────────────────────────────────────────────────────────
+#
+#   <class>  <path>::<fn>  <fingerprint>  <reason...>
+#
+# Whitespace-separated; the reason is the rest of the line and is MANDATORY.
+# `<fn>` is `<module>` for a site at module scope, e.g. a doc comment. The
+# fingerprint is printed beside every finding and by `--list`. Line numbers are
+# deliberately not part of the key: they drift on unrelated edits.
+
+# ── axis A: scheme-separator sites ──────────────────────────────────────────
+
+display    crates/wcore-agent/src/orchestration/monitor.rs::root_cause_signature  d2dc427f150c  Cuts scheme, authority and last path segment to build a log-line FINGERPRINT that is compared against other fingerprints for grouping. Nothing is dialed, trusted or shown as the host of a request.
+no-host    crates/wcore-agent/src/tool_backends/video_analyze.rs::download_remote_video  65a91b8b0b2d  Reads the SCHEME only, to refuse anything that is not https. The authority is never extracted here; reqwest builds the request from the whole URL through its own parser.
+no-host    crates/wcore-browser/src/egress_proxy.rs::serve_connection  17cd4b6824d7  A `contains("://")` shape test separating an absolute-form request target from CONNECT authority-form. It extracts nothing; the target string is passed on whole.
+parser     crates/wcore-browser/src/policy.rs::strip_pattern_decorations  56e58664f711  wayland#1252 Site B, fixed. This line is a `contains` guard on the remainder; the host itself comes from `wcore_types::url_authority`, which is what the fix installed.
+no-host    crates/wcore-channel-discord/src/gateway.rs::ensure_path  0c87d58ed618  Locates the authority end only to INSERT a missing `/` path, and returns the whole URL. It never returns a host and no decision is taken on the authority it stepped over.
+test-only  crates/wcore-channel-discord/src/gateway.rs::gateway_url_always_carries_a_path  4376fb30f569  A `#[cfg(test)]` assertion re-deriving the offset it is checking. Ships in no binary an operator runs.
+no-host    crates/wcore-cli/src/plugin/marketplace.rs::normalize_source  5423cb023289  A `!contains("://")` predicate deciding whether a source is `owner/repo` shorthand. No authority is read out of the string.
+display    crates/wcore-cli/src/tui/tool_formatters/web.rs::derive_domain  e704eda18d3d  One of the four display cuts wayland#1276 names. The result is a UI hint printed beside a tool result; no permission, allowlist or locality answer reads it.
+display    crates/wcore-cli/src/tui/tool_formatters/web_fetch.rs::derive_domain  52db4d6ce79e  One of the four display cuts wayland#1276 names. Renders a label under an already-approved fetch; the approval itself was decided upstream through the parser.
+no-host    crates/wcore-cli/src/tui/widgets/sources_block.rs::<module>  4e009dd08469  A doc comment describing the cut below it. Prose produces no host; it is enumerated because #1252's own measurement grepped raw source and a reader is told about it here.
+display    crates/wcore-cli/src/tui/widgets/sources_block.rs::extract_domain  0fcbd46bf698  One of the four display cuts wayland#1276 names. Labels a citation row in the sources block; nothing downstream decides on the value.
+no-host    crates/wcore-config/src/compat.rs::split_authority  b290dda05255  Holds the scheme and authority aside so `join_endpoint` cannot mistake a host named `v1` for a path segment. The prefix is re-concatenated VERBATIM and no host is read out of it.
+test-only  crates/wcore-config/src/limits.rs::vendor_endpoint_names  65a91b8b0b2d  A `#[cfg(test)]` helper cutting hosts out of the bundled `providers.toml` to name vendor-operated endpoints. Ships in no binary an operator runs.
+test-only  crates/wcore-config/src/limits.rs::vendor_operated_catalog_endpoints_keep_their_arm  65a91b8b0b2d  A `#[cfg(test)]` closure over the same bundled catalog. Ships in no binary an operator runs.
+no-host    crates/wcore-config/src/portability/redact.rs::<module>  3d9a00145f93  A doc comment recording the hand cut this function USED to be, so the next reader does not reinstate it. Prose produces no host.
+parser     crates/wcore-config/src/portability/redact.rs::strip_url_userinfo  fdcbc688fb82  wayland#1252 Site C, fixed. The scheme offset is used for the redaction span; the host answer comes from `wcore_types::url_authority`, which is what the fix installed.
+parser     crates/wcore-config/src/portability/redact.rs::strip_url_userinfo  bd1d32b72e21  Second scheme offset in the same fixed function, for the same redaction span. Both are subordinate to the parser call that decides the host.
+display    crates/wcore-protocol/src/events.rs::split_endpoint  0b926f616fcf  wayland#1243's stated honest remainder. Retained ONLY as `scrub_base_url`'s redaction fallback for a string that does not parse as a URL at all -- nothing reqwest could have dialed either. Its doc comment forbids asking it which host a request reaches, and it is off the `is_local_endpoint` path.
+no-host    crates/wcore-providers/src/retry.rs::with_transport_cause  03a0ff07408d  A `contains("://")` predicate that suppresses a URL-shaped inner cause from an error message. Nothing is extracted and nothing is decided about a host.
+test-only  crates/wcore-skills/src/mcp.rs::tc_wb_uri_no_skill_prefix_passthrough  d0dfba33d641  A comment inside a `#[cfg(test)]` function, describing a `replace` this repo performs on a whole URI. Ships in no binary an operator runs.
+no-host    crates/wcore-tools/src/bash/policy.rs::is_path_token  41fbdd24f92c  A `contains("://")` predicate excluding URL-shaped tokens from path-token detection in a bash command line. No authority is read out.
+no-host    crates/wcore-tools/src/bash/policy.rs::command_path_tokens  46b5be414e44  The same predicate applied as a filter over command tokens. No authority is read out.
+parser     crates/wcore-tools/src/website_policy.rs::normalize_rule  b0a1dba0b060  The `contains("://")` guard exists precisely to hand the value to `Url::parse` on the next line; `host_str()` supplies the host.
+parser     crates/wcore-tools/src/website_policy.rs::extract_host_from_urlish  469bfaa60cc5  The `!contains("://")` guard decides whether to PREFIX a scheme so `Url::parse` can pull the authority. Every host this function returns comes from `host_str()`.
+
+# ── axis B: host-shaped declarations that do not reach the parser ───────────
+
+no-host    crates/wcore-agent/src/channel_tools.rs::effective_mcp_authority  62f3678be141  "Authority" here is an operator-permission posture, not a network authority. Returns one of two fixed labels and reads no URL.
+no-host    crates/wcore-agent/src/egress/classify.rs::registrable_domain  3f0d58b59e71  Input is ALREADY a parsed host -- callers pass `Url::host_str()` -- and `psl::domain_str` folds it to its registrable domain. No URL string is read here.
+no-host    crates/wcore-agent/src/host_send_transport.rs::clamp_host_field  7dd43ece8d94  "Host" here is the host APPLICATION, not a network host. Truncates one protocol result field to a character budget.
+no-host    crates/wcore-agent/src/journal_provider.rs::authority_message  90894a25c9df  "Authority" here is the budget authority. Prefixes an error string so the journal can recognise its own class of failure.
+no-host    crates/wcore-browser/src/egress_proxy.rs::host  c1ddb2c62591  Renders the IP of the `SocketAddr` this proxy is bound to. There is no URL anywhere on this path.
+no-host    crates/wcore-browser/src/egress_proxy.rs::connect_authority_url  7834a2499f1f  Input is a CONNECT target in RFC 9110 authority-form (`host:port`), which is NOT a URL and which `url::Url` cannot parse. The value built here is handed to the parser, which is what resolves any smuggled userinfo; this function decides nothing.
+no-host    crates/wcore-browser/src/policy.rs::blocked_host_reason  929413d04658  Takes an ALREADY-parsed host and returns the refusal text for it. Its comment names `url::Url::host_str()` because the caller used it; a comment is not a call and the gate reads comment-stripped bodies.
+no-host    crates/wcore-budget/src/execution.rs::authority  d8ce0933c5a4  "Authority" here is the execution budget authority. A field accessor over a receipt; no URL is involved.
+no-host    crates/wcore-cli/src/acp.rs::hostname_or  ea1a517fc77c  Reads the machine name from `$HOSTNAME`, with a fallback. Not a URL authority and never used as one.
+no-host    crates/wcore-cli/src/self_update.rs::archive_name_for_host  bdd2db065932  "Host" here is the host PLATFORM. Builds a release-archive filename from the OS/arch target triple.
+display    crates/wcore-cli/src/tui/tool_formatters/web.rs::derive_domain  97a8672ebb10  Whole-function view of the same display cut classified on axis A above. Renders a UI hint; no permission or allowlist answer reads it.
+display    crates/wcore-cli/src/tui/tool_formatters/web_fetch.rs::derive_domain  0e84d17b789e  Whole-function view of the same display cut classified on axis A above. Renders a label under an already-approved fetch.
+display    crates/wcore-cli/src/tui/widgets/sources_block.rs::extract_domain  de27a123a6b1  Whole-function view of the same display cut classified on axis A above. Labels a citation row; nothing downstream decides on it.
+no-host    crates/wcore-config/src/compat.rs::split_authority  601d8f9596d3  Whole-function view of the split classified on axis A above. Returns the untouched scheme+authority prefix and the path, and the prefix is re-concatenated verbatim.
+no-host    crates/wcore-eval-scenarios/src/report.rs::authority_label  b19c4c405808  "Authority" here is the evidence-receipt authority claim (local vs CI). Returns one of two fixed labels.
+no-host    crates/wcore-exec-backend/src/node/capability.rs::leaks_host_detail  6275a9a17bd2  "Host detail" here means local filesystem paths leaking into a capability report. Scans two report fields for path separators; no URL is read.
+no-host    crates/wcore-exec-backend/src/node/pairing.rs::read_hostname_file  d491ee1935ce  Reads the machine name from `/etc/hostname` or `/proc/sys/kernel/hostname`. Not a URL authority.
+no-host    crates/wcore-tools/src/vfs.rs::real_fs_authority  2838e3ed1bf1  "Authority" here is the filesystem identity token `realfs:unix:<dev>:<ino>`, used to tell one mounted filesystem from another. No URL is involved.
+no-host    crates/wcore-tools/src/vfs.rs::windows_authority  c7776480576b  The Windows half of the same filesystem identity token, keyed on the volume serial. No URL is involved.
+no-host    crates/wcore-tools/src/website_policy.rs::normalize_host  ae1af951ac52  Input is ALREADY a host -- every caller supplies one from `Url::host_str()` or from a policy rule. Lowercases it and drops one trailing DNS root dot.

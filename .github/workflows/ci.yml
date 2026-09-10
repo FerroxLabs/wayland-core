@@ -1839,6 +1839,21 @@ jobs:
           python3 scripts/check-test-state-dir-guards.py --self-test
           python3 scripts/check-test-state-dir-guards.py
 
+      # -- URL authority gate (FerroxLabs/wayland#1276) --------------------
+      # `#1211` -> `#1243` -> `#1252` is one bug class arriving three times,
+      # each time found by a hand sweep AFTER the fact. #1252 c3 closed its
+      # three sites by measuring every production line carrying the scheme
+      # separator; nothing in the workspace went red when a fourth cut was
+      # added. This step enumerates that same total set plus the host-shaped
+      # declarations that carry no scheme literal at all, checks the five
+      # already-fixed sites still answer through the parser, and fails closed
+      # if either enumeration stops matching.
+      - name: No hand-cut URL authority parser
+        if: ${{ !cancelled() }}
+        run: |
+          python3 scripts/check-url-authority-cuts.py --self-test
+          python3 scripts/check-url-authority-cuts.py
+
       # ── message-whitespace gate (FerroxLabs/wayland#1162, defect D22) ──
       # A multi-line message written with `\`-newline continuations gets
       # collapsed onto one source line by a tooling pass, and the SOURCE

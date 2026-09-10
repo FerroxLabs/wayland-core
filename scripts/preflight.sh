@@ -96,6 +96,11 @@ GATES=(
   # directory with no env var on the path.
   "armed|python3 scripts/check-test-state-dir-guards.py --self-test"
   "armed|python3 scripts/check-test-state-dir-guards.py"
+  # wayland#1276 c1-c4: neither sibling above sees a FOURTH hand-cut URL
+  # authority parser. #1252 closed its three sites by measuring, and a
+  # measurement answers "clean" one commit after the next cut lands.
+  "armed|python3 scripts/check-url-authority-cuts.py --self-test"
+  "armed|python3 scripts/check-url-authority-cuts.py"
   # wayland#1272 c1: the board must track the blocking list, not a snapshot of
   # it. Offline here because preflight is a local gate; the release path runs
   # it live.
