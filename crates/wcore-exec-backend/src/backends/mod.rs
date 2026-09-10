@@ -450,15 +450,12 @@ pub(crate) fn load_or_create_seed_at(path: &std::path::Path, what: &str) -> Resu
         }
         let ticket = STAGING_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let staging = path.with_extension(format!("key.tmp.{}.{ticket}", std::process::id()));
-        std::fs::write(&staging, fresh)?;
-        #[cfg(unix)]
-        {
-            // Set on the STAGING file, before it is reachable under the real
-            // name. The previous order -- create the target, write, then chmod
-            // -- published a private key at the umask default first.
-            use std::os::unix::fs::PermissionsExt as _;
-            let _ = std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o600));
-        }
+        // Created with its final mode ALREADY SET, and every failure
+        // propagated. The previous order -- write, then chmod, then discard
+        // the chmod result -- left the publication below reachable after the
+        // permissions could not be established, which is the one edge a
+        // successful-path mode trace cannot see (wayland#1298 c3).
+        write_staged_seed(&staging, &fresh)?;
         // `hard_link` rather than `rename`, and that difference is the whole
         // point. Both publish a COMPLETE file, so neither can be read torn.
         // Only `hard_link` is also EXCLUSIVE: it fails with AlreadyExists
@@ -481,6 +478,63 @@ pub(crate) fn load_or_create_seed_at(path: &std::path::Path, what: &str) -> Resu
     )))
 }
 
+/// Write a freshly generated seed to its staging path with the final mode
+/// already applied, refusing rather than publishing if that cannot be done.
+///
+/// `create_new` plus `mode` means the private key never exists at any other
+/// permission — not create-then-chmod, which leaves the key readable at the
+/// umask default for the window between the two calls. Every error is
+/// returned, so [`load_or_create_seed_at`] cannot link a seed whose
+/// permissions were never established: the caller sees the failure and the
+/// real name stays absent.
+///
+/// The landed mode is read back because `create_new(true).mode(0o600)` is a
+/// request. A filesystem that ignores it (a mounted share, an inherited ACL)
+/// would otherwise publish a world-readable signing key while every syscall
+/// returned success.
+fn write_staged_seed(staging: &std::path::Path, seed: &[u8; 32]) -> Result<()> {
+    use std::io::Write as _;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+
+    let written = options
+        .open(staging)
+        .and_then(|mut file| file.write_all(seed));
+    if written.is_err() {
+        // Leave nothing a later pass could link.
+        let _ = std::fs::remove_file(staging);
+    }
+    written?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let landed = match std::fs::metadata(staging) {
+            Ok(metadata) => metadata.permissions().mode() & 0o777,
+            Err(error) => {
+                let _ = std::fs::remove_file(staging);
+                return Err(error.into());
+            }
+        };
+        if landed != 0o600 {
+            let _ = std::fs::remove_file(staging);
+            return Err(ExecError::Receipt(format!(
+                "seed staging file {} landed at mode {landed:o}, not 0600; refusing to \
+                 publish a signing key this filesystem will not keep private",
+                staging.display()
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 /// The atomic-publish contract of [`load_or_create_seed_at`].
 ///
 /// These target the helper directly rather than going through
@@ -491,7 +545,61 @@ pub(crate) fn load_or_create_seed_at(path: &std::path::Path, what: &str) -> Resu
 /// concurrency the only variable.
 #[cfg(test)]
 mod seed_publish_tests {
-    use super::load_or_create_seed_at;
+    use super::{load_or_create_seed_at, write_staged_seed};
+
+    /// wayland#1298 c3, the FAILURE edge.
+    ///
+    /// The successful-path mode trace this criterion used to rest on cannot
+    /// see this: it only shows that when everything works the key is 0600.
+    /// The defect was that when establishing the mode did NOT work, the
+    /// result was discarded and the key was published anyway. Here the write
+    /// cannot succeed at all, and what is being asserted is that the failure
+    /// is returned and nothing is left behind for a later pass to link.
+    ///
+    /// The injection is a missing parent rather than a read-only directory
+    /// because the Linux CI host and the Hetzner proof runner both run as
+    /// root, and mode bits do not refuse root — a permission-based injection
+    /// would pass there for the wrong reason.
+    #[test]
+    fn a_staging_seed_that_cannot_be_written_is_never_published() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let staging = home.path().join("no-such-dir").join("backend.key.tmp.1.0");
+
+        let refused = write_staged_seed(&staging, &[7u8; 32]);
+
+        assert!(
+            refused.is_err(),
+            "a staging write that cannot happen must be an error, not a discarded result"
+        );
+        assert!(
+            !staging.exists(),
+            "a failed staging write must leave nothing behind: {}",
+            staging.display()
+        );
+    }
+
+    /// wayland#1298 c3, the mode itself, asserted on the file that is actually
+    /// reachable under the real name rather than on the staging file.
+    #[cfg(unix)]
+    #[test]
+    fn the_published_seed_is_reachable_only_at_0600() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let home = tempfile::tempdir().expect("tempdir");
+        let path = home.path().join("keys").join("backend.key");
+
+        load_or_create_seed_at(&path, "backend signing seed").expect("first use publishes a seed");
+
+        let mode = std::fs::metadata(&path)
+            .expect("published seed is readable")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "a signing seed must never be reachable under its real name at any other mode"
+        );
+    }
 
     #[test]
     fn concurrent_first_use_never_observes_a_partial_seed() {
