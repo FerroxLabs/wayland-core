@@ -10,7 +10,15 @@
 # #1134 opens with. Resolving callers turned that excuse into a verdict, and
 # the verdict named nine pre-existing pairs on the day it was written.
 #
-# Eight of them are listed below and are owned by FerroxLabs/wayland#1233.
+# Five of them are listed below and are owned by FerroxLabs/wayland#1233.
+# Three `temp_state()` rows left when `StateDirGuard` replaced them, and the
+# `wcore-cli` row left on 2026-09-10 for a different reason worth reading:
+# it was never a hazard. `gateway.rs::run_gateway` does write WAYLAND_HOME
+# from production code, but nothing in the wcore-cli test binary calls it.
+# The "reached from an unserialized test" verdict came from the caller walk
+# following `fn run`, a name that crate declares 31 times, into 155 unrelated
+# call sites. The walk now refuses a colliding name at every hop rather than
+# only the first, and the gate reports that write as unattributable.
 # They are DEBT, not clearance: each is a real
 # hazard under the shared-process CI leg, where one test binary is one process
 # and a sibling test's production path reads what the guard wrote. They are
@@ -57,4 +65,3 @@
 2026-11-30  wcore-agent::skill_source_write_refusal  WAYLAND_HOME  crates/wcore-agent/tests/skill_source_write_refusal.rs::wayland_home  gh#1233  `fn wayland_home` writes WAYLAND_HOME for an unserialized test in an 11-test binary whose production readers span nine crates.
 2026-11-30  wcore-browser::sidecar_npm_install_wiring_test  PATH  crates/wcore-browser/tests/sidecar_npm_install_wiring_test.rs::stub_npm_on_path  gh#1233  `stub_npm_on_path` rewrites PATH, which wcore-config and wcore-tools production code read for shell resolution, from an unserialized test with two siblings.
 2026-11-30  wcore-channel-telegram  WAYLAND_HOME  crates/wcore-channel-telegram/src/lib.rs::cfg  gh#1233  A config helper writes WAYLAND_HOME in a 79-test lib binary; some callers hold a lock and at least one does not.
-2026-11-30  wcore-cli  WAYLAND_HOME  crates/wcore-cli/src/gateway.rs::run_gateway  gh#1233  `run_gateway` is PRODUCTION code that writes WAYLAND_HOME and is reached from an unserialized test in the 2169-test wcore-cli lib binary. Worth reading before renewing: the write is not test-only, so the fix is probably in the gateway rather than in the test.

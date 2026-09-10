@@ -321,7 +321,25 @@ async fn run_argv(argv: &[String]) -> Result<std::process::Output> {
         .with_context(|| format!("failed to invoke `{}`", argv.join(" ")))
 }
 
-pub async fn run(args: GatewayArgs) -> Result<()> {
+/// Dispatch one `wayland-core gateway <verb>`.
+///
+/// Named for the command rather than spelled `run`, and that is load-bearing
+/// rather than cosmetic (wayland#1233 c3). `run_gateway` below writes the
+/// process-global `WAYLAND_HOME`, and whether a TEST can reach that write is
+/// decided by `scripts/check-test-env-globals.py` walking callers BY NAME
+/// inside the `wcore-cli` test binary. `wcore-cli` declares `fn run` 31 times.
+/// While this function was spelled `run`, that walk fanned out over 155
+/// unrelated `run(` call sites and reported the write as "reached from an
+/// unserialized test" on the strength of `fresh_dir_writes_both_files` -- a
+/// verdict about a function that has never called into the gateway. Measured
+/// 2026-09-10; the walk is now printed in that script's own self-test.
+///
+/// What the unique name buys, exactly: a test calling this entry point is
+/// attributed to the write, where a test calling `gateway::run` could never
+/// have been. What it does not buy: the chain still leaves this crate through
+/// `main.rs::run`, which collides, so the gate REPORTS the write as
+/// unattributable rather than proving nothing reaches it.
+pub async fn dispatch_gateway_command(args: GatewayArgs) -> Result<()> {
     match args.cmd {
         GatewayCmd::Install(scope) => install(&scope).await,
         GatewayCmd::Uninstall(scope) => uninstall(&scope).await,

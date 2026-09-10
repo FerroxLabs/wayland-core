@@ -56,7 +56,13 @@ HOW A HELPER WRITE IS AUDITED
         otherwise convict the wrong caller.
     Every mention of the key inside the binary, outside the key's own defining
     block, is a call site; its enclosing fn is classified the same way, and a
-    helper caller is followed one level further (bounded, cycle-guarded).
+    helper caller is followed one level further (bounded, cycle-guarded), and
+    EVERY hop applies the same unique-declaration rule the first one does: a
+    name declared more than once in the binary is reported, never followed.
+    Following it convicts whatever else happens to share it -- measured
+    2026-09-10, `gateway.rs::run_gateway` reached `fn run`, which `wcore-cli`
+    declares 32 times, and was reported as "reached from an unserialized test"
+    on the strength of `fresh_dir_writes_both_files`.
     A key with even one UNSERIALIZED-TEST caller is `UNSERIALIZED-HELPER` and
     FAILS exactly like a direct write.
 
@@ -498,6 +504,7 @@ def scan(pkgs):
                 continue
             key = fn
         seen, frontier, verdict, reached = set(), [(key, qualified)], set(), False
+        collided = set()
         for _ in range(3):
             nxt = []
             for name, qual in frontier:
@@ -507,6 +514,21 @@ def scan(pkgs):
                 for caller, kind in callers_of(binary, name, qual):
                     reached = True
                     if kind == "helper":
+                        # The rule the FIRST hop already applies, applied to
+                        # every hop. Following a name declared more than once
+                        # convicts whatever else in the binary happens to share
+                        # it. Measured 2026-09-10 on wcore-cli: the walk from
+                        # `gateway.rs::run_gateway` -- production code no test
+                        # calls -- reached `fn run`, which `wcore-cli` declares
+                        # 32 times, and from there 155 unrelated `run(` call
+                        # sites including `fresh_dir_writes_both_files` and
+                        # `extract_zip_recovers_binary`. The verdict
+                        # "reached from an unserialized test" was manufactured
+                        # by the collision, and it is the whole of what
+                        # wayland#1233's wcore-cli row rested on.
+                        if fn_decls[binary].get(caller, 0) != 1:
+                            collided.add(caller)
+                            continue
                         nxt.append((caller, False))
                     else:
                         verdict.add(kind)
@@ -517,6 +539,14 @@ def scan(pkgs):
             kind = "UNSERIALIZED-HELPER"
         elif verdict:
             kind = "serialized-helper"
+        elif collided:
+            # Reached SOMETHING, but only through a name this scan cannot
+            # disambiguate. Reported, never failed on -- the same disposition
+            # a colliding attribution key already gets.
+            unattributable += 1
+            kinds["unattributable-helper"] = (
+                kinds.get("unattributable-helper", 0) + 1)
+            continue
         else:
             # Nobody in this binary's test code calls it. Either production
             # code owns the write (`wcore-config`'s .env loader) or the call
@@ -600,6 +630,23 @@ _HELPER_TWO_SITES = (
     + '    #[test]\n    fn u() { let _q = EnvPin2::newer(); }\n'
     + _SIBLING
 )
+# A write one call deep whose only route to a test runs through a COLLIDING
+# name. `t` calls `other::run`, which reaches nothing; `run` also names the fn
+# that DOES reach the write. Convicting here convicts the wrong caller, and
+# that is exactly what produced wayland#1233's wcore-cli row.
+_COLLIDING_CHAIN = (
+    '    fn writes_the_global() { unsafe { std::env::set_var("SHARED_V", "x") }; }\n'
+    "    fn run() { writes_the_global(); }\n"
+    "    pub mod other {\n        pub fn run() {}\n    }\n"
+    "    #[test]\n    fn t() { other::run(); }\n"
+) + _SIBLING
+# The control for the above: the SAME shape with the intermediate name declared
+# exactly once, so the guard must not have switched the walk off.
+_UNIQUE_CHAIN = (
+    '    fn writes_the_global() { unsafe { std::env::set_var("SHARED_V", "x") }; }\n'
+    "    fn only_this_one_reaches_it() { writes_the_global(); }\n"
+    "    #[test]\n    fn t() { only_this_one_reaches_it(); }\n"
+) + _SIBLING
 _DEMO_SITE1 = "crates/demo/src/lib.rs::new"
 _DEMO_SITE2 = "crates/demo/src/lib.rs::newer"
 _DEMO_DIRECT = "crates/demo/src/lib.rs::t"
@@ -687,6 +734,8 @@ def self_test():
         ("src: the write one call deep, caller unserialized", _HELPER_UNSERIAL, None, True),
         ("src: the write one call deep, caller serialized", _HELPER_SERIAL, None, False),
         ("src: a guard nothing ever constructs", _HELPER_UNCALLED, None, False),
+        ("src: the chain runs through a colliding name", _COLLIDING_CHAIN, None, False),
+        ("src: the same chain, name declared once", _UNIQUE_CHAIN, None, True),
         ("src: set_var quoted in a doc comment", _COMMENT_ONLY, None, False),
         ("tests/: unserialized writer + sibling", None, _INT_UNSERIAL, True),
         ("tests/: the same writer, serialized", None, _INT_SERIAL, False),
@@ -1015,10 +1064,11 @@ def main():
           "serialized callers, %d reached an unserialized test and FAIL below."
           % (kinds.get("serialized-helper", 0),
              kinds.get("UNSERIALIZED-HELPER", 0)))
-    print("NOT audited by this gate: %d write(s) whose attribution key is a fn "
-          "name declared more than once in the binary (a colliding name would "
-          "convict the wrong caller), and %d whose callers are production code "
-          "or a call spelling this scan does not resolve."
+    print("NOT audited by this gate: %d write(s) whose attribution key -- or a "
+          "name ON THE WAY to it -- is a fn declared more than once in the "
+          "binary (a colliding name would convict the wrong caller), and %d "
+          "whose callers are production code or a call spelling this scan "
+          "does not resolve."
           % (kinds.get("unattributable-helper", 0),
              kinds.get("unreached-helper", 0)))
     print("shared-process integration leg: %d target(s) selected, %d test(s) "
