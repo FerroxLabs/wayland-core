@@ -1,0 +1,228 @@
+# THROWAWAY MEASUREMENT WORKFLOW — lane w15/mac2, release 0.13.14.
+# Must never reach `main` or the release branch. Scoped to `measure/**`, which
+# `ci.yml` does not list, so a push here costs one macOS runner and nothing else.
+#
+# wayland#1286 asks for the population's `--retries 0` RATE on native macOS.
+# `redundant_walk_root_is_not_walked_twice` is the member that cannot supply it
+# from CI: since 2026-09-07T16:20Z the macOS leg runs its binary in an isolated
+# step at `--retries 0 --test-threads 1` and the main step EXCLUDES it, so its
+# macOS results never enter the uploaded JUnit at all. That step has produced 19
+# consecutive native-macOS greens — but `--test-threads 1` REMOVES the parallel
+# contention this flake needs, so it changes the condition rather than measuring
+# it, and its green is not evidence about the flake.
+#
+# This job restores the condition: default parallelism, and a second arm under a
+# CPU load matching a saturated hosted runner, because during the real CI leg
+# this binary used to execute inside a fully-loaded workspace run. A green from
+# an idle host is a green from the wrong host.
+
+name: w15-mac2 walk rate + agent verify (THROWAWAY)
+
+on:
+  push:
+    branches:
+      - 'measure/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: never
+
+jobs:
+  walk-identity:
+    name: "walk_parallel_identity_test @ --retries 0, parallel"
+    runs-on: macos-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v6
+      - uses: loonghao/vx@v0.9.17
+        with:
+          setup: 'true'
+          cache: 'true'
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Host facts
+        run: |
+          set -euo pipefail
+          sw_vers
+          echo "logical cpus: $(sysctl -n hw.logicalcpu)"
+
+      - name: Confirm CI really does exclude this binary from the main step
+        run: |
+          set +e
+          set -uo pipefail
+          echo "=== isolated step ==="
+          /usr/bin/grep -n "walk_parallel_identity_test" .github/workflows/ci.yml | head -10
+          echo "(if this prints nothing the premise of this job is wrong and its result means something else)"
+
+      - name: Build
+        run: vx cargo nextest run --locked -p wcore-tools --test walk_parallel_identity_test --no-run
+
+      - name: "Arm A: default parallelism, idle host, n=20"
+        run: |
+          set +e
+          set -uo pipefail
+          mkdir -p /tmp/walk-idle
+          pass=0; fail=0
+          for i in $(seq 1 20); do
+            vx cargo nextest run --locked -p wcore-tools --test walk_parallel_identity_test \
+              --profile ci --retries 0 --no-fail-fast --no-tests=fail \
+              > "/tmp/walk-idle/run-${i}.log" 2>&1
+            rc=$?
+            if [ "$rc" = "0" ]; then pass=$((pass+1)); else fail=$((fail+1)); fi
+            echo "idle invocation ${i}: rc=${rc}"
+          done
+          echo "WALK_IDLE_PASS=${pass} WALK_IDLE_FAIL=${fail}"
+
+      - name: "Arm B: default parallelism under 2x-cpu load, n=20"
+        run: |
+          set +e
+          set -uo pipefail
+          mkdir -p /tmp/walk-load
+          n=$(( $(sysctl -n hw.logicalcpu) * 2 ))
+          for _ in $(seq 1 "$n"); do ( while :; do :; done ) & done
+          loadpids=$(jobs -p)
+          echo "spinners: ${n}"
+          pass=0; fail=0
+          for i in $(seq 1 20); do
+            vx cargo nextest run --locked -p wcore-tools --test walk_parallel_identity_test \
+              --profile ci --retries 0 --no-fail-fast --no-tests=fail \
+              > "/tmp/walk-load/run-${i}.log" 2>&1
+            rc=$?
+            if [ "$rc" = "0" ]; then pass=$((pass+1)); else fail=$((fail+1)); fi
+            echo "loaded invocation ${i}: rc=${rc} loadavg=$(sysctl -n vm.loadavg)"
+          done
+          # shellcheck disable=SC2086
+          kill $loadpids 2>/dev/null || true
+          echo "WALK_LOAD_PASS=${pass} WALK_LOAD_FAIL=${fail}"
+
+      - name: Grade
+        if: always()
+        run: |
+          set +e
+          set -uo pipefail
+          for dir in /tmp/walk-idle /tmp/walk-load; do
+            echo "=== ${dir} ==="
+            for t in redundant_walk_root_is_not_walked_twice \
+                     a_disjoint_grant_really_does_cost_a_second_walk; do
+              failed=$(/usr/bin/grep -l "FAIL .*${t}" ${dir}/*.log 2>/dev/null | /usr/bin/wc -l | tr -d ' ')
+              present=$(/usr/bin/grep -l "${t}" ${dir}/*.log 2>/dev/null | /usr/bin/wc -l | tr -d ' ')
+              echo "  ${t}: FAILED=${failed} PRESENT=${present}"
+            done
+            echo "  (PRESENT=0 makes every FAILED=0 above a report of ABSENCE, not of health)"
+          done
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: walk-identity-logs
+          path: |
+            /tmp/walk-idle
+            /tmp/walk-load
+          retention-days: 7
+
+  # -------------------------------------------------------------------------
+  # wayland#1289. The clippy/test gate for the KEY_STORE_NEVER_ASKED_EXTENSION
+  # repair, plus its RED arm. cargo is banned on the development Mac and all
+  # three Linux build slots are held by other lanes, so this runner is the
+  # compile check as well as the measurement.
+  #
+  # RED ARM: mutate the extension to 0s. `recv_timeout(Duration::ZERO)` returns
+  # Timeout immediately, which restores the exact pre-repair behaviour, so the
+  # new test must FAIL there and PASS in the green arm. As with the mcp arm, the
+  # mutation is proved to have landed on CODE before the build, because a
+  # mutation that silently matches nothing is a second green arm wearing a red
+  # label.
+  # -------------------------------------------------------------------------
+  agent-key-wait:
+    name: "recovery_confidential @ --retries 0 (${{ matrix.arm }})"
+    runs-on: macos-latest
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        arm: [green, red]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: loonghao/vx@v0.9.17
+        with:
+          setup: 'true'
+          cache: 'true'
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Mutate the extension to 0s (RED ARM ONLY) and prove it landed
+        if: matrix.arm == 'red'
+        run: |
+          set -euo pipefail
+          f=crates/wcore-agent/src/recovery_confidential.rs
+          pat='^pub(crate) const KEY_STORE_NEVER_ASKED_EXTENSION: Duration = Duration::from_secs(5);$'
+          before=$(/usr/bin/grep -c "$pat" "$f" || true)
+          if [ "$before" != "1" ]; then
+            echo "FAIL: expected exactly 1 code-line match, got ${before}"
+            /usr/bin/grep -n 'KEY_STORE_NEVER_ASKED_EXTENSION' "$f" || true
+            exit 1
+          fi
+          /usr/bin/sed -i '' 's|^pub(crate) const KEY_STORE_NEVER_ASKED_EXTENSION: Duration = Duration::from_secs(5);$|pub(crate) const KEY_STORE_NEVER_ASKED_EXTENSION: Duration = Duration::from_secs(0);|' "$f"
+          after=$(/usr/bin/grep -c '^pub(crate) const KEY_STORE_NEVER_ASKED_EXTENSION: Duration = Duration::from_secs(0);$' "$f")
+          [ "$after" = "1" ] || { echo "FAIL: mutation did not land"; exit 1; }
+          touch "$f"
+          echo "RED ARM ACTIVE:"
+          /usr/bin/grep -n 'KEY_STORE_NEVER_ASKED_EXTENSION: Duration' "$f"
+
+      - name: "clippy -D warnings (GREEN ARM ONLY: the red tree is mutated)"
+        if: matrix.arm == 'green'
+        run: |
+          set -euo pipefail
+          vx cargo clippy --locked -p wcore-agent -p wcore-mcp --all-targets -- -D warnings
+
+      - name: "clippy with the test-utils feature (the dead_code surface)"
+        if: matrix.arm == 'green'
+        run: |
+          set -euo pipefail
+          vx cargo clippy --locked -p wcore-agent --features test-utils --all-targets -- -D warnings
+
+      - name: "recovery_confidential unit tests x 5 @ --retries 0"
+        run: |
+          set +e
+          set -uo pipefail
+          mkdir -p /tmp/key
+          pass=0; fail=0
+          for i in $(seq 1 5); do
+            vx cargo nextest run --locked -p wcore-agent --lib \
+              --profile ci --retries 0 --no-fail-fast --no-tests=fail \
+              -E 'test(/recovery_confidential/)' \
+              > "/tmp/key/run-${i}.log" 2>&1
+            rc=$?
+            if [ "$rc" = "0" ]; then pass=$((pass+1)); else fail=$((fail+1)); fi
+            echo "invocation ${i}: rc=${rc}"
+          done
+          echo "KEY_PASS=${pass} KEY_FAIL=${fail}"
+
+      - name: Grade
+        if: always()
+        run: |
+          set +e
+          set -uo pipefail
+          for t in a_load_the_host_was_slow_to_schedule_is_given_one_bounded_extension \
+                   both_key_store_timeout_causes_are_told_apart; do
+            failed=$(/usr/bin/grep -l "FAIL .*${t}" /tmp/key/*.log 2>/dev/null | /usr/bin/wc -l | tr -d ' ')
+            present=$(/usr/bin/grep -l "${t}" /tmp/key/*.log 2>/dev/null | /usr/bin/wc -l | tr -d ' ')
+            echo "${t}: FAILED=${failed} PRESENT=${present}"
+          done
+          echo "(PRESENT=0 makes FAILED=0 a report of ABSENCE; the red arm is only a red arm if PRESENT>0)"
+          /usr/bin/grep -h "Summary \[" /tmp/key/*.log 2>/dev/null | head -5
+          /usr/bin/grep -h -A 4 "panicked at" /tmp/key/*.log 2>/dev/null | head -20
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: agent-key-wait-${{ matrix.arm }}-logs
+          path: /tmp/key
+          retention-days: 7
