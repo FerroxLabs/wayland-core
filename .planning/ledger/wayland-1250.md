@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "wcore-exec-backend tests race on the WAYLAND_EXEC_BACKEND_STATE_DIR process global in the shared-process suite"
 status: open
-last_verified_commit: 509f4426b
+last_verified_commit: cdd15c3dd
 criteria:
   - id: c1
     text: "temp_state() stops writing the process global: the state directory is passed to the constructor, the shape ContainerBackend::with_image already used for WAYLAND_EXEC_CONTAINER_IMAGE."
@@ -22,7 +22,7 @@ criteria:
     text: "Shown RED: the interleaving reproduces on a shared-process run before the fix, with the 1 passed / 1 failed signature quoted, and does not after. Isolation passes 8/8 today and so proves nothing either way."
     state: not-met
     owner: core
-    note: "AUTHORED 2026-08-31, not transcribed: the issue body declares no criteria, so this ticket could not have been graded or closed as filed. Derived from a measurement the body already records, so grading it does not re-derive the finding. State is not-met because no lane has claimed it."
+    note: "STILL NOT MET, and now not-met on EVIDENCE rather than on nobody having tried. THE RED ARM WAS BUILT AND IT DID NOT REPRODUCE. At 1b29659a5 `temp_state()` in tests/conformance_matrix.rs was restored VERBATIM to its pre-fix body from d3d29737b^ -- `unsafe { std::env::set_var(\"WAYLAND_EXEC_BACKEND_STATE_DIR\", dir.path()) }` returning the bare TempDir, with the mutation confirmed by `git diff` before any run. `cargo test -p wcore-exec-backend --test conformance_matrix` (SHARED PROCESS, plain cargo test, never nextest -- nextest gives each test its own process and can never see this class) was then run 20 times on hetzner-dsm at loadavg 26-29, one remote-proof invocation per trial, no retries: 20/20 `2 passed; 0 failed`, 0.93-1.05s each. The `1 passed / 1 failed` signature this criterion requires was NEVER OBSERVED. NOT A VACUOUS RUN, controlled: the two tests genuinely overlap in that shared process -- the same binary at `--test-threads=1` takes 1.26s against 0.93-1.05s in parallel, so roughly 0.26s of the ~1s run is concurrent and the interleaving window is real, just narrow. AFTER-ARM for completeness: 2 passed / 0 failed at cdd15c3dd. WHAT THIS MEANS: the redirection hazard c1 fixed is real as a mechanism, but the failure this ticket was filed on has not been shown to be it -- which is consistent with wayland#1298, where the ci-linux payload (`backend signing seed at <path> is not 32 bytes`) was traced to torn seed publication and not to a removed state dir. WHAT IS OWED: either a reproduction of the 1-passed/1-failed signature on the pre-fix body under the condition that actually produced it (the containerised shared-process integration leg, or a forced interleaving that is declared as forced), or a decision to supersede this criterion into wayland#1298 rather than leave a red arm nobody can raise."
   - id: c4
     text: "The three temp_state() rows carried as dated debt in wayland#1233 are REMOVED from .config/env-global-helper-debt.txt by this fix rather than left listed against a helper that no longer writes a global."
     state: met
