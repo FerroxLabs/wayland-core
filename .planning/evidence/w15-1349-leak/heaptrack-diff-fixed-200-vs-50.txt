@@ -1,0 +1,102 @@
+    35655 B         2 calls       238 B/cycle
+        _RNvMs4_NtCslNYArtu3iFV_5alloc7raw_vecNtB5_11RawVecInner15try_allocate_inCsduwmD7cSIQq_5gimli
+        alloc::raw_vec::RawVecInner$LT$A$GT$::with_capacity_in::hc2d94c01346c8c44
+        alloc::vec::Vec$LT$T$GT$::with_capacity::h32108ac2038652f0
+        parking_lot_core::parking_lot::HashTable::new::hc7fea27ab2750e89
+
+    33587 B       151 calls       224 B/cycle
+        wcore_acp::protocol::_::_$LT$impl$u20$serde_core..ser..Serialize$u20$for$u20$wcore_acp..protocol..MessageEvent$GT$::serialize::h800c8e0c7f1339df
+        wcore_acp::transport::rest::prompt::_$u7b$$u7b$closure$u7d$$u7d$::_$u7b$$u7b$closure$u7d$$u7d$::h68fd5facd27817b3
+
+    12943 B      3020 calls        86 B/cycle
+        wcore_tools::registry::ToolRegistry::to_tool_defs_filtered::_$u7b$$u7b$closure$u7d$$u7d$::hffe77de32c5ba61b
+        wcore_tools::registry::ToolRegistry::to_tool_defs_filtered::hdf632c5ec6d9b594
+        wcore_agent::engine::AgentEngine::assemble_turn_prelude::h10382381e8e45157
+        wcore_agent::engine::AgentEngine::run_inner_impl::_$u7b$$u7b$closure$u7d$$u7d$::h3620fdede4479e33
+        wcore_agent::engine::AgentEngine::run_inner::_$u7b$$u7b$closure$u7d$$u7d$::hd2b3f780d6507f5c
+
+    11653 B      2718 calls        78 B/cycle
+        wcore_tools::registry::ToolRegistry::to_tool_defs_filtered::_$u7b$$u7b$closure$u7d$$u7d$::hffe77de32c5ba61b
+        wcore_tools::registry::ToolRegistry::to_tool_defs_filtered::hdf632c5ec6d9b594
+        wcore_agent::engine::AgentEngine::assemble_turn_prelude::h10382381e8e45157
+        wcore_agent::engine::AgentEngine::run_inner_impl::_$u7b$$u7b$closure$u7d$$u7d$::h3620fdede4479e33
+        wcore_agent::engine::AgentEngine::run_inner::_$u7b$$u7b$closure$u7d$$u7d$::hd2b3f780d6507f5c
+
+     7342 B       604 calls        49 B/cycle
+        wcore_tools::registry::ToolRegistry::to_tool_defs_filtered::hdf632c5ec6d9b594
+        wcore_agent::engine::AgentEngine::assemble_turn_prelude::h10382381e8e45157
+        wcore_agent::engine::AgentEngine::run_inner_impl::_$u7b$$u7b$closure$u7d$$u7d$::h3620fdede4479e33
+        wcore_agent::engine::AgentEngine::run_inner::_$u7b$$u7b$closure$u7d$$u7d$::hd2b3f780d6507f5c
+        wcore_agent::engine::AgentEngine::run_with_content_audited::_$u7b$$u7b$closure$u7d$$u7d$::h7dfe0782a9a952d2
+
+      384 B       453 calls         3 B/cycle
+        wcore_tools::registry::ToolRegistry::to_tool_defs_filtered::_$u7b$$u7b$closure$u7d$$u7d$::hffe77de32c5ba61b
+        wcore_tools::registry::ToolRegistry::to_tool_defs_filtered::hdf632c5ec6d9b594
+        wcore_agent::engine::AgentEngine::assemble_turn_prelude::h10382381e8e45157
+        wcore_agent::engine::AgentEngine::run_inner_impl::_$u7b$$u7b$closure$u7d$$u7d$::h3620fdede4479e33
+        wcore_agent::engine::AgentEngine::run_inner::_$u7b$$u7b$closure$u7d$$u7d$::hd2b3f780d6507f5c
+
+      256 B       453 calls         2 B/cycle
+        wcore_tools::wayland_introspection::telemetry_schema::h1485457ebccccf91
+        wcore_tools::registry::ToolRegistry::to_tool_defs_filtered::_$u7b$$u7b$closure$u7d$$u7d$::hffe77de32c5ba61b
+        wcore_tools::registry::ToolRegistry::to_tool_defs_filtered::hdf632c5ec6d9b594
+        wcore_agent::engine::AgentEngine::assemble_turn_prelude::h10382381e8e45157
+        wcore_agent::engine::AgentEngine::run_inner_impl::_$u7b$$u7b$closure$u7d$$u7d$::h3620fdede4479e33
+
+      -72 B       300 calls        -0 B/cycle
+        wcore_agent::engine::AgentEngine::commit_provider_recovery_checkpoint::_$u7b$$u7b$closure$u7d$$u7d$::hf0d2dbbf5421fbfa
+        wcore_agent::engine::AgentEngine::run_inner_impl::_$u7b$$u7b$closure$u7d$$u7d$::h3620fdede4479e33
+        wcore_agent::engine::AgentEngine::run_inner::_$u7b$$u7b$closure$u7d$$u7d$::hd2b3f780d6507f5c
+        wcore_agent::engine::AgentEngine::run_with_content_audited::_$u7b$$u7b$closure$u7d$$u7d$::h7dfe0782a9a952d2
+        wcore_agent::engine::AgentEngine::run_with_content::_$u7b$$u7b$closure$u7d$$u7d$::h6d78dca0c611481d
+
+     -564 B       150 calls        -4 B/cycle
+        wcore_budget::tracker::BudgetTracker::reserve_turn::h53388c626c065ff3
+        wcore_agent::budget_authority::BudgetAuthorityCoordinator::reserve_provider_dispatch::h7317a32a59e3c0ec
+        wcore_agent::engine::AgentEngine::run_inner_impl::_$u7b$$u7b$closure$u7d$$u7d$::h3620fdede4479e33
+        wcore_agent::engine::AgentEngine::run_inner::_$u7b$$u7b$closure$u7d$$u7d$::hd2b3f780d6507f5c
+        wcore_agent::engine::AgentEngine::run_with_content_audited::_$u7b$$u7b$closure$u7d$$u7d$::h7dfe0782a9a952d2
+
+    -1443 B       150 calls       -10 B/cycle
+        wcore_tools::registry::fold_deferred_into_catalog::h8610cb9bfa2ad1a1
+        wcore_agent::engine::AgentEngine::apply_tool_deferral::h950ca3a6606123ba
+        wcore_agent::engine::AgentEngine::assemble_turn_prelude::h10382381e8e45157
+        wcore_agent::engine::AgentEngine::run_inner_impl::_$u7b$$u7b$closure$u7d$$u7d$::h3620fdede4479e33
+        wcore_agent::engine::AgentEngine::run_inner::_$u7b$$u7b$closure$u7d$$u7d$::hd2b3f780d6507f5c
+
+    -1454 B      1052 calls       -10 B/cycle
+        wcore_agent::session_journal::JournalWriter::append::ha1cab50a6fa33f0f
+        wcore_agent::session_journal::SessionJournal::append::h813db950955bf351
+        wcore_agent::journal_provider::append_event::_$u7b$$u7b$closure$u7d$$u7d$::_$u7b$$u7b$closure$u7d$$u7d$::hfa2b0edb486c2cd3
+
+    -2488 B       150 calls       -17 B/cycle
+        wcore_providers::retry::observe_provider_attempts::_$u7b$$u7b$closure$u7d$$u7d$::h6b26cd184f414d13
+        wcore_providers::retry::scope_max_retries::_$u7b$$u7b$closure$u7d$$u7d$::h1c65c830cdcb37ba
+        wcore_providers::retry::scope_configured_fallback_admitter::_$u7b$$u7b$closure$u7d$$u7d$::h3b9a82e6a084ab85
+        wcore_providers::http_client::awaiting_first_byte::_$u7b$$u7b$closure$u7d$$u7d$::_$u7b$$u7b$closure$u7d$$u7d$::h62cfc7e138b52e47
+        wcore_providers::http_client::awaiting_first_byte::_$u7b$$u7b$closure$u7d$$u7d$::h5aa89bb1952760cd
+
+    -2631 B       902 calls       -18 B/cycle
+        wcore_agent::session_journal::JournalWriter::append::ha1cab50a6fa33f0f
+        wcore_agent::session_journal::SessionJournal::append::h813db950955bf351
+        wcore_agent::journal_provider::append_event::_$u7b$$u7b$closure$u7d$$u7d$::_$u7b$$u7b$closure$u7d$$u7d$::hfa2b0edb486c2cd3
+
+    -3706 B       150 calls       -25 B/cycle
+        wcore_providers::retry::observe_provider_attempts::_$u7b$$u7b$closure$u7d$$u7d$::h6b26cd184f414d13
+        wcore_providers::retry::scope_max_retries::_$u7b$$u7b$closure$u7d$$u7d$::h1c65c830cdcb37ba
+        wcore_providers::retry::scope_configured_fallback_admitter::_$u7b$$u7b$closure$u7d$$u7d$::h3b9a82e6a084ab85
+        wcore_providers::http_client::awaiting_first_byte::_$u7b$$u7b$closure$u7d$$u7d$::_$u7b$$u7b$closure$u7d$$u7d$::h62cfc7e138b52e47
+        wcore_providers::http_client::awaiting_first_byte::_$u7b$$u7b$closure$u7d$$u7d$::h5aa89bb1952760cd
+
+    -3706 B       150 calls       -25 B/cycle
+        wcore_agent::spend_guard::SpendGuardProvider::meter::heac1fa8c938ffd81
+        wcore_providers::attempt_lifecycle::scope_provider_attempt_lifecycle::_$u7b$$u7b$closure$u7d$$u7d$::h6b9510c5b18f0dde
+        wcore_providers::retry::observe_provider_attempts::_$u7b$$u7b$closure$u7d$$u7d$::h6b26cd184f414d13
+        wcore_providers::retry::scope_max_retries::_$u7b$$u7b$closure$u7d$$u7d$::h1c65c830cdcb37ba
+        wcore_providers::retry::scope_configured_fallback_admitter::_$u7b$$u7b$closure$u7d$$u7d$::h3b9a82e6a084ab85
+
+   -33556 B       452 calls      -224 B/cycle
+        wcore_agent::session_journal::JournalWriter::append::ha1cab50a6fa33f0f
+        wcore_agent::session_journal::SessionJournal::append::h813db950955bf351
+        wcore_agent::journal_provider::append_event::_$u7b$$u7b$closure$u7d$$u7d$::_$u7b$$u7b$closure$u7d$$u7d$::hfa2b0edb486c2cd3
+

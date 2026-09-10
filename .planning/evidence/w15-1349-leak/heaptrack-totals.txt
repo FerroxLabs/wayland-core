@@ -1,0 +1,6 @@
+ht50       total runtime: 113.619000s.|calls to allocation functions: 2648218 (23307/s)|peak heap memory consumption: 73.25M|peak RSS (including heaptrack overhead): 268.49M|total memory leaked: 6.87M|
+ht200      total runtime: 443.352000s.|calls to allocation functions: 12902881 (29103/s)|peak heap memory consumption: 73.40M|peak RSS (including heaptrack overhead): 273.66M|total memory leaked: 7.42M|
+fix-ht50   total runtime: 94.081000s.|calls to allocation functions: 2656724 (28238/s)|peak heap memory consumption: 73.22M|peak RSS (including heaptrack overhead): 271.64M|total memory leaked: 6.33M|
+fix-ht200  total runtime: 445.134000s.|calls to allocation functions: 12901812 (28984/s)|peak heap memory consumption: 73.25M|peak RSS (including heaptrack overhead): 269.37M|total memory leaked: 6.39M|
+c32ht64    total runtime: 17.706000s.|calls to allocation functions: 2640804 (149147/s)|peak heap memory consumption: 133.02M|peak RSS (including heaptrack overhead): 427.26M|total memory leaked: 120.58M|
+c32ht320   total runtime: 84.883000s.|calls to allocation functions: 16441874 (193700/s)|peak heap memory consumption: 145.15M|peak RSS (including heaptrack overhead): 523.17M|total memory leaked: 120.92M|

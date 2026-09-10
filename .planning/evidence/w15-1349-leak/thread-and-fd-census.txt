@@ -1,0 +1,44 @@
+Live census of the `wayland-core acp serve` process, taken while the probe was
+running and AFTER every session it had created was DELETEd (each cycle asserts
+delete_status 204, get_after_delete_status 404, and `GET /v1/sessions` == []).
+
+Command (per running arm, on hetzner-dsm):
+
+  for p in $(ps -eo pid,args --no-headers | grep "[w]ayland-core.*acp serve" | awk '{print $1}'); do
+    grep -q "w15-leak/<arm>/" /proc/$p/environ || continue
+    cat /proc/$p/task/*/comm | sort | uniq -c | sort -rn
+    ls -l /proc/$p/fd | awk '{print $NF}' | sort | uniq -c | sort -rn
+    grep -E "Threads|VmRSS|VmData" /proc/$p/status
+  done
+
+--- od32arena2, concurrency 32, ~461 sessions created and deleted -------------
+
+  thread names                          fd targets
+    462 wayland-recover                   461 .../wayland-core/credentials.confidential-key.lock
+    123 tokio-rt-worker                    28 .../wayland-core/sessions/<uuid>.journal*
+     14 notify-rs inoti                    18 socket
+      1 wcore-main                         16 anon_inode:[eventpoll]
+      1 wayland-core                       15 anon_inode:[eventfd]
+      1 tracing-appende                    14 anon_inode:inotify
+                                            2 .../core.log
+                                            1 .../logs/wayland-core.log
+                                            1 /dev/null
+
+  VmRSS 292,228 kB   VmData 2,118,644 kB   Threads 563   maps 2308   fds 608
+
+  smaps_rollup: Rss 324,380 kB / Pss 272,973 kB / Anonymous 218,616 kB /
+                Private_Dirty 218,616 kB / Pss_File 54,357 kB
+
+  ("wayland-recover" is the 15-char truncation of the thread name set at
+   crates/wcore-agent/src/recovery_confidential.rs:691, "wayland-recovery-key".)
+
+--- controls at concurrency 1 -------------------------------------------------
+
+  arm     sessions(files/5)  wayland-recovery-key  total threads  lock fds  VmRSS
+  od1        ~300                   0                  102            0     141,292 kB
+  pay16      ~57                    0                  101            0     364,920 kB
+  fixA       ~362                   1                  103            1     201,296 kB
+
+One abandoned thread and one held `credentials.confidential-key.lock` fd per
+session at concurrency 32; none at concurrency 1. The RSS slopes split the same
+way: 101,104 B/cycle at concurrency 32 vs 7,033-12,908 B/cycle at concurrency 1.

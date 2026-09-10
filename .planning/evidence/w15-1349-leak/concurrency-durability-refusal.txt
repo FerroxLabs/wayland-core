@@ -1,0 +1,32 @@
+Not #1349, but found while trying to run the concurrency arms, and it BLOCKS any
+attempt to reproduce the soak's concurrency legs under the soak's own config.
+
+Binary e7b46387e (sha256 2d6d69b1...), [session] enabled = true,
+require_durability = true, credentials backend encrypted_file with
+WAYLAND_VAULT_PASSPHRASE set — i.e. exactly evidence/mixed-soak353/driver.py's
+config. Six concurrent POST /v1/sessions/{id}/prompt, each expecting 32768 bytes
+of streamed text. Result, as [index, elapsed_ms, frames, first_frame]:
+
+  [0, 5087, 1, {"kind":"error","error":{"code":-32003,"message":"Session
+      persistence authority unavailable: [session] require_durability = true,
+      but this profile's credential store was asked for the recovery key and did
+      not answer in time, so this turn's provider request cannot be sealed for
+      crash recovery. Unlock or repair the OS keyring for this profile and send
+      the message again. Or set [session] require_dura..."}}]
+  [1, 3956, 2, text_delta(32768 bytes) then done/end_turn]
+  [2, 5088, 1, same refusal]
+  [3, 5091, 1, same refusal]
+  [4, 5087, 1, same refusal]
+  [5, 5088, 1, same refusal]
+
+One turn served, five refused, all five at the same fixed budget (5.087-5.091 s).
+At concurrency 8 this was 238 of 240 cycles; at concurrency 32, 318 of 320. It is
+the caller-side view of the same `credentials.confidential-key.lock` serialisation
+that strands the loader threads.
+
+WHAT IS NOT ESTABLISHED: the two-hour soak at source 3530199fb reported 0 of 8938
+cycles failing at the same concurrencies with the same config. So either this is a
+regression between 3530199fb and e7b46387e, or it is load-dependent and hetzner
+was quieter during the soak (loadavg 28.0/28.6 there; 46-77 during these runs).
+Deciding that needs a build of 3530199fb, which was not done. It needs its own
+ticket either way.

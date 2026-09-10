@@ -1,0 +1,105 @@
+   125552 B     29294 calls       837 B/cycle
+        wcore_agent::engine::AgentEngine::recovery_posture::he693da464e9635fe
+        wcore_agent::engine::AgentEngine::commit_terminal_recovery_checkpoint::_$u7b$$u7b$closure$u7d$$u7d$::h7abfe3f81b0474a5
+        wcore_agent::engine::AgentEngine::run_inner_impl::_$u7b$$u7b$closure$u7d$$u7d$::h3620fdede4479e33
+        wcore_agent::engine::AgentEngine::run_inner::_$u7b$$u7b$closure$u7d$$u7d$::hd2b3f780d6507f5c
+        wcore_agent::engine::AgentEngine::run_with_content_audited::_$u7b$$u7b$closure$u7d$$u7d$::h7dfe0782a9a952d2
+
+   125552 B     29294 calls       837 B/cycle
+        wcore_agent::engine::AgentEngine::recovery_posture::_$u7b$$u7b$closure$u7d$$u7d$::h74b51bb69a3bbd19
+        wcore_agent::engine::AgentEngine::recovery_posture::he693da464e9635fe
+        wcore_agent::engine::AgentEngine::commit_terminal_recovery_checkpoint::_$u7b$$u7b$closure$u7d$$u7d$::h7abfe3f81b0474a5
+        wcore_agent::engine::AgentEngine::run_inner_impl::_$u7b$$u7b$closure$u7d$$u7d$::h3620fdede4479e33
+        wcore_agent::engine::AgentEngine::run_inner::_$u7b$$u7b$closure$u7d$$u7d$::hd2b3f780d6507f5c
+
+    78643 B       150 calls       524 B/cycle
+        wcore_agent::approval::ApprovalBridge::spawn_reaper::h2d95d680e55d7d7c
+        wcore_agent::bootstrap::AgentBootstrap::build_scoped::_$u7b$$u7b$closure$u7d$$u7d$::h4e0ea6ee76a74598
+        wcore_egress::policy::with_default_policy::_$u7b$$u7b$closure$u7d$$u7d$::h78ffd21d78e822b9
+        wcore_agent::bootstrap::AgentBootstrap::build::_$u7b$$u7b$closure$u7d$$u7d$::h46648e3877b33148
+        wcore_cli::acp_engine::EngineTurnEngine::build_session::_$u7b$$u7b$closure$u7d$$u7d$::h9a3d891aa94f7fb8
+
+    67112 B       302 calls       447 B/cycle
+        wcore_agent::session_journal::reducer::state_payload_digest::h431a99c51c02b58d
+        wcore_agent::engine::AgentEngine::recovery_posture::_$u7b$$u7b$closure$u7d$$u7d$::h1f84810fcf71fa3f
+        wcore_agent::engine::AgentEngine::recovery_posture::he693da464e9635fe
+        wcore_agent::engine::AgentEngine::commit_terminal_recovery_checkpoint::_$u7b$$u7b$closure$u7d$$u7d$::h7abfe3f81b0474a5
+        wcore_agent::engine::AgentEngine::run_inner_impl::_$u7b$$u7b$closure$u7d$$u7d$::h3620fdede4479e33
+
+    33607 B      2864 calls       224 B/cycle
+        wcore_agent::engine::AgentEngine::run_inner_impl::_$u7b$$u7b$closure$u7d$$u7d$::h3620fdede4479e33
+        wcore_agent::engine::AgentEngine::run_inner::_$u7b$$u7b$closure$u7d$$u7d$::hd2b3f780d6507f5c
+        wcore_agent::engine::AgentEngine::run_with_content_audited::_$u7b$$u7b$closure$u7d$$u7d$::h7dfe0782a9a952d2
+        wcore_agent::engine::AgentEngine::run_with_content::_$u7b$$u7b$closure$u7d$$u7d$::h6d78dca0c611481d
+        wcore_agent::engine::AgentEngine::run::_$u7b$$u7b$closure$u7d$$u7d$::h3596e46ecd35df3d
+
+    33556 B       151 calls       224 B/cycle
+        wcore_agent::engine::AgentEngine::run_inner_impl::_$u7b$$u7b$closure$u7d$$u7d$::h3620fdede4479e33
+        wcore_agent::engine::AgentEngine::run_inner::_$u7b$$u7b$closure$u7d$$u7d$::hd2b3f780d6507f5c
+        wcore_agent::engine::AgentEngine::run_with_content_audited::_$u7b$$u7b$closure$u7d$$u7d$::h7dfe0782a9a952d2
+        wcore_agent::engine::AgentEngine::run_with_content::_$u7b$$u7b$closure$u7d$$u7d$::h6d78dca0c611481d
+        wcore_agent::engine::AgentEngine::run::_$u7b$$u7b$closure$u7d$$u7d$::h3596e46ecd35df3d
+
+    33556 B       151 calls       224 B/cycle
+        wcore_agent::session_journal::JournalWriter::append::ha1cab50a6fa33f0f
+        wcore_agent::session_journal::SessionJournal::append_built_from_head::h598698c9e86e2e54
+        wcore_agent::budget_authority::BudgetAuthorityCoordinator::build_and_append::h1bf5c5728eecdccb
+        wcore_agent::budget_authority::BudgetAuthorityCoordinator::commit_current_authority::h3aae7ff789c31f06
+        wcore_agent::budget_authority::BudgetAuthorityCoordinator::settle_provider_dispatch::ha601feb81b60c401
+
+    33556 B       161 calls       224 B/cycle
+        wcore_types::message::_::_$LT$impl$u20$serde_core..ser..Serialize$u20$for$u20$wcore_types..message..ContentBlock$GT$::serialize::h145c1f4baf12e1b6
+        wcore_types::message::_::_$LT$impl$u20$serde_core..ser..Serialize$u20$for$u20$wcore_types..message..Message$GT$::serialize::hcf91e8da42b4bdc7
+        wcore_agent::engine::AgentEngine::commit_terminal_recovery_checkpoint::_$u7b$$u7b$closure$u7d$$u7d$::h7abfe3f81b0474a5
+        wcore_agent::engine::AgentEngine::run_inner_impl::_$u7b$$u7b$closure$u7d$$u7d$::h3620fdede4479e33
+        wcore_agent::engine::AgentEngine::run_inner::_$u7b$$u7b$closure$u7d$$u7d$::hd2b3f780d6507f5c
+
+    25180 B     14798 calls       168 B/cycle
+        wcore_agent::engine::AgentEngine::recovery_posture::_$u7b$$u7b$closure$u7d$$u7d$::h74b51bb69a3bbd19
+        wcore_agent::engine::AgentEngine::recovery_posture::he693da464e9635fe
+        wcore_agent::engine::AgentEngine::commit_terminal_recovery_checkpoint::_$u7b$$u7b$closure$u7d$$u7d$::h7abfe3f81b0474a5
+        wcore_agent::engine::AgentEngine::run_inner_impl::_$u7b$$u7b$closure$u7d$$u7d$::h3620fdede4479e33
+        wcore_agent::engine::AgentEngine::run_inner::_$u7b$$u7b$closure$u7d$$u7d$::hd2b3f780d6507f5c
+
+    23347 B       150 calls       156 B/cycle
+        wcore_agent::approval::ApprovalBridge::new::hcadb39127232276a
+        wcore_agent::bootstrap::AgentBootstrap::build_scoped::_$u7b$$u7b$closure$u7d$$u7d$::h4e0ea6ee76a74598
+        wcore_egress::policy::with_default_policy::_$u7b$$u7b$closure$u7d$$u7d$::h78ffd21d78e822b9
+        wcore_agent::bootstrap::AgentBootstrap::build::_$u7b$$u7b$closure$u7d$$u7d$::h46648e3877b33148
+        wcore_cli::acp_engine::EngineTurnEngine::build_session::_$u7b$$u7b$closure$u7d$$u7d$::h9a3d891aa94f7fb8
+
+    17203 B       150 calls       115 B/cycle
+        wcore_agent::approval::ApprovalBridge::spawn_reaper::_$u7b$$u7b$closure$u7d$$u7d$::h02c5eaabf5079c6d
+
+    12288 B       150 calls        82 B/cycle
+        wcore_agent::approval::ApprovalBridge::new::hcadb39127232276a
+        wcore_agent::bootstrap::AgentBootstrap::build_scoped::_$u7b$$u7b$closure$u7d$$u7d$::h4e0ea6ee76a74598
+        wcore_egress::policy::with_default_policy::_$u7b$$u7b$closure$u7d$$u7d$::h78ffd21d78e822b9
+        wcore_agent::bootstrap::AgentBootstrap::build::_$u7b$$u7b$closure$u7d$$u7d$::h46648e3877b33148
+        wcore_cli::acp_engine::EngineTurnEngine::build_session::_$u7b$$u7b$closure$u7d$$u7d$::h9a3d891aa94f7fb8
+
+      736 B       151 calls         5 B/cycle
+        wcore_agent::cache_ledger::CacheLedger::record_turn::h911508c60b0ba7c6
+        wcore_agent::cache_ledger::CacheLedgerRecorder::record_turn::h80de8d45e7323a8e
+        wcore_agent::engine::AgentEngine::record_cache_ledger_turn::h0ffd29a64b373ce3
+        wcore_agent::engine::AgentEngine::run_inner_impl::_$u7b$$u7b$closure$u7d$$u7d$::h3620fdede4479e33
+        wcore_agent::engine::AgentEngine::run_inner::_$u7b$$u7b$closure$u7d$$u7d$::hd2b3f780d6507f5c
+
+      632 B       151 calls         4 B/cycle
+        wcore_agent::session_journal::JournalWriter::append::ha1cab50a6fa33f0f
+        wcore_agent::session_journal::SessionJournal::append_built_from_head::h598698c9e86e2e54
+        wcore_agent::budget_authority::BudgetAuthorityCoordinator::build_and_append::h1bf5c5728eecdccb
+        wcore_agent::budget_authority::BudgetAuthorityCoordinator::commit_current_authority::h3aae7ff789c31f06
+        wcore_agent::budget_authority::BudgetAuthorityCoordinator::settle_provider_dispatch::ha601feb81b60c401
+
+      632 B       151 calls         4 B/cycle
+        wcore_agent::session_journal::reducer::apply_event::h5a0e722f3c994182
+        wcore_agent::session_journal::reducer::reduce::h7dc0a64d9ea992a8
+        wcore_agent::session_journal::JournalWriter::append::ha1cab50a6fa33f0f
+        wcore_agent::session_journal::SessionJournal::append_built_from_head::h598698c9e86e2e54
+        wcore_agent::budget_authority::BudgetAuthorityCoordinator::build_and_append::h1bf5c5728eecdccb
+
+      512 B       151 calls         3 B/cycle
+        wcore_cli::acp_engine::ProtocolToMessageStream::project::h5683491b49fde6d1
+        wcore_acp::server::AcpServer::tee_into_log::_$u7b$$u7b$closure$u7d$$u7d$::heb5900b32109d6b4
+
