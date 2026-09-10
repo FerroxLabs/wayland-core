@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "First Windows retry-flake cluster: a wall-clock ratio guard and a dispatch-budget test at 94% of its kill line (CI (Array))"
 status: open
-last_verified_commit: df291c1ce
+last_verified_commit: bdd687b29
 criteria:
   - id: c1
     text: "one_turn_costs_about_two_whole_payload_scrub_passes has its estimator changed to reduce variance WITHOUT moving either bound, and is re-measured at n>=40 under load with a stated failure rate. Widening the 1.5..2.5 window does not satisfy this."
