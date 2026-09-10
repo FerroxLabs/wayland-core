@@ -1,0 +1,10 @@
+samples=24 failed_or_unexpected=0
+arm=A n=12 median=17.209 mean=17.337 stdev=1.261 min=15.110 max=19.194
+arm=B n=12 median=17.814 mean=17.695 stdev=1.379 min=14.988 max=19.752
+paired B-A per round: r1:+1.409 r2:-0.037 r3:+2.624 r4:-1.353 r5:-0.868 r6:-1.521 r7:+0.089 r8:-1.499 r9:+0.757 r10:+2.422 r11:+2.387 r12:-0.122
+paired n=12 median_diff=+0.026s mean_diff=+0.357s B_slower_rounds=6/12
+bootstrap95 median paired diff: [-1.110, +1.898] s (seed 1353, 20000 resamples)
+median ratio B/A = 1.0351 bootstrap95 [0.9480, 1.1052]
+load1 at sample start: min=35.15 median=39.95 max=45.24 (96 CPU)
+load1 arm=A median=39.95
+load1 arm=B median=40.45
