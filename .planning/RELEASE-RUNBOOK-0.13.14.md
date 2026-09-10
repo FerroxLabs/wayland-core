@@ -66,3 +66,67 @@ Published version; exact source SHA; authenticated release manifest; Windows x64
 and Mac ARM64 binaries with SHA256; contract manifest. State absolute values per
 binary, never "unchanged" — a relative statement is relative to a baseline the
 reader may not share.
+
+## Corrections measured 2026-09-10 (session C) — supersede the sections above
+
+### The integ push already runs 11 of the 13 required checks
+An earlier note in `HANDOFF-CLAUDE-0910-B.md` said three required checks never
+run on `integ/**`. Measured against the last integ push run (34438211271), it is
+**two**, and the eleven that DO run include every leg that was assumed late:
+
+    Build (aarch64-apple-darwin)    Build (aarch64-pc-windows-msvc)
+    Build (aarch64-unknown-linux-gnu)  Build (x86_64-apple-darwin)
+    Build (x86_64-pc-windows-msvc)  Build (x86_64-unknown-linux-gnu)
+    CI (Array)   CI (linux-containerized)   CI (macos-latest)
+    Eval acceptance gate (Linux, containerized)   report
+
+`ci.yml`'s `on:` block is `pull_request→main`, `push→main`, `push→'lane/**'`,
+`push→'integ/**'`, and the darwin/windows matrix gates on
+`startsWith(github.ref_name,'integ/')` — so an integ push gets the full matrix
+WITHOUT needing the `[ci-darwin]` / `[ci-windows]` commit markers a `lane/**`
+push needs. A green integ run therefore predicts the PR far better than assumed.
+
+### The two that are genuinely PR-only, and what to do about each
+- **`scan`** (`osv-scan.yml`) — also carries `workflow_dispatch`, so it can be
+  fired against any ref before the PR exists:
+  `gh workflow run osv-scan.yml -R FerroxLabs/wayland-core --ref <ref>`
+- **`Bench regression (linux)`** (`bench-regression.yml`) — fires ONLY on
+  `pull_request→main` / `push→main`, so it cannot be dispatched. It is the one
+  check whose first execution is the PR. It does not need CI: the gate is
+  `cargo run --bin wcore-eval-bench -- --floor 0.7 --report-json bench.json`
+  over a 30-case corpus, exit 0 iff `pass_ratio >= 0.7`. Run that on hetzner
+  before opening the PR and the last late surprise is gone. The 0.7 floor is
+  pinned in BOTH the workflow and the binary default on purpose — if you change
+  one, change both, deliberately.
+
+### core#404 c1 does not have to wait for the PR
+`ci.yml` fires on `push→'lane/**'`, so the cancellation demonstration can be
+staged on a throwaway lane branch and never touches the release run. Sequence:
+push the tree to `lane/<name>`, watch job `CI (linux-containerized)` until step
+`Upload nextest JUnit checkpoint (survives a later cancellation)` (step 33 on
+the last run) reaches `conclusion: success` AND a later step is `in_progress`,
+then `gh run cancel`. Download `nextest-junit-linux-containerized-checkpoint`
+and quote the report job's `CANCELLED WITH TEST EVIDENCE` line. Cancelling the
+release run instead would cost a clean green and buy nothing.
+
+### wayland#1272 c2 is one Sean action, not engineering work
+Its whole residual was wayland#1256 c3. At this tree wayland#1256 reads c1 met,
+c2 met, c3 **met** — `symbol:scripts/check-test-scope-coverage.py::receipts_for`
+resolves at `scripts/check-test-scope-coverage.py:169` and the gate is wired at
+`scripts/preflight.sh:416`. Five of tranche 3a's six are CLOSED on the tracker;
+#1256 is the sixth and is release-closable on its merits. A lane may not close
+an issue, so c2 stays not-met until `gh issue close FerroxLabs/wayland#1256`.
+
+### The shared-home hazard is cross-PROCESS, not intra-process
+Recorded because the earlier framing was wrong and would send the next lane to
+the wrong instrument. `tools/remote-proof.py` exports one
+`WAYLAND_HOME="$root/test-homes/$nonce/wayland-core"` for the WHOLE cargo
+invocation, so every process it spawns resolves the same home. Nextest does not
+hide this class — it sharpens it, because more processes means more contention.
+Proven by pid mismatch (`F24_CHANNEL_LEASE=observer owner_pid=3931773` while the
+panicking process was `3931789`) and by a two-process sqlite migration race that
+one process cannot produce: both read `user_version` below target, both run the
+same `ALTER TABLE`, the loser gets `duplicate column name: last_latency_ms`,
+`Memory::open` returns `Err`, and bootstrap silently degrades to `NullMemory` —
+which accepts every write and returns a fresh id, so one root cause surfaced as
+several unrelated-looking assertion failures.
