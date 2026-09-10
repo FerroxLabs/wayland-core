@@ -387,20 +387,31 @@ async fn the_bootstrap_prompt_uses_the_real_window_derived_skill_budget() {
          something in segment 0 is still sized against it"
     );
 
-    // Precondition: the planted skill reached the listing in BOTH arms, so
-    // there is a listing whose size the budget could act on. Without this a
-    // session that rendered no skills section at all would make the
-    // comparison below pass by rendering two empty listings.
-    for (label, listing) in [("1_000_000", &roomy), ("2_000", &tight)] {
-        assert!(
-            listing.contains("issue-1150"),
-            "precondition: the planted skill never reached the {label}-token listing"
-        );
-    }
+    // Precondition: there is a real listing whose size the budget acts on.
+    //
+    // THIS USED TO SAY "the planted skill reached the listing in BOTH arms",
+    // read off the system prompt, and it was VACUOUS on the tight arm: the
+    // marker it matched, "issue-1150", is also the first two segments of
+    // UNLISTED_MODEL, which the prompt's intro states on every session. An
+    // 80-character budget cannot hold a single entry, so the tight arm never
+    // contained the planted skill and the precondition passed on the model
+    // name. Reading the listing instead of the prompt exposed that, and the
+    // honest form of the same claim is asymmetric: the roomy arm HOLDS the
+    // skill, the tight arm DECLARES that it dropped it.
+    assert!(
+        roomy.contains("issue-1150-skill"),
+        "precondition: the planted skill never reached the 1,000,000-token listing"
+    );
     assert!(
         roomy.contains("ISSUE_1150_DESCRIPTION_MARKER"),
         "precondition: a 1,000,000-token window gives a 40,000-char budget, so the planted \
          description must survive in full"
+    );
+    assert!(
+        tight.contains(wcore_skills::prompt::SKILL_OVERFLOW_HINT),
+        "precondition: an 80-char budget must render a TRIMMED listing that says \
+         so; a listing with nothing to trim would make the comparison below \
+         meaningless: {tight}"
     );
 
     assert!(
