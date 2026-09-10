@@ -9,18 +9,16 @@ Owners come from each ledger's `owner:` on its UNMET criteria — the
 owner is read, not assigned, so a row cannot claim an owner the
 ledger does not.
 
-Blocking issues: 28   Outstanding criteria: 48
+Blocking issues: 26   Outstanding criteria: 43
 
 | Issue | Owner | Outstanding | Title |
 |---|---|---:|---|
 | FerroxLabs/wayland#1116 | core | 2 | Desktop: no abandon verb on the host wire leaves a crash-interrupted session wedged in-app |
-| FerroxLabs/wayland#1233 | core | 2 | Eight helper-attributed env-global hazards, now audited and carried as dated debt |
 | FerroxLabs/wayland#1238 | core | 1 | Flaky: parallel_spawn_caps_active_child_engines_across_shared_calls fails on a 15s wall-clock budget above loadavg ~190, not on its invariant |
 | FerroxLabs/wayland#1240 | core | 1 | await_completion_returns_on_match reds the shared-process lib leg on a timing race, not a process global |
-| FerroxLabs/wayland#1244 | core | 3 | The live /model-switch leg of the spend-audit keying proof needs a PTY-driven TUI run |
+| FerroxLabs/wayland#1244 | core | 1 | The live /model-switch leg of the spend-audit keying proof needs a PTY-driven TUI run |
 | FerroxLabs/wayland#1245 | core | 4 | Flaky: t19_live_negative_leg has a 45s drain window with zero headroom; it fails 3/3 above loadavg ~150 |
 | FerroxLabs/wayland#1250 | core | 1 | wcore-exec-backend tests race on the WAYLAND_EXEC_BACKEND_STATE_DIR process global in the shared-process suite |
-| FerroxLabs/wayland#1256 | core | 1 | A lane can break the Desktop contract corpus and pass its own gate: preflight.sh never asks whether the corpus is current |
 | FerroxLabs/wayland#1269 | core | 2 | Unmerged lane/f13-* branches held out of 0.13.12: four carry work integ lacks, two await their owning lane, five archived as redundant |
 | FerroxLabs/wayland#1272 | core | 2 | 0.13.12 release board: all 32 blocking issues mapped to an owner (17 in flight, 15 unassigned) |
 | FerroxLabs/wayland#1282 | core | 2 | dangerous_expiry_cancels_production_streaming_bash_process_tree fails only under full-suite contention, and is not allowlisted |
