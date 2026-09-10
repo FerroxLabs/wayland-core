@@ -150,8 +150,7 @@ async fn user_notices(memory_root: &std::path::Path) -> Vec<String> {
     .await
     .expect("bootstrap must still succeed — memory degrades, it does not abort the session");
     drop(result);
-    let infos = notices.infos.lock().unwrap().clone();
-    infos
+    notices.infos.lock().unwrap().clone()
 }
 
 /// THE #1351 c2 GUARD.
