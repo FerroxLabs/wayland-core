@@ -698,25 +698,31 @@ impl RetainedHistory {
             return;
         }
         let freed = before - after;
-        let subtracted = self
+        let mut underflowed = false;
+        // One atomic update: saturating here, never a later `store(0)` that
+        // would overwrite bytes other logs add concurrently.
+        let _ = self
             .total
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |total| {
-                total.checked_sub(freed)
+                underflowed = total < freed;
+                Some(total.saturating_sub(freed))
             });
-        if subtracted.is_err() {
+        if underflowed {
             // Unreachable while every change goes through `SessionLog::mutate`
             // and a retired log is emptied through it (see `forget_log`).
-            // Reaching here means the total drifted below the logs it counts:
-            // fail a debug build outright, and report it in release rather
-            // than wrap to a value that would evict every log on every append.
+            // This is a LAST RESORT, not a drift detector: it only fires when
+            // drift exceeds the whole remaining total, and a smaller drift
+            // passes unnoticed. The deterministic eviction tests are what
+            // prove the accounting exact. If it ever fires, fail a debug build
+            // outright, and in release report it and saturate rather than wrap
+            // to a value that would evict every log on every append.
             if cfg!(debug_assertions) {
                 panic!("retained history total would underflow by {freed} bytes");
             }
             tracing::error!(
                 freed,
-                "retained history accounting drifted below the logs it counts; clamped at zero"
+                "retained history accounting drifted below the logs it counts; saturated at zero"
             );
-            self.total.store(0, Ordering::Release);
         }
     }
 }
@@ -749,12 +755,16 @@ fn forget_log(log: &SessionLog, history: &RetainedHistory) {
 ///
 /// Bounds, stated rather than implied. No lock serializes evictors: each finds
 /// the largest log from the per-log atomics without locking any log, then
-/// locks only that victim for one O(1) pop, so a recorder never waits for
-/// another recorder's eviction work and never frees more than it added. The
-/// total can therefore sit above the cap by the appends still in flight -- at
-/// most one event (at most 1 MiB) per recording session -- and below it by at
-/// most one event per concurrent evictor; once appends stop it is at or under
-/// the cap. What an eviction can wait on: one read of the map per call (a
+/// locks only that victim, re-checks the cap under that lock, and pops at most
+/// one event. So a recorder never waits for another recorder's eviction work,
+/// and an evictor that finds the total already back under the cap -- because
+/// others popped while it waited for the victim's lock -- pops nothing. A call
+/// stops once it has freed at least what its own append added, so a small
+/// append can free one larger event: up to one event more than it added. The
+/// total can sit above the cap by the appends still in flight -- at most one
+/// event (at most 1 MiB) per recording session -- and below it by at most one
+/// event per evictor whose re-check and pop raced another's; once appends
+/// stop it is at or under the cap. What an eviction can wait on: one read of the map per call (a
 /// create or close holding it for write delays that by one insert or remove),
 /// and the victim's lock (a resume cloning that log's tail delays the pop).
 async fn evict_for_append(
@@ -778,6 +788,12 @@ async fn evict_for_append(
         #[cfg(test)]
         eviction_tests::pause_at_eviction_gate(&history.total).await;
         freed += victim.mutate(history, |log| {
+            // Re-check under the victim's lock (second review, MAJOR 1):
+            // evictors parked on this lock while another popped must not keep
+            // trimming the largest log once the total is back under the cap.
+            if !history.over_cap() {
+                return 0;
+            }
             let before = log.retained_bytes();
             log.evict_oldest();
             before - log.retained_bytes()
