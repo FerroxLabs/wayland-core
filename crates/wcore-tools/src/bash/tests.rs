@@ -2721,6 +2721,51 @@ fn workspace_whose_walk_costs_at_least(
     panic!("could not grow a workspace whose walk costs {target:?} within 240k entries");
 }
 
+/// The KNOWN-POSITIVE CONTROL for every `secret_deny_walk_count() == 0`
+/// assertion below.
+///
+/// core#403 c1: those assertions replaced a wall-clock ratio, and a counter
+/// that reads zero because nothing is wired to it looks exactly like a walk
+/// that was correctly escaped. So each cancellation test drives the SAME policy
+/// through the SAME call path with the token NOT cancelled and requires the
+/// counter to move. Zero then becomes evidence about the cancellation rather
+/// than about the instrument.
+///
+/// It is the WIRING that is controlled, not the function: the counter is moved
+/// by `BashTool`'s own manifest build (`bash.rs:156`), not by a direct call to
+/// the policy, so a call site that stopped building a manifest at all would
+/// fail here rather than pass everything.
+async fn assert_uncancelled_exec_walks(
+    policy: &std::sync::Arc<crate::workspace_policy::WorkspacePolicy>,
+    streaming: bool,
+) {
+    let before = policy.secret_deny_walk_count();
+    let ctx = canned_ctx(std::sync::Arc::clone(policy), CannedBackend::enforcing());
+    let sink = crate::NullToolOutputSink;
+    let result = if streaming {
+        BashTool
+            .execute_streaming_with_ctx(json!({"command": "echo hi"}), &ctx, &sink)
+            .await
+    } else {
+        BashTool
+            .execute_with_ctx(json!({"command": "echo hi"}), &ctx)
+            .await
+    };
+    assert!(
+        !result.content.contains("cancelled"),
+        "instrument control: the control call must NOT be cancelled; got: {}",
+        result.content
+    );
+    let after = policy.secret_deny_walk_count();
+    assert!(
+        after > before,
+        "instrument control: an uncancelled exec on this policy did not \
+         recompute the deny set ({before} -> {after}), so a zero count on the \
+         cancelled call proves nothing; got: {}",
+        result.content
+    );
+}
+
 /// #1111, call site `bash.rs:641` (`execute_with_ctx`): Esc must not wait for
 /// the walk.
 #[tokio::test]
@@ -2730,25 +2775,25 @@ async fn a_cancelled_bash_does_not_wait_for_the_secret_deny_walk() {
     let root = std::fs::canonicalize(dir.path()).unwrap();
     let (policy, walk) = workspace_whose_walk_costs_at_least(&root, CALIBRATED_WALK);
 
-    let ctx = canned_ctx(policy, CannedBackend::enforcing());
+    let ctx = canned_ctx(std::sync::Arc::clone(&policy), CannedBackend::enforcing());
     ctx.cancel.cancel();
 
-    let started = std::time::Instant::now();
     let result = BashTool
         .execute_with_ctx(json!({"command": "echo hi"}), &ctx)
         .await;
-    let elapsed = started.elapsed();
 
     assert!(
         result.content.contains("cancelled"),
         "a cancelled command must say so; got: {}",
         result.content
     );
-    assert!(
-        elapsed * 3 < walk,
-        "cancellation waited {elapsed:?} for a walk measured at {walk:?} — the \
-         manifest build is outside the cancellation scope"
+    assert_eq!(
+        policy.secret_deny_walk_count(),
+        0,
+        "a cancelled call recomputed the deny set on a tree whose walk costs \
+         {walk:?} — the manifest build is inside the cancellation scope"
     );
+    assert_uncancelled_exec_walks(&policy, false).await;
 }
 
 /// #1111, call site `bash.rs:641`: the `timeout` parameter must bound the whole
@@ -2908,26 +2953,27 @@ async fn a_cancelled_streaming_bash_does_not_wait_for_the_secret_deny_walk() {
     let root = std::fs::canonicalize(dir.path()).unwrap();
     let (policy, walk) = workspace_whose_walk_costs_at_least(&root, CALIBRATED_WALK);
 
-    let ctx = canned_ctx(policy, CannedBackend::enforcing());
+    let ctx = canned_ctx(std::sync::Arc::clone(&policy), CannedBackend::enforcing());
     ctx.cancel.cancel();
 
     let sink = crate::NullToolOutputSink;
-    let started = std::time::Instant::now();
     let result = BashTool
         .execute_streaming_with_ctx(json!({"command": "echo hi"}), &ctx, &sink)
         .await;
-    let elapsed = started.elapsed();
 
     assert!(
         result.content.contains("cancelled"),
         "a cancelled streaming command must say so; got: {}",
         result.content
     );
-    assert!(
-        elapsed * 3 < walk,
-        "streaming cancellation waited {elapsed:?} for a walk measured at \
-         {walk:?} — the manifest build is outside the cancellation scope"
+    assert_eq!(
+        policy.secret_deny_walk_count(),
+        0,
+        "a cancelled streaming call recomputed the deny set on a tree whose \
+         walk costs {walk:?} — the manifest build is inside the cancellation \
+         scope"
     );
+    assert_uncancelled_exec_walks(&policy, true).await;
 }
 
 /// #1111, call site `bash.rs:744`: the timeout must bound the streaming path's
@@ -3254,36 +3300,55 @@ async fn a_workspace_that_does_not_walk_cancels_promptly_even_on_a_large_tree() 
     let root = std::fs::canonicalize(dir.path()).unwrap();
     let (_contained, walk) = workspace_whose_walk_costs_at_least(&root, CALIBRATED_WALK);
 
+    // The instrument's own liveness, taken FIRST and on this thread: a
+    // contained walk of this tree must enumerate it. Without this, "the
+    // trusted_local posture visited no entries" is equally consistent with a
+    // counter nothing increments any more.
+    let before = crate::workspace_policy::walk_entries();
+    let contained_deny = crate::workspace_policy::WorkspacePolicy::contained(&root)
+        .secret_deny_paths_for_backend(true);
+    let contained_entries = crate::workspace_policy::walk_entries() - before;
+    assert!(
+        contained_entries > 0 && contained_deny.iter().any(|p| p.ends_with(".env")),
+        "instrument control: a contained walk of this tree must enumerate it \
+         and find the planted .env; visited {contained_entries} entries, deny \
+         list {contained_deny:?}"
+    );
+
     let local = std::sync::Arc::new(crate::workspace_policy::WorkspacePolicy::trusted_local(
         &root,
     ));
     // The control's own control: this posture must genuinely skip the walk.
-    let started = std::time::Instant::now();
+    // STATED IN ENTRIES VISITED, not in wall-clock time (core#403 c1) — the
+    // same repair `contained_construction_does_not_walk_the_workspace` took for
+    // the same reason: two timings on a loaded 96-core host compress until the
+    // ratio decides the scheduler rather than the walk.
+    let before = crate::workspace_policy::walk_entries();
     let deny = local.secret_deny_paths_for_backend(true);
-    let local_walk = started.elapsed();
-    assert!(
-        local_walk * 10 < walk,
-        "trusted_local computed its deny list in {local_walk:?} against a \
-         contained walk of {walk:?} on the SAME tree — expected no walk at all \
-         (deny list: {} entries)",
+    let local_entries = crate::workspace_policy::walk_entries() - before;
+    assert_eq!(
+        local_entries,
+        0,
+        "trusted_local enumerated {local_entries} filesystem entries on the \
+         SAME tree a contained walk visits {contained_entries} of — expected no \
+         walk at all (deny list: {} entries)",
         deny.len()
     );
 
-    let ctx = canned_ctx(local, CannedBackend::enforcing());
+    let ctx = canned_ctx(std::sync::Arc::clone(&local), CannedBackend::enforcing());
     ctx.cancel.cancel();
 
-    let started = std::time::Instant::now();
     let result = BashTool
         .execute_with_ctx(json!({"command": "echo hi"}), &ctx)
         .await;
-    let elapsed = started.elapsed();
 
     assert!(result.content.contains("cancelled"));
-    assert!(
-        elapsed * 3 < walk,
-        "the no-walk posture took {elapsed:?} on a tree whose contained walk \
-         costs {walk:?} — the red arm's latency would not be attributable to \
-         the walk"
+    assert_eq!(
+        local.secret_deny_walk_count(),
+        1,
+        "the no-walk posture recomputed its deny set inside a cancelled call, \
+         on a tree whose contained walk costs {walk:?} — exactly one \
+         recomputation is expected here, the direct call above"
     );
 }
 
