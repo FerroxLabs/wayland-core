@@ -1312,7 +1312,8 @@ mod tests {
         let server = AcpServer::new().with_turn_engine(Arc::new(MockTurnEngine::new(script)));
         let total = |server: &AcpServer| {
             server
-                .retained_total
+                .retained
+                .total
                 .load(std::sync::atomic::Ordering::Acquire)
         };
         let retained = |server: &AcpServer, id: &str| {
