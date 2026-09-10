@@ -368,10 +368,18 @@ async fn the_bootstrap_prompt_uses_the_real_window_derived_skill_budget() {
     // now window-INDEPENDENT. Two sessions differing only in the window produce
     // the same segment 0, and neither names a skill. Without this the port
     // below would be a silent downgrade rather than a stated one.
-    assert!(
-        !roomy_prompt.contains("issue-1150") && !tight_prompt.contains("issue-1150"),
-        "the boot prompt still names installed skills"
-    );
+    // Matched on the skill NAMES and the description marker, not on the bare
+    // "issue-1150" prefix: that also spells UNLISTED_MODEL, which the intro
+    // legitimately states, and the first cut of this assertion fired on the
+    // model name.
+    for (label, prompt) in [("1_000_000", &roomy_prompt), ("2_000", &tight_prompt)] {
+        assert!(
+            !prompt.contains("issue-1150-filler-")
+                && !prompt.contains("issue-1150-skill")
+                && !prompt.contains("ISSUE_1150_DESCRIPTION_MARKER"),
+            "the {label}-token boot prompt still names installed skills"
+        );
+    }
     assert_eq!(
         roomy_prompt.len(),
         tight_prompt.len(),
