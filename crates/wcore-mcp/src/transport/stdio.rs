@@ -311,12 +311,37 @@ fn kill_process_group(process_group_id: u32) -> std::io::Result<()> {
 /// So the census is re-taken until it settles or the budget below expires.
 /// This does not weaken the guard: a member that is genuinely alive and that
 /// this process is not permitted to signal does not become `SZOMB` and does
-/// not leave the group, so it is still reported — just later. The exact XNU
-/// bookkeeping that makes `killpg` skip an exiting member (whether it is the
-/// `P_LIST_EXITED` / `P_WEXIT` transition or something else) is deliberately
-/// NOT asserted here: the repair depends only on the two observations being
-/// separated in time, which is measurable from userspace, and not on which
-/// kernel flag causes the skip.
+/// not leave the group, so it is still reported — just later.
+///
+/// # The window, MEASURED on a real macOS host rather than reasoned about
+///
+/// A C probe (`kill(-pgid, SIGKILL)` spun until it first fails, then an
+/// immediate `KERN_PROC_PGRP` census) on macos-latest, macOS 26.6.2 arm64,
+/// 3 logical CPUs — the same 3-vCPU hosted-runner shape this cluster keeps
+/// failing on. 400 iterations idle and 400 under a 2x-CPU spinner load:
+///
+/// ```text
+///                     idle        loaded
+///   EPERM + live       384/400     388/400
+///   EPERM + clean       16/400      12/400
+///   ESRCH / other        0           0
+///   settle, mean        52 us       71 us
+///   settle, max        361 us     8354 us
+///   p_flag & P_WEXIT   384/384     388/388
+/// ```
+///
+/// Two things follow, and neither was known before. The disagreement is not
+/// rare — it is the NORMAL outcome, 96 % of the time, and the flake was rare
+/// only because most of `close()`'s callers do not race it. And the member
+/// `killpg` declines to signal is `p_stat == SRUN` (2) with `P_WEXIT`
+/// (`0x00002000`) set in every single sample: it is already inside `exit(2)`,
+/// which is precisely the state the census's `p_stat != SZOMB` predicate
+/// cannot see and `killpg` will not signal.
+///
+/// `P_WEXIT` is recorded as DATA, not depended on. The repair keys off the two
+/// observations being separated in time, which is true whatever XNU calls the
+/// flag, and would keep working if Apple stopped exporting it. The budget
+/// below is sized against the 8.4 ms worst case measured here.
 #[cfg(unix)]
 fn classify_group_kill_failure(
     process_group_id: u32,
@@ -332,14 +357,14 @@ fn classify_group_kill_failure(
 /// How long [`classify_group_kill_failure`] keeps re-reading the census before
 /// it calls a member that is still there a containment failure.
 ///
-/// Sized from the mechanism rather than from taste. The window being absorbed
-/// is one process's transit from "kernel will no longer signal it" to
-/// "`p_stat == SZOMB`", which is kernel bookkeeping on an already-doomed
-/// process and does not wait on any userspace work. Half a second is orders of
-/// magnitude more than that transit needs even on a 3-vCPU hosted runner under
-/// full load, and it is short enough that the one path that pays it in full —
-/// a real surviving descendant, which is an error either way — is not
-/// noticeably slower to report.
+/// Sized from the MEASUREMENT in [`classify_group_kill_failure`]'s doc, not
+/// from taste. The window being absorbed is one process's transit from "kernel
+/// will no longer signal it" to "`p_stat == SZOMB`": measured mean 52 us and
+/// max 361 us idle, mean 71 us and max 8.4 ms under a 2x-CPU load, on the
+/// 3-vCPU hosted macOS runner this flake lives on. 500 ms is 60x the worst
+/// case observed there, and it is short enough that the one path that pays it
+/// in full — a real surviving descendant, which is an error either way — is
+/// not noticeably slower to report.
 ///
 /// Nothing pays this in the common case: a torn-down group answers `Live(0)`
 /// on the first read and returns immediately.
