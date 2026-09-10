@@ -9,7 +9,7 @@ Owners come from each ledger's `owner:` on its UNMET criteria — the
 owner is read, not assigned, so a row cannot claim an owner the
 ledger does not.
 
-Blocking issues: 32   Outstanding criteria: 65
+Blocking issues: 32   Outstanding criteria: 63
 
 | Issue | Owner | Outstanding | Title |
 |---|---|---:|---|
@@ -21,7 +21,7 @@ Blocking issues: 32   Outstanding criteria: 65
 | FerroxLabs/wayland#1245 | core | 4 | Flaky: t19_live_negative_leg has a 45s drain window with zero headroom; it fails 3/3 above loadavg ~150 |
 | FerroxLabs/wayland#1250 | core | 1 | wcore-exec-backend tests race on the WAYLAND_EXEC_BACKEND_STATE_DIR process global in the shared-process suite |
 | FerroxLabs/wayland#1256 | core | 1 | A lane can break the Desktop contract corpus and pass its own gate: preflight.sh never asks whether the corpus is current |
-| FerroxLabs/wayland#1269 | core | 3 | Unmerged lane/f13-* branches held out of 0.13.12: four carry work integ lacks, two await their owning lane, five archived as redundant |
+| FerroxLabs/wayland#1269 | core | 2 | Unmerged lane/f13-* branches held out of 0.13.12: four carry work integ lacks, two await their owning lane, five archived as redundant |
 | FerroxLabs/wayland#1272 | core | 3 | 0.13.12 release board: all 32 blocking issues mapped to an owner (17 in flight, 15 unassigned) |
 | FerroxLabs/wayland#1282 | core | 2 | dangerous_expiry_cancels_production_streaming_bash_process_tree fails only under full-suite contention, and is not allowlisted |
 | FerroxLabs/wayland#1283 | core | 3 | Skills are still injected on every ordinary turn, with no relevance or activation gate (#1280 c3/c4/c5, #1150 c5 skills half) |
@@ -41,7 +41,7 @@ Blocking issues: 32   Outstanding criteria: 65
 | FerroxLabs/wayland-core#401 | core | 1 | an_unknown_window_sizes_the_skill_listing precondition cannot pass in a clean container, so every integ/f13 CI run is red |
 | FerroxLabs/wayland-core#404 | core | 1 | A ci-linux cancellation at the 120-minute budget destroys the JUnit evidence the run already produced |
 | FerroxLabs/wayland-core#415 | core | 2 | Close the quarantine console bypass with a restricting-SID token, without removing the feature (from #389 c1) |
-| FerroxLabs/wayland-core#424 | core | 2 | mutants-nightly has produced zero data in 87 runs: every leg dies in ~30s on a missing target/ parent, and the step exits 0 so it can never go red |
+| FerroxLabs/wayland-core#424 | core | 1 | mutants-nightly has produced zero data in 87 runs: every leg dies in ~30s on a missing target/ parent, and the step exits 0 so it can never go red |
 | FerroxLabs/wayland-core#434 | core | 3 | The #338 c2 Windows residual pin reports the escape CLOSED while the same report shows it open |
 | FerroxLabs/wayland-core#449 | core | 1 | [mutants-nightly] wcore-cron — surviving mutants (2026-09-04) |
 | FerroxLabs/wayland-core#451 | core | 2 | Four of five mutation legs cannot run their unmutated test suite inside the per-crate timeout, so they test zero mutants |
