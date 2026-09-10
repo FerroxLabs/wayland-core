@@ -1,6 +1,8 @@
+use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Utc};
@@ -923,8 +925,15 @@ fn is_expired_empty_session(meta: &SessionMeta, now: SystemTime) -> bool {
 
 /// Execute `f(index)` with an exclusive advisory lock on the index file.
 ///
-/// Uses a `.lock` sentinel file with a stale-lock timeout of 30 s so a
-/// SIGKILL of a writer does not permanently block readers.
+/// Two layers, taken in this order and released in the reverse one:
+///
+/// 1. [`InProcessIndexLock`] queues the writers of THIS process. Only the
+///    thread at its head ever touches the sentinel, so no in-process writer
+///    can meet, steal or delete another's sentinel, and none fails because
+///    another held the lock past the sentinel's fixed 1 s budget (#1355).
+/// 2. A `.lock` sentinel file excludes writers in OTHER processes, with a
+///    stale-lock timeout of 30 s so a SIGKILL of a writer does not
+///    permanently block readers.
 ///
 /// The closure receives a `&mut SessionIndex` and any mutations are
 /// atomically written back to `index.json` after `f` returns.
@@ -935,11 +944,13 @@ where
     std::fs::create_dir_all(directory)?;
     let lock_path = directory.join("index.lock");
     let index_path = directory.join("index.json");
+    let stale_after = Duration::from_secs(30);
 
     #[cfg(test)]
     let waiting_since = std::time::Instant::now();
+    let in_process = InProcessIndexLock::acquire(directory, stale_after)?;
     // Acquire the sentinel lock with stale-lock timeout.
-    acquire_sentinel_lock(&lock_path, Duration::from_secs(30))?;
+    acquire_sentinel_lock(&lock_path, stale_after)?;
 
     #[cfg(test)]
     let acquired_at = std::time::Instant::now();
@@ -977,6 +988,9 @@ where
     #[cfg(test)]
     tests::leave_index_holder();
     let _ = std::fs::remove_file(&lock_path);
+    // Only now, with the sentinel gone, may the next in-process writer run.
+    // Releasing earlier would hand it this sentinel and the 1 s budget again.
+    drop(in_process);
     #[cfg(test)]
     tests::record_index_timing(
         acquired_at.duration_since(waiting_since),
@@ -984,6 +998,96 @@ where
         wrote_index,
     );
     result
+}
+
+/// One index directory's place in the queue of this process's writers (#1355).
+///
+/// The sentinel's fixed 1 s budget exists so that a peer PROCESS which died
+/// holding it cannot wedge this one. None of that applies between threads of
+/// one process: a holder here cannot die without taking every waiter with it,
+/// and a hold past 1 s is only a slow `fsync` under load, which is how CI's
+/// shared-process lib step failed. So in-process writers wait here for up to
+/// the same threshold the sentinel treats as proof of a dead holder, then give
+/// up with an error; they never steal. The bound stays, so a holder hung in
+/// the filesystem cannot hang every later writer forever.
+///
+/// Keyed by the canonical directory so two spellings of one store share a
+/// queue. If canonicalisation fails the raw path is the key, which at worst
+/// leaves that writer to the sentinel's own exclusion, as before.
+struct InProcessIndexLock {
+    key: PathBuf,
+    slot: Arc<IndexLockSlot>,
+}
+
+#[derive(Default)]
+struct IndexLockSlot {
+    held: Mutex<bool>,
+    released: Condvar,
+}
+
+fn index_lock_slots() -> MutexGuard<'static, HashMap<PathBuf, Arc<IndexLockSlot>>> {
+    static SLOTS: OnceLock<Mutex<HashMap<PathBuf, Arc<IndexLockSlot>>>> = OnceLock::new();
+    SLOTS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+impl InProcessIndexLock {
+    fn acquire(directory: &Path, bound: Duration) -> anyhow::Result<Self> {
+        let key = std::fs::canonicalize(directory).unwrap_or_else(|_| directory.to_path_buf());
+        let slot = Arc::clone(index_lock_slots().entry(key.clone()).or_default());
+        let started = std::time::Instant::now();
+        let mut held = slot.held.lock().unwrap_or_else(PoisonError::into_inner);
+        while *held {
+            let waited = started.elapsed();
+            #[cfg(test)]
+            tests::record_index_lock_contention(waited);
+            if waited >= bound {
+                drop(held);
+                forget_idle_slot(&key, &slot);
+                anyhow::bail!(
+                    "Could not acquire index lock for {} after {}s: another writer in this process still holds it",
+                    directory.display(),
+                    bound.as_secs()
+                );
+            }
+            // Sliced, so the bound is re-checked even without a wake-up.
+            let slice = (bound - waited).min(Duration::from_millis(50));
+            held = slot
+                .released
+                .wait_timeout(held, slice)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        *held = true;
+        drop(held);
+        Ok(Self { key, slot })
+    }
+}
+
+impl Drop for InProcessIndexLock {
+    fn drop(&mut self) {
+        *self
+            .slot
+            .held
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = false;
+        self.slot.released.notify_one();
+        forget_idle_slot(&self.key, &self.slot);
+    }
+}
+
+/// Remove `key`'s slot from the registry once nobody holds or awaits it, so a
+/// process that opens many stores (the test suite) does not accumulate them.
+fn forget_idle_slot(key: &Path, slot: &Arc<IndexLockSlot>) {
+    let mut slots = index_lock_slots();
+    // Clones are only taken under this registry lock, so a count of 2 (the
+    // registry's and the caller's) proves no other writer holds or awaits it.
+    if slots.get(key).is_some_and(|entry| Arc::ptr_eq(entry, slot)) && Arc::strong_count(slot) == 2
+    {
+        slots.remove(key);
+    }
 }
 
 /// Write `lock_path` atomically.  If the file already exists and is younger
