@@ -142,12 +142,19 @@ mod tests {
             Some(std::ffi::OsStr::new("channel-state")),
             "state files must live under the profile's channel-state directory"
         );
-        // Non-vacuity: a hashed name is 16 hex digits plus the fixed affixes,
-        // so an empty or missing file_name would satisfy the equality above.
+        // Non-vacuity: two missing `file_name()`s compare equal as `None`, so
+        // the equality above would pass on a path that has no name at all.
+        // Asserted on the SHAPE rather than a length constant -- the first
+        // draft of this line said 25 and the real name is 32, which the suite
+        // caught immediately.
         let name = a.file_name().unwrap().to_string_lossy().into_owned();
+        let hex = name
+            .strip_prefix("telegram-")
+            .and_then(|s| s.strip_suffix(".offset"))
+            .unwrap_or_else(|| panic!("expected telegram-<hex>.offset, got {name}"));
         assert!(
-            name.starts_with("telegram-") && name.ends_with(".offset") && name.len() == 25,
-            "expected telegram-<16 hex>.offset, got {name}"
+            hex.len() == 16 && hex.chars().all(|c| c.is_ascii_hexdigit()),
+            "expected a 16-digit hex key, got {hex:?} from {name}"
         );
     }
 }
