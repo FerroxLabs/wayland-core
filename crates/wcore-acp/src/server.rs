@@ -1067,6 +1067,75 @@ mod tests {
         }
     }
 
+    /// wayland#1352 c1. Measured on `acp serve` (diag build 784419c4b, c8 16 MiB
+    /// fast readers): each session's recorder waited 1.1-1.6 s for the
+    /// process-wide event-log lock that every other session's recorder and
+    /// delivery task took per event, against 4-52 ms at concurrency 1. Its
+    /// engine then spent the one-second relay budget and the turn was
+    /// cancelled. Holding that shared state here stands in for another
+    /// session's log work; this session's turn must still record and deliver.
+    #[tokio::test]
+    async fn another_sessions_event_log_work_does_not_stall_this_sessions_turn() {
+        let chunk = 32 * 1024;
+        let mut script: Vec<MessageEvent> = (0..64)
+            .map(|_| MessageEvent::TextDelta {
+                text: "x".repeat(chunk),
+            })
+            .collect();
+        script.push(MessageEvent::Done {
+            stop_reason: "end_turn".to_string(),
+            turn_id: String::new(),
+        });
+        let server = AcpServer::new().with_turn_engine(Arc::new(MockTurnEngine::new(script)));
+        let other = server.create_session(empty_create()).await.unwrap();
+        let this = server.create_session(empty_create()).await.unwrap();
+        let response = server
+            .send_message(MessageSendRequest {
+                session_id: this.session_id.clone(),
+                text: "go".to_string(),
+                tools: Vec::new(),
+            })
+            .await
+            .unwrap();
+
+        let other_sessions_log_work = server.events.read().await;
+        let live = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            response.collect::<Vec<_>>(),
+        )
+        .await;
+        drop(other_sessions_log_work);
+
+        let frames = live.expect(
+            "this session's turn stalled while another session held shared event-log state",
+        );
+        let text: usize = frames
+            .iter()
+            .map(|frame| match frame {
+                MessageEvent::TextDelta { text } => text.len(),
+                _ => 0,
+            })
+            .sum();
+        assert_eq!(text, 64 * chunk, "{:?}", frames.last());
+        assert!(matches!(frames.last(), Some(MessageEvent::Done { .. })));
+        assert_eq!(
+            server
+                .event_tip(&this.session_id)
+                .await
+                .expect("this session keeps its log")
+                .position,
+            65
+        );
+        assert_eq!(
+            server
+                .event_tip(&other.session_id)
+                .await
+                .expect("the other session keeps its log")
+                .position,
+            0
+        );
+    }
+
     #[tokio::test]
     async fn create_then_get_roundtrips() {
         let server = AcpServer::new();
