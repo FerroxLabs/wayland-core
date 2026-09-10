@@ -9146,6 +9146,7 @@ dependencies = [
  "tracing",
  "utoipa",
  "uuid",
+ "wcore-acp",
  "wcore-config",
  "wcore-egress",
 ]
