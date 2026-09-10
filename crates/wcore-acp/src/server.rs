@@ -129,6 +129,10 @@ pub struct AcpServer {
     events: Arc<RwLock<HashMap<String, SharedLog>>>,
     /// Encoded bytes retained across every session log. See [`RetainedHistory`].
     retained: Arc<RetainedHistory>,
+    /// The aggregate live-delivery budget this server's channels and charges
+    /// use: the single process-wide budget, unless a test opted into an
+    /// isolated one with [`Self::with_isolated_delivery_budget`].
+    delivery_budget: &'static crate::bounded::DeliveryBudget,
     /// Retained events per session stream. See [`Self::with_event_retention`].
     event_retention: usize,
     /// Bounded ledger backing the `Idempotency-Key` header on the mutating
@@ -211,6 +215,7 @@ impl AcpServer {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             events: Arc::new(RwLock::new(HashMap::new())),
             retained: Arc::new(RetainedHistory::default()),
+            delivery_budget: crate::bounded::DeliveryBudget::process(),
             event_retention: crate::cursor::DEFAULT_RETENTION,
             commands: Arc::new(RwLock::new(CommandLedger::new())),
             role_policy: None,
@@ -233,6 +238,17 @@ impl AcpServer {
     /// Lowering it does not lose events silently: a cursor that falls outside
     /// the window gets [`crate::cursor::CursorError::TooOld`] naming the oldest
     /// position still servable, so the client resynchronises deliberately.
+    /// TEST ISOLATION ONLY. Charge this server's live delivery against a
+    /// separate budget, so tests sharing one process -- the shared-process lib
+    /// suite runs a crate's unit tests as threads of one binary -- cannot
+    /// refuse or detach each other's readers through the aggregate. Production
+    /// never calls this: every server otherwise shares the process budget.
+    #[doc(hidden)]
+    pub fn with_isolated_delivery_budget(mut self) -> Self {
+        self.delivery_budget = crate::bounded::DeliveryBudget::isolated();
+        self
+    }
+
     pub fn with_event_retention(mut self, events: usize) -> Self {
         self.event_retention = events.clamp(1, crate::cursor::DEFAULT_RETENTION);
         self
@@ -454,9 +470,11 @@ impl AcpServer {
             Event(Cursor),
             Overload,
         }
-        let channels = crate::bounded::channel(overflow.clone())
+        let budget = self.delivery_budget;
+        let channels = budget
+            .channel(overflow.clone())
             .ok()
-            .zip(crate::bounded::channel(DeliveryPosition::Overload).ok());
+            .zip(budget.channel(DeliveryPosition::Overload).ok());
         let (mut positions_tx, rx) = match channels {
             Some(((tx, rx), (positions_tx, mut positions_rx))) => {
                 let events = Arc::clone(&self.events);
@@ -481,7 +499,7 @@ impl AcpServer {
                             tx.overload();
                             break;
                         };
-                        let Ok(position_charge) = crate::bounded::retain(&cursor) else {
+                        let Ok(position_charge) = budget.retain(&cursor) else {
                             tx.overload();
                             break;
                         };
@@ -492,9 +510,9 @@ impl AcpServer {
                             // measured for this exact event, so nothing is
                             // encoded while this session's log is locked.
                             let charge = if size == 0 {
-                                crate::bounded::retain(&event.event)
+                                budget.retain(&event.event)
                             } else {
-                                crate::bounded::retain_encoded(size)
+                                budget.retain_encoded(size)
                             };
                             charge.ok().map(|charge| (event.event.clone(), charge))
                         });
@@ -1261,7 +1279,9 @@ mod tests {
             stop_reason: "end_turn".to_string(),
             turn_id: String::new(),
         });
-        let server = AcpServer::new().with_turn_engine(Arc::new(MockTurnEngine::new(script)));
+        let server = AcpServer::new()
+            .with_isolated_delivery_budget()
+            .with_turn_engine(Arc::new(MockTurnEngine::new(script)));
         let other = server.create_session(empty_create()).await.unwrap();
         let this = server.create_session(empty_create()).await.unwrap();
         let response = server
@@ -1325,7 +1345,9 @@ mod tests {
                 turn_id: String::new(),
             }))
             .collect();
-        let server = AcpServer::new().with_turn_engine(Arc::new(MockTurnEngine::new(script)));
+        let server = AcpServer::new()
+            .with_isolated_delivery_budget()
+            .with_turn_engine(Arc::new(MockTurnEngine::new(script)));
         let total = |server: &AcpServer| {
             server
                 .retained

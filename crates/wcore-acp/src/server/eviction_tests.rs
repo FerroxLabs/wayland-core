@@ -174,7 +174,7 @@ const BIG: usize = 256 * 1024;
 /// and must be zero once every session is gone -- not low, and never wrapped.
 #[tokio::test]
 async fn a_close_between_victim_choice_and_pop_keeps_retained_total_exact() {
-    let server = AcpServer::new();
+    let server = AcpServer::new().with_isolated_delivery_budget();
     // The victim: the largest log, whole, under the 8 MiB per-log cap.
     let victim = recorded_session(&server, turn(chunks(31, BIG))).await;
     let mut others = Vec::new();
@@ -240,7 +240,7 @@ async fn a_close_between_victim_choice_and_pop_keeps_retained_total_exact() {
 /// very retention a lagging reader resumes from.
 #[tokio::test]
 async fn evictors_parked_on_one_victim_trim_it_only_as_far_as_the_cap_needs() {
-    let server = AcpServer::new();
+    let server = AcpServer::new().with_isolated_delivery_budget();
     // The victim: strictly the largest log, whole, under the 8 MiB per-log cap.
     let victim = recorded_session(&server, turn(chunks(31, BIG))).await;
     let mut others = Vec::new();
@@ -333,7 +333,7 @@ async fn evictors_parked_on_one_victim_trim_it_only_as_far_as_the_cap_needs() {
 /// and be zero at the end.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn churn_over_the_cap_with_mixed_chunk_sizes_keeps_retained_total_exact() {
-    let server = AcpServer::new();
+    let server = AcpServer::new().with_isolated_delivery_budget();
     let mut residents = Vec::new();
     for _ in 0..8 {
         residents.push(recorded_session(&server, turn(chunks(28, BIG))).await);
@@ -373,7 +373,9 @@ async fn churn_over_the_cap_with_mixed_chunk_sizes_keeps_retained_total_exact() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_exclusive_hold_on_the_log_map_does_not_stall_a_running_turn() {
     let (feed, rx) = tokio::sync::mpsc::unbounded_channel();
-    let server = AcpServer::new().with_turn_engine(Arc::new(Fed(std::sync::Mutex::new(Some(rx)))));
+    let server = AcpServer::new()
+        .with_isolated_delivery_budget()
+        .with_turn_engine(Arc::new(Fed(std::sync::Mutex::new(Some(rx)))));
     let id = server
         .create_session(create_request())
         .await

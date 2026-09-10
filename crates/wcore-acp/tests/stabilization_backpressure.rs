@@ -43,10 +43,12 @@ impl TurnEngine for Burst {
 /// `a_reader_that_stops_reading_is_detached_by_its_wait_budget_beside_a_fast_one`.
 #[tokio::test]
 async fn slow_reader_has_explicit_overload_while_replay_retains_bounded_tail() {
-    let server = AcpServer::new().with_turn_engine(Arc::new(Burst {
-        chunks: 64,
-        chunk_bytes: 256 * 1024,
-    }));
+    let server = AcpServer::new()
+        .with_isolated_delivery_budget()
+        .with_turn_engine(Arc::new(Burst {
+            chunks: 64,
+            chunk_bytes: 256 * 1024,
+        }));
     let id = server
         .create_session(SessionCreateRequest {
             model: None,
@@ -152,10 +154,12 @@ async fn byte_overload_keeps_one_terminal_and_releases_owned_capacity() {
 #[tokio::test]
 async fn fast_rest_reader_receives_complete_sixteen_mib_burst() {
     use wcore_acp::transport::rest::RestTransport;
-    let server = AcpServer::new().with_turn_engine(Arc::new(Burst {
-        chunks: 512,
-        chunk_bytes: 32 * 1024,
-    }));
+    let server = AcpServer::new()
+        .with_isolated_delivery_budget()
+        .with_turn_engine(Arc::new(Burst {
+            chunks: 512,
+            chunk_bytes: 32 * 1024,
+        }));
     let app = RestTransport::new(Arc::new(server.clone())).router();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
@@ -221,10 +225,12 @@ async fn fast_rest_reader_receives_complete_sixteen_mib_burst() {
 
 #[tokio::test]
 async fn aggregate_replay_pressure_preserves_a_late_stream_first_event() {
-    let server = AcpServer::new().with_turn_engine(Arc::new(Burst {
-        chunks: 256,
-        chunk_bytes: 32768,
-    }));
+    let server = AcpServer::new()
+        .with_isolated_delivery_budget()
+        .with_turn_engine(Arc::new(Burst {
+            chunks: 256,
+            chunk_bytes: 32768,
+        }));
     let mut sessions = Vec::new();
     // Nine independent near-8MiB histories exceed the 64MiB aggregate cap.
     // Keep their sessions resident but detach delivery while recording finishes.
@@ -315,10 +321,12 @@ async fn aggregate_replay_pressure_preserves_a_late_stream_first_event() {
 /// replay gap exists), and time is paused, so only the budget can detach it.
 #[tokio::test(start_paused = true)]
 async fn a_reader_that_stops_reading_is_detached_by_its_wait_budget_beside_a_fast_one() {
-    let stalled_server = AcpServer::new().with_turn_engine(Arc::new(Burst {
-        chunks: 16,
-        chunk_bytes: 256 * 1024,
-    }));
+    let stalled_server = AcpServer::new()
+        .with_isolated_delivery_budget()
+        .with_turn_engine(Arc::new(Burst {
+            chunks: 16,
+            chunk_bytes: 256 * 1024,
+        }));
     // Same session and log ownership, different fixture output.
     let fast_server = stalled_server.clone().with_turn_engine(Arc::new(Burst {
         chunks: 512,

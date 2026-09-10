@@ -65,10 +65,12 @@ fn create() -> SessionCreateRequest {
 /// pending positions. Time is paused, so the result does not depend on load.
 #[tokio::test(start_paused = true)]
 async fn a_reader_inside_its_budget_and_replay_window_is_not_detached_by_small_events() {
-    let server = AcpServer::new().with_turn_engine(Arc::new(LargeThenSmall {
-        large: 8,
-        small: 512,
-    }));
+    let server = AcpServer::new()
+        .with_isolated_delivery_budget()
+        .with_turn_engine(Arc::new(LargeThenSmall {
+            large: 8,
+            small: 512,
+        }));
     let id = server.create_session(create()).await.unwrap().session_id;
     let genesis = server.event_tip(&id).await.unwrap();
     let mut response = server
