@@ -393,6 +393,28 @@ PY
 CORPUS_GATE="cargo run -q -p wcore-protocol --bin wcore-contract -- check"
 render_gate armed "$CORPUS_GATE"
 
+# ── SCOPED-TEST COVERAGE ───────────────────────────────────────────────────
+# wayland#1256 c3, the GENERAL case the corpus gate above closes ONE instance
+# of. That gate asks a total question about the tree, so the corpus observable
+# no longer depends on the lane's crate list. Every OTHER crate still does: a
+# lane that runs `-p A -p B` learns nothing about C, and until now it could
+# print a green verdict anyway.
+#
+# This one asks the arithmetic question -- which workspace members did this
+# lane's test runs not cover -- and answers it from tools/remote-proof.py's
+# receipts for THIS commit, so it grades what ran rather than what a lane says
+# ran. A scoped run is not refused; it DEGRADES, which turns the banner below
+# from PASSED into INCOMPLETE and prints every unrun crate by name. That is the
+# criterion exactly: scope your run freely, but you cannot then call the tree
+# green while a crate nobody ran sits unmentioned.
+#
+# NOT in GATES above, for the same reason the corpus gate is not: GATES mirrors
+# ci.yml's host-side steps, and this gate has no meaning in CI -- CI has no
+# remote-proof receipts, so it would be DEGRADED on every run there forever.
+SCOPE_GATE="python3 scripts/check-test-scope-coverage.py"
+render_gate armed "$SCOPE_GATE --self-test"
+render_gate armed "$SCOPE_GATE"
+
 for entry in "${GATES[@]}"; do
   render_gate "${entry%%|*}" "${entry#*|}"
 done
