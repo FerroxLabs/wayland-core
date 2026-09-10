@@ -343,3 +343,84 @@ Never merge: `w15/relay1352-redarm-drift` (73bccf836), `w15/relay1352-redarm-bud
 * Live drift absence (not observable from outside the process).
 * Everything in the earlier Not claimed list still stands, except that the cap
   is now stated with bounds instead of as exact.
+
+## Second review round — adversarial review of f7f6b96d8
+
+No blocker; one MAJOR and three minors, fixed as new commits on
+`w15/stage2-1356` (base b348328cc, which already carries every #1352 commit).
+Receipts for every run below are in `review2/`, all `"complete": true`.
+
+### MAJOR 1 — concurrent evictors over-trimmed the largest log
+
+Every over-cap recorder chose the largest log from the lock-free counters and
+popped with no re-check, so evictors parked on that log's lock (behind a resume
+copy, a delivery copy or its own append) each popped once more after the total
+was already back under the cap.
+
+**Forced.** `crates/wcore-acp/src/server/eviction_tests.rs::evictors_parked_on_one_victim_trim_it_only_as_far_as_the_cap_needs`
+builds retained history just under the 64 MiB cap with one strictly largest
+log, then starts four trigger turns: the first crosses the cap, the next three
+keep it over. Each trigger's evictor chooses the same victim and parks at the
+`cfg(test)` gate before popping; all four are then released together.
+* f3b6ef72e (the test, unrepaired code): **FAIL**, "the largest log was trimmed
+  4 events where one was enough" (remote_exit 100).
+* f237dcf2b (`victim.mutate` returns 0 when `!history.over_cap()` under the
+  victim's lock): passes.
+* Red arm `w15/stage2-1356-redarm-overtrim` (6889d95b4, never merge), the fix
+  with only the re-check removed: **FAIL** with the same message.
+
+### MINOR 2, MINOR 3
+
+* The `evict_for_append` doc no longer says a call never frees more than it
+  added: a call stops once it has freed at least what its append added, so a
+  small append can free one larger event.
+* `RetainedHistory::account` saturates inside the `fetch_update` closure; the
+  racy `store(0)` that could overwrite other logs' concurrent adds is gone. The
+  comment now says it only fires when drift exceeds the whole remaining total,
+  so it is a last resort and not a drift detector; the deterministic eviction
+  tests are what prove the accounting exact.
+
+### MINOR 4 — tests shared one process-wide delivery budget
+
+* **Measured first** (e3adb7301, before the seam): `cargo test -p wcore-acp --lib`,
+  one process, 5/5 runs at 145/145; `cargo test -p wcore-acp --test
+  stabilization_backpressure`, 4/4 completed runs at 5/5 (the fifth was refused
+  for a busy slot, `complete: false`, and does not count). No flake observed.
+* **Isolated by construction anyway** (bf69d6ff3). `bounded::DeliveryBudget`
+  owns the aggregate counter and its notifier. `DeliveryBudget::process()` is
+  the single static production uses, and the free functions `channel`,
+  `retain` and `retain_encoded` still use it, so wcore-cli and every production
+  path are unchanged and nothing is relaxed. `AcpServer::with_isolated_delivery_budget()`
+  (hidden, documented test-only) gives one test's server its own budget; the
+  eviction tests, the #1352 server tests, the streaming integration tests in
+  `stabilization_backpressure.rs` and `stage2_small_event_burst.rs` opt in.
+  `bounded::backpressure_tests::exhausting_an_isolated_budget_leaves_other_budgets_untouched`
+  fills one isolated budget to refusal and shows another still admits a channel
+  and a charge. After the seam, the one-process lib suite ran 3/3 at 147/147.
+
+### Gates at bf69d6ff3
+
+* wcore-acp nextest **179/180**. The one failure is
+  `stage2_small_event_burst::a_reader_inside_its_budget_and_replay_window_is_not_detached_by_small_events`,
+  the wayland#1356 c1 red test committed at e3adb7301: a separate ticket, red by
+  design until that repair lands.
+* clippy `--all-targets -D warnings`: clean on Linux and on
+  `--target x86_64-pc-windows-gnu`.
+* wcore-cli `test(acp_engine::)`: 52/52.
+
+### Second-round commits on `w15/stage2-1356`
+
+1. `f3b6ef72e` test(acp): parked evictors must not over-trim the largest log -- red on the unrepaired code
+2. `f237dcf2b` fix(acp): re-check the cap under the victim's lock (also MINOR 2 and MINOR 3)
+3. `bf69d6ff3` test(acp): isolate each heavy test's delivery budget (MINOR 4)
+4. the ledger and evidence commit that adds this section
+
+Never merge: `w15/stage2-1356-redarm-overtrim` (6889d95b4).
+
+### Not claimed in this round
+
+* The `acp serve` A/B was not rerun after these fixes; it is held while the
+  #1349 soak runs.
+* That MAJOR 1 explains the churn arm's stage-2 detaches. The base binary
+  9b2e24f2, which has no such evictor, also detached 1/112, and the in-process
+  instrument for wayland#1356 names the stage-2 positions window instead.

@@ -1,0 +1,24 @@
+proof-1789061782-23575.json e3adb7301 nextest run --locked -p wcore-acp --test stage2_small_event_burst --retries 0 --no-fail-fast remote_exit 100 complete True
+proof-1789062122-32977.json e3adb7301 test --locked -p wcore-acp --lib remote_exit 0 complete True
+proof-1789062140-33625.json e3adb7301 test --locked -p wcore-acp --lib remote_exit 0 complete True
+proof-1789062154-33822.json e3adb7301 test --locked -p wcore-acp --lib remote_exit 0 complete True
+proof-1789062166-34132.json e3adb7301 test --locked -p wcore-acp --lib remote_exit 0 complete True
+proof-1789062179-34961.json e3adb7301 test --locked -p wcore-acp --lib remote_exit 0 complete True
+proof-1789062191-35170.json e3adb7301 test --locked -p wcore-acp --test stabilization_backpressure remote_exit 0 complete True
+proof-1789062204-35546.json e3adb7301 test --locked -p wcore-acp --test stabilization_backpressure remote_exit 0 complete True
+proof-1789062217-36028.json e3adb7301 test --locked -p wcore-acp --test stabilization_backpressure remote_exit 0 complete True
+proof-1789062230-36577.json e3adb7301 test --locked -p wcore-acp --test stabilization_backpressure remote_exit 0 complete True
+proof-1789062241-36922.json e3adb7301 test --locked -p wcore-acp --test stabilization_backpressure remote_exit None complete False
+proof-1789062206-35589.json f3b6ef72e nextest run --locked -p wcore-acp --lib --retries 0 --no-fail-fast -E test(=server::eviction_tests::evictors_p remote_exit None complete False
+proof-1789062235-36739.json f3b6ef72e nextest run --locked -p wcore-acp --lib --retries 0 --no-fail-fast -E test(=server::eviction_tests::evictors_p remote_exit 100 complete True
+proof-1789062295-40027.json f237dcf2b nextest run --locked -p wcore-acp --retries 0 --no-fail-fast remote_exit 100 complete True
+proof-1789062312-40220.json f237dcf2b clippy --locked -p wcore-acp --all-targets -- -D warnings remote_exit 0 complete True
+proof-1789062324-40738.json f237dcf2b clippy --locked -p wcore-acp --all-targets --target x86_64-pc-windows-gnu -- -D warnings remote_exit 0 complete True
+proof-1789062475-47254.json 6889d95b4 nextest run --locked -p wcore-acp --lib --retries 0 --no-fail-fast -E test(=server::eviction_tests::evictors_p remote_exit 100 complete True
+proof-1789062531-50649.json bf69d6ff3 test --locked -p wcore-acp --lib remote_exit 0 complete True
+proof-1789062547-51387.json bf69d6ff3 test --locked -p wcore-acp --lib remote_exit 0 complete True
+proof-1789062559-51633.json bf69d6ff3 test --locked -p wcore-acp --lib remote_exit 0 complete True
+proof-1789062571-51809.json bf69d6ff3 nextest run --locked -p wcore-acp --retries 0 --no-fail-fast remote_exit 100 complete True
+proof-1789062587-52131.json bf69d6ff3 clippy --locked -p wcore-acp --all-targets -- -D warnings remote_exit 0 complete True
+proof-1789062600-52235.json bf69d6ff3 clippy --locked -p wcore-acp --all-targets --target x86_64-pc-windows-gnu -- -D warnings remote_exit 0 complete True
+proof-1789062612-52588.json bf69d6ff3 nextest run --locked -p wcore-cli --lib --retries 0 --no-fail-fast -E test(acp_engine::) remote_exit 0 complete True

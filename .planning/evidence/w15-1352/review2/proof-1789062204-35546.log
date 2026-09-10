@@ -1,0 +1,12 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.24s
+     Running tests/stabilization_backpressure.rs (/root/waylandcore-stabilization-20260905/slots/parallel-1/target/debug/deps/stabilization_backpressure-eaf83b8f75f10526)
+
+running 5 tests
+test byte_overload_keeps_one_terminal_and_releases_owned_capacity ... ok
+test slow_reader_has_explicit_overload_while_replay_retains_bounded_tail ... ok
+test a_reader_that_stops_reading_is_detached_by_its_wait_budget_beside_a_fast_one ... ok
+test fast_rest_reader_receives_complete_sixteen_mib_burst ... ok
+test aggregate_replay_pressure_preserves_a_late_stream_first_event ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.64s
+

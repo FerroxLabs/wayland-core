@@ -1,0 +1,28 @@
+   Compiling wcore-acp v0.13.14 (/root/waylandcore-stabilization-20260905/slots/parallel-1/source/crates/wcore-acp)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.65s
+────────────
+ Nextest run ID 81540f74-2519-4137-8b97-b7f139d33a63 with nextest profile: default
+    Starting 1 test across 1 binary (145 tests skipped)
+        FAIL [   1.515s] (1/1) wcore-acp server::eviction_tests::evictors_parked_on_one_victim_trim_it_only_as_far_as_the_cap_needs
+  stdout ───
+
+    running 1 test
+    test server::eviction_tests::evictors_parked_on_one_victim_trim_it_only_as_far_as_the_cap_needs ... FAILED
+
+    failures:
+
+    failures:
+        server::eviction_tests::evictors_parked_on_one_victim_trim_it_only_as_far_as_the_cap_needs
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 145 filtered out; finished in 1.51s
+
+  stderr ───
+
+    thread 'server::eviction_tests::evictors_parked_on_one_victim_trim_it_only_as_far_as_the_cap_needs' (3970341) panicked at crates/wcore-acp/src/server/eviction_tests.rs:313:5:
+    the largest log was trimmed 4 events where one was enough
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   1.516s] 1 test run: 0 passed, 1 failed, 145 skipped
+        FAIL [   1.515s] (1/1) wcore-acp server::eviction_tests::evictors_parked_on_one_victim_trim_it_only_as_far_as_the_cap_needs
+error: test run failed

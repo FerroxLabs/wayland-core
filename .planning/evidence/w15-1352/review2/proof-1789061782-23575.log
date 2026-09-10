@@ -1,0 +1,28 @@
+   Compiling wcore-acp v0.13.14 (/root/waylandcore-stabilization-20260905/slots/parallel-1/source/crates/wcore-acp)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.22s
+────────────
+ Nextest run ID 797c9211-13fe-4b50-b530-3d6b945362f8 with nextest profile: default
+    Starting 1 test across 1 binary
+        FAIL [   0.150s] (1/1) wcore-acp::stage2_small_event_burst a_reader_inside_its_budget_and_replay_window_is_not_detached_by_small_events
+  stdout ───
+
+    running 1 test
+    test a_reader_inside_its_budget_and_replay_window_is_not_detached_by_small_events ... FAILED
+
+    failures:
+
+    failures:
+        a_reader_inside_its_budget_and_replay_window_is_not_detached_by_small_events
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+
+  stderr ───
+
+    thread 'a_reader_inside_its_budget_and_replay_window_is_not_detached_by_small_events' (3780097) panicked at crates/wcore-acp/tests/stage2_small_event_burst.rs:101:5:
+    a reader inside its budget and the replay window was detached after 3 frames: Some("live delivery overloaded; resume from retained event cursor")
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   0.150s] 1 test run: 0 passed, 1 failed, 0 skipped
+        FAIL [   0.150s] (1/1) wcore-acp::stage2_small_event_burst a_reader_inside_its_budget_and_replay_window_is_not_detached_by_small_events
+error: test run failed
