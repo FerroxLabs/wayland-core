@@ -21,7 +21,6 @@
 /// notification wait 800 ms to be safe.
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use tempfile::TempDir;
@@ -30,24 +29,43 @@ use tokio::time::timeout;
 use crate::discovery::RuntimeDiscovery;
 use crate::watcher::SkillWatcher;
 
-/// Create a uniquely named, non-hidden test directory under `/tmp/`.
+/// Create a uniquely named, non-hidden test directory under the temp root.
 ///
-/// Returns a `PathBuf` and a guard that removes the directory on drop.
-/// Using `/tmp/` directly (rather than `TempDir`) avoids the macOS
-/// `.tmpXXXX` hidden-directory naming that triggers `should_ignore`.
-fn make_visible_test_dir(name: &str) -> (PathBuf, TempDirGuard) {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+/// Returns a `PathBuf` and the owning `TempDir`, which removes the directory
+/// on drop. The name is `wcore_watcher_test_<name>_<random>`: visible, so the
+/// macOS `.tmpXXXX` naming that `should_ignore` filters is avoided, and
+/// RANDOM, so no two processes can be handed the same directory.
+///
+/// The randomness is the whole point (wayland#1308 c2). This used to be a
+/// process-local `AtomicU64`, and every test name is used exactly once, so the
+/// counter was always 0 and two identically-launched test binaries computed
+/// the SAME path under the same `std::env::temp_dir()`. On a box running
+/// several runner services as one user that root is shared, so whichever
+/// process finished first removed the directory the other was still watching
+/// -- and the survivor's next write failed with `ERROR_PATH_NOT_FOUND` (3),
+/// the directory-component error the four siblings all reported.
+/// `cross_process_siblings_do_not_share_a_test_directory` is the control.
+fn make_visible_test_dir(name: &str) -> (PathBuf, TempDir) {
     // Use /private/tmp to match FSEvents resolved path on macOS
     let base = if cfg!(target_os = "macos") {
         PathBuf::from("/private/tmp")
     } else {
         std::env::temp_dir()
     };
-    let dir = base.join(format!("wcore_watcher_test_{name}_{id}"));
-    expect_fs(fs::create_dir_all(&dir), "create test dir", &dir);
-    let guard = TempDirGuard(dir.clone());
-    (dir, guard)
+    expect_fs(fs::create_dir_all(&base), "create test temp root", &base);
+    let dir = match tempfile::Builder::new()
+        .prefix(&format!("wcore_watcher_test_{name}_"))
+        .tempdir_in(&base)
+    {
+        Ok(dir) => dir,
+        Err(error) => panic!(
+            "create test dir for {name} under {} failed: {error}\n{}",
+            base.display(),
+            first_missing_component(&base)
+        ),
+    };
+    let path = dir.path().to_path_buf();
+    (path, dir)
 }
 
 /// Report WHICH component of a path is missing when a filesystem call fails.
@@ -93,15 +111,6 @@ fn first_missing_component(path: &Path) -> String {
     report
         .push_str("\n  every component exists NOW -- it was recreated, or the leaf is the problem");
     report
-}
-
-/// RAII guard that removes the test directory on drop.
-struct TempDirGuard(PathBuf);
-
-impl Drop for TempDirGuard {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
 }
 
 const DEBOUNCE_EXPECT_MS: u64 = 600; // wait when expecting a notification
@@ -652,14 +661,14 @@ async fn tc20_version_monotonically_increasing() {
 // wayland#1308 c2: which directory component goes missing, and who removes it
 // ---------------------------------------------------------------------------
 //
-// `make_visible_test_dir` names a directory from the test name plus a
+// `make_visible_test_dir` used to name a directory from the test name plus a
 // PROCESS-LOCAL `AtomicU64`. Every test name is used once, so within one
-// process the counter is always 0 and two identically-launched test binaries
-// therefore compute the SAME path under the SAME `std::env::temp_dir()`. On a
-// box running several runner services as one user that root is shared, so two
-// concurrent runs of the same test share one directory -- and whichever
-// finishes first removes it out from under the other. The survivor's next
-// write then fails with `ERROR_PATH_NOT_FOUND` (3), the directory-component
+// process the counter was always 0 and two identically-launched test binaries
+// computed the SAME path under the SAME `std::env::temp_dir()`. On a box
+// running several runner services as one user that root is shared, so two
+// concurrent runs of the same test shared one directory -- and whichever
+// finished first removed it out from under the other. The survivor's next
+// write then failed with `ERROR_PATH_NOT_FOUND` (3), the directory-component
 // error, which is exactly the code the four siblings reported.
 //
 // This is a control, not an observation: it drives the two processes through a
