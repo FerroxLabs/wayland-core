@@ -1097,9 +1097,12 @@ fn binary() -> &'static str {
 /// crashed at boot would also leave the sentinel absent — and that would be a
 /// negative leg measuring a dead process rather than containment.
 ///
-/// Waits for `sentinel` to appear, up to a bounded deadline, and returns as
-/// soon as it does. The negative leg therefore waits the FULL window before
-/// concluding absence.
+/// Returns as soon as `sentinel` appears, which is what keeps the POSITIVE leg
+/// fast. With no sentinel it returns as soon as the driven TURN COMPLETES -- the
+/// Skill tool has answered and the assistant stream after it has closed -- so
+/// the negative leg concludes absence on the product's own signal and not on a
+/// fixed wall-clock window (gh#1245). A turn that never completes at all is a
+/// panic, not a silent absence.
 fn drive_skill_turn(home: &Path, skill_name: &str, sentinel: &Path) -> Vec<String> {
     use std::io::{BufRead, BufReader, Write};
     use std::time::{Duration, Instant};
@@ -1174,18 +1177,54 @@ fn drive_skill_turn(home: &Path, skill_name: &str, sentinel: &Path) -> Vec<Strin
     )
     .expect("write message");
 
-    // Bounded drain: wait for the sentinel to appear, and keep the stdout pipe
-    // drained so the child never blocks on a full pipe. Returning early on the
-    // sentinel keeps the POSITIVE leg fast; the NEGATIVE leg waits the whole
-    // window before concluding absence.
-    let deadline = Instant::now() + Duration::from_secs(45);
+    // Bounded drain, keeping the stdout pipe emptied so the child never blocks
+    // on a full pipe. The sentinel early-return is what keeps the POSITIVE leg
+    // fast and is deliberately retained.
+    //
+    // gh#1245. The NEGATIVE leg used to conclude absence by waiting out a FIXED
+    // 45 s wall-clock window with nothing else able to stop it, and that window
+    // had ZERO headroom: measured on hetzner-dsm at 1-min loadavg 29.50 the leg
+    // took 45.324 s against its own 45.0 s deadline on a run that PASSED. Above
+    // roughly loadavg 150 the driven turn simply does not finish inside it, and
+    // the leg then reds about how busy the host was rather than about
+    // containment.
+    //
+    // Absence is now concluded on THE TURN'S OWN COMPLETION, which is a signal
+    // the product emits rather than a clock this harness reads: the Skill tool
+    // has returned a `tool_result`, and the assistant stream that follows it
+    // has closed with a `stream_end`. At that point the payload has had every
+    // opportunity it is ever going to get, however slow the host was, so the
+    // leg is no longer racing real elapsed time.
+    //
+    // The wall clock that survives is a BACKSTOP for a child that never
+    // completes a turn at all -- not the normal path. Reaching it is a hard
+    // failure carrying the whole stream, rather than a silent "sentinel absent,
+    // therefore contained": a child that stalled after emitting the Skill
+    // tool's answer used to satisfy this leg vacuously.
+    const TURN_BACKSTOP: Duration = Duration::from_secs(300);
+    let backstop = Instant::now() + TURN_BACKSTOP;
     let mut lines = Vec::new();
-    while Instant::now() < deadline {
+    let mut tool_result_seen = false;
+    let mut concluded = false;
+    while Instant::now() < backstop {
         if sentinel.exists() {
+            concluded = true;
             break;
         }
-        if let Ok(line) = rx.recv_timeout(Duration::from_millis(200)) {
-            lines.push(line);
+        match rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(line) => {
+                let closes_a_stream = line.contains("\"type\":\"stream_end\"");
+                tool_result_seen |= line.contains("\"type\":\"tool_result\"");
+                lines.push(line);
+                if tool_result_seen && closes_a_stream {
+                    concluded = true;
+                    break;
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            // The child closed stdout. Anything still buffered has already been
+            // handed over above, so there is nothing further to wait for.
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
     let _ = writeln!(stdin, "{{\"type\":\"stop\"}}");
@@ -1197,6 +1236,14 @@ fn drive_skill_turn(home: &Path, skill_name: &str, sentinel: &Path) -> Vec<Strin
     let _ = child.wait();
     drop(server);
     drop(rt);
+    assert!(
+        concluded,
+        "the driven turn neither wrote the sentinel nor completed a turn within \
+         {}s, so this leg measured a stalled child rather than containment. \
+         stream:\n{}",
+        TURN_BACKSTOP.as_secs(),
+        lines.join("\n")
+    );
     lines
 }
 
