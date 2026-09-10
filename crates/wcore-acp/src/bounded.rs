@@ -45,13 +45,13 @@ impl DeliveryBudget {
 
     /// A separate budget for ONE test's server, so sibling tests in the same
     /// process cannot exhaust it. Leaked to be `'static`; for tests only.
-    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn isolated() -> &'static DeliveryBudget {
         Box::leak(Box::new(DeliveryBudget::new()))
     }
 
     /// Bytes currently charged to this budget.
-    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn charged(&self) -> usize {
         *self.lock_used()
     }
@@ -267,18 +267,13 @@ impl<E: Serialize> Sender<E> {
         wait_budget: &mut Duration,
         cancelled: impl Future<Output = ()>,
     ) -> Result<(), &'static str> {
-        if !std::ptr::eq(retained.budget, self.0.budget) {
-            // A charge must be taken from the budget of the channel it is
-            // queued into. Every caller does; keep the books right if not.
-            debug_assert!(
-                false,
-                "a retained charge was queued into a channel of another budget"
-            );
-            *retained.budget.lock_used() -= retained.bytes;
-            retained.budget.changed.notify_waiters();
-            *self.0.budget.lock_used() += retained.bytes;
-            retained.budget = self.0.budget;
-        }
+        // A charge is taken from the budget of the channel it is queued into.
+        // Without `test-support` every channel and charge share the process
+        // budget, so this can differ only when a test mixes isolated budgets.
+        debug_assert!(
+            std::ptr::eq(retained.budget, self.0.budget),
+            "a retained charge was queued into a channel of another budget"
+        );
         let size = retained.bytes;
         let mut pending = Some(event);
         tokio::pin!(cancelled);

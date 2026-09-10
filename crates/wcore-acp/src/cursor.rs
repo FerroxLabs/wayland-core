@@ -180,6 +180,9 @@ pub struct EventLog<E> {
     capacity: usize,
     encoded_bytes: usize,
     sizes: VecDeque<usize>,
+    /// Per retained event: the turn that recorded it and its 1-based sequence
+    /// in that turn, `(0, 0)` when untagged. Aligned with `retained`.
+    tags: VecDeque<(u64, u64)>,
 }
 
 impl<E: Clone> EventLog<E> {
@@ -200,6 +203,7 @@ impl<E: Clone> EventLog<E> {
             capacity: capacity.max(1),
             encoded_bytes: 0,
             sizes: VecDeque::new(),
+            tags: VecDeque::new(),
         }
     }
 
@@ -254,6 +258,7 @@ impl<E: Clone> EventLog<E> {
         self.next += 1;
         self.retained.push_back(Positioned { position, event });
         self.sizes.push_back(0);
+        self.tags.push_back((0, 0));
         while self.retained.len() > self.capacity {
             self.evict_oldest();
         }
@@ -262,10 +267,18 @@ impl<E: Clone> EventLog<E> {
 
     /// Byte-bounded append used by ACP, preserving monotonic positions on eviction.
     pub fn append_encoded(&mut self, event: E, size: usize) -> u64 {
+        self.append_tagged(event, size, (0, 0))
+    }
+
+    /// [`Self::append_encoded`], recording which turn appended the event and
+    /// its sequence in that turn, so a turn's live delivery can find exactly
+    /// its own events among other turns' (see [`Self::find_tagged`]).
+    pub fn append_tagged(&mut self, event: E, size: usize, tag: (u64, u64)) -> u64 {
         let position = self.next;
         self.next += 1;
         self.retained.push_back(Positioned { position, event });
         self.sizes.push_back(size);
+        self.tags.push_back(tag);
         self.encoded_bytes += size;
         while self.retained.len() > self.capacity || self.encoded_bytes > 8 * 1024 * 1024 {
             self.evict_oldest();
@@ -279,10 +292,25 @@ impl<E: Clone> EventLog<E> {
         if self.retained.pop_front().is_none() {
             return false;
         }
+        self.tags.pop_front();
         self.encoded_bytes = self
             .encoded_bytes
             .saturating_sub(self.sizes.pop_front().unwrap_or(0));
         true
+    }
+
+    /// The retained event appended with `tag`, with its recorded encoded size;
+    /// `None` if no retained event carries it (never appended, or evicted).
+    /// Newest first: a reader keeping up finds its event within the entries
+    /// recorded after it; the scan is bounded by the log's capacity.
+    pub(crate) fn find_tagged(&self, tag: (u64, u64)) -> Option<(&Positioned<E>, usize)> {
+        self.retained
+            .iter()
+            .zip(self.sizes.iter().copied())
+            .zip(self.tags.iter())
+            .rev()
+            .find(|(_, event_tag)| **event_tag == tag)
+            .map(|(found, _)| found)
     }
 
     fn validate_cursor(&self, cursor: &Cursor) -> Result<(), CursorError> {
@@ -318,6 +346,7 @@ impl<E: Clone> EventLog<E> {
     /// with the encoded size [`Self::append_encoded`] recorded for it (zero
     /// for an event added by [`Self::append`]), so a caller holding the log
     /// can charge for the event without encoding it again.
+    #[cfg(test)]
     pub(crate) fn next_after(
         &self,
         cursor: &Cursor,

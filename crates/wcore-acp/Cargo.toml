@@ -27,7 +27,14 @@ bytes = "1"
 # tests/openapi_contract.rs against tests/fixtures/openapi/rest-openapi-shape.json.
 utoipa = { workspace = true }
 
+[features]
+# Test isolation only: per-server delivery budgets for integration tests.
+# Never enabled by a production build.
+test-support = []
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+# Enables `test-support` for this crate's own integration tests.
+wcore-acp = { path = ".", features = ["test-support"] }
 # Paused-time tests: the #1352 budget guard must isolate the wait budget.
 tokio = { workspace = true, features = ["test-util"] }

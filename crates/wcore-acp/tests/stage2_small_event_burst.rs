@@ -122,14 +122,18 @@ async fn a_reader_inside_its_budget_and_replay_window_is_not_detached_by_small_e
 /// per frame falls out of one log's replay window (1,024 events, 8 MiB),
 /// because recording never waits for a reader. That reader IS still detached,
 /// and a host cannot recover what it missed by resuming: the events after its
-/// last frame are already evicted.
+/// last frame are already evicted. It is detached through that REPLAY GAP (its
+/// next event is no longer retained, at about frame 3), not through the
+/// one-second budget, which that test's paced reader never spends.
 #[tokio::test(start_paused = true)]
 async fn a_reader_that_falls_out_of_the_replay_window_is_detached_and_cannot_resume() {
     use wcore_acp::cursor::{Cursor, CursorError, ResumeError};
-    let server = AcpServer::new().with_turn_engine(Arc::new(LargeThenSmall {
-        large: 16,
-        small: 2048,
-    }));
+    let server = AcpServer::new()
+        .with_isolated_delivery_budget()
+        .with_turn_engine(Arc::new(LargeThenSmall {
+            large: 16,
+            small: 2048,
+        }));
     let id = server.create_session(create()).await.unwrap().session_id;
     let genesis = server.event_tip(&id).await.unwrap();
     let mut response = server
