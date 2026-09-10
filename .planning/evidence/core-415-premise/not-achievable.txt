@@ -1,0 +1,41 @@
+core#415 c1/c2 -- NOT ACHIEVABLE, with the measurement that refutes the premise
+================================================================================
+
+Restated on the issue 2026-09-10:
+https://github.com/FerroxLabs/wayland-core/issues/415#issuecomment-5617888314
+
+WHAT c1 ASKED FOR
+  A restricting-SID quarantine child, measured on real Windows, with the
+  reproduction control alive in the SAME run.
+
+WHY NO TREE CHANGE CAN DELIVER IT
+  With the console closed, the child can ALREADY open cmd.exe, git.exe and
+  ntdll.dll for READ|EXECUTE, and CreateProcess still returns
+  ERROR_ACCESS_DENIED. The failure is therefore NOT the one a restricting SID
+  would fix. The record refutes the PREMISE, not nine attempted arms.
+  SetTokenInformation(TokenDefaultDacl) answered 1344 in all three forms tried.
+
+  c2 -- "whatever spawn path it needs preserves core#393's process-tree
+  containment" -- is moot in consequence: there is no spawn path in question,
+  so there is nothing whose containment could be preserved or broken.
+
+STANDING REPO DECISION THIS SITS UNDER
+  No sandbox on Windows via AppContainer; AppContainer is not to be chased
+  again. The Job Object default is intended. What was ever in scope on this
+  ticket is the HONESTY OF THE CLAIM, not the resurrection of a containment
+  model that was measured and rejected.
+
+WHAT IS NOT DELIVERED, STATED PLAINLY SO THIS FILE CANNOT BE MISREAD
+  The quarantine console bypass is NOT closed by a restricting-SID token in
+  0.13.14. This record disposes of the criterion; it does not deliver the
+  capability, and nothing here should be quoted as if it did.
+
+REOPEN TRIGGER -- this is a disposition, not a shrug
+  A run in which SetTokenInformation(TokenDefaultDacl) SUCCEEDS, and a
+  restricted arm then shows WROTE_TO_USER_CONSOLE=false with all three EXEC
+  arms at 0, in the SAME run, with the control alive.
+
+RE-VERIFIED LIVE RATHER THAN CARRIED FORWARD
+  c3's "permanent answer" was re-run on real Windows:
+  a_quarantine_git_announces_itself_on_the_operators_console 10/10, with the
+  labelling notice read back out of the console screen buffer.
