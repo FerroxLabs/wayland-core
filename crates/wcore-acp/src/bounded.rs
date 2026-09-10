@@ -42,6 +42,12 @@ pub fn retain<T: Serialize>(value: &T) -> Result<Retained, &'static str> {
     let bytes = serde_json::to_vec(value)
         .map_err(|_| "cannot encode retained input")?
         .len();
+    retain_encoded(bytes)
+}
+
+/// Charge an input whose exact encoded size is already known, so a caller
+/// holding a lock need not encode the value again to account for it.
+pub fn retain_encoded(bytes: usize) -> Result<Retained, &'static str> {
     let mut used = global().lock().unwrap_or_else(|e| e.into_inner());
     if bytes > EVENT_BYTES || *used + bytes > AGGREGATE_BYTES {
         return Err("retained projection input budget exhausted");

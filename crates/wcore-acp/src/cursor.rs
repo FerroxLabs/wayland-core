@@ -314,16 +314,20 @@ impl<E: Clone> EventLog<E> {
         Ok(())
     }
 
-    /// Borrow one event without cloning a replay tail into live delivery.
+    /// Borrow one event without cloning a replay tail into live delivery,
+    /// with the encoded size [`Self::append_encoded`] recorded for it (zero
+    /// for an event added by [`Self::append`]), so a caller holding the log
+    /// can charge for the event without encoding it again.
     pub(crate) fn next_after(
         &self,
         cursor: &Cursor,
-    ) -> Result<Option<&Positioned<E>>, CursorError> {
+    ) -> Result<Option<(&Positioned<E>, usize)>, CursorError> {
         self.validate_cursor(cursor)?;
         Ok(self
             .retained
             .iter()
-            .find(|event| event.position > cursor.position))
+            .zip(self.sizes.iter().copied())
+            .find(|(event, _)| event.position > cursor.position))
     }
 
     /// Everything strictly after `cursor`, in order, exactly once.
@@ -375,7 +379,7 @@ mod tests {
             stream_id: "stream-A".into(),
             position: 2,
         };
-        assert_eq!(log.next_after(&retained).unwrap().unwrap().position, 3);
+        assert_eq!(log.next_after(&retained).unwrap().unwrap().0.position, 3);
         assert!(log.next_after(&log.tip()).unwrap().is_none());
         assert!(matches!(
             log.next_after(&Cursor {

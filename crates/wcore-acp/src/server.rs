@@ -117,7 +117,17 @@ pub struct AcpServer {
     /// mid-turn is precisely the client that needs to resume, so logging only
     /// what was successfully delivered would retain everything except the
     /// events that matter.
-    events: Arc<RwLock<HashMap<String, EventLog<MessageEvent>>>>,
+    ///
+    /// Each log has its OWN lock (#1352). The map lock is taken only to add or
+    /// find a log, never per event, so one session's recording, delivery or
+    /// resume cannot make another session's recorder wait.
+    events: Arc<RwLock<HashMap<String, SharedLog>>>,
+    /// Encoded bytes retained across every session log, kept exact under each
+    /// log's lock and enforced against [`RETAINED_HISTORY_BYTES`].
+    retained_total: Arc<std::sync::atomic::AtomicUsize>,
+    /// Serializes cross-session eviction so two recorders over the cap never
+    /// evict more than the cap requires.
+    eviction: Arc<tokio::sync::Mutex<()>>,
     /// Retained events per session stream. See [`Self::with_event_retention`].
     event_retention: usize,
     /// Bounded ledger backing the `Idempotency-Key` header on the mutating
@@ -199,6 +209,8 @@ impl AcpServer {
             instance_id: uuid::Uuid::new_v4().to_string(),
             sessions: Arc::new(RwLock::new(HashMap::new())),
             events: Arc::new(RwLock::new(HashMap::new())),
+            retained_total: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            eviction: Arc::new(tokio::sync::Mutex::new(())),
             event_retention: crate::cursor::DEFAULT_RETENTION,
             commands: Arc::new(RwLock::new(CommandLedger::new())),
             role_policy: None,
@@ -453,6 +465,10 @@ impl AcpServer {
                 tokio::spawn(async move {
                     let _delivery = delivery;
                     let mut wait_budget = std::time::Duration::from_secs(1);
+                    // Resolve this session's own log once. Per-event delivery
+                    // never takes the process-wide map lock, so another
+                    // session's recording or delivery cannot stall it (#1352).
+                    let log = events.read().await.get(&session_id).cloned();
                     loop {
                         // Close cancels the engine, whose terminal must follow
                         // already-recorded frames. Only real delivery pressure
@@ -469,16 +485,19 @@ impl AcpServer {
                             tx.overload();
                             break;
                         };
-                        let event = {
-                            let logs = events.read().await;
-                            logs.get(&session_id)
-                                .and_then(|log| log.next_after(&cursor).ok().flatten())
-                                .and_then(|event| {
-                                    crate::bounded::retain(&event.event)
-                                        .ok()
-                                        .map(|charge| (event.event.clone(), charge))
-                                })
-                        };
+                        let event = log.as_ref().and_then(|log| {
+                            let log = lock_log(log);
+                            let (event, size) = log.next_after(&cursor).ok().flatten()?;
+                            // Charge before cloning, from the size the recorder
+                            // measured for this exact event, so nothing is
+                            // encoded while this session's log is locked.
+                            let charge = if size == 0 {
+                                crate::bounded::retain(&event.event)
+                            } else {
+                                crate::bounded::retain_encoded(size)
+                            };
+                            charge.ok().map(|charge| (event.event.clone(), charge))
+                        });
                         drop(cursor);
                         drop(position_charge);
                         let Some((event, charge)) = event else {
@@ -506,6 +525,8 @@ impl AcpServer {
             None => (None, None),
         };
         let events = Arc::clone(&self.events);
+        let retained_total = Arc::clone(&self.retained_total);
+        let eviction = Arc::clone(&self.eviction);
         let session_id = session_id.to_string();
         let recording = lifecycle.stream();
         tokio::spawn(async move {
@@ -513,65 +534,49 @@ impl AcpServer {
             let _turn_slot = turn_slot;
             let mut upstream = upstream;
             let mut oversized = false;
+            // This session's own log, resolved once (#1352). Appending takes
+            // only this session's lock, never a process-wide one that every
+            // other session's recorder and delivery task also needs.
+            let log = events.read().await.get(&session_id).cloned();
             while let Some(ev) = upstream.next().await {
                 if oversized {
                     continue;
                 }
-                let ev = if serde_json::to_vec(&ev)
+                let encoded = serde_json::to_vec(&ev)
                     .map(|v| v.len())
-                    .unwrap_or(usize::MAX)
-                    > crate::bounded::EVENT_BYTES
-                {
+                    .unwrap_or(usize::MAX);
+                let (ev, size) = if encoded > crate::bounded::EVENT_BYTES {
                     oversized = true;
-                    MessageEvent::Error {
+                    let refused = MessageEvent::Error {
                         error: crate::protocol::JsonRpcError {
                             code: -32003,
                             message: "encoded event exceeds1MiB; structured payload refused".into(),
                             data: None,
                         },
                         turn_id: turn_id.clone(),
-                    }
-                } else {
-                    ev
-                };
-                let cursor = {
-                    let mut guard = events.write().await;
-                    let cursor = if let Some(log) = guard.get_mut(&session_id) {
-                        let size = serde_json::to_vec(&ev)
-                            .map(|v| v.len())
-                            .unwrap_or(usize::MAX);
-                        let position = log.append_encoded(ev, size);
-                        Some(Cursor {
-                            stream_id: log.stream_id().to_string(),
-                            position: position - 1,
-                        })
-                    } else {
-                        None
                     };
-                    while guard
-                        .values()
-                        .map(|log| log.retained_bytes())
-                        .sum::<usize>()
-                        > 64 * 1024 * 1024
-                    {
-                        let victim = guard
-                            .iter()
-                            .filter(|(_, log)| log.retained_len() > 0)
-                            // Positions are session-local, so comparing them
-                            // starves newly started streams. Reclaim from the
-                            // largest retained history to share the byte budget.
-                            .max_by_key(|(_, log)| log.retained_bytes())
-                            .map(|(id, _)| id.clone());
-                        let Some(victim) = victim else {
-                            break;
-                        };
-                        guard
-                            .get_mut(&victim)
-                            .expect("selected log exists")
-                            .evict_oldest();
-                    }
-                    cursor
+                    let size = serde_json::to_vec(&refused)
+                        .map(|v| v.len())
+                        .unwrap_or(usize::MAX);
+                    (refused, size)
+                } else {
+                    (ev, encoded)
                 };
+                let cursor = log.as_ref().map(|log| {
+                    let mut log = lock_log(log);
+                    let before = log.retained_bytes();
+                    let position = log.append_encoded(ev, size);
+                    account_retained(&retained_total, before, log.retained_bytes());
+                    Cursor {
+                        stream_id: log.stream_id().to_string(),
+                        position: position - 1,
+                    }
+                });
+                if retained_total.load(std::sync::atomic::Ordering::Acquire)
+                    > RETAINED_HISTORY_BYTES
+                {
+                    evict_to_cap(&events, &retained_total, &eviction).await;
+                }
                 // Only tiny bounded positions cross this handoff. Never wait
                 // for live delivery while draining the real protocol relay.
                 if let Some(sender) = &positions_tx {
@@ -600,7 +605,9 @@ impl AcpServer {
 
     /// The tip cursor for a session's stream — what a live subscriber holds.
     pub async fn event_tip(&self, session_id: &str) -> Option<Cursor> {
-        self.events.read().await.get(session_id).map(|l| l.tip())
+        let log = self.events.read().await.get(session_id).cloned()?;
+        let tip = lock_log(&log).tip();
+        Some(tip)
     }
 
     /// Serve a resume: everything the cursor has not seen, or a NAMED refusal.
@@ -613,12 +620,12 @@ impl AcpServer {
         session_id: &str,
         cursor: &Cursor,
     ) -> Result<ResumeResponse, ResumeError> {
-        let guard = self.events.read().await;
-        let Some(log) = guard.get(session_id) else {
+        let Some(log) = self.events.read().await.get(session_id).cloned() else {
             return Err(ResumeError::NoSuchSession {
                 session_id: session_id.to_string(),
             });
         };
+        let log = lock_log(&log);
         let events = log.since(cursor).map_err(ResumeError::Cursor)?;
         Ok(ResumeResponse {
             stream_id: log.stream_id().to_string(),
@@ -629,6 +636,63 @@ impl AcpServer {
     }
 
     // ── Command idempotency on the request path ───────────────────────────
+}
+
+/// One session's event log behind its own lock. See [`AcpServer::events`].
+type SharedLog = Arc<std::sync::Mutex<EventLog<MessageEvent>>>;
+
+/// Retained replay history across every session before the largest log is
+/// trimmed. Unchanged by #1352, which only moved where it is enforced.
+const RETAINED_HISTORY_BYTES: usize = 64 * 1024 * 1024;
+
+/// No caller awaits while holding a log lock. Its critical sections are O(1)
+/// apart from cloning this session's own events (one per delivery, a resume
+/// tail in `events_since`), so the longest can delay only this session.
+fn lock_log(log: &SharedLog) -> std::sync::MutexGuard<'_, EventLog<MessageEvent>> {
+    log.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Apply one log's retained-byte change, observed under that log's lock, to
+/// the cross-session total.
+fn account_retained(total: &std::sync::atomic::AtomicUsize, before: usize, after: usize) {
+    use std::sync::atomic::Ordering;
+    if after >= before {
+        total.fetch_add(after - before, Ordering::AcqRel);
+    } else {
+        total.fetch_sub(before - after, Ordering::AcqRel);
+    }
+}
+
+/// Trim retained history to [`RETAINED_HISTORY_BYTES`], always from the
+/// largest retained log. Positions are session-local, so comparing them would
+/// starve newly started streams; reclaiming from the largest history shares
+/// the byte budget. Only evictors wait on `eviction`, and each log is locked
+/// only for an O(1) read or pop, so a session under the cap never waits here.
+async fn evict_to_cap(
+    events: &RwLock<HashMap<String, SharedLog>>,
+    total: &std::sync::atomic::AtomicUsize,
+    eviction: &tokio::sync::Mutex<()>,
+) {
+    use std::sync::atomic::Ordering;
+    let _serialized = eviction.lock().await;
+    let logs: Vec<SharedLog> = events.read().await.values().cloned().collect();
+    while total.load(Ordering::Acquire) > RETAINED_HISTORY_BYTES {
+        let victim = logs
+            .iter()
+            .filter_map(|log| {
+                let guard = lock_log(log);
+                (guard.retained_len() > 0).then(|| (guard.retained_bytes(), log))
+            })
+            .max_by_key(|(bytes, _)| *bytes)
+            .map(|(_, log)| log);
+        let Some(victim) = victim else {
+            break;
+        };
+        let mut victim = lock_log(victim);
+        let before = victim.retained_bytes();
+        victim.evict_oldest();
+        account_retained(total, before, victim.retained_bytes());
+    }
 }
 
 /// Canonical fingerprint of a command: its method name plus a serialization of
@@ -710,7 +774,10 @@ impl HttpHandler for AcpServer {
         // message could not tell "no events yet" from "no such session".
         self.events.write().await.insert(
             id.clone(),
-            EventLog::with_capacity(self.stream_id_for(&id), self.event_retention),
+            Arc::new(std::sync::Mutex::new(EventLog::with_capacity(
+                self.stream_id_for(&id),
+                self.event_retention,
+            ))),
         );
 
         // persona-profiles PR-7: a `profile:<name>` agent routes to a per-PROFILE
@@ -729,7 +796,10 @@ impl HttpHandler for AcpServer {
             };
             if let Err(e) = opened {
                 self.sessions.write().await.remove(&id);
-                self.events.write().await.remove(&id);
+                if let Some(log) = self.events.write().await.remove(&id) {
+                    let retained = lock_log(&log).retained_bytes();
+                    account_retained(&self.retained_total, retained, 0);
+                }
                 return Err(e);
             }
         }
@@ -1134,6 +1204,65 @@ mod tests {
                 .position,
             0
         );
+    }
+
+    /// #1352 moved the 64 MiB retained-history cap onto a cross-session total.
+    /// A closed session's history must leave that total with its log, or the
+    /// total only grows and every later append evicts live sessions' history.
+    #[tokio::test]
+    async fn closing_a_session_returns_its_history_to_the_retained_total() {
+        let script: Vec<MessageEvent> = (0..64)
+            .map(|_| MessageEvent::TextDelta {
+                text: "x".repeat(32 * 1024),
+            })
+            .chain(std::iter::once(MessageEvent::Done {
+                stop_reason: "end_turn".to_string(),
+                turn_id: String::new(),
+            }))
+            .collect();
+        let server = AcpServer::new().with_turn_engine(Arc::new(MockTurnEngine::new(script)));
+        let total = |server: &AcpServer| {
+            server
+                .retained_total
+                .load(std::sync::atomic::Ordering::Acquire)
+        };
+        let retained = |server: &AcpServer, id: &str| {
+            let server = server.clone();
+            let id = id.to_string();
+            async move {
+                let log = server.events.read().await.get(&id).cloned().unwrap();
+                lock_log(&log).retained_bytes()
+            }
+        };
+        let mut ids = Vec::new();
+        for _ in 0..2 {
+            let id = server
+                .create_session(empty_create())
+                .await
+                .unwrap()
+                .session_id;
+            let frames: Vec<_> = server
+                .send_message(MessageSendRequest {
+                    session_id: id.clone(),
+                    text: "go".to_string(),
+                    tools: Vec::new(),
+                })
+                .await
+                .unwrap()
+                .collect()
+                .await;
+            assert!(matches!(frames.last(), Some(MessageEvent::Done { .. })));
+            ids.push(id);
+        }
+        let first = retained(&server, &ids[0]).await;
+        let second = retained(&server, &ids[1]).await;
+        assert!(first > 64 * 32 * 1024, "the burst is retained: {first}");
+        assert_eq!(total(&server), first + second);
+
+        server.delete_session(ids[0].clone()).await.unwrap();
+        assert_eq!(total(&server), second);
+        server.delete_session(ids[1].clone()).await.unwrap();
+        assert_eq!(total(&server), 0);
     }
 
     #[tokio::test]

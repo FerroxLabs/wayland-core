@@ -118,7 +118,12 @@ impl SessionLifecycle {
                 let mut sessions = server.sessions.write().await;
                 let mut events = server.events.write().await;
                 sessions.remove(&session_id);
-                events.remove(&session_id);
+                if let Some(log) = events.remove(&session_id) {
+                    // Recording has finished, so this is the log's final size;
+                    // its history leaves the cross-session total with it.
+                    let retained = super::lock_log(&log).retained_bytes();
+                    super::account_retained(&server.retained_total, retained, 0);
+                }
                 Ok::<(), AcpError>(())
             })
             .await
