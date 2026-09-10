@@ -13438,6 +13438,16 @@ impl AgentEngine {
         );
     }
 
+    /// Point this engine's request protection at a backend SELECTION that
+    /// refuses — the one production shape that reaches the degrade notice
+    /// carrying a store report (wayland#1302 c3).
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn use_unselectable_recovery_key_store(&mut self) {
+        self.recovery_request_protection = Arc::new(
+            crate::recovery_confidential::RecoveryRequestProtector::with_unselectable_key_store_for_test(),
+        );
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn commit_provider_recovery_checkpoint(
         &self,
@@ -33520,6 +33530,41 @@ mod audit_2026_05_22_tests {
         assert!(
             lowered.contains("never asked"),
             "the notice must say what actually happened, got {:?}",
+            notices[0]
+        );
+    }
+
+    /// wayland#1302 c3, on the degrade notice — the surface a NORMAL turn
+    /// puts in front of a user.
+    ///
+    /// `NoSecureBackendAvailable` is the only store-answered cause that
+    /// reaches this notice, and before c3 it said only that the host had no
+    /// keyring and no unlocked vault. What the selection itself reported was
+    /// discarded at `load_key_from_configured_store`, so every selection
+    /// refusal rendered as one sentence.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_refused_backend_selection_reaches_the_degrade_notice() {
+        let (mut engine, events, _dir, _server) = journaled_engine_with_a_key_store(
+            super::AgentEngine::use_unselectable_recovery_key_store,
+        )
+        .await;
+
+        let result = engine.run("say something", "m-1").await;
+
+        assert!(
+            result.is_ok(),
+            "a host with no confidential backend must degrade the turn, not fail it: {result:?}"
+        );
+        let notices = replay_protection_notices(&events);
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(
+            notices[0].contains("select/backend-unavailable"),
+            "the safe error code must reach the notice the user reads, got {:?}",
+            notices[0]
+        );
+        assert!(
+            !notices[0].contains("the OS keyring returned"),
+            "a class several rungs produce must not be attributed to one, got {:?}",
             notices[0]
         );
     }

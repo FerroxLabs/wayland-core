@@ -431,6 +431,10 @@ enum KeySource {
     /// wayland#1302 measured 104 times against a healthy store.
     #[cfg(any(test, feature = "test-utils"))]
     StarvedForTest,
+    /// Backend selection refuses. The one production shape that reaches the
+    /// degrade notice carrying a store report (wayland#1302 c3).
+    #[cfg(any(test, feature = "test-utils"))]
+    SelectionRefusedForTest,
 }
 
 impl Default for RecoveryRequestProtector {
@@ -587,6 +591,17 @@ impl RecoveryRequestProtector {
         }
     }
 
+    /// A protector whose backend SELECTION refuses, for grading what the
+    /// degrade notice says about a store that answered before any rung was
+    /// opened. wayland#1302 c3.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn with_unselectable_key_store_for_test() -> Self {
+        Self {
+            state: Mutex::new(ProtectorState::default()),
+            key_source: KeySource::SelectionRefusedForTest,
+        }
+    }
+
     fn with_key<T>(
         &self,
         config: &Config,
@@ -736,6 +751,15 @@ impl RecoveryRequestProtector {
                 loop {
                     std::thread::park();
                 }
+            }),
+            #[cfg(any(test, feature = "test-utils"))]
+            KeySource::SelectionRefusedForTest => Box::new(move || {
+                asked.store(true, Ordering::Release);
+                Err(store_selection_failure(
+                    &CredentialsError::BackendUnavailable(
+                        "no confidential credential backend is available".to_owned(),
+                    ),
+                ))
             }),
         }
     }
