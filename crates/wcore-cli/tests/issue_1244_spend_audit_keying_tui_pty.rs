@@ -84,10 +84,31 @@ struct Run {
 /// in-session, send a second prompt, and collect everything the assertions
 /// below need.
 fn drive_a_model_switch() -> Run {
+    drive_a_model_switch_with(true)
+}
+
+/// As above, with `durable_session` deciding whether `[session]` is enabled.
+///
+/// `false` is the operator's own opt-out and is the posture in which the
+/// pre-#1203 placeholder is OBSERVABLE. With a journal, `sync_spend_guard_
+/// session` re-keys the guard from `current_session_id()` before the first
+/// record is written at task end, so a uuid handed to `install_spend_guard`
+/// never reaches the file — measured, see the c3 arm below. With no journal
+/// there is no id to re-key from, the constructor's key survives to the first
+/// record, and `rebind_provider` then writes the second record under
+/// `budget_session_id()`'s fallback. Those are the two different keys #1244 c3
+/// asks for, and the fixed build makes them the same value.
+fn drive_a_model_switch_with(durable_session: bool) -> Run {
     let home = TempDir::new().expect("tempdir");
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     let server = rt.block_on(MockLlm::new().text(ANSWER_1).text(ANSWER_2).start());
     write_config(home.path(), "anthropic", Some(MODEL_A), Some(&server.uri()));
+    if !durable_session {
+        let path = home.path().join("config.toml");
+        let mut toml = std::fs::read_to_string(&path).expect("read seeded config.toml");
+        toml.push_str("\n[session]\nenabled = false\n");
+        std::fs::write(&path, toml).expect("disable durable sessions");
+    }
 
     let mut pty = Pty::spawn_with_env(home.path(), 40, 200, &[] as &[(&str, &str)]);
     pty.wait_for(
@@ -350,6 +371,65 @@ fn the_audit_key_is_the_session_id_and_not_a_placeholder() {
          directory ({:?}), so the audit trail cannot be joined to the session it \
          bills. Lines:\n{}",
         run.session_dir_ids,
+        run.lines.join("\n")
+    );
+}
+
+/// The same switch on a host with NO durable journal — the operator's
+/// `[session] enabled = false` opt-out.
+///
+/// ## What this arm is, and what it is NOT
+///
+/// It was written as wayland#1244 c3's red arm and it REFUTED c3's premise, so
+/// it is kept as the record of that. c3 asks for "a build whose
+/// `install_spend_guard` call sites take `uuid::Uuid::new_v4()` producing two
+/// different keys". That build was constructed — the literal pre-#1203 code,
+/// restored at both constructor call sites — and measured on both postures:
+///
+/// * journalled host: ONE key across the switch, `4043e8c23632` on both lines.
+///   `sync_spend_guard_session` re-keys the guard from `current_session_id()`
+///   and every record is written at task end, after that has happened, so the
+///   uuid never reaches the file. #1203's own comment says exactly this.
+/// * no journal (this arm): ONE key across the switch,
+///   `b4f97e92-628c-4d36-b9a3-416f717ffe43` on both lines. The uuid DOES reach
+///   the file here — there is no id to re-key from — but `rebind_provider`
+///   writes the second record under the same value, so the two do not differ.
+///
+/// So this arm does not discriminate against that mutation, and neither does
+/// any other test in this file. It is a PROPERTY GUARD — a future change that
+/// made `rebind_provider` key from a different source than the constructor
+/// would fail it — not a regression guard for the uuid placeholder. Stated
+/// here rather than left for a reader to discover, because a guard believed to
+/// catch something it cannot is worse than no guard.
+#[test]
+fn the_key_survives_a_switch_on_a_host_with_no_durable_journal() {
+    let run = drive_a_model_switch_with(false);
+
+    println!("--- c3: spend-audit.jsonl with [session] enabled = false ---");
+    for line in &run.lines {
+        println!("{line}");
+    }
+    println!("--- end ---");
+
+    assert!(
+        run.models.iter().any(|m| m == MODEL_B),
+        "no request went out on {MODEL_B}, so no switch happened: {:?}",
+        run.models
+    );
+    assert!(
+        run.records.len() >= 2,
+        "expected a record on each side of the switch, got {}:\n{}",
+        run.records.len(),
+        run.lines.join("\n")
+    );
+
+    let ids = session_ids(&run);
+    let first = &ids[0];
+    assert!(
+        ids.iter().all(|id| id == first),
+        "the model switch split one conversation into distinct audit keys ({ids:?}) — \
+         this is #1244 c3's red condition, and on a fixed build both records must carry \
+         the same key. The lines:\n{}",
         run.lines.join("\n")
     );
 }
