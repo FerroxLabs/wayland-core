@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "Flaky: parallel_spawn_caps_active_child_engines_across_shared_calls fails on a 15s wall-clock budget above loadavg ~190, not on its invariant"
 status: open
-last_verified_commit: 509f4426b
+last_verified_commit: e16de82cd
 criteria:
   - id: c1
     text: "— The test's second phase does not fail on a wall-clock budget that host load can exhaust. Either the 15s `tokio::time::timeout` is replaced by a condition the test can wait on unboundedly (with the harness-level timeout as the only backstop), or the budget is derived from something measured rather than a literal, with the derivation stated in the source."
@@ -25,7 +25,8 @@ criteria:
     note: "Transcribed from the issue body verbatim on 2026-08-31. This ledger did not exist until now: the issue was filed 2026-08-29/30 by this cycle's own verification and never entered the release gate, which counts only issues holding a ledger file. State is not-met because no lane has claimed it and nothing in the tree has been graded against this text. kind is defect, not task, because the gate reserves task for a credential, an account or a platform a human must obtain and there is code behind this one."
   - id: c4
     text: "— `TRY n FAIL` occurrences for this test are counted across recent CI logs, not just run conclusions, so the retry-masked rate is on the record before and after."
-    state: not-met
+    state: met
+    evidence: "file:.planning/FLAKE-CENSUS-20260910.md:128:TRY n FAIL` before and after, from the logs"
     owner: core
     note: "Transcribed from the issue body verbatim on 2026-08-31. This ledger did not exist until now: the issue was filed 2026-08-29/30 by this cycle's own verification and never entered the release gate, which counts only issues holding a ledger file. State is not-met because no lane has claimed it and nothing in the tree has been graded against this text. kind is defect, not task, because the gate reserves task for a credential, an account or a platform a human must obtain and there is code behind this one."
 ---
