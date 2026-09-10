@@ -489,3 +489,242 @@ async fn the_fixture_overflows_every_budget_under_test() {
         assumed.len()
     );
 }
+
+// -- #401: the fixture's independence, graded rather than asserted -----------
+
+/// How many skills stand in for "a host with a populated skills catalogue" in
+/// `the_verdict_does_not_move_when_the_host_catalogue_grows`. Distinct names
+/// from the fixture's own, so the loader's name dedup cannot collapse them into
+/// it and leave the arm measuring nothing.
+const HOST_SKILLS: usize = 30;
+
+/// Plant a second catalogue standing in for what a developer box happens to
+/// have installed. Deliberately the same SHAPE as `plant_skill`'s filler --
+/// non-bundled, unique descriptions, individually large -- because a host
+/// catalogue that could not compete for the budget would make the arm vacuous.
+fn plant_host_catalogue(root: &std::path::Path) {
+    let skills = root.join(".wayland-core").join("skills");
+    for i in 0..HOST_SKILLS {
+        let dir = skills.join(format!("host-installed-{i:03}"));
+        std::fs::create_dir_all(&dir).expect("host skill dir");
+        let desc = format!("host {i:03} ")
+            + &"an installed capability that competes for the same budget "
+                .repeat(FILLER_DESC_LEN / 57 + 1)[..FILLER_DESC_LEN];
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: host-installed-{i:03}\ndescription: {desc}\n---\n\nbody\n"),
+        )
+        .expect("write host SKILL.md");
+    }
+}
+
+/// Boot exactly like `boot`, with one more catalogue bound beside the fixture's
+/// own. Returns the system prompt.
+async fn boot_with_host_catalogue(model: &str, context_window: Option<usize>) -> String {
+    let tmp = tempdir().expect("tempdir");
+    let root = std::fs::canonicalize(tmp.path()).expect("canonicalize workspace");
+    plant_skill(&root);
+    let host = tempdir().expect("host tempdir");
+    let host_root = std::fs::canonicalize(host.path()).expect("canonicalize host");
+    plant_host_catalogue(&host_root);
+
+    let mut cfg = config(model);
+    cfg.compact.context_window = context_window;
+
+    let sink: Arc<dyn OutputSink> = Arc::new(NoticeSink::default());
+    let result = AgentBootstrap::new(
+        cfg,
+        root.to_str().expect("utf-8 workspace").to_string(),
+        sink,
+    )
+    .without_channels(true)
+    .extra_skill_dirs(vec![root.clone(), host_root.clone()])
+    .build()
+    .await
+    .expect("bootstrap");
+    result.engine.system_prompt().to_string()
+}
+
+/// #401 c1, the half that is decidable without two machines: the verdict of
+/// `an_unknown_window_sizes_the_skill_listing_like_the_window_it_assumes` must
+/// not MOVE when the catalogue grows by a host's worth of installed skills.
+///
+/// The defect this file was opened for is the mirror image -- the verdict moved
+/// when the catalogue SHRANK, because the discriminating power came from
+/// whatever `$HOME` happened to hold, so the file passed on hetzner and failed
+/// 3/3 in a clean CI container. The fixture fix supplies the overflow itself,
+/// and `the_fixture_overflows_every_budget_under_test` grades that from below.
+/// This grades it from ABOVE: adding 30 more non-bundled skills of the same
+/// size, all competing for the same budget, must leave every relation the test
+/// asserts exactly as it found them.
+///
+/// It is NOT a substitute for running the file on a populated host. It is the
+/// property that makes such a run predictable, held permanently and on every
+/// platform, rather than re-argued from one machine's `$HOME`.
+#[tokio::test]
+async fn the_verdict_does_not_move_when_the_host_catalogue_grows() {
+    let unknown = boot_with_host_catalogue(UNLISTED_MODEL, None).await;
+    let assumed = boot_with_host_catalogue(
+        UNLISTED_MODEL,
+        Some(wcore_config::compact::UNVERIFIED_CONTEXT_WINDOW),
+    )
+    .await;
+    let old_fabrication = boot_with_host_catalogue(
+        UNLISTED_MODEL,
+        Some(wcore_config::compact::DEFAULT_CONTEXT_WINDOW),
+    )
+    .await;
+
+    assert!(
+        unknown.contains("issue-1150"),
+        "precondition: the fixture's own skill must still reach the prompt when a \
+         host catalogue is competing with it, or this arm grades the host instead"
+    );
+    assert_eq!(
+        unknown.len(),
+        assumed.len(),
+        "the unknown-window listing must still be budgeted against {} tokens with a \
+         populated catalogue in play (unknown = {} bytes, assumed = {} bytes)",
+        wcore_config::compact::UNVERIFIED_CONTEXT_WINDOW,
+        unknown.len(),
+        assumed.len(),
+    );
+    assert!(
+        old_fabrication.len() > unknown.len(),
+        "the 200,000-token arm must still buy a strictly longer listing with a \
+         populated catalogue (200k = {} bytes, unknown = {} bytes)",
+        old_fabrication.len(),
+        unknown.len(),
+    );
+}
+
+/// #401 c4 -- the ambient-catalogue dependence is a SHAPE, not one site.
+///
+/// The sibling comment inside `the_bootstrap_prompt_uses_the_real_window_derived_skill_budget`
+/// diagnosed this class ("that composition differs between a developer box with
+/// skills installed and a clean CI container") and the very next test in the
+/// same file was written with the defect anyway. A comment is not a guard, so
+/// this is the guard: every `wcore-agent` test that makes a claim about the
+/// SIZE or CONTENT of a rendered skills listing must supply the catalogue it
+/// grades, instead of taking its discriminating power from `$HOME`.
+///
+/// Three ways to supply it are recognised, all three of them already in the
+/// tree: plant a directory and bind it with `.extra_skill_dirs`, build the
+/// catalogue in memory with `SkillCatalog::from_refs`, or drive the prompt
+/// through `build_for_test` with an explicit catalogue.
+///
+/// A STATIC SWEEP IS ONLY WORTH ITS CONTROLS, so the classifier is driven in
+/// BOTH directions on synthetic sources before it is pointed at the tree, and
+/// the walk asserts a floor on what it actually read -- a scan that silently
+/// found no files would otherwise report "no violations" and read as a pass.
+#[test]
+fn no_agent_test_grades_the_skills_budget_against_the_ambient_catalogue() {
+    // A file mentioning any of these makes a claim about the rendered listing's
+    // size or content. Deliberately broad: a mention in a doc comment still
+    // means the file is reasoning about this budget.
+    const BUDGET_MARKERS: [&str; 4] = [
+        "get_char_budget",
+        "format_skills_section",
+        "format_skills_within_budget",
+        "SKILL_OVERFLOW_HINT",
+    ];
+    // ...and any of these means it brought its own catalogue.
+    const ISOLATION_MARKERS: [&str; 3] = [
+        "extra_skill_dirs",
+        "SkillCatalog::from_refs",
+        "build_for_test",
+    ];
+
+    fn grades_budget(src: &str) -> bool {
+        BUDGET_MARKERS.iter().any(|m| src.contains(m))
+    }
+    fn owns_catalogue(src: &str) -> bool {
+        ISOLATION_MARKERS.iter().any(|m| src.contains(m))
+    }
+
+    // ── CONTROLS, BEFORE THE SWEEP ──────────────────────────────────────────
+    // The violating shape: it grades the budget and never says whose catalogue.
+    let ambient = "let budget = get_char_budget(None);\nassert!(block.len() <= budget);";
+    assert!(
+        grades_budget(ambient) && !owns_catalogue(ambient),
+        "the classifier cannot recognise the shape it exists to find"
+    );
+    // The compliant shape, over the same marker, so the arm above is the
+    // ISOLATION and not the budget marker being unmatchable.
+    let isolated =
+        "let catalog = SkillCatalog::from_refs(vec![]);\nlet budget = get_char_budget(None);";
+    assert!(
+        grades_budget(isolated) && owns_catalogue(isolated),
+        "the classifier does not recognise an in-memory catalogue as isolation"
+    );
+    // ...and a file that grades nothing here is out of scope entirely, so the
+    // sweep cannot be satisfied by flagging everything.
+    let unrelated = "assert_eq!(engine.turns(), 1);";
+    assert!(
+        !grades_budget(unrelated),
+        "the classifier claims an unrelated test grades the skills budget"
+    );
+
+    // ── THE SWEEP ───────────────────────────────────────────────────────────
+    let tests_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let mut scanned = 0usize;
+    let mut graded: Vec<String> = Vec::new();
+    let mut violations: Vec<String> = Vec::new();
+    let mut stack = vec![tests_dir.clone()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("read wcore-agent tests directory") {
+            let path = entry.expect("directory entry").path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            scanned += 1;
+            let src = std::fs::read_to_string(&path).expect("read a test source");
+            if !grades_budget(&src) {
+                continue;
+            }
+            let rel = path
+                .strip_prefix(&tests_dir)
+                .unwrap_or(&path)
+                .display()
+                .to_string();
+            if !owns_catalogue(&src) {
+                violations.push(rel.clone());
+            }
+            graded.push(rel);
+        }
+    }
+
+    // ANTI-VACUITY. A walk that found nothing reports "no violations", which is
+    // indistinguishable from a clean tree — the exact failure this file's own
+    // defect took two days to notice one level down.
+    assert!(
+        scanned >= 100,
+        "the sweep read only {scanned} sources under {}; it is not walking the \
+         tests directory and its silence means nothing",
+        tests_dir.display()
+    );
+    assert!(
+        graded.len() >= 4,
+        "the sweep classified only {} file(s) as grading the skills budget; at \
+         least four do. The markers have stopped matching: {graded:?}",
+        graded.len()
+    );
+    assert!(
+        graded
+            .iter()
+            .any(|f| f == "issue_1150_unknown_context_window_test.rs"),
+        "the sweep did not classify THIS file as grading the skills budget, so \
+         it is not reading what it thinks it is reading: {graded:?}"
+    );
+    assert!(
+        violations.is_empty(),
+        "these wcore-agent tests reason about the skills budget and never supply \
+         the catalogue they grade, so what they measure is whatever $HOME holds \
+         — a clean container and a developer box give different answers and the \
+         green one is the vacuous one: {violations:?}"
+    );
+}

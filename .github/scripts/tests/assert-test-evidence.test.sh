@@ -537,6 +537,112 @@ leg_case "blank lines and comments in REQUIRED_LEGS -> GREEN" 0 \
 nextest-junit-linux-containerized ci-linux success
 "
 
+# ── FerroxLabs/wayland-core#404 — A CANCELLED LEG IS NOT ONE OBSERVABLE ──────
+#
+# c2. `ci-linux` killed at its 150-minute budget having ALREADY run the whole
+# workspace suite, and `ci-linux` dead before its test step, both used to print
+# the identical line in the `report` job's own output:
+#
+#     required leg   : nextest-junit-linux-containerized (ci-linux) was cancelled — not required to report
+#
+# One of those runs has a downloadable JUnit holding every completed test
+# identity; the other knows nothing about the suite. Thirteen consecutive red
+# `report` runs were diagnosed by hand-downloading each leg's artifact because
+# this line could not say which.
+#
+# NEITHER is graded as a failure — a cancelled leg is not a defect — so the exit
+# code is 0 on both arms and cannot be what distinguishes them. That is exactly
+# why these arms assert on the OUTPUT, and why each carries the other's needle
+# as a negative control: a script that printed both sentences unconditionally
+# would satisfy the positive halves alone.
+leg_says_not() {
+  # leg_says_not <name> <expected_exit> <reports_dir> <required_legs> <needle>
+  local name=$1 want=$2 dir=$3 legs=$4 needle=$5
+  local out rc
+  out=$(EVIDENCE_DIR="$dir" EXPECTED_MIN=1 LABEL="ci matrix" MIN_TESTS=1 \
+        UPSTREAM_RESULT=success REQUIRED_LEGS="$legs" \
+        FLAKE_GATE_TODAY=2026-08-28 bash "$SCRIPT" 2>&1)
+  rc=$?
+  if [ "$rc" -eq "$want" ] && ! printf "%s" "$out" | grep -q -- "$needle"; then
+    PASS=$((PASS + 1)); printf "ok   %-58s exit=%s\n" "$name" "$rc"
+  else
+    FAIL=$((FAIL + 1)); printf "FAIL %-58s exit=%s want=%s must-not-say=%s\n" \
+      "$name" "$rc" "$want" "$needle"
+    printf "%s\n" "$out" | sed "s/^/       | /"
+  fi
+}
+
+# C1. CANCELLED AFTER THE TESTS RAN. The only artifact is the checkpoint the
+#     test step uploaded — the end-of-job upload never happened, because the job
+#     was killed before reaching it. This is the run #404 was filed for.
+mkdir -p "$TMP/cancelled-with/nextest-junit-linux-containerized-checkpoint"
+printf "%s\n" "$REAL" > "$TMP/cancelled-with/nextest-junit-linux-containerized-checkpoint/junit.xml"
+# Another leg reported normally, so the aggregate floor is met either way and
+# the per-leg line is the only thing that can carry the distinction.
+mkdir -p "$TMP/cancelled-with/nextest-junit-macos-latest"
+printf "%s\n" "$REAL" > "$TMP/cancelled-with/nextest-junit-macos-latest/junit.xml"
+leg_says "cancelled leg whose evidence survived SAYS so" 0 \
+  "$TMP/cancelled-with" "nextest-junit-linux-containerized ci-linux cancelled" \
+  "CANCELLED WITH TEST EVIDENCE"
+
+# C2. CANCELLED WITH NOTHING. Same result string, same required-leg line, no
+#     artifact of any kind for that leg.
+mkdir -p "$TMP/cancelled-without/nextest-junit-macos-latest"
+printf "%s\n" "$REAL" > "$TMP/cancelled-without/nextest-junit-macos-latest/junit.xml"
+leg_says "cancelled leg with no evidence SAYS THAT INSTEAD" 0 \
+  "$TMP/cancelled-without" "nextest-junit-linux-containerized ci-linux cancelled" \
+  "CANCELLED WITH NO TEST EVIDENCE"
+
+# C3. THE DISCRIMINATION ITSELF, both directions. Each arm must NOT carry the
+#     other's sentence, or "distinguishable" would be satisfied by a script that
+#     emitted every sentence on every run.
+leg_says_not "the survived arm does not claim there was no evidence" 0 \
+  "$TMP/cancelled-with" "nextest-junit-linux-containerized ci-linux cancelled" \
+  "CANCELLED WITH NO TEST EVIDENCE"
+leg_says_not "the empty arm does not claim evidence survived" 0 \
+  "$TMP/cancelled-without" "nextest-junit-linux-containerized ci-linux cancelled" \
+  "CANCELLED WITH TEST EVIDENCE"
+
+# C4. A FILE IS NOT A TEST, on this arm too. A checkpoint holding nextest's
+#     zero-match junit.xml is not surviving evidence, or the distinction would
+#     be "an artifact exists" rather than "the suite ran".
+mkdir -p "$TMP/cancelled-zero/nextest-junit-linux-containerized-checkpoint" \
+         "$TMP/cancelled-zero/nextest-junit-macos-latest"
+printf "%s\n" "$EMPTY" > "$TMP/cancelled-zero/nextest-junit-linux-containerized-checkpoint/junit.xml"
+printf "%s\n" "$REAL" > "$TMP/cancelled-zero/nextest-junit-macos-latest/junit.xml"
+leg_says "a zero-test checkpoint is not surviving evidence" 0 \
+  "$TMP/cancelled-zero" "nextest-junit-linux-containerized ci-linux cancelled" \
+  "CANCELLED WITH NO TEST EVIDENCE"
+
+# ── c1's MECHANISM: THE CHECKPOINT IS THE SAME LEG ──────────────────────────
+#
+# The checkpoint is uploaded under its own artifact name so the end-of-job
+# upload never has to overwrite it. `report` therefore downloads TWO
+# subdirectories for one leg, and the per-leg floor has to read them as one — a
+# leg whose end-of-job upload was lost but whose checkpoint landed HAS reported.
+C5="$TMP/checkpoint-only"
+mkdir -p "$C5/nextest-junit-linux-containerized-checkpoint"
+printf "%s\n" "$REAL" > "$C5/nextest-junit-linux-containerized-checkpoint/junit.xml"
+leg_case "checkpoint alone satisfies the required leg -> GREEN" 0 \
+  "$C5" "nextest-junit-linux-containerized ci-linux success"
+
+# C6. THE CONTROL FOR C5, over the same code path: remove the checkpoint and the
+#     same leg at the same result is RED again. Without this, C5's green could be
+#     the per-leg floor having gone soft rather than the union working.
+rm -rf "$C5/nextest-junit-linux-containerized-checkpoint"
+mkdir -p "$C5/nextest-junit-macos-latest"
+printf "%s\n" "$REAL" > "$C5/nextest-junit-macos-latest/junit.xml"
+leg_case "the same leg with neither directory -> RED" 1 \
+  "$C5" "nextest-junit-linux-containerized ci-linux success"
+
+# C7. And the union is a UNION, not a replacement: a leg carrying only the
+#     end-of-job artifact (every run before this checkpoint existed, and every
+#     completed run's `<leg>` directory) still passes.
+mkdir -p "$C5/nextest-junit-linux-containerized"
+printf "%s\n" "$REAL" > "$C5/nextest-junit-linux-containerized/junit.xml"
+leg_case "the end-of-job artifact alone still satisfies the leg" 0 \
+  "$C5" "nextest-junit-linux-containerized ci-linux success"
+
 echo "---"
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]

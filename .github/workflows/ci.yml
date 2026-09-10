@@ -2276,6 +2276,51 @@ jobs:
             cargo nextest run --workspace --profile ci --no-fail-fast \
             -E 'not binary_id(=wcore-cli::release_binary_smoke) & not binary_id(=wcore-cli::stabilization_recovery)'
 
+      # ── JUNIT CHECKPOINT (FerroxLabs/wayland-core#404 c1) ────────────────
+      # THE EVIDENCE IS UPLOADED WHERE IT IS PRODUCED, NOT WHERE THE JOB ENDS.
+      #
+      # `Upload nextest JUnit report` at the bottom of this job carries
+      # `if: always()`, and that is NOT a preservation path for the case #404
+      # names. Between the step above and that upload sit the swarm gate, the
+      # voice suite, BOTH shared-process suites, the corpus drift check, the
+      # security audit and the signed-manifest drill — measured at roughly half
+      # this job's wall time. A cancellation anywhere in that stretch (the
+      # `timeout-minutes: 150` above, a `cancel-in-progress` on a PR push, or a
+      # human pressing cancel) stops the job, and a job that is cancelled is not
+      # guaranteed to reach a trailing `always()` step: GitHub gives the runner
+      # a bounded grace period and a job killed at its budget can lose it. The
+      # measured consequence is a run that did ALL the test work and reported
+      # NONE of it — the most expensive possible outcome, and the one #404 was
+      # filed for.
+      #
+      # This step removes the dependency on that grace period entirely. It runs
+      # while nothing has been cancelled yet, seconds after the suite finished,
+      # so the evidence is already in the artifact store before any of the long
+      # gates below can consume the wall.
+      #
+      # A DISTINCT ARTIFACT NAME, deliberately. Re-using
+      # `nextest-junit-linux-containerized` would need `overwrite: true` on the
+      # later upload, and overwrite is delete-then-create: a cancellation inside
+      # that window destroys the checkpoint too, which is the failure mode this
+      # step exists to remove. The `report` job downloads `nextest-junit-*`, so
+      # this lands as its own subdirectory and
+      # `.github/scripts/assert-test-evidence.sh` reads the pair as ONE leg
+      # (see the `-checkpoint` union there). On a run that completes normally
+      # both artifacts exist and hold the same evidence; on a cancelled run only
+      # this one does, and that difference is what makes #404 c2 decidable.
+      #
+      # `if: always()` here is NOT the preservation mechanism — the POSITION is.
+      # It is present so a red test step still yields its report.
+      - name: Upload nextest JUnit checkpoint (survives a later cancellation)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nextest-junit-linux-containerized-checkpoint
+          path: |
+            target/nextest/ci/junit.xml
+            target/nextest/ci/outer-attempts/
+          if-no-files-found: ignore
+
       # ── Swarm delegated-dispatch gate ────────────────────────────────────
       # THE COUNTERWEIGHT TO THE HONEST SKIP.
       #

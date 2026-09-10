@@ -110,15 +110,71 @@ fi
 # A leg whose job was CANCELLED or SKIPPED is not required to have reported —
 # the same rule the aggregate gate already applies to its own upstream — so
 # this cannot turn a conditioned platform into a permanent red.
+#
+# ── A CANCELLED LEG IS NOT ONE OBSERVABLE (FerroxLabs/wayland-core#404 c2) ──
+#
+# The `cancelled`/`skipped` arm below used to print one line — "not required to
+# report" — and `continue`. That line is emitted identically for a leg killed at
+# its 150-minute budget having ALREADY run the whole workspace suite, and for a
+# leg that died before its test step and produced nothing at all. Those are
+# opposite facts about a run: in the first case there IS a downloadable JUnit
+# holding the completed test identities, in the second nothing is known about
+# the suite. `report` is the job everyone reads, and its own output could not
+# tell them apart, so every diagnosis had to be made by downloading each leg's
+# artifact by hand.
+#
+# Neither case is FAILED here — a cancelled leg is not a defect, and making it
+# one is how a gate gets switched off — but they are now two different lines and
+# two different annotations. The checkpoint upload in ci.yml (see
+# `Upload nextest JUnit checkpoint`) is what makes the first case actually
+# reachable: without it a cancelled leg has no artifact and the distinction
+# would be true but never observed.
+#
+# ── THE CHECKPOINT IS THE SAME LEG (FerroxLabs/wayland-core#404 c1) ─────────
+#
+# `ci-linux` uploads its JUnit TWICE under two artifact names: once immediately
+# after the test step (`<leg>-checkpoint`, which survives a cancellation of any
+# later step) and once at the end of the job (`<leg>`, which additionally
+# carries `outer-attempts/`). `actions/download-artifact` gives each its own
+# subdirectory, so a leg's evidence is the UNION of the two. Counting only
+# `<leg>` would read a cancelled-after-tests run as "no evidence" with the
+# evidence sitting in the directory next to it.
 REQUIRED_LEGS="${REQUIRED_LEGS:-}"
 LEG_FAILURES=0
+
+# Count reports / test cases across a leg's directories, ignoring the ones that
+# do not exist. `outer-attempt-*.xml` stays excluded for the reason in the
+# header: a preserved failure is not coverage.
+leg_counts() { # leg_counts <dir>... -> sets LEG_COUNT / LEG_TESTS
+  local roots=() d
+  for d in "$@"; do [ -d "$d" ] && roots+=("$d"); done
+  if [ "${#roots[@]}" -eq 0 ]; then
+    LEG_COUNT=0
+    LEG_TESTS=0
+    return 0
+  fi
+  local found
+  found=$(find "${roots[@]}" -type f -name "*.xml" ! -name "outer-attempt-*.xml" | sort)
+  LEG_COUNT=$(printf "%s" "$found" | grep -c . || true)
+  LEG_TESTS=$({ find "${roots[@]}" -type f -name "*.xml" ! -name "outer-attempt-*.xml" -exec grep -oh "<testcase" {} + 2>/dev/null || true; } | grep -c . || true)
+}
+
 while read -r leg_dir leg_job leg_result; do
   [ -n "${leg_dir:-}" ] || continue
   case "$leg_dir" in \#*) continue ;; esac
   leg_job="${leg_job:-unknown}"
   leg_result="${leg_result:-unknown}"
+  leg_root="$EVIDENCE_DIR/$leg_dir"
+  leg_checkpoint="$EVIDENCE_DIR/$leg_dir-checkpoint"
   if [ "$leg_result" = "cancelled" ] || [ "$leg_result" = "skipped" ]; then
-    echo "required leg   : $leg_dir ($leg_job) was $leg_result — not required to report"
+    leg_counts "$leg_root" "$leg_checkpoint"
+    if [ "$LEG_TESTS" -ge 1 ]; then
+      echo "required leg   : $leg_dir ($leg_job) was $leg_result AFTER its test step — $LEG_COUNT report(s), $LEG_TESTS test case(s) SURVIVED"
+      echo "::notice title=CANCELLED WITH TEST EVIDENCE ($leg_job)::The leg '${leg_job}' concluded '${leg_result}', and the JUnit it had already produced SURVIVED: ${LEG_COUNT} report(s) holding ${LEG_TESTS} test case(s) are downloadable from this run under ${leg_dir}(-checkpoint). The suite RAN; what was lost is whatever ran after it. This is not the same run as one that produced no evidence at all (FerroxLabs/wayland-core#404)."
+    else
+      echo "required leg   : $leg_dir ($leg_job) was $leg_result with NO test evidence — nothing is known about the suite"
+      echo "::warning title=CANCELLED WITH NO TEST EVIDENCE ($leg_job)::The leg '${leg_job}' concluded '${leg_result}' and contributed ZERO JUnit reports, so this run says NOTHING about whether its suite passes — not even that it started. A leg that dies before its test step leaves no artifact. Do not read the aggregate below as coverage for '${leg_job}' (FerroxLabs/wayland-core#404). ${HINT}"
+    fi
     continue
   fi
   # THE LEG THAT REPORTED NOTHING HAS NO DIRECTORY AT ALL. That is the
@@ -130,19 +186,15 @@ while read -r leg_dir leg_job leg_result; do
   # named, no reason a reader could act on. Right exit code, wrong mechanism,
   # and it would evaporate the moment anyone relaxed `set -e`. So the absent
   # directory is READ AS ZERO here and falls through to the named failure.
-  leg_root="$EVIDENCE_DIR/$leg_dir"
-  if [ -d "$leg_root" ]; then
-    leg_found=$(find "$leg_root" -type f -name "*.xml" ! -name "outer-attempt-*.xml" | sort)
-    leg_count=$(printf "%s" "$leg_found" | grep -c . || true)
-    leg_tests=$({ find "$leg_root" -type f -name "*.xml" ! -name "outer-attempt-*.xml" -exec grep -oh "<testcase" {} + 2>/dev/null || true; } | grep -c . || true)
-  else
-    echo "required leg   : $leg_dir uploaded no artifact at all — no $leg_root exists"
-    leg_count=0
-    leg_tests=0
+  if [ ! -d "$leg_root" ] && [ ! -d "$leg_checkpoint" ]; then
+    echo "required leg   : $leg_dir uploaded no artifact at all — neither $leg_root nor $leg_checkpoint exists"
   fi
+  leg_counts "$leg_root" "$leg_checkpoint"
+  leg_count=$LEG_COUNT
+  leg_tests=$LEG_TESTS
   echo "required leg   : $leg_dir ($leg_job, result $leg_result) -> $leg_count report(s), $leg_tests test case(s)"
   if [ "$leg_count" -lt 1 ] || [ "$leg_tests" -lt 1 ]; then
-    echo "::error title=NO TEST SIGNAL FROM $leg_job ($LABEL)::The leg '${leg_job}' finished with result '${leg_result}' and contributed ${leg_count} JUnit report(s) holding ${leg_tests} test case(s) to ${EVIDENCE_DIR}/${leg_dir}. Another leg's upload cannot stand in for it: this leg is named here because it runs coverage no other leg runs (wayland#1216). A leg that dies before its test step uploads nothing at all, silently, because the upload is if-no-files-found: ignore. ${HINT}"
+    echo "::error title=NO TEST SIGNAL FROM $leg_job ($LABEL)::The leg '${leg_job}' finished with result '${leg_result}' and contributed ${leg_count} JUnit report(s) holding ${leg_tests} test case(s) to ${EVIDENCE_DIR}/${leg_dir} and ${EVIDENCE_DIR}/${leg_dir}-checkpoint combined. Another leg's upload cannot stand in for it: this leg is named here because it runs coverage no other leg runs (wayland#1216). A leg that dies before its test step uploads nothing at all, silently, because the upload is if-no-files-found: ignore. ${HINT}"
     LEG_FAILURES=$((LEG_FAILURES + 1))
   fi
 done <<REQUIRED_LEGS_EOF

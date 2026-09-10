@@ -209,6 +209,16 @@ want_grep "ci.yml names the workspace-suite leg as required" \
 # leg that is required and can never report, which is a permanently-red gate.
 want_grep "the required leg name matches the uploaded artifact name" \
   "$CI" "name: nextest-junit-linux-containerized"
+# ...AS A WHOLE LINE. The FerroxLabs/wayland-core#404 checkpoint artifact is
+# named `nextest-junit-linux-containerized-checkpoint`, so the substring above is
+# now satisfied by the CHECKPOINT upload alone -- measured: renaming the
+# end-of-job artifact to `...-final` left the assertion above green. The leg
+# named in `report`'s REQUIRED_LEGS is the unsuffixed one, so pin it exactly.
+if grep -qE '^ +name: nextest-junit-linux-containerized$' "$CI"; then
+  ok "the end-of-job artifact carries the required leg name EXACTLY"
+else
+  bad "the end-of-job artifact carries the required leg name EXACTLY"
+fi
 # ...and the report job must still fire when `ci` was skipped but the required
 # leg ran, or the floor is unreachable on exactly those runs.
 #
@@ -242,6 +252,97 @@ if [ -n "$gate_if" ]; then
   ok "the evidence gate's condition was located (anti-vacuity)"
 else
   bad "the evidence gate's condition was located (anti-vacuity)"
+fi
+
+# ── FerroxLabs/wayland-core#404 c1 — THE CHECKPOINT'S POSITION IS THE FIX ────
+#
+# `Upload nextest JUnit report` already carried `if: always()` when #404 was
+# filed, and it sits at the BOTTOM of `ci-linux`, after the swarm gate, the voice
+# suite, both shared-process suites, the corpus drift check, the security audit
+# and the signed-manifest drill. A job cancelled anywhere in that stretch — the
+# 150-minute budget, a `cancel-in-progress` push, a human — is not guaranteed to
+# reach a trailing `always()` step, and the run loses every test result it had
+# already produced.
+#
+# The repair is a SECOND upload placed immediately after the test step, so the
+# evidence reaches the artifact store while nothing has been cancelled yet.
+# `if: always()` on it is not the mechanism; its POSITION is. So what is
+# asserted here is the position, by line number, against the steps it must
+# precede — a condition-only assertion would grade exactly the thing that was
+# already true and still lost the evidence.
+CKPT_ARTIFACT="nextest-junit-linux-containerized-checkpoint"
+want_grep "ci-linux uploads a JUnit checkpoint" "$CI" "name: $CKPT_ARTIFACT"
+want_grep "the evidence gate reads the checkpoint as the same leg" \
+  "$GATE" 'leg_checkpoint="$EVIDENCE_DIR/$leg_dir-checkpoint"'
+# c2's two observables, asserted as strings because the gate deliberately does
+# NOT change its exit code between them (a cancelled leg is not a defect).
+want_grep "the gate names cancelled-WITH-evidence" \
+  "$GATE" "CANCELLED WITH TEST EVIDENCE"
+want_grep "the gate names cancelled-with-NO-evidence" \
+  "$GATE" "CANCELLED WITH NO TEST EVIDENCE"
+want_grep "the #404 self-test arms run in lint.yml" \
+  "$ROOT/.github/workflows/lint.yml" "bash .github/scripts/tests/assert-test-evidence.test.sh"
+
+# SCOPED TO THE `ci-linux` JOB, not to the file. `Run tests (nextest CI
+# profile)`, `Security audit` and `Upload nextest JUnit report` all also appear
+# in the `ci` matrix job ~1,400 lines earlier, so a whole-file `grep | head -1`
+# compares a ci-linux line number against a ci-matrix one and answers nonsense.
+# Measured: it reported the checkpoint at 2314 "after" a security audit at 880.
+CIL_START=$(grep -n '^  ci-linux:' "$CI" | head -1 | cut -d: -f1)
+CIL_END=$(awk -v s="${CIL_START:-0}" 'NR>s && /^  [A-Za-z0-9_-]+:$/ {print NR; exit}' "$CI")
+if [ -n "${CIL_START:-}" ] && [ -n "${CIL_END:-}" ] && [ "$CIL_START" -lt "$CIL_END" ]; then
+  ok "the ci-linux job body was located (lines $CIL_START-$CIL_END)"
+else
+  bad "the ci-linux job body was located (start=${CIL_START:-} end=${CIL_END:-})"
+fi
+line_of() { # line_of <file> <line-prefix>, first match INSIDE ci-linux
+  awk -v s="${CIL_START:-0}" -v e="${CIL_END:-0}" -v pat="$2" \
+      'NR>s && NR<e && index($0, pat)==1 {print NR; exit}' "$1"
+}
+is_before() { [ -n "${1:-}" ] && [ -n "${2:-}" ] && [ "$1" -lt "$2" ]; }
+
+L_RUN=$(line_of "$CI" "      - name: Run tests (nextest CI profile)")
+L_CKPT=$(line_of "$CI" "      - name: Upload nextest JUnit checkpoint")
+L_LIB=$(line_of "$CI" "      - name: Shared-process lib suite")
+L_INTEG=$(line_of "$CI" "      - name: Shared-process integration suite")
+L_AUDIT=$(line_of "$CI" "      - name: Security audit")
+L_FINAL=$(line_of "$CI" "      - name: Upload nextest JUnit report")
+
+# ANTI-VACUITY FIRST: every anchor must have been found, or every ordering
+# assertion below would compare two empty strings and `is_before` would answer
+# the same way for all of them.
+for pair in "test step:$L_RUN" "checkpoint:$L_CKPT" "lib suite:$L_LIB" \
+            "integration suite:$L_INTEG" "security audit:$L_AUDIT" \
+            "final upload:$L_FINAL"; do
+  if [ -n "${pair#*:}" ]; then ok "located the ${pair%%:*} step"
+  else bad "located the ${pair%%:*} step"; fi
+done
+
+for later in "$L_LIB" "$L_INTEG" "$L_AUDIT" "$L_FINAL"; do
+  if is_before "$L_CKPT" "$later"; then
+    ok "the checkpoint precedes the step at line $later"
+  else
+    bad "the checkpoint (line $L_CKPT) must precede the step at line $later"
+  fi
+done
+if is_before "$L_RUN" "$L_CKPT"; then
+  ok "the checkpoint follows the test step that produces the evidence"
+else
+  bad "the checkpoint (line $L_CKPT) must follow the test step (line $L_RUN)"
+fi
+
+# CONTROL: the comparator must be able to answer NO, or every ordering
+# assertion above passes on any file whatsoever.
+if is_before "$L_FINAL" "$L_RUN"; then
+  bad "control: is_before can report a wrong order"
+else
+  ok "control: is_before can report a wrong order"
+fi
+# ...and NO on a missing anchor, which is the shape a renamed step takes.
+if is_before "$(line_of "$CI" "      - name: a step that does not exist")" "$L_RUN"; then
+  bad "control: is_before rejects a missing anchor"
+else
+  ok "control: is_before rejects a missing anchor"
 fi
 
 echo "---"
