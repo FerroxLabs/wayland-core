@@ -649,6 +649,28 @@ impl SessionJournal {
             .map(|writer| writer.state.clone())
     }
 
+    /// Read ONE durable child record from the live writer state.
+    ///
+    /// Same lock and the same poisoning error as [`Self::state`], but it clones
+    /// only the requested record. The durable spawner inspects a child several
+    /// times per dispatch, and cloning the whole reduced state for each lookup
+    /// made every dispatch cost grow with the number of children already in the
+    /// journal (wayland#1301).
+    pub(crate) fn durable_child(
+        &self,
+        child_id: &str,
+    ) -> Result<Option<wcore_types::spawner::DurableChildRecord>, JournalError> {
+        let writer = self
+            .inner
+            .lock()
+            .map_err(|_| JournalError::WriterPoisoned)?;
+        Ok(writer
+            .state
+            .children
+            .get(child_id)
+            .and_then(|child| child.durable.clone()))
+    }
+
     /// Read the same live writer state as `state`, without copying unrelated
     /// conversation and provider payloads for child-supervision queries.
     pub(crate) fn durable_children(
