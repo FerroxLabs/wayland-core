@@ -297,7 +297,8 @@ async fn a_thousand_project_skills_still_fit_the_window_budget() {
             )
         })
         .collect();
-    let listing = listing_of(&wcore_agent::context::format_skills_section(&skills, None));
+    let rendered = wcore_agent::context::format_skills_section(&skills, None);
+    let listing = listing_of(&rendered);
 
     // NON-VACUITY: the arm has to be over budget BEFORE the ceiling, or a pass
     // here means only that 1,000 skills happen to be small. One name-only entry
@@ -344,7 +345,8 @@ fn a_small_skill_set_is_listed_in_full_and_not_trimmed() {
     let skills: Vec<SkillRef> = (0..6)
         .map(|i| skill_ref(&format!("m-skill-{i:03}"), "short", SkillSource::User))
         .collect();
-    let listing = listing_of(&wcore_agent::context::format_skills_section(&skills, None));
+    let rendered = wcore_agent::context::format_skills_section(&skills, None);
+    let listing = listing_of(&rendered);
 
     for i in 0..6 {
         assert!(
