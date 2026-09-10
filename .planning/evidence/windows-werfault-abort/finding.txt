@@ -1,0 +1,108 @@
+WINDOWS: abort() IN A TEST CHILD COSTS ~3.2 SECONDS, AND IT IS WINDOWS ERROR REPORTING
+======================================================================================
+Found 2026-09-10 while fixing wayland#1300 c1/c2. Recorded here rather than only in
+that ticket's ledger note BECAUSE IT IS NOT SPECIFIC TO wayland#1300: any test in
+this workspace that kills a child process with `abort()` on Windows pays this, and
+it is BISTABLE, so it presents as an unexplained 25-50x timing spread rather than as
+a constant cost. That is the exact shape people chase for days. Two candidate causes
+were refuted by measurement before this one was found (see REFUTED, below).
+
+THE MECHANISM
+-------------
+`std::process::abort()` on the windows-msvc target raises a fatal exception. The
+Windows Error Reporting service handles it by launching `WerFault.exe`. The parent
+does not see the child exit until WER is finished, so `Command::status()` -- and
+therefore any harness that waits for a crashed child -- bills the WER time.
+
+NAMED BY OBSERVATION, NOT INFERRED: sampling the process table every 100 ms through a
+six-abort run observed SEVEN distinct `WerFault.exe` processes.
+
+THE MEASUREMENT
+---------------
+Host: SeanDesktop (the `ferrox-win-msvc` CI runner host), Windows 11 10.0.26200.9168,
+32 cores. Standalone harness: a parent spawns N children, each of which terminates in
+one of four ways; the figure is the parent-observed wall clock per spawn, so it
+includes process creation, the child body and the teardown.
+
+Four modes INTERLEAVED over two passes in one session, n=12 per arm per pass, so host
+drift could not be mistaken for the effect:
+
+    mode                                          pass 1 (ms)        pass 2 (ms)
+    ----------------------------------------      ---------------    ---------------
+    abort()                                       2888.9 - 3469.2    3137.3 - 3464.9
+    abort() after _set_abort_behavior(0,          2904.8 - 3537.1    2917.0 - 3433.3
+      _WRITE_ABORT_MSG | _CALL_REPORTFAULT)
+    TerminateProcess(GetCurrentProcess(), 134)       2.7 -    5.2       2.7 -    5.1
+    exit(0)                                          2.8 -    4.8       3.0 -    5.0
+
+Read it as ~1150x. Process creation is the 2.7 ms floor; everything above it is WER.
+
+THE CRT SWITCH DOES NOT WORK, AND THAT IS WORTH KNOWING
+-------------------------------------------------------
+`_set_abort_behavior(0, _CALL_REPORTFAULT)` is the documented way to stop the CRT
+invoking WER from `abort()`, and it is the first thing a reader will reach for. It
+does NOT help here -- 2904.8-3537.1 ms, indistinguishable from plain abort() -- because
+Rust's `std::process::abort` does not route through the CRT `abort()` on this target,
+so there is no CRT behaviour flag in the path to clear. Recorded as refuted rather
+than dropped so nobody spends the afternoon on it.
+
+WHAT TO DO INSTEAD
+------------------
+`TerminateProcess(GetCurrentProcess(), code)`. See `hard_kill_self` in
+`crates/wcore-config/src/credentials.rs` for the implementation and the SAFETY note.
+
+IT IS NOT A WEAKER CRASH -- THIS IS THE PART THAT MATTERS FOR A CRASH-INJECTION TEST.
+`TerminateProcess` dispatches no exception at all, so no vectored or structured
+handler runs, no CRT teardown runs and no atexit handler runs. That is STRICTLY
+HARSHER than `abort()`, which does dispatch. `exit(0)` is equally fast and is the
+wrong choice: it flushes stdio and runs atexit handlers, so it is the weakest kill of
+the three, and swapping to it would have been a quiet regression dressed as a speedup.
+
+Keep a plain `abort()` as the unreachable fallback after the call rather than a spin
+loop, so a failure to terminate is still a crash -- slow, but correct -- and not a hang.
+
+EFFECT, MEASURED ON THE MODULE THAT FOUND IT
+--------------------------------------------
+`credentials::chunk_crash_injection`, `cargo nextest run -p wcore-config --lib
+--profile ci --retries 0`, SeanDesktop, 15 consecutive passes:
+
+    whole module            3.57 - 3.70 s      (was: harness-killed at 180.114 s;
+                                                slowest passing member 131.44-149.03 s)
+    the five sibling sweeps 0.413 - 0.479 s    (was: a ~1.5 s and a ~36-97 s mode
+                                                inside ONE run)
+    whole 817-test wcore-config lib suite, 5 passes: 14.60 - 15.00 s
+
+Across ~600 guaranteed injected crashes in those 15 passes (the 40 rotation rounds
+per pass crash on every round), ZERO rounds show anything near the 2889 ms WER floor;
+the global maximum round is 88.8 ms. The `abort()` fallback never wins the race.
+
+REFUTED BEFORE THIS WAS FOUND -- both by measurement, both recorded so they are not retried
+-------------------------------------------------------------------------------------------
+1. SERIALISING the module (`--test-threads=1`), on the theory that concurrent test
+   processes contend: 2.3-5.7x WORSE (306.76 / 316.29 / 304.93 s against 132.18 /
+   125.72 / 53.61 s concurrent, alternating in one session).
+2. A WINDOWS DEFENDER PATH EXCLUSION on the target directory, on the theory that
+   on-access scanning of a freshly linked test image is the cost: A/B/A with the scan
+   cache invalidated before every arm gives 146.67 / 127.92 s with no exclusion,
+   145.73 / 128.92 s with the target directory excluded, 60.86 s with it removed
+   again. The exclusion moves nothing and the host drifts more than the effect.
+
+Both were looking at PROCESS CREATION. The cost was in the child's DEATH, which is
+why neither found it. The tell was in the data the whole time and reads backwards
+until you see it: a sweep's SLOW rounds were its rounds with a LOW injected crash
+index -- the child aborts almost immediately and does essentially no work -- while its
+FAST rounds were the ones with the highest index, which do the most work and then run
+past the end of the write to a normal `exit(0)`. More work was faster. The cost could
+not be the work.
+
+CROSS-PLATFORM CONTEXT, SAME COMMIT, SAME INSTRUMENT
+-----------------------------------------------------
+Per-round wall clock, max/min, after the fix:
+
+    Windows   1.08x .. 4.54x    (13 of 90 test-instances >= 3x)
+    macOS     1.73x .. 12.95x   (86 of 120 >= 3x)   GitHub-hosted macos-26-arm64
+    Linux    34.32x .. 61.18x   (all >= 3x)         hetzner-dsm
+
+Windows is now the BEST of the three on that metric. Recorded because a "max/min below
+3x" threshold on a millisecond-scale round is a gate NO platform passes, and a gate
+that cannot pass is worth as little as one that cannot fail.
