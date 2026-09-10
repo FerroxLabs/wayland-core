@@ -95,12 +95,59 @@ mod tests {
         let _ = std::fs::remove_file(&p);
     }
 
+    /// GRADED ON THE NAME, NOT THE WHOLE PATH, and that is the point of this
+    /// comment rather than a style preference.
+    ///
+    /// `state_path` roots itself at `wayland_config_dir()`, which reads the
+    /// `WAYLAND_HOME` PROCESS GLOBAL. `lib.rs::cfg` in this same crate writes
+    /// that global from a `Once`, and its SAFETY note assumed
+    /// "process-per-test under nextest; no other thread reads the env". That
+    /// assumption does not hold in the shared-process leg, which runs
+    /// `cargo test --workspace --lib` — one process for all 79 tests in this
+    /// binary, threads in parallel. Comparing whole paths therefore graded
+    /// WHERE THE PROFILE HOME HAPPENED TO POINT between two calls, not this
+    /// module's hashing.
+    ///
+    /// It fired: CI run 34438211271, leg `CI (linux-containerized)`, step
+    /// "Shared-process lib suite" — FAILED at offset_store.rs:103 on
+    /// `same channel must map to the same file`, while the SAME test PASSED in
+    /// the nextest leg of the same run (position 5267/18053). That difference
+    /// is the whole reason the shared-process leg exists.
+    /// `.config/env-global-helper-debt.txt:67` had already named this exact
+    /// pair, dated, under gh#1233.
+    ///
+    /// What the module actually promises, per its own docstring, is that the
+    /// FILE NAME is a deterministic function of the channel name. That is what
+    /// is asserted here, and it is true under any profile home. The parent is
+    /// asserted by its own name (`channel-state`) rather than by a second
+    /// reading of the global, so nothing here can be decided by another
+    /// thread's env mutation.
     #[test]
     fn state_path_is_stable_and_channel_specific() {
         let a = state_path("telegram-main");
         let a2 = state_path("telegram-main");
         let b = state_path("telegram-alt");
-        assert_eq!(a, a2, "same channel must map to the same file");
-        assert_ne!(a, b, "different channels must not collide");
+        assert_eq!(
+            a.file_name(),
+            a2.file_name(),
+            "same channel must map to the same file"
+        );
+        assert_ne!(
+            a.file_name(),
+            b.file_name(),
+            "different channels must not collide"
+        );
+        assert_eq!(
+            a.parent().and_then(|p| p.file_name()),
+            Some(std::ffi::OsStr::new("channel-state")),
+            "state files must live under the profile's channel-state directory"
+        );
+        // Non-vacuity: a hashed name is 16 hex digits plus the fixed affixes,
+        // so an empty or missing file_name would satisfy the equality above.
+        let name = a.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            name.starts_with("telegram-") && name.ends_with(".offset") && name.len() == 25,
+            "expected telegram-<16 hex>.offset, got {name}"
+        );
     }
 }
