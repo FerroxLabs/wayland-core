@@ -455,7 +455,7 @@ impl ToolConfirmer {
             // error; nothing has been consumed, so nothing is lost.
             AnswerRead::Unavailable => self.decide_from_answer(tool_name, &mut io::stdin().lock()),
             AnswerRead::Expired => {
-                eprintln!(
+                let _ = format!(
                     "\nNo answer after {}s - denying {}. Set {}=<seconds> to change \
                      the budget (0 waits forever).",
                     budget.as_secs(),
