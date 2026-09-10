@@ -82,6 +82,9 @@ on:
     # to be delayed or dropped. A dropped run matters here because a census that
     # does not run is indistinguishable from a census that found nothing.
     - cron: '17 6 * * 1'
+  push:
+    branches:
+      - 'measure/w15-mac2-census'
   workflow_dispatch:
     inputs:
       days:
