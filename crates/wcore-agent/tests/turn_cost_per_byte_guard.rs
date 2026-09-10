@@ -180,16 +180,26 @@ fn warm_up() {
 async fn one_turn_costs_about_two_whole_payload_scrub_passes() {
     warm_up();
 
-    // Three interleaved ROUNDS. Each round measures the two turns and the
-    // reference scrub adjacent in time, so a burst of co-tenant load lands on
-    // all three and largely cancels inside that round's ratio; the median then
-    // discards a round where it did not. Measured on hetzner-dsm with the box
-    // deliberately oversubscribed (48 spinners on 96 cores, load 43->75), a
-    // per-sample `min` estimator produced ratios of 2.04/2.30/2.07/0.98 — one
-    // of which is a false red and one of which is close to a false green.
+    // Interleaved ROUNDS. Each round measures the two turns and the reference
+    // scrub adjacent in time, so a burst of co-tenant load lands on all three
+    // and largely cancels inside that round's ratio; the median then discards a
+    // round where it did not. Measured on hetzner-dsm with the box deliberately
+    // oversubscribed (48 spinners on 96 cores, load 43->75), a per-sample `min`
+    // estimator produced ratios of 2.04/2.30/2.07/0.98 — one of which is a
+    // false red and one of which is close to a false green.
+    //
+    // ROUNDS is 7, not 3 (wayland#1301 c1). The estimator is a DIFFERENCE of
+    // two wall-clock samples divided by a third, so it amplifies scheduler
+    // noise: over 120 measured rounds, 7 individual ratios were >= 2.5 (max
+    // 4.61) and 3 were <= 1.5, and a median of 3 needs only two bad rounds out
+    // of three to carry one of those through. A median of 7 needs four. The
+    // BOUNDS are deliberately unchanged — widening them would retire the
+    // property the test exists for — and every raw ratio is still printed, so
+    // a real shift shows up in the samples before it shows up in the verdict.
+    const ROUNDS: usize = 7;
     let mut ratios: Vec<f64> = Vec::new();
     let (mut small, mut large, mut scrub) = (f64::MAX, f64::MAX, f64::MAX);
-    for _ in 0..3 {
+    for _ in 0..ROUNDS {
         let round_small = turn_seconds(SMALL).await.0;
         let round_large = turn_seconds(2 * SMALL).await.0;
         let round_scrub = one_scrub_pass_seconds(SMALL);
@@ -200,7 +210,7 @@ async fn one_turn_costs_about_two_whole_payload_scrub_passes() {
     }
     ratios.sort_by(|a, b| a.partial_cmp(b).expect("no NaN timings"));
 
-    let passes = ratios[1];
+    let passes = ratios[ratios.len() / 2];
     eprintln!(
         "TURN-COST min_small={small:.4}s min_large={large:.4}s min_scrub={scrub:.4}s ratios={ratios:.2?} median_passes={passes:.2}"
     );
