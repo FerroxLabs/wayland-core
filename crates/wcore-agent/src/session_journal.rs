@@ -1379,26 +1379,10 @@ impl Drop for CheckpointAdmission<'_> {
 /// test run another store's whole publication inside that gap, so moving the
 /// released snapshot to after the scan cannot hide from it (wayland#1353).
 ///
-/// An entry another store removes between the listing and its stat is gone, not
-/// an error (wayland#1357), so the directory is listed again. Every rescan is
-/// still taken after the admission's released snapshot, so rescanning cannot
-/// weaken the quota. The bound only stops a directory that never holds still
-/// from spinning; reaching it fails closed, as a vanished entry always did.
+/// An entry another store removes between the listing and its stat counts as gone
+/// inside [`checkpoint_directory_bytes`] (wayland#1357).
 fn scan_checkpoint_quota(directory: &Path) -> Result<u64, JournalError> {
-    const MAX_SCANS: usize = 8;
-    let mut scans = 1;
-    let scanned = loop {
-        match checkpoint_directory_bytes(directory) {
-            Err(JournalError::Io { path, source })
-                if source.kind() == std::io::ErrorKind::NotFound
-                    && path.as_path() != directory
-                    && scans < MAX_SCANS =>
-            {
-                scans += 1;
-            }
-            result => break result?,
-        }
-    };
+    let scanned = checkpoint_directory_bytes(directory)?;
     #[cfg(test)]
     quota_race_gate::after_quota_scan(directory);
     Ok(scanned)
@@ -1767,10 +1751,17 @@ fn checkpoint_directory_bytes(directory: &Path) -> Result<u64, JournalError> {
             source,
         })?;
         let path = entry.path();
-        let metadata = checkpoint_entry_metadata(&entry).map_err(|source| JournalError::Io {
-            path: path.clone(),
-            source,
-        })?;
+        // An entry removed between the listing and this stat is gone, not an error
+        // (wayland#1357). If it was another store's temporary, that store is still
+        // reserved, released after the scanning store's snapshot, or published
+        // before it and so listed here under its published name: the admission
+        // counts it whichever holds. The directory itself vanishing fails closed at
+        // `read_dir`, and every other error still fails closed.
+        let metadata = match checkpoint_entry_metadata(&entry) {
+            Ok(metadata) => metadata,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(source) => return Err(JournalError::Io { path, source }),
+        };
         if metadata.file_type().is_symlink() || !metadata.is_file() {
             return Err(JournalError::InvalidTransition(format!(
                 "filesystem effect checkpoint store contains an unsafe entry: {}",
