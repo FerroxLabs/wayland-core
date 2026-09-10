@@ -91,6 +91,22 @@ const ATTACHMENT_NONCE: &str = "PWN7Q2ZX-URLNONCE";
 
 const ROUTED_SKILL: &str = "wire-contract-fixture";
 
+/// A skill installed AFTER the session boots, so the catalogue's mid-session
+/// refresh has something real to report.
+const ADDED_SKILL: &str = "wire-contract-added";
+
+/// The literal head of the skill-inventory refresh block `AgentEngine` injects
+/// when `SkillCatalog::inventory_changed()` is set (`engine.rs`).
+///
+/// Deliberately NOT a [`NAMED_RUNTIME_PREFIXES`] entry, and it must never
+/// become one. The directive is the model's ALLOWLIST of trusted product text
+/// inside a turn whose other content is hostile; this block's payload is a
+/// SKILL LISTING, so enumerating it would have the directive vouch for a
+/// listing any sender can forge by pasting this line and inventing entries
+/// under it. The block is suppressed on channel-attached engines instead, and
+/// the enumeration stays at two.
+const INVENTORY_REFRESH_HEAD: &str = "Current skill inventory supersedes the initial listing.";
+
 /// A fixed substring of the system directive. Not the whole constant, so the
 /// assertion still means something if the wording is edited, and not computed
 /// from the constant at all — a literal, checked by eye against the source.
@@ -1000,4 +1016,133 @@ fn unnamed_line_in_accepts_only_the_blocks_the_directive_names() {
         "an unterminated envelope is one block — recorded deliberately, since the \
          product always closes it and the wire assertion above forbids sender bytes here"
     );
+}
+
+/// Drive TWO turns on one engine, installing a new skill into the workspace
+/// between them, and return every request body the provider saw.
+///
+/// The catalogue is re-scanned at the admitted user-turn boundary
+/// (`engine.rs` calls `catalog.refresh_local()` there), and
+/// `inventory_changed` is sticky once set — so the second turn is the one
+/// whose catalogue has changed, and both arms below use the identical fixture.
+async fn turns_across_a_mid_session_catalog_change(
+    server: &MockServer,
+    cwd: &Path,
+    with_channel_posture: bool,
+) -> Vec<Value> {
+    let provider: Arc<dyn LlmProvider> = Arc::new(AnthropicProvider::new(
+        "anthropic-wire-test-key",
+        &server.uri(),
+        ProviderCompat::anthropic_defaults(),
+        DebugConfig::default(),
+    ));
+    let mut config = base_config(
+        ProviderType::Anthropic,
+        &server.uri(),
+        ProviderCompat::anthropic_defaults(),
+    );
+    configure_persisted_test_session(&mut config, cwd);
+    let mut bootstrap = AgentBootstrap::new(config, cwd.to_str().unwrap(), null_output())
+        .provider(provider)
+        .without_channels(true);
+    if with_channel_posture {
+        bootstrap = bootstrap.channel_tool_posture(ChannelToolScope {
+            posture: ChannelToolPosture::Conversational,
+            workspace_root: cwd.to_path_buf(),
+            ambient_mcp_full_authority_v1: false,
+        });
+    }
+    let mut built = bootstrap.build().await.expect("bootstrap against the mock");
+    built
+        .engine
+        .init_session("p3wire", cwd.to_str().unwrap(), None)
+        .expect("persisted session binds the production budget authority");
+    built.engine.use_recovery_test_key(&RECOVERY_TEST_KEY);
+
+    if let Err(e) = built.engine.run("first turn", "catalog-msg-1").await {
+        panic!("first turn failed before reaching the provider: {e}");
+    }
+
+    let added = cwd.join(".wayland-core/skills").join(ADDED_SKILL);
+    std::fs::create_dir_all(&added).expect("added skill directory");
+    std::fs::write(
+        added.join("SKILL.md"),
+        format!("---\nname: {ADDED_SKILL}\ndescription: added mid session\n---\nFixture only.\n"),
+    )
+    .expect("added skill");
+
+    if let Err(e) = built.engine.run("second turn", "catalog-msg-2").await {
+        panic!("second turn failed before reaching the provider: {e}");
+    }
+
+    server
+        .received_requests()
+        .await
+        .expect("wiremock records requests")
+        .into_iter()
+        .map(|r| serde_json::from_slice::<Value>(&r.body).expect("request body is JSON"))
+        .collect()
+}
+
+/// THE LOCAL CONTROL, and the proof the suppression is not too broad.
+///
+/// An ordinary non-channel engine whose catalogue changed mid-session must
+/// STILL receive the refresh block. Nothing about the local path changes: it
+/// carries no untrusted-channel directive, so it has no enumeration to falsify,
+/// and a user who edits a skill mid-session still gets told.
+///
+/// It is also what stops the channel arm below being vacuous. If this fixture
+/// ever stopped changing the catalogue, the channel assertion would pass for
+/// free against a build where the block was simply broken for everyone — the
+/// exact shape of gate this repository has shipped before.
+#[tokio::test]
+async fn a_local_engine_still_gets_the_inventory_refresh_after_a_catalog_change() {
+    let server = start_mock("/v1/messages", anthropic_text_sse("ok")).await;
+    let (_dir, cwd) = resolved_workspace();
+    let bodies = turns_across_a_mid_session_catalog_change(&server, &cwd, false).await;
+    let turns: Vec<String> = bodies.iter().flat_map(wire_user_turns).collect();
+    assert!(
+        turns.iter().any(|t| t.contains(INVENTORY_REFRESH_HEAD)),
+        "the LOCAL path lost its mid-session inventory refresh. Either the channel gate is too \
+         broad, or this fixture no longer changes the catalogue - and in that case the channel \
+         assertion beside this one proves nothing. Turns: {turns:?}"
+    );
+}
+
+/// THE PROPERTY: a channel-attached engine whose catalogue HAS changed still
+/// puts no un-enumerated product block on the wire.
+///
+/// Two assertions, and both are load-bearing. The first names the specific
+/// block this closes, so a regression says what came back. The second is the
+/// general form — any product-only user turn must consist entirely of lines the
+/// directive names — so a FIFTH un-enumerated block added later is caught here
+/// too, not just the one that was found.
+///
+/// Verified by mutation: dropping `&& !self.untrusted_channel_session()` from
+/// the injection site in `engine.rs` turns this test red and leaves the local
+/// control above green.
+#[tokio::test]
+async fn a_channel_engine_puts_no_inventory_refresh_on_the_wire_after_a_catalog_change() {
+    let server = start_mock("/v1/messages", anthropic_text_sse("ok")).await;
+    let (_dir, cwd) = resolved_workspace();
+    let bodies = turns_across_a_mid_session_catalog_change(&server, &cwd, true).await;
+    let turns: Vec<String> = bodies.iter().flat_map(wire_user_turns).collect();
+    assert!(
+        !bodies.is_empty(),
+        "no request reached the provider, so every absence assertion below is free"
+    );
+    assert!(
+        !turns.iter().any(|t| t.contains(INVENTORY_REFRESH_HEAD)),
+        "the skill-inventory refresh reached a CHANNEL wire. The directive enumerates two \
+         runtime blocks and this is not one of them, so the model's basis for telling product \
+         text from a sender's text is no longer sound. Turns: {turns:?}"
+    );
+    for turn in &turns {
+        if turn == "first turn" || turn == "second turn" {
+            continue;
+        }
+        if let Some(line) = unnamed_line_in(turn) {
+            panic!("un-enumerated product line on a channel wire: {line:?} (whole turn: {turn:?})");
+        }
+    }
 }

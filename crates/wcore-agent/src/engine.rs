@@ -8861,18 +8861,52 @@ impl AgentEngine {
     /// tool-results tail — Anthropic requires `tool_result` blocks first, so
     /// a text block must never be inserted ahead of them.
     ///
-    /// Callers: the per-turn skill hint (`Skill hint: …`) and PrePrompt plugin
-    /// contributions (their own `<plugin-context … trust="untrusted">`
-    /// envelope). BOTH are named in the system directive; adding a THIRD
-    /// caller without adding it there makes that directive false —
-    /// `untrusted_channel_wire_test` grades the composition of the turn on the
-    /// wire and will go red.
+    /// Callers on a CHANNEL-ATTACHED engine: the per-turn skill hint
+    /// (`Experimental skill hint: …`) and PrePrompt plugin contributions
+    /// (their own `<plugin-context … trust="untrusted">` envelope). BOTH are
+    /// named in the system directive; adding a THIRD caller without adding it
+    /// there makes that directive false — `untrusted_channel_wire_test` grades
+    /// the composition of the turn on the wire and will go red.
+    ///
+    /// That is not hypothetical: the skill-inventory refresh block
+    /// (`Current skill inventory supersedes the initial listing…`) WAS added
+    /// as a third caller and the directive was not updated, which this test
+    /// caught under a full-workspace run. It was not fixed by naming a fourth
+    /// block, because that block's payload is a SKILL LISTING and the
+    /// directive is the model's allowlist of trusted product text: enumerating
+    /// it would have the directive vouch for a listing a sender can forge.
+    /// It is SUPPRESSED on a channel-attached engine instead — see
+    /// `untrusted_channel_session` below and its call site. The enumeration
+    /// stays at the two conditional blocks named above, and the local
+    /// (non-channel) path is untouched.
     ///
     /// #559 removed a third caller, the current-date line, by moving it into
     /// the cached system prefix. Both remaining callers are CONDITIONAL (the
     /// router must match; a PrePrompt hook must be installed), so a default
     /// channel session now puts no product string at all ahead of the
     /// sender's bytes.
+    /// Is this engine attached to an untrusted remote channel?
+    ///
+    /// The signal is the engine's own composed system prompt carrying
+    /// [`wcore_channels::untrusted::UNTRUSTED_CHANNEL_SESSION_DIRECTIVE`],
+    /// which `AgentBootstrap::build` appends exactly when a
+    /// `channel_tool_posture` is set. `config.system_prompt` is written once
+    /// there and never reassigned: the engine only READS it (to seed
+    /// `self.system_prompt`), and the persona / overlay paths mutate
+    /// `self.system_prompt` instead. So it is a stable record of what this
+    /// session was built as, which a mutable prompt would not be.
+    ///
+    /// Keyed on the DIRECTIVE rather than on a parallel boolean, deliberately.
+    /// The rule being enforced is "every product-written block in a user turn
+    /// is one the directive enumerates", so guard and artefact cannot drift
+    /// apart: an engine carrying the directive is exactly an engine the
+    /// enumeration binds.
+    fn untrusted_channel_session(&self) -> bool {
+        self.config.system_prompt.as_deref().is_some_and(|prompt| {
+            prompt.contains(wcore_channels::untrusted::UNTRUSTED_CHANNEL_SESSION_DIRECTIVE)
+        })
+    }
+
     fn attach_transient_block(message: &mut Message, text: String) {
         let block = ContentBlock::Text { text };
         match message.content.last() {
@@ -14734,6 +14768,7 @@ impl AgentEngine {
                     let mut transient_tail = false;
                     if let Some(catalog) = &self.skill_catalog
                         && catalog.inventory_changed()
+                        && !self.untrusted_channel_session()
                     {
                         let listing = crate::context::format_skills_section(
                             &catalog.visible(),
