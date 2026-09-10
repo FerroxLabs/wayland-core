@@ -1,0 +1,227 @@
+wayland#1301 c3/c4: fix1_dispatch_budget_aborts_with_partial_result AGAINST ITS WINDOWS KILL LINE
+==================================================================================================
+Lane w15/win1301, 2026-09-10. Every sample is listed; the MAXIMUM decides, because c3 grades the
+worst case against a kill line, not the average.
+
+THE KILL LINE: 240 s
+--------------------
+`.config/nextest.toml:161-162` gives this test `slow-timeout = { period = "120s", terminate-after = 2 }`
+in `[[profile.default.overrides]]`, and nextest applies default-profile overrides under `--profile ci`
+(no `[profile.ci]` override names this test). Observed, not inferred, twice: CI run 33707672948
+recorded `<flakyFailure type='test timeout' time='240.072'>`, and the hosted baseline below killed two
+debug runs at 240.025 s and 240.026 s. Headroom = 240 / measured seconds. 1.5x requires <= 160.000 s.
+
+WHAT CI RUNS TODAY, AND WHY THE OLD FIGURE IS STALE
+---------------------------------------------------
+* `CI (Array)` runs on GitHub-HOSTED `windows-latest`, not SeanDesktop:
+  `.github/workflows/ci.yml:229` `runs-on: ${{ contains(matrix.os, 'self-hosted') && 'windows-latest' || matrix.os }}`.
+  Confirmed from the jobs API: labels ["windows-latest"], runner group "GitHub Actions".
+* Since 1780b3164 (2026-09-08) Windows runs this test ONLY in its own step,
+  "Dispatch budget boundary (isolated Windows execution)":
+  `vx cargo nextest run --locked --release -p wcore-agent --test workflow_limits_test --profile ci
+   --retries 0 --no-tests=fail --test-threads 1 -E 'test(=fix1_dispatch_budget_aborts_with_partial_result)'`
+  and the shared debug pool EXCLUDES it (`ci.yml:710`, `ci.yml:1266`).
+* So the previously recorded 90-94 percent / 1.06-1.11x (216.9-226.3 s, 2026-09-03) measured a debug
+  build inside the contended shared pool -- a condition CI no longer uses. ISOLATION REMOVES THAT
+  CONDITION RATHER THAN MEASURING IT; it does not mean the test got faster. Both figures are recorded
+  side by side below so `met` is never read as "the test got cheaper by moving it".
+
+REAL CI, ISOLATED RELEASE STEP, n=5 (context, not the deciding instrument)
+--------------------------------------------------------------------------
+    run 34255398149 job 102159879578   99.698 s   2.41x
+    run 34318072596 job 102358480327   91.113 s   2.63x
+    run 34336411323 job 102416807016   90.790 s   2.64x
+    run 34351599352 job 102466052744   93.342 s   2.57x
+    run 34438211271 job 102747677852   71.310 s   3.37x
+n=5 is below the criterion's n>=10, and the same invocation measured far slower on the same executor
+class below, so these do not decide c3.
+
+BASELINE, HOSTED windows-latest, EXACT CI INVOCATION, n=12 PER ARM, INTERLEAVED (DECIDES)
+-----------------------------------------------------------------------------------------
+Run 34484229471 on throwaway branch timing/w15-1301 (source 38f82b87f + harness, no code change).
+Shard a: runner "GitHub Actions 1000065374", AMD EPYC 9V74, 4 cores, 16 GB, Windows build 26100.
+Shard b: runner "GitHub Actions 1000065375", AMD EPYC 7763, 4 cores, 16 GB, Windows build 26100.
+Release is the arm CI runs; debug is interleaved with it. Graded from raw nextest output
+(a passing run that crosses its slow period prints `SLOW [ Xs]`, so PASS is only counted when the
+final-status line and the Summary line agree).
+
+    release  a: 132.660 135.762 131.223 119.892 119.994 121.725
+    release  b: 182.977 147.799 140.936 125.954 117.550 117.861
+             MAX 182.977 s  ->  1.31x   (NOT MET at base)
+    debug    a: 212.156 212.298 207.825 193.891 187.644 189.029
+    debug    b: TIMEOUT@240.026 TIMEOUT@240.025 218.685 234.382 191.731 190.317
+             2 of 12 killed by the harness; max passing 234.382 s -> 1.02x
+
+SHARED-POOL DEBUG FIGURE (the condition that produced the allowlist row), recorded for comparison:
+    CI (Array), 2026-09-02/03, ten runs, 185.46-226.28 s -> 1.06x at max.
+
+BASELINE, SeanDesktop (Windows 11 build 26200, 32 cores), n=10 PER ARM, INTERLEAVED
+-----------------------------------------------------------------------------------
+Exact CI invocation, runner-idle check before AND after every run (Runner.Worker count), all 20 runs
+0/0, none contaminated. SeanDesktop is not the CI executor; supplementary only.
+    release: 54.987 58.098 58.193 62.944 79.254 87.975 91.322 93.776 93.792 94.212  max 94.212 -> 2.55x
+    debug:   148.513 149.298 149.840 150.127 150.835 151.156 151.218 151.726 151.908 154.730  max -> 1.55x
+
+WHERE THE TIME GOES ON WINDOWS
+------------------------------
+WERFAULT IS NOT PART OF IT. Measured: a WerFault.exe / WerFaultSecure.exe poll on every one of 24
+SeanDesktop headroom runs, 24 hosted baseline runs and 12 attribution runs saw none, and sampled runs
+recorded no child process of the test binary. Nothing on the dispatch path spawns a process or calls
+abort().
+
+It is not CPU. The same release build of the same test on Linux (hetzner-dsm, 38f82b87f) passes in
+15.068 s. Sampled hosted release runs: 122-126 s wall, 25-27 s user CPU, 39-43 s kernel CPU,
+~5.67-5.69 million non-read/write I/O operations per run (SeanDesktop: 4.26-4.38 million).
+
+Stage-timing instrument (throwaway branch timing/w15-1301-instr, e554ba8a0, never merged), release,
+whole-run totals in seconds (calls):
+
+                                  SeanDesktop run1 / run2 / run3        Linux (hetzner)
+    test wall                         61.5 / 76.2 / 55.7                  15.1
+    path_identity (2 per append)      17.58 / 20.52 / 16.37  (8029)       0.27   flat
+    child_tool_registry (PATH search)  9.76 / 12.99 /  8.51  (1000)       0.13   flat
+    effects_dir_bytes (quota scan)     7.03 / 10.09 /  6.26  (1000)       1.18   GROWS
+    effects_load                       3.77 /  3.54 /  2.98  (1000)       0.02   flat
+    journal write + sync_all           3.40 /  3.71 /  3.26  (4001)       0.50   flat
+    spend_audit_finish                 2.98 /  3.12 /  2.92  (1000)       0.21   flat
+    inspect state clone                2.53 /  3.72 /  2.30  (3000)       2.34   GROWS
+    journal reduce state clone         1.98 /  2.69 /  1.87  (4001)       2.05   GROWS
+
+Growth, run 1, seconds per 100-dispatch window, first -> last: effects_dir_bytes 0.108 -> 1.163;
+inspect clone 0.056 -> 0.427; reduce clone 0.041 -> 0.347. path_identity 2.390 -> 1.552 and the tool
+registry 1.343 -> 0.747 do not grow.
+
+Environment-only arms (SeanDesktop, n=4 each, interleaved, runner idle, no code change):
+    base         53.757 53.994 58.572 76.053
+    PATH=System32 + PATHEXT=.EXE   75.376 65.509 73.292 72.999
+    fresh WAYLAND_HOME (0-byte spend audit, not the real 18.9 MB one)   83.601 84.322 50.849 84.442
+Neither arm is faster than base at this n; both effects are smaller than the host's two-speed spread.
+The real %APPDATA% spend audit was NOT deleted, truncated or rotated -- only redirected.
+
+An ETW file-I/O trace was attempted and abandoned: the NT Kernel Logger was already held by another
+session (left untouched); a WPR FileIO capture produced a 10.6 GB ETL for one run and its text dump was
+stopped by explicit PID before it could load the shared box.
+
+THE FIXES (w15/win1301)
+-----------------------
+aa8f42912 perf(journal): read one durable child without cloning session state
+    DurableChildStore::inspect cloned the whole ReducedSessionState to read one record, three times per
+    dispatch. SessionJournal::durable_child takes the same lock and error and clones only that record.
+    Share: 2.3-3.7 s of 55.7-76.2 s on SeanDesktop; 2.34 s of 15.1 s on Linux.
+07272c36b perf(journal): size published checkpoints from the directory listing
+    checkpoint_directory_bytes opened every entry of the checkpoint store on every store. Entries whose
+    whole name is exactly a valid_sha256_hex digest are published checkpoints -- created only by
+    hard-linking a fully written and synced temporary, never rewritten in place by any production
+    writer -- and are sized from the directory entry. Temporaries, leftovers and unknown names keep the
+    per-file symlink_metadata open. Share: 6.3-10.1 s of 55.7-76.2 s on SeanDesktop.
+Neither touches a SOURCE_INPUTS file (durable_child.rs, session_journal.rs,
+tests/durable_child_store_test.rs). Neither changes what the test proves: the same 1000-dispatch
+budget constant, the same real dispatches, the same assertions, the same kill line.
+
+Verification of 07272c36b on hetzner-dsm parallel-2 (each remote_exit 0, complete true):
+    clippy -p wcore-agent --all-targets -D warnings                               Linux
+    clippy -p wcore-agent --all-targets --target x86_64-pc-windows-gnu -D warnings
+    nextest --profile ci --retries 0: 57 run, 57 passed, including
+        session_journal::fault_tests::checkpoint_quota_sizes_only_exact_digest_names_from_the_listing
+        session_journal::fault_tests::published_checkpoint_names_are_exact_lowercase_digests_only
+        durable_child_store_test inspect_matches_the_full_state_projection_for_durable_legacy_and_unknown_children
+        workflow_limits_test fix1_dispatch_budget_aborts_with_partial_result
+aa8f42912 additionally: 70 tests across durable_child_store, durable_spawner, child_transaction_gate,
+child_transaction_parent_cas, bootstrap and workflow_limits test binaries, all passed.
+
+BASE-VS-FIX A/B, SeanDesktop, n=10 PER ARM, INTERLEAVED (supplementary)
+-----------------------------------------------------------------------
+Windows 11 build 26200, 32 cores. Base = 38f82b87f source; fix = the same source plus
+38f82b87f..07272c36b applied with `git apply --check` first; arm identity asserted before any build
+(`is_published_checkpoint_name` absent in base, present in fix); each arm its own CARGO_TARGET_DIR,
+because two copies of one workspace otherwise write the same test-binary name. Exact CI invocation,
+arm order rotated every round, runner-idle check before and after every run: 20/20 runs 0/0, 20/20 exit
+0, 0 WerFault. Graded from raw nextest output.
+    base: 54.965 63.205 63.625 67.381 70.144 75.304 75.957 83.333 92.791 94.187   max 94.187 -> 2.55x
+    fix:  46.989 47.977 52.615 53.801 56.985 58.392 62.326 65.624 74.915 77.300   max 77.300 -> 3.10x
+Per round (base / fix): r1 75.957/52.615  r2 54.965/47.977  r3 75.304/62.326  r4 63.625/65.624
+r5 94.187/77.300  r6 70.144/74.915  r7 92.791/46.989  r8 83.333/58.392  r9 67.381/53.801  r10 63.205/56.985.
+Fix faster in 8 of 10 rounds; max -18 percent, median about -21 percent. This box is not the CI executor.
+
+LINUX CONTROL, hetzner-dsm slot parallel-2, n=3 PER ARM (context only)
+---------------------------------------------------------------------
+Exact CI invocation, one sample per remote-proof run, arm order alternated per pair. hetzner-dsm is a
+shared 96-core box with other lanes building on it; load was recorded for pair 3 only.
+    base (f0b9199ce = 38f82b87f + throwaway workflow/harness files, no code change):
+          14.979   38.555 (load not recorded)   16.535 (loadavg 58.51 -> 47.78)
+    fix  (07272c36b):
+          12.428   12.597   13.044 (loadavg 47.72 -> 40.52)
+The 38.555 s base sample has no load record and is not read as evidence of a larger win. Linux shows the
+same direction at a much smaller absolute cost, consistent with the stage instrument (the two fixed terms
+were 2.34 s + 1.18 s of a 15.1 s Linux run).
+
+BASE-VS-FIX A/B, HOSTED windows-latest, n>=10 PER ARM (DECIDES c3)
+-------------------------------------------------------------------
+Base arm = f0b9199ce (38f82b87f plus the throwaway workflow and harness files, no code change); fix arm
+= 07272c36bc6dc57383ef54e16413fb5ced98c154, checked out into ./fix and asserted by the job
+(`base_head=` / `fix_head=` in each job log) before any build. Each arm builds its own release test
+binary into its own target dir; arm order rotates every round; graded from raw nextest output; every
+run exit 0, 0 WerFault.
+
+RUN 1 -- 34497263461
+  shard a: runner "GitHub Actions 1000065410", AMD EPYC 7763, 4 cores, 16 GB, build 26100
+    per round base / fix: r1 94.699/76.484  r2 95.820/78.037  r3 92.931/76.033
+                          r4 157.942/76.503  r5 138.372/111.380  r6 97.861/90.932
+  shard b: runner "GitHub Actions 1000065409", AMD EPYC 9V74, 4 cores, 16 GB, build 26100
+    per round base / fix: r1 139.056/105.511  r2 125.488/104.451  r3 102.036/104.247
+                          r4 101.647/92.084  r5 119.717/125.049  r6 117.322/133.061
+  run 1 base, n=12: 92.931 94.699 95.820 97.861 101.647 102.036 117.322 119.717 125.488 138.372
+                    139.056 157.942                                     max 157.942 -> 1.52x
+  run 1 fix,  n=12: 76.033 76.484 76.503 78.037 90.932 92.084 104.247 104.451 105.511 111.380
+                    125.049 133.061                                     max 133.061 -> 1.80x
+  Fix faster in 6/6 rounds on shard a and 3/6 on shard b.
+
+RUN 2 -- 34503922201 (a second draw on fresh VMs, so the fix arm covers four hosted VMs). Base head
+c6194919c is an empty commit on f0b9199ce: identical tree 5ab28458b40a941076be381d343f1e3539307f2b.
+  shard a: runner "GitHub Actions 1000065436", Intel Xeon Platinum 8370C, 4 cores, 16 GB, build 26100
+    per round base / fix: r1 116.404/93.087  r2 104.195/89.788  r3 100.069/78.389
+                          r4 103.066/86.669  r5 125.783/80.084  r6 89.903/81.468
+  shard b: runner "GitHub Actions 1000065437", AMD EPYC 7763, 4 cores, 16 GB, build 26100
+    per round base / fix: r1 100.874/83.722  r2 102.754/87.307  r3 103.711/85.455
+                          r4 108.497/89.274  r5 107.284/88.045  r6 110.179/87.491
+  run 2 base, n=12: max 125.783 -> 1.91x      run 2 fix, n=12: max 93.087 -> 2.58x
+  Fix faster in 12/12 rounds.
+
+COMBINED HOSTED A/B, runs 1 and 2, four VMs, every sample passing
+  base n=24: 89.903 92.931 94.699 95.820 97.861 100.069 100.874 101.647 102.036 102.754 103.066
+             103.711 104.195 107.284 108.497 110.179 116.404 117.322 119.717 125.488 125.783 138.372
+             139.056 157.942              median 103.953   max 157.942 -> 1.52x
+  fix  n=24: 76.033 76.484 76.503 78.037 78.389 80.084 81.468 83.722 85.455 86.669 87.307 87.491
+             88.045 89.274 89.788 90.932 92.084 93.087 104.247 104.451 105.511 111.380 125.049
+             133.061                      median 87.768    max 133.061 -> 1.80x
+  Paired rounds 24: fix faster in 21; median paired difference fix-minus-base -17.999 s (mean -18.794 s).
+
+VERDICT
+-------
+c3 MET ON 07272c36b: hosted fix arm n=24 across four VMs, worst sample 133.061 s = 1.80x of the 240 s kill line.
+0 of 24 fix samples exceed 160.000 s. The headroom is bought by a measured per-dispatch cost reduction,
+not by moving the kill line, cutting dispatches, or changing the test profile.
+LIMITS, stated so this is not over-read:
+* Base on the same four VMs also cleared 1.5x (157.942 s); the baseline run on two OTHER VMs did not
+  (182.977 s). VM draw moves this test by more than the fix moves any single round.
+* Subtracting the median paired reduction (18.0 s) from the slowest base sample ever seen (182.977 s)
+  gives ~165 s, which would miss 1.5x. That is an INFERENCE: the fix never ran on that VM.
+* Isolation removes the shared-pool condition instead of measuring it; the shared-pool debug figure
+  is 185.46-226.28 s (1.06x), and CI no longer runs this test that way on Windows.
+c4: the `fix1_dispatch_budget_aborts_with_partial_result` retry-allowlist row is deleted, not renewed.
+The retry gate grades CI JUnit, so the row governs exactly what CI runs.
+
+NOT CHANGED, AND WHY
+--------------------
+The two LARGEST Windows costs are flat, not growing, and each is a design decision rather than a lane fix:
+* path_identity (~2.2 ms per call, twice per journal append, ~9 path opens per call on Windows) is the
+  rename-and-replace guard on the journal authority (`session_journal/lease.rs:550`). Not weakened.
+* The child tool registry re-resolves node/npm/python3/git across PATH x PATHEXT for every child with no
+  cache (`wcore-tools` toolchain discovery). Caching a policy input is a boundary decision.
+
+SEPARATE DEFECT FOUND, NOT FIXED HERE: FerroxLabs/wayland#1353
+--------------------------------------------------------------
+The session-quota check in store_effect_checkpoint is not atomic with the write it admits and holds no
+lock across both. Probe 506aed92e (branch timing/w15-1301-quota-race) lets two stores pass the check
+before either writes: RED on hetzner-dsm, total 570425344 bytes > quota 536870912 (+32 MiB), both
+accepted. Its repair touches the same scan as 07272c36b and lands after it, in another lane.
