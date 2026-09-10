@@ -89,6 +89,14 @@ pub struct SupervisorConfig {
     /// the seam a test uses so that grading the REFUSAL does not require a
     /// real 300 MB browser install on the machine running the test.
     pub loopback_pref_dir: Option<PathBuf>,
+    /// The npm executable used by the first-use sidecar install.
+    ///
+    /// `None`, the production default, runs `npm` and lets the OS resolve it
+    /// against `PATH`. `Some(path)` names it outright — the seam a test uses to
+    /// stand in a fake npm without rewriting the process-global `PATH`
+    /// (FerroxLabs/wayland#1233). See
+    /// [`crate::binary::BrowserBinaryManager::npm_program`].
+    pub npm_program: Option<String>,
 }
 
 impl Default for SupervisorConfig {
@@ -118,6 +126,7 @@ impl Default for SupervisorConfig {
             egress_policy: None,
             allow_unproxied_sidecar: false,
             loopback_pref_dir: None,
+            npm_program: None,
         }
     }
 }
@@ -685,10 +694,13 @@ impl BrowserSupervisor {
         if which::which(program).is_ok() {
             return Ok(program.to_string());
         }
-        let manager = crate::binary::BrowserBinaryManager::new(
+        let mut manager = crate::binary::BrowserBinaryManager::new(
             self.config.binary_install_root.clone(),
             false,
         );
+        if let Some(npm) = &self.config.npm_program {
+            manager = manager.with_npm_program(npm.clone());
+        }
         if !self.config.camoufox_download.enabled {
             if !self.config.sidecar_auto_install.enabled {
                 // The operator turned the fresh-machine path off. Pre-existing

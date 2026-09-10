@@ -218,6 +218,18 @@ pub struct WorkspacePolicy {
     /// contained checkout into orchestrator-owned repository administration.
     deny_git_authority_env: bool,
     delegated_scratch: Option<PathBuf>,
+    /// The user-level skill SOURCE directories (`<config root>/skills`,
+    /// `<config root>/commands`), when the caller states them.
+    ///
+    /// `None` — the production default — resolves them from
+    /// `wcore_config::config::user_skill_source_dirs()`, i.e. from
+    /// `WAYLAND_HOME` at the point of use, which is what every shipped session
+    /// wants. `Some` states them outright, which is the seam a test uses so it
+    /// does not have to WRITE `WAYLAND_HOME` to be isolated: that write is a
+    /// process global, one test binary is one process under `cargo test`, and
+    /// a sibling test's production path then reads what the writer left
+    /// (FerroxLabs/wayland#1233). See [`Self::with_user_config_root`].
+    user_skill_source_dirs: Option<Vec<PathBuf>>,
     /// #667: this policy relies on the OS sandbox actually enforcing
     /// `fs_read_deny` to keep secrets unreadable from `Bash` — so `Bash` must be
     /// REFUSED when the active backend cannot enforce read-deny (else it fails
@@ -630,6 +642,7 @@ impl WorkspacePolicy {
             authority_write_deny: Vec::new(),
             deny_git_authority_env: false,
             delegated_scratch: None,
+            user_skill_source_dirs: None,
             // Genuinely-local Trusted default: no project-secret denial, so the
             // Bash read-deny-enforcement gate does not apply. `with_project_secret_deny`
             // flips this to true for a Full/remote session (#667).
@@ -688,6 +701,7 @@ impl WorkspacePolicy {
             authority_write_deny: Vec::new(),
             deny_git_authority_env: false,
             delegated_scratch: None,
+            user_skill_source_dirs: None,
             // Contained denies project secrets → Bash must be refused when the
             // backend can't enforce read-deny (else `cat .env` fails open).
             secret_read_deny_required: true,
@@ -798,6 +812,7 @@ impl WorkspacePolicy {
             authority_write_deny: protected,
             deny_git_authority_env: true,
             delegated_scratch: Some(scratch),
+            user_skill_source_dirs: None,
             secret_read_deny_required: true,
             // A delegated mutation is issued BY an orchestrator, not typed by the
             // operator, so it is never a local-operator principal.
@@ -1502,6 +1517,31 @@ impl WorkspacePolicy {
     /// (`wcore_agent::auto_skill::drafter`) and the `skills` CLI verbs write
     /// their `SKILL.md` files through `wcore_config::atomic_write` / `std::fs`,
     /// never the tool VFS, so skill installation and drafting are unaffected.
+    /// State the user-level skill SOURCE root for this policy, instead of
+    /// letting [`Self::is_skill_source_path`] resolve it from `WAYLAND_HOME`
+    /// when it is asked.
+    ///
+    /// The two leaf names are derived from
+    /// `wcore_config::config::SKILL_SOURCE_DIR_NAMES`, the same constant
+    /// `user_skill_source_dirs()` builds from, so an override cannot name a
+    /// different pair than production uses.
+    ///
+    /// Exists for tests, and exists in production code rather than behind
+    /// `cfg(test)` because the tests that need it live in `tests/` and link
+    /// this crate compiled WITHOUT `cfg(test)` — the same reason
+    /// `wcore_exec_backend::StateDirGuard` is public.
+    #[must_use]
+    pub fn with_user_config_root(mut self, root: impl AsRef<Path>) -> Self {
+        let root = root.as_ref();
+        self.user_skill_source_dirs = Some(
+            wcore_config::config::SKILL_SOURCE_DIR_NAMES
+                .iter()
+                .map(|name| root.join(name))
+                .collect(),
+        );
+        self
+    }
+
     pub fn is_skill_source_path(&self, path: &Path) -> bool {
         // #356 c4 — resolver: `canon_existing_ancestor`: WHICH resolver, stated
         // here rather than only at its definition, because this file used to hold two with different escape
@@ -1520,7 +1560,15 @@ impl WorkspacePolicy {
         if under_project_load_path(&canon) {
             return true;
         }
-        wcore_config::config::user_skill_source_dirs()
+        let resolved;
+        let user_dirs: &[PathBuf] = match self.user_skill_source_dirs.as_deref() {
+            Some(stated) => stated,
+            None => {
+                resolved = wcore_config::config::user_skill_source_dirs();
+                &resolved
+            }
+        };
+        user_dirs
             .iter()
             .any(|dir| canon.starts_with(canon_existing_ancestor(dir)))
     }

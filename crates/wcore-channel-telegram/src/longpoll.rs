@@ -21,6 +21,9 @@ pub(crate) struct LongPollArgs {
     /// Channel name — keys the persisted update offset so a restart resumes
     /// past the last-confirmed update instead of re-delivering it.
     pub channel_name: String,
+    /// Channel-state root for the persisted offset. `None` = under the profile
+    /// home; `Some` states it. See `crate::offset_store::state_path`.
+    pub state_dir: Option<std::path::PathBuf>,
     pub timeout_secs: u32,
     pub allowed_chat_ids: HashSet<String>,
     pub inbox: Arc<Mutex<VecDeque<ChannelEvent>>>,
@@ -37,6 +40,7 @@ pub(crate) async fn longpoll_loop(args: LongPollArgs) {
         api_base,
         bot_token,
         channel_name,
+        state_dir,
         timeout_secs,
         allowed_chat_ids,
         inbox,
@@ -45,7 +49,8 @@ pub(crate) async fn longpoll_loop(args: LongPollArgs) {
 
     // Seed from the persisted watermark so a restart does not re-deliver the
     // final unconfirmed batch as duplicate turns. Absent/corrupt file → 0.
-    let mut offset: i64 = crate::offset_store::load(&channel_name).unwrap_or(0);
+    let mut offset: i64 =
+        crate::offset_store::load(state_dir.as_deref(), &channel_name).unwrap_or(0);
     let mut consecutive_failures: u32 = 0;
 
     loop {
@@ -73,7 +78,7 @@ pub(crate) async fn longpoll_loop(args: LongPollArgs) {
                 // these updates so the next getUpdates (this run or after a
                 // restart) starts past them.
                 if offset > before {
-                    crate::offset_store::save(&channel_name, offset);
+                    crate::offset_store::save(state_dir.as_deref(), &channel_name, offset);
                 }
             }
             // A revoked/invalid bot token makes getUpdates return 401/403,

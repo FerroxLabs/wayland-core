@@ -114,12 +114,71 @@ fn program_resolves(program: &str) -> bool {
     which::which(program).is_ok()
 }
 
+/// Everything the probe asks about, **stated by the caller** rather than
+/// re-read out of the process environment at the point of use.
+///
+/// Production builds this with [`BrowserProbeTarget::configured`], which is the
+/// single place `WAYLAND_CAMOUFOX_URL` / `WAYLAND_CAMOUFOX_BIN` decide the
+/// answer. A caller that wants a *dead* backend — every guard for `27-C2(b)`
+/// does — states one with [`BrowserProbeTarget::stated`] instead of writing
+/// those two process globals and hoping no sibling test in the same binary
+/// reads them while it holds them. That hazard is FerroxLabs/wayland#1233: one
+/// test binary is one process under `cargo test`, so an RAII env guard is
+/// visible to every concurrently-running test in it, and the restoring `Drop`
+/// half is a second write of the same global.
+///
+/// Same shape as `ContainerBackend::with_image`: the value travels as an
+/// argument, and only the production constructor consults the environment.
+#[derive(Debug, Clone)]
+pub struct BrowserProbeTarget {
+    /// Sidecar base URL (no trailing slash).
+    pub base_url: String,
+    /// The sidecar program the supervisor would spawn. `None` defers to the
+    /// operator's configuration, which is what production wants; `Some` states
+    /// it outright and reads no environment variable.
+    pub sidecar_program: Option<String>,
+}
+
+impl BrowserProbeTarget {
+    /// The operator's own configuration — the shipped production target.
+    #[must_use]
+    pub fn configured() -> Self {
+        Self {
+            base_url: crate::backends::CamoufoxBackend::configured_url(),
+            sidecar_program: None,
+        }
+    }
+
+    /// A target stated in full. Touches no process global in either direction.
+    #[must_use]
+    pub fn stated(base_url: impl Into<String>, sidecar_program: impl Into<String>) -> Self {
+        Self {
+            base_url: base_url.into(),
+            sidecar_program: Some(sidecar_program.into()),
+        }
+    }
+}
+
 /// Probe whether the browser capability can start.
 ///
 /// `camoufox_base_url` is the sidecar base URL (no trailing slash), normally
 /// `CamoufoxBackend::default_url()`. Only contacted when the local binary does
 /// not resolve, so an installed deployment pays nothing.
+///
+/// The sidecar program comes from the operator's configuration. Use
+/// [`probe_target`] to state it instead.
 pub async fn probe(camoufox_base_url: &str) -> BrowserLiveness {
+    probe_target(&BrowserProbeTarget {
+        base_url: camoufox_base_url.to_string(),
+        sidecar_program: None,
+    })
+    .await
+}
+
+/// [`probe`], with every input the caller cares about stated rather than read
+/// from the environment. See [`BrowserProbeTarget`].
+pub async fn probe_target(target: &BrowserProbeTarget) -> BrowserLiveness {
+    let camoufox_base_url: &str = &target.base_url;
     // Cloud backend: compiled in AND credentialed means a machine with no local
     // browser at all can still browse. Whether `select_provider` ultimately
     // picks it depends on the hint and on the F17 policy refusal, which this
@@ -139,7 +198,14 @@ pub async fn probe(camoufox_base_url: &str) -> BrowserLiveness {
         // Build the supervisor's real production config ONCE and read both the
         // program and the healthcheck URL out of it, so the probe cannot
         // disagree with the thing it is predicting. See `camoufox_program`.
-        let cfg = crate::supervisor::SupervisorConfig::local_camoufox(camoufox_base_url);
+        let mut cfg = crate::supervisor::SupervisorConfig::local_camoufox(camoufox_base_url);
+        // A stated program REPLACES the one `local_camoufox` read out of
+        // `WAYLAND_CAMOUFOX_BIN`. Everything downstream — the `Ready`/
+        // `Unavailable` verdict and the reason text an operator acts on — is
+        // then about the program the caller named.
+        if let Some(program) = &target.sidecar_program {
+            cfg.sidecar_program = Some(program.clone());
+        }
 
         // `None` (observe-only mode) is NOT a failure here — it means the
         // supervisor was told not to spawn anything, so fall through to the

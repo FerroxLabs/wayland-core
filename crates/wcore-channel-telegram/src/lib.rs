@@ -68,6 +68,10 @@ pub struct TelegramChannel {
     /// Boxed trait object so the same channel can run against either
     /// the keyring backend (production) or a memory-backed mock (tests).
     creds: Arc<dyn CredentialsStore>,
+    /// Channel-state root for the persisted `getUpdates` offset. `None` —
+    /// production — puts it under the profile home. `Some` states it outright;
+    /// see [`Self::with_state_dir`].
+    state_dir: Option<std::path::PathBuf>,
 }
 
 impl TelegramChannel {
@@ -115,7 +119,22 @@ impl TelegramChannel {
             shutdown: None,
             api_base,
             creds,
+            state_dir: None,
         }
+    }
+
+    /// Put this channel's persisted offset watermark under `dir` instead of
+    /// under the profile home.
+    ///
+    /// The seam a test uses to isolate its own state. It exists because the
+    /// alternative — writing `WAYLAND_HOME` from a test helper — is a write of
+    /// a process global in a binary that `cargo test` runs as ONE process, so
+    /// it is visible to every concurrently-running sibling
+    /// (FerroxLabs/wayland#1233).
+    #[must_use]
+    pub fn with_state_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
+        self.state_dir = Some(dir.into());
+        self
     }
 
     /// Current connection state. Mostly useful for tests.
@@ -196,6 +215,7 @@ impl Channel for TelegramChannel {
             api_base: self.api_base.clone(),
             bot_token: token,
             channel_name: self.name.clone(),
+            state_dir: self.state_dir.clone(),
             timeout_secs: self.config.long_poll_timeout_secs,
             allowed_chat_ids: allowed,
             inbox: Arc::clone(&self.inbox),
@@ -572,21 +592,32 @@ mod tests {
         }
     }
 
-    fn cfg() -> TelegramConfig {
-        // Isolate per-test persisted state (the getUpdates offset watermark)
-        // under a pid-unique WAYLAND_HOME so concurrent test processes — and
-        // prior box runs — can't read each other's offset and skip a mocked
-        // update. nextest runs one test per process, so the pid is unique and
-        // the env mutation is local. Set once, before any state I/O.
-        static ISOLATE: std::sync::Once = std::sync::Once::new();
-        ISOLATE.call_once(|| {
+    /// Per-binary channel-state root for the persisted getUpdates offset
+    /// watermark, STATED on every channel this module builds
+    /// (`TelegramChannel::with_state_dir`) rather than written into
+    /// `WAYLAND_HOME`.
+    ///
+    /// That write used to sit in `cfg()` and was carried as dated debt by
+    /// FerroxLabs/wayland#1233. Its own comment gave the reason it was safe —
+    /// "nextest runs one test per process" — and that is exactly the instrument
+    /// on which this hazard is invisible: under plain `cargo test` this crate's
+    /// lib binary is ONE process for all 79 tests, so the write was visible to
+    /// every sibling that resolved a path through `wayland_config_dir()`.
+    ///
+    /// Pid-unique so a prior box run's leftovers cannot be read back, and
+    /// cleared once per process for the same reason.
+    fn test_state_dir() -> &'static std::path::Path {
+        static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+        DIR.get_or_init(|| {
             let dir =
                 std::env::temp_dir().join(format!("wcore_tg_test_state_{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
-            // SAFETY: process-per-test under nextest; no other thread reads the env.
-            unsafe { std::env::set_var("WAYLAND_HOME", &dir) };
-        });
+            dir
+        })
+        .as_path()
+    }
 
+    fn cfg() -> TelegramConfig {
         TelegramConfig {
             credential_handle: "telegram.test.bot_token".to_string(),
             allowed_chat_ids: Vec::new(),
@@ -643,7 +674,7 @@ mod tests {
     #[test]
     fn a_body_over_the_cap_splits_into_pieces_the_platform_will_accept() {
         let creds = InMemoryCreds::with_token("telegram.test.bot_token", TEST_TOKEN);
-        let ch = TelegramChannel::new("test", cfg(), creds);
+        let ch = TelegramChannel::new("test", cfg(), creds).with_state_dir(test_state_dir());
         let cap = ch.max_message_len().expect(
             "telegram must declare a finite cap; None disables chunking and reinstates HIGH-6",
         );
@@ -712,7 +743,7 @@ mod tests {
         };
         let creds = InMemoryCreds::with_token("telegram.test.bot_token", TEST_TOKEN);
         // `new`, exactly as `wcore_channels_registry::make_telegram` calls it.
-        let mut ch = TelegramChannel::new("seam", cfg, creds);
+        let mut ch = TelegramChannel::new("seam", cfg, creds).with_state_dir(test_state_dir());
         ch.start().await.unwrap();
         ch.send_message(OutgoingMessage::text("9", "seam"))
             .await
@@ -727,7 +758,7 @@ mod tests {
     #[test]
     fn new_without_an_override_still_points_at_production_telegram() {
         let creds = InMemoryCreds::with_token("telegram.test.bot_token", TEST_TOKEN);
-        let ch = TelegramChannel::new("default", cfg(), creds);
+        let ch = TelegramChannel::new("default", cfg(), creds).with_state_dir(test_state_dir());
         assert_eq!(ch.api_base, TELEGRAM_API_BASE);
     }
 
@@ -752,7 +783,8 @@ mod tests {
             .await;
 
         let creds = InMemoryCreds::with_token("telegram.test.bot_token", TEST_TOKEN);
-        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url());
+        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url())
+            .with_state_dir(test_state_dir());
         ch.start().await.unwrap();
         let receipt = ch
             .send_message(OutgoingMessage::text("42", "hello"))
@@ -788,7 +820,8 @@ mod tests {
             .await;
 
         let creds = InMemoryCreds::with_token("telegram.test.bot_token", TEST_TOKEN);
-        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url());
+        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url())
+            .with_state_dir(test_state_dir());
         ch.start().await.unwrap();
         ch.send_message(OutgoingMessage::text("1", "Hi! (ok)."))
             .await
@@ -817,7 +850,8 @@ mod tests {
             ..cfg()
         };
         let creds = InMemoryCreds::with_token("telegram.test.bot_token", TEST_TOKEN);
-        let mut ch = TelegramChannel::with_api_base("test", html_cfg, creds, server.url());
+        let mut ch = TelegramChannel::with_api_base("test", html_cfg, creds, server.url())
+            .with_state_dir(test_state_dir());
         ch.start().await.unwrap();
         ch.send_message(OutgoingMessage::text("1", "Hi! (ok)."))
             .await
@@ -847,7 +881,8 @@ mod tests {
             .await;
 
         let creds = InMemoryCreds::with_token("telegram.test.bot_token", TEST_TOKEN);
-        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url());
+        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url())
+            .with_state_dir(test_state_dir());
         ch.start().await.unwrap();
         let receipt = ch
             .send_message(OutgoingMessage::text("1", "after retry"))
@@ -883,7 +918,8 @@ mod tests {
             .await;
 
         let creds = InMemoryCreds::with_token("telegram.test.bot_token", TEST_TOKEN);
-        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url());
+        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url())
+            .with_state_dir(test_state_dir());
         ch.start().await.unwrap();
         let receipt = ch
             .send_message(OutgoingMessage::text("9", "after 429"))
@@ -912,7 +948,8 @@ mod tests {
             .await;
 
         let creds = InMemoryCreds::with_token("telegram.test.bot_token", TEST_TOKEN);
-        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url());
+        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url())
+            .with_state_dir(test_state_dir());
         ch.start().await.unwrap();
         let err = ch
             .send_message(OutgoingMessage::text("nope", "x"))
@@ -934,7 +971,8 @@ mod tests {
     // -----------------------------------------------------------------
     #[tokio::test]
     async fn longpoll_ingests_message_into_inbox() {
-        // State isolation (pid-unique WAYLAND_HOME) is set up by `cfg()` below.
+        // State isolation: `with_state_dir(test_state_dir())` on the channel
+        // below. No environment variable is written.
         let mut server = mockito::Server::new_async().await;
         // First getUpdates returns one update; subsequent calls return
         // empty so the loop doesn't burn CPU.
@@ -958,11 +996,12 @@ mod tests {
 
         let creds = InMemoryCreds::with_token("telegram.test.bot_token", TEST_TOKEN);
         // Unique channel name → unique offset-store file, so this test's offset
-        // watermark can't collide with another telegram test under the shared
-        // process-wide WAYLAND_HOME (`cargo test` runs the whole crate's tests
-        // in ONE process; the pid-unique WAYLAND_HOME is then shared by all of
-        // them, and offset_store keys only on the channel name — #210).
-        let mut ch = TelegramChannel::with_api_base("longpoll-ingest", cfg(), creds, server.url());
+        // watermark can't collide with another telegram test inside the shared
+        // `test_state_dir()` root (`cargo test` runs the whole crate's tests in
+        // ONE process, that root is per-process, and offset_store keys only on
+        // the channel name — #210).
+        let mut ch = TelegramChannel::with_api_base("longpoll-ingest", cfg(), creds, server.url())
+            .with_state_dir(test_state_dir());
         ch.start().await.unwrap();
 
         // Wait until the long-poll task has pushed the message.
@@ -1019,8 +1058,9 @@ mod tests {
 
         let creds = InMemoryCreds::with_token("telegram.test.bot_token", TEST_TOKEN);
         // Unique channel name → unique offset-store file, isolated from the
-        // other longpoll test under the shared process WAYLAND_HOME (#210).
-        let mut ch = TelegramChannel::with_api_base("longpoll-advance", cfg(), creds, server.url());
+        // other longpoll test inside the shared `test_state_dir()` root (#210).
+        let mut ch = TelegramChannel::with_api_base("longpoll-advance", cfg(), creds, server.url())
+            .with_state_dir(test_state_dir());
         ch.start().await.unwrap();
 
         // Wait until we see the second call hit with offset=43.
@@ -1084,7 +1124,8 @@ parse_mode = "MarkdownV2"
             .await;
 
         let creds = InMemoryCreds::with_token("telegram.test.bot_token", TEST_TOKEN);
-        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url());
+        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url())
+            .with_state_dir(test_state_dir());
         ch.start().await.unwrap();
         assert!(ch.poll_handle.is_some());
 
@@ -1105,7 +1146,8 @@ parse_mode = "MarkdownV2"
     async fn send_before_start_errors_not_started() {
         let creds = InMemoryCreds::with_token("telegram.test.bot_token", TEST_TOKEN);
         let mut ch =
-            TelegramChannel::with_api_base("test", cfg(), creds, "http://unused".to_string());
+            TelegramChannel::with_api_base("test", cfg(), creds, "http://unused".to_string())
+                .with_state_dir(test_state_dir());
         let err = ch
             .send_message(OutgoingMessage::text("c", "x"))
             .await
@@ -1166,7 +1208,8 @@ parse_mode = "MarkdownV2"
             .await;
 
         let creds = InMemoryCreds::with_token("telegram.test.bot_token", TEST_TOKEN);
-        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url());
+        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url())
+            .with_state_dir(test_state_dir());
         ch.start().await.unwrap();
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
@@ -1233,7 +1276,8 @@ parse_mode = "MarkdownV2"
             .await;
 
         let creds = InMemoryCreds::with_token("telegram.test.bot_token", TEST_TOKEN);
-        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url());
+        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url())
+            .with_state_dir(test_state_dir());
         ch.start().await.unwrap();
         let msg = OutgoingMessage {
             conversation_id: "-1001234567890".to_string(),
@@ -1269,7 +1313,8 @@ parse_mode = "MarkdownV2"
             .await;
 
         let creds = InMemoryCreds::with_token("telegram.test.bot_token", TEST_TOKEN);
-        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url());
+        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url())
+            .with_state_dir(test_state_dir());
         ch.start().await.unwrap();
         let msg = OutgoingMessage {
             conversation_id: "-1001234567890".to_string(),
@@ -1306,7 +1351,8 @@ parse_mode = "MarkdownV2"
             .await;
 
         let creds = InMemoryCreds::with_token("telegram.test.bot_token", TEST_TOKEN);
-        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url());
+        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url())
+            .with_state_dir(test_state_dir());
         ch.start().await.unwrap();
         ch.send_message(OutgoingMessage::text("42", "plain"))
             .await
@@ -1341,7 +1387,8 @@ parse_mode = "MarkdownV2"
             .await;
 
         let creds = InMemoryCreds::with_token("telegram.test.bot_token", TEST_TOKEN);
-        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url());
+        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url())
+            .with_state_dir(test_state_dir());
         ch.start().await.unwrap();
         let msg = OutgoingMessage {
             conversation_id: "1".to_string(),
@@ -1380,7 +1427,8 @@ parse_mode = "MarkdownV2"
             .await;
 
         let creds = InMemoryCreds::with_token("telegram.test.bot_token", TEST_TOKEN);
-        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url());
+        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url())
+            .with_state_dir(test_state_dir());
         ch.start().await.unwrap();
         let msg = OutgoingMessage {
             conversation_id: "1".to_string(),
@@ -1430,7 +1478,8 @@ parse_mode = "MarkdownV2"
             .await;
 
         let creds = InMemoryCreds::with_token("telegram.test.bot_token", TEST_TOKEN);
-        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url());
+        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url())
+            .with_state_dir(test_state_dir());
         ch.start().await.unwrap();
         let msg = OutgoingMessage {
             conversation_id: "1".to_string(),
@@ -1473,7 +1522,8 @@ parse_mode = "MarkdownV2"
             .await;
 
         let creds = InMemoryCreds::with_token("telegram.test.bot_token", TEST_TOKEN);
-        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url());
+        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url())
+            .with_state_dir(test_state_dir());
         ch.start().await.unwrap();
         ch.send_typing("42").await.unwrap();
         mock.assert_async().await;
@@ -1483,7 +1533,8 @@ parse_mode = "MarkdownV2"
     #[tokio::test]
     async fn send_typing_before_start_errors_not_started() {
         let creds = InMemoryCreds::with_token("telegram.test.bot_token", TEST_TOKEN);
-        let ch = TelegramChannel::with_api_base("test", cfg(), creds, "http://unused".to_string());
+        let ch = TelegramChannel::with_api_base("test", cfg(), creds, "http://unused".to_string())
+            .with_state_dir(test_state_dir());
         let err = ch.send_typing("42").await.expect_err("expected NotStarted");
         assert!(matches!(err, ChannelError::NotStarted), "got {err:?}");
     }
@@ -1513,7 +1564,8 @@ parse_mode = "MarkdownV2"
             .await;
 
         let creds = InMemoryCreds::with_token("telegram.test.bot_token", TEST_TOKEN);
-        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url());
+        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url())
+            .with_state_dir(test_state_dir());
         ch.start().await.unwrap();
         ch.react("42", "7", "👀").await.unwrap();
         mock.assert_async().await;
@@ -1537,7 +1589,8 @@ parse_mode = "MarkdownV2"
             .expect_at_least(0)
             .create_async()
             .await;
-        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url());
+        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url())
+            .with_state_dir(test_state_dir());
         ch.start().await.unwrap();
 
         let err = ch
@@ -1575,7 +1628,8 @@ parse_mode = "MarkdownV2"
             .await;
 
         let creds = InMemoryCreds::with_token("telegram.test.bot_token", TEST_TOKEN);
-        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url());
+        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url())
+            .with_state_dir(test_state_dir());
         ch.start().await.unwrap();
         let err = ch
             .react("42", "7", "🦄")
@@ -1600,7 +1654,8 @@ parse_mode = "MarkdownV2"
         // Empty creds store — handle is not present.
         let creds: Arc<dyn CredentialsStore> = Arc::new(InMemoryCreds::new());
         let mut ch =
-            TelegramChannel::with_api_base("test", cfg(), creds, "http://unused".to_string());
+            TelegramChannel::with_api_base("test", cfg(), creds, "http://unused".to_string())
+                .with_state_dir(test_state_dir());
         let err = ch.start().await.expect_err("expected Auth error");
         assert!(matches!(err, ChannelError::Auth(_)), "got {err:?}");
     }
@@ -1632,7 +1687,8 @@ parse_mode = "MarkdownV2"
             ..cfg()
         };
         let creds = InMemoryCreds::with_token("telegram.test.bot_token", TEST_TOKEN);
-        let mut ch = TelegramChannel::with_api_base("test", html_cfg, creds, server.url());
+        let mut ch = TelegramChannel::with_api_base("test", html_cfg, creds, server.url())
+            .with_state_dir(test_state_dir());
         ch.start().await.unwrap();
         ch.send_message(OutgoingMessage::text("1", "a < b & c > d"))
             .await
@@ -1664,7 +1720,8 @@ parse_mode = "MarkdownV2"
             .await;
 
         let creds = InMemoryCreds::with_token("telegram.test.bot_token", TEST_TOKEN);
-        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url());
+        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url())
+            .with_state_dir(test_state_dir());
         ch.start().await.unwrap();
         m_del.assert_async().await;
         ch.stop().await.unwrap();
@@ -1687,7 +1744,8 @@ parse_mode = "MarkdownV2"
             .await;
 
         let creds = InMemoryCreds::with_token("telegram.test.bot_token", TEST_TOKEN);
-        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url());
+        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url())
+            .with_state_dir(test_state_dir());
         let err = ch
             .start()
             .await
@@ -1712,7 +1770,8 @@ parse_mode = "MarkdownV2"
             .create_async()
             .await;
         let creds = InMemoryCreds::with_token("telegram.test.bot_token", TEST_TOKEN);
-        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url());
+        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url())
+            .with_state_dir(test_state_dir());
         ch.start().await.unwrap();
         ch
     }
@@ -1834,7 +1893,8 @@ parse_mode = "MarkdownV2"
     async fn native_action_declaration_matches_behaviour() {
         use wcore_channels::ActionSupport;
         let creds = InMemoryCreds::with_token("telegram.test.bot_token", TEST_TOKEN);
-        let ch = TelegramChannel::with_api_base("test", cfg(), creds, "http://unused".to_string());
+        let ch = TelegramChannel::with_api_base("test", cfg(), creds, "http://unused".to_string())
+            .with_state_dir(test_state_dir());
         let a = ch.native_actions();
         assert_eq!(a.edit, ActionSupport::Implemented);
         assert_eq!(a.delete, ActionSupport::Implemented);

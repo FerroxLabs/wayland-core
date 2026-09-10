@@ -37,18 +37,31 @@
 //! the plugin is absent.
 
 use wcore_agent::output::protocol_sink::{CapabilityNarrowing, PluginCapabilitySet};
-use wcore_browser::liveness::BrowserLiveness;
+use wcore_browser::liveness::{BrowserLiveness, BrowserProbeTarget};
 use wcore_cua::liveness::CuaLiveness;
 
 /// A loopback port that is reserved and never served. Planted as the sidecar
 /// base URL so the healthcheck arm of the probe is provably dead.
 const DEAD_SIDECAR_URL: &str = "http://127.0.0.1:1";
 
-/// Point the browser probe at a program that cannot exist **and** at a sidecar
-/// URL nothing answers, so "no backend can start" is the true state of the
-/// world rather than an assumption.
+/// A program that cannot exist, stated beside the dead sidecar URL so that
+/// "no backend can start" is the true state of the world rather than an
+/// assumption.
+const NO_SUCH_PROGRAM: &str = "wcore-agent-liveness-guard-no-such-program";
+
+/// The dead backend, STATED at the call site — it writes nothing.
 ///
-/// Both facts have to be planted, because the probe deliberately mirrors
+/// This used to be an RAII guard (`NoBackend::install` / its `Drop`) that set
+/// `WAYLAND_CAMOUFOX_BIN` and `WAYLAND_CAMOUFOX_URL` and restored them on the
+/// way out. Both halves were process-global writes, and both were carried as
+/// dated debt by FerroxLabs/wayland#1233: under `cargo test` this whole binary
+/// is ONE process, so the values were visible to every concurrently-running
+/// sibling — including the `Drop` half's restore, which lands while another
+/// test may be mid-probe. The values now travel as an argument
+/// (`BrowserProbeTarget`), which is the shape `ContainerBackend::with_image`
+/// already uses, so there is no window and nothing to restore.
+///
+/// Both facts still have to be stated, because the probe deliberately mirrors
 /// `BrowserSupervisor::ensure_ready`'s TWO real startup paths: a resolvable
 /// sidecar program, or an externally managed sidecar already answering
 /// `/health`. This guard used to plant only the first and let the second fall
@@ -56,45 +69,9 @@ const DEAD_SIDECAR_URL: &str = "http://127.0.0.1:1";
 /// control. On any host actually running a Camoufox sidecar on the default
 /// port — a supported deployment, and the standing state of the Linux build
 /// box — that second path stayed live, the probe correctly answered `Ready`,
-/// and this test failed against a product that was telling the truth. The
-/// oracle below then compared a `probe(127.0.0.1:1)` verdict against a
-/// `narrowed_to_live()` that had probed port 9377: two different experiments.
-struct NoBackend {
-    prior_bin: Option<std::ffi::OsString>,
-    prior_url: Option<std::ffi::OsString>,
-}
-
-impl NoBackend {
-    fn install() -> Self {
-        let prior_bin = std::env::var_os("WAYLAND_CAMOUFOX_BIN");
-        let prior_url = std::env::var_os("WAYLAND_CAMOUFOX_URL");
-        unsafe {
-            std::env::set_var(
-                "WAYLAND_CAMOUFOX_BIN",
-                "wcore-agent-liveness-guard-no-such-program",
-            );
-            std::env::set_var("WAYLAND_CAMOUFOX_URL", DEAD_SIDECAR_URL);
-        };
-        Self {
-            prior_bin,
-            prior_url,
-        }
-    }
-}
-
-impl Drop for NoBackend {
-    fn drop(&mut self) {
-        unsafe {
-            match self.prior_bin.take() {
-                Some(v) => std::env::set_var("WAYLAND_CAMOUFOX_BIN", v),
-                None => std::env::remove_var("WAYLAND_CAMOUFOX_BIN"),
-            }
-            match self.prior_url.take() {
-                Some(v) => std::env::set_var("WAYLAND_CAMOUFOX_URL", v),
-                None => std::env::remove_var("WAYLAND_CAMOUFOX_URL"),
-            }
-        }
-    }
+/// and this test failed against a product that was telling the truth.
+fn no_backend() -> BrowserProbeTarget {
+    BrowserProbeTarget::stated(DEAD_SIDECAR_URL, NO_SUCH_PROGRAM)
 }
 
 /// Property 2, and the security-critical one: the probe must not be able to
@@ -104,7 +81,7 @@ async fn never_widens_a_capability_the_identity_check_refused() {
     let none = PluginCapabilitySet::default();
     assert!(!none.browser_suite && !none.computer_use, "precondition");
 
-    let (after, narrowings) = none.narrowed_to_live().await;
+    let (after, narrowings) = none.narrowed_to_live_against(&no_backend()).await;
 
     assert!(
         narrowings.is_empty(),
@@ -129,19 +106,19 @@ async fn never_widens_a_capability_the_identity_check_refused() {
 /// host.
 #[tokio::test]
 async fn narrows_when_no_backend_can_start() {
-    let _guard = NoBackend::install();
+    // ONE target value, handed to both the oracle and the code under test, so
+    // they are provably the same experiment rather than two runs that happen
+    // to agree about an ambient global.
+    let target = no_backend();
 
-    // Same URL the guard planted, so the oracle and `narrowed_to_live` below
-    // are the same experiment. The URL is a fact this test PLANTS, not one it
-    // reads back out of the probe.
-    let browser_verdict = wcore_browser::liveness::probe(DEAD_SIDECAR_URL).await;
+    let browser_verdict = wcore_browser::liveness::probe_target(&target).await;
     let cua_verdict = wcore_cua::liveness::probe();
 
     let advertised = PluginCapabilitySet {
         browser_suite: true,
         computer_use: true,
     };
-    let (after, narrowings) = advertised.narrowed_to_live().await;
+    let (after, narrowings) = advertised.narrowed_to_live_against(&target).await;
 
     // #1130 — every cleared flag must arrive with the words to explain it.
     // A narrowing the caller is not handed is a narrowing the user is never

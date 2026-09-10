@@ -12,8 +12,15 @@
 //! `bootstrap.rs:3225` installs for a trusted local session, which is the
 //! surface `write_artifacts` does not cover.
 //!
-//! Env note: `app_config_dir()` is `WAYLAND_HOME`-derived, so the whole file
-//! shares ONE home, set once. Every test here reads it; none of them changes it.
+//! Home note: the whole file shares ONE user config root, and it is STATED on
+//! the policy (`WorkspacePolicy::with_user_config_root`) rather than written
+//! into `WAYLAND_HOME`. That write was carried as dated debt by
+//! FerroxLabs/wayland#1233: `app_config_dir()` is `WAYLAND_HOME`-derived, the
+//! variable is a process global, and under `cargo test` this binary is ONE
+//! process — so a sibling test still resolving its own config root could see
+//! the write land, and the four tests here that never called the helper
+//! resolved against the REAL operator config dir instead. Stating the root
+//! removes both.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -28,8 +35,8 @@ use wcore_tools::workspace_policy::WorkspacePolicy;
 use wcore_tools::write::WriteTool;
 use wcore_tools::{NullToolOutputSink, Tool};
 
-/// One `WAYLAND_HOME` for the whole binary, leaked on purpose: `app_config_dir()`
-/// re-reads the env on every call, so the directory has to outlive every test.
+/// One user config root for the whole binary, leaked on purpose: it is handed
+/// to every policy this file builds and has to outlive every test.
 ///
 /// Addressed THROUGH A SYMLINK on unix, deliberately. A prefix deny compares two
 /// paths, and it is only sound if both are normalized to the same depth. The
@@ -40,6 +47,8 @@ use wcore_tools::{NullToolOutputSink, Tool};
 /// (`/var` -> `/private/var`, which is where `TempDir` lives); this symlink
 /// makes Linux and CI exercise it too, so the hole cannot ship green on the host
 /// the gate happens to run on.
+///
+/// Nothing here writes an environment variable. See the module note.
 fn wayland_home() -> &'static Path {
     static HOME: OnceLock<PathBuf> = OnceLock::new();
     HOME.get_or_init(|| {
@@ -57,9 +66,6 @@ fn wayland_home() -> &'static Path {
         // directory still exercises every other assertion in this file.
         #[cfg(not(unix))]
         let path = real;
-        // SAFETY: set once, before any test body runs work that reads it, and
-        // never mutated afterwards.
-        unsafe { std::env::set_var("WAYLAND_HOME", &path) };
         path
     })
     .as_path()
@@ -71,7 +77,13 @@ fn wayland_home() -> &'static Path {
 /// anything outside the workspace, so the config dir was only ever reachable
 /// from the everyday local session.
 fn session(cwd: &Path) -> (Arc<dyn VirtualFs>, ToolContext) {
-    let policy = Arc::new(WorkspacePolicy::trusted_local(cwd));
+    // The user config root is STATED, so every test in this binary — including
+    // the four that never touch `wayland_home()` themselves — is judged against
+    // this file's own temporary root and never against the operator's real
+    // config dir. Previously that isolation came from a `WAYLAND_HOME` write
+    // some tests raced and others never saw at all.
+    let policy =
+        Arc::new(WorkspacePolicy::trusted_local(cwd).with_user_config_root(wayland_home()));
     let vfs: Arc<dyn VirtualFs> = Arc::new(RepoControlDenyFs::new(RealFs, policy));
     let ctx = ToolContext::new(
         "call-1",

@@ -244,14 +244,32 @@ impl PluginCapabilitySet {
                   dropped; announce them on the OutputSink (see `AgentBootstrap::build`) \
                   or #1130 is reopened"]
     pub async fn narrowed_to_live(self) -> (Self, Vec<CapabilityNarrowing>) {
+        self.narrowed_to_live_against(&wcore_browser::liveness::BrowserProbeTarget::configured())
+            .await
+    }
+
+    /// [`Self::narrowed_to_live`], with the browser probe's target STATED by
+    /// the caller instead of read out of `WAYLAND_CAMOUFOX_URL` /
+    /// `WAYLAND_CAMOUFOX_BIN` at the point of use.
+    ///
+    /// Production calls the no-argument form, which passes
+    /// `BrowserProbeTarget::configured()`. This one exists so a guard can plant
+    /// a provably-dead backend WITHOUT writing a process global that every
+    /// concurrently-running test in the same binary can see — the
+    /// FerroxLabs/wayland#1233 hazard class. The two are the same code path;
+    /// only the target differs.
+    #[must_use = "the narrowings are the only record of a capability this session \
+                  dropped; announce them on the OutputSink (see `AgentBootstrap::build`) \
+                  or #1130 is reopened"]
+    pub async fn narrowed_to_live_against(
+        self,
+        browser_target: &wcore_browser::liveness::BrowserProbeTarget,
+    ) -> (Self, Vec<CapabilityNarrowing>) {
         let mut out = self;
         let mut narrowed = Vec::new();
 
         if out.browser_suite {
-            let probe = wcore_browser::liveness::probe(
-                &wcore_browser::backends::CamoufoxBackend::configured_url(),
-            )
-            .await;
+            let probe = wcore_browser::liveness::probe_target(browser_target).await;
             if let Some(u) = probe.unavailable() {
                 narrowed.push(CapabilityNarrowing {
                     capability: "browser_suite",

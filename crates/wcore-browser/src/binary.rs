@@ -113,6 +113,16 @@ pub struct BrowserBinaryManager {
     pub offline: bool,
     /// Optional `HTTPS_PROXY` override (otherwise picked from env).
     pub https_proxy: Option<String>,
+    /// The npm executable to run for [`Self::provision_sidecar_via_npm`].
+    ///
+    /// `"npm"` — the default — is resolved against `PATH` by the OS, which is
+    /// what every shipped deployment wants. A caller can name an absolute path
+    /// instead; that is the seam a test uses to stand in a fake npm WITHOUT
+    /// prepending to `PATH`. `PATH` is a process global that `wcore-config` and
+    /// `wcore-tools` production code read for shell resolution, so a test
+    /// rewriting it is visible to every concurrently-running sibling in the
+    /// same binary (FerroxLabs/wayland#1233).
+    pub npm_program: String,
 }
 
 impl BrowserBinaryManager {
@@ -123,7 +133,15 @@ impl BrowserBinaryManager {
             https_proxy: std::env::var("HTTPS_PROXY")
                 .ok()
                 .or_else(|| std::env::var("https_proxy").ok()),
+            npm_program: "npm".to_string(),
         }
+    }
+
+    /// Run `program` instead of `npm`. See [`Self::npm_program`].
+    #[must_use]
+    pub fn with_npm_program(mut self, program: impl Into<String>) -> Self {
+        self.npm_program = program.into();
+        self
     }
 
     /// Build the reqwest client honoring `HTTPS_PROXY` / `https_proxy`.
@@ -168,7 +186,7 @@ impl BrowserBinaryManager {
         if self.offline {
             return Err(BinaryError::OfflineRefusal);
         }
-        if which::which("npm").is_err() {
+        if which::which(&self.npm_program).is_err() {
             return Err(BinaryError::NpmMissing);
         }
         let prefix = self.install_root.join("node");
@@ -180,7 +198,7 @@ impl BrowserBinaryManager {
         // Argv mode. The package name and prefix are separate argv entries, so
         // no shell interprets them - see AGENTS.md "Shell Execution".
         let mut cmd = wcore_config::shell::shell_command_argv(
-            "npm",
+            &self.npm_program,
             &[
                 "install",
                 "-g",

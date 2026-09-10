@@ -10,21 +10,34 @@
 # #1134 opens with. Resolving callers turned that excuse into a verdict, and
 # the verdict named nine pre-existing pairs on the day it was written.
 #
-# Five of them are listed below and are owned by FerroxLabs/wayland#1233.
-# Three `temp_state()` rows left when `StateDirGuard` replaced them, and the
-# `wcore-cli` row left on 2026-09-10 for a different reason worth reading:
-# it was never a hazard. `gateway.rs::run_gateway` does write WAYLAND_HOME
-# from production code, but nothing in the wcore-cli test binary calls it.
-# The "reached from an unserialized test" verdict came from the caller walk
-# following `fn run`, a name that crate declares 31 times, into 155 unrelated
-# call sites. The walk now refuses a colliding name at every hop rather than
-# only the first, and the gate reports that write as unattributable.
-# They are DEBT, not clearance: each is a real
-# hazard under the shared-process CI leg, where one test binary is one process
-# and a sibling test's production path reads what the guard wrote. They are
-# listed rather than fixed here because fixing them means changing the tests
-# themselves, in crates this change does not otherwise touch, and a gate that
-# goes red on the day it lands is a gate someone switches off.
+# THE LIST IS NOW EMPTY, and that is the state the file was designed to reach.
+# All nine pairs have reached a terminal state:
+#
+#   * Three `temp_state()` rows left when `StateDirGuard` replaced them.
+#   * The `wcore-cli` row left on 2026-09-10 for a different reason worth
+#     reading: it was never a hazard. `gateway.rs::run_gateway` does write
+#     WAYLAND_HOME from production code, but nothing in the wcore-cli test
+#     binary calls it. The "reached from an unserialized test" verdict came
+#     from the caller walk following `fn run`, a name that crate declares 31
+#     times, into 155 unrelated call sites. The walk now refuses a colliding
+#     name at every hop rather than only the first, and the gate reports that
+#     write as unattributable.
+#   * The last five left on 2026-09-10 by the fix the header of this file kept
+#     deferring: the helper stopped writing the process global, and the value
+#     is stated at the CALL SITE instead -- the shape `ContainerBackend::
+#     with_image` already used. Four seams carry it, all in production code
+#     because the callers are integration tests that link these crates without
+#     `cfg(test)`: `wcore_browser::liveness::BrowserProbeTarget` (the sidecar
+#     URL and program), `WorkspacePolicy::with_user_config_root` (the skill
+#     SOURCE roots), `SupervisorConfig::npm_program` (the npm executable, so a
+#     stub no longer has to be prepended to PATH), and
+#     `TelegramChannel::with_state_dir` (the offset watermark root). No
+#     re-dating, no serialization, no environment write in either direction.
+#
+# An EMPTY list is not a dead file. Every rule below still runs on every CI
+# invocation, so the next helper-attributed hazard is refused outright rather
+# than added here -- which is the point: a debt list that never empties is a
+# list, and this one emptied.
 #
 # ── WHAT A LINE HERE DOES AND DOES NOT DO ───────────────────────────────────
 #
@@ -60,8 +73,3 @@
 # both of which the gate prints beside every finding. Line numbers are
 # deliberately not part of the key: they drift on unrelated edits.
 
-2026-11-30  wcore-agent::capability_liveness_narrowing  WAYLAND_CAMOUFOX_URL  crates/wcore-agent/tests/capability_liveness_narrowing.rs::install  gh#1233  An RAII installer/guard pair writes the URL that wcore-browser production code reads, from two unserialized tests in a 4-test binary. This is the installer half.
-2026-11-30  wcore-agent::capability_liveness_narrowing  WAYLAND_CAMOUFOX_URL  crates/wcore-agent/tests/capability_liveness_narrowing.rs::drop  gh#1233  The Drop half of the same guard pair; it restores the variable, which is still a write of a global a sibling test's production path reads.
-2026-11-30  wcore-agent::skill_source_write_refusal  WAYLAND_HOME  crates/wcore-agent/tests/skill_source_write_refusal.rs::wayland_home  gh#1233  `fn wayland_home` writes WAYLAND_HOME for an unserialized test in an 11-test binary whose production readers span nine crates.
-2026-11-30  wcore-browser::sidecar_npm_install_wiring_test  PATH  crates/wcore-browser/tests/sidecar_npm_install_wiring_test.rs::stub_npm_on_path  gh#1233  `stub_npm_on_path` rewrites PATH, which wcore-config and wcore-tools production code read for shell resolution, from an unserialized test with two siblings.
-2026-11-30  wcore-channel-telegram  WAYLAND_HOME  crates/wcore-channel-telegram/src/lib.rs::cfg  gh#1233  A config helper writes WAYLAND_HOME in a 79-test lib binary; some callers hold a lock and at least one does not.

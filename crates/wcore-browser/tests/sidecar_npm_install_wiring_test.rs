@@ -13,10 +13,17 @@
 //! defect `camoufox_provisioning_wiring_test.rs` was written for one path
 //! earlier.
 //!
-//! `npm` is a STUB on `PATH`, so no test here touches the network or a real
-//! registry. The stub records its argv, which is what lets the
-//! "never `--ignore-scripts`" claim below be measured rather than asserted
+//! `npm` is a STUB, NAMED on the supervisor config, so no test here touches the
+//! network or a real registry. The stub records its argv, which is what lets
+//! the "never `--ignore-scripts`" claim below be measured rather than asserted
 //! about source.
+//!
+//! It used to reach the product by being prepended to `PATH`, and that write
+//! was carried as dated debt by FerroxLabs/wayland#1233: `PATH` is a process
+//! global that `wcore-config` and `wcore-tools` production code read for shell
+//! resolution, and under `cargo test` this binary is ONE process, so the
+//! rewrite was visible to both siblings. `SupervisorConfig::npm_program` now
+//! carries the value as an argument instead.
 //!
 //! **Unix only** — the stand-in npm and sidecar are `#!`-scripts and the
 //! executable bit is a Unix concept. Windows is a gap here, not a pass.
@@ -35,15 +42,15 @@ use wcore_config::browser::{CamoufoxDownloadConfig, SidecarAutoInstall};
 /// attributable to the install and to nothing already on the host.
 const PROGRAM: &str = "wcore-npm-sidecar-that-does-not-exist";
 
-/// A stub `npm`, prepended to `PATH` ONCE for this test binary.
+/// A stub `npm`, written once for this test binary and NAMED on the
+/// supervisor config. Returns the absolute path of the stub executable.
 ///
-/// Set once and never mutated, so the arms below cannot race each other
-/// through the process-global environment. Each arm isolates itself by
-/// install root instead: the stub derives every path it touches from the
-/// `--prefix` it was handed.
-fn stub_npm_on_path() -> &'static Path {
-    static DIR: OnceLock<PathBuf> = OnceLock::new();
-    DIR.get_or_init(|| {
+/// Nothing about it is ambient: it is not on `PATH`, it writes no environment
+/// variable, and each arm isolates itself by install root — the stub derives
+/// every path it touches from the `--prefix` it was handed.
+fn stub_npm() -> &'static Path {
+    static NPM: OnceLock<PathBuf> = OnceLock::new();
+    NPM.get_or_init(|| {
         let dir = std::env::temp_dir().join(format!("wcore-stub-npm-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let npm = dir.join("npm");
@@ -85,11 +92,7 @@ os.chmod(shim, 0o755)
         )
         .unwrap();
         std::fs::set_permissions(&npm, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let old = std::env::var("PATH").unwrap_or_default();
-        unsafe {
-            std::env::set_var("PATH", format!("{}:{old}", dir.display()));
-        }
-        dir
+        npm
     })
     .as_path()
 }
@@ -111,6 +114,8 @@ fn cfg(port: u16, root: &Path, auto: SidecarAutoInstall) -> SupervisorConfig {
         camoufox_download: CamoufoxDownloadConfig::default(),
         sidecar_auto_install: auto,
         binary_install_root: root.join("bin"),
+        // The stub, named rather than planted on `PATH`.
+        npm_program: Some(stub_npm().to_string_lossy().into_owned()),
         ..SupervisorConfig::default()
     }
 }
@@ -119,7 +124,6 @@ fn cfg(port: u16, root: &Path, auto: SidecarAutoInstall) -> SupervisorConfig {
 /// that already had the sidecar and ARM 2 would prove nothing.
 #[test]
 fn configured_program_is_genuinely_unresolvable() {
-    stub_npm_on_path();
     assert!(
         which::which(PROGRAM).is_err(),
         "{PROGRAM} resolves on this host; both arms below would be vacuous"
@@ -130,7 +134,6 @@ fn configured_program_is_genuinely_unresolvable() {
 /// it and spawns what it installed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ensure_ready_installs_the_sidecar_and_spawns_what_it_installed() {
-    stub_npm_on_path();
     let port = free_port();
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("bin");
@@ -196,7 +199,6 @@ async fn ensure_ready_installs_the_sidecar_and_spawns_what_it_installed() {
 /// and ignores the operator's opt-out.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn nothing_is_installed_when_auto_install_is_disabled() {
-    stub_npm_on_path();
     let port = free_port();
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("bin");

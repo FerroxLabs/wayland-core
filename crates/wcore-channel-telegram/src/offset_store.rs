@@ -16,18 +16,27 @@ use std::path::{Path, PathBuf};
 /// Deterministic per-channel state-file path. Uses `DefaultHasher` (fixed keys,
 /// stable across processes) over the channel name so the same channel always
 /// maps to the same file without leaking the name into the filename.
-fn state_path(channel_name: &str) -> PathBuf {
+///
+/// `root` is the channel-state ROOT. `None` — production — resolves it under
+/// the profile home. `Some(dir)` states it, which is the seam a test uses so it
+/// does not have to WRITE `WAYLAND_HOME`: that variable is a process global,
+/// one test binary is one process under `cargo test`, and the crate's 79-test
+/// lib binary then has a helper's write racing every sibling that resolves a
+/// path through it (FerroxLabs/wayland#1233).
+fn state_path(root: Option<&Path>, channel_name: &str) -> PathBuf {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     channel_name.hash(&mut h);
     let key = h.finish();
-    wcore_config::config::wayland_config_dir()
-        .join("channel-state")
-        .join(format!("telegram-{key:016x}.offset"))
+    let root = match root {
+        Some(dir) => dir.to_path_buf(),
+        None => wcore_config::config::wayland_config_dir().join("channel-state"),
+    };
+    root.join(format!("telegram-{key:016x}.offset"))
 }
 
 /// Load the persisted offset for this channel, if any.
-pub(crate) fn load(channel_name: &str) -> Option<i64> {
-    load_from(&state_path(channel_name))
+pub(crate) fn load(root: Option<&Path>, channel_name: &str) -> Option<i64> {
+    load_from(&state_path(root, channel_name))
 }
 
 fn load_from(path: &Path) -> Option<i64> {
@@ -39,8 +48,8 @@ fn load_from(path: &Path) -> Option<i64> {
 }
 
 /// Persist the offset. Best-effort; a write failure is logged only.
-pub(crate) fn save(channel_name: &str, offset: i64) {
-    if let Err(e) = save_to(&state_path(channel_name), offset) {
+pub(crate) fn save(root: Option<&Path>, channel_name: &str, offset: i64) {
+    if let Err(e) = save_to(&state_path(root, channel_name), offset) {
         tracing::warn!(
             target: "wcore_channel_telegram::longpoll",
             error = %e,
@@ -95,66 +104,37 @@ mod tests {
         let _ = std::fs::remove_file(&p);
     }
 
-    /// GRADED ON THE NAME, NOT THE WHOLE PATH, and that is the point of this
-    /// comment rather than a style preference.
-    ///
-    /// `state_path` roots itself at `wayland_config_dir()`, which reads the
-    /// `WAYLAND_HOME` PROCESS GLOBAL. `lib.rs::cfg` in this same crate writes
-    /// that global from a `Once`, and its SAFETY note assumed
-    /// "process-per-test under nextest; no other thread reads the env". That
-    /// assumption does not hold in the shared-process leg, which runs
-    /// `cargo test --workspace --lib` — one process for all 79 tests in this
-    /// binary, threads in parallel. Comparing whole paths therefore graded
-    /// WHERE THE PROFILE HOME HAPPENED TO POINT between two calls, not this
-    /// module's hashing.
-    ///
-    /// It fired: CI run 34438211271, leg `CI (linux-containerized)`, step
-    /// "Shared-process lib suite" — FAILED at offset_store.rs:103 on
+    /// THIS HAZARD FIRED, it was not hypothetical. Before the `root` seam
+    /// above, this function compared two whole paths rooted at
+    /// `wayland_config_dir()`, which reads the `WAYLAND_HOME` process global
+    /// that `lib.rs::cfg` used to write from a `Once`. CI run 34438211271, leg
+    /// `CI (linux-containerized)`, step "Shared-process lib suite": FAILED at
     /// `same channel must map to the same file`, while the SAME test PASSED in
-    /// the nextest leg of the same run (position 5267/18053). That difference
-    /// is the whole reason the shared-process leg exists.
-    /// `.config/env-global-helper-debt.txt:67` had already named this exact
-    /// pair, dated, under gh#1233.
-    ///
-    /// What the module actually promises, per its own docstring, is that the
-    /// FILE NAME is a deterministic function of the channel name. That is what
-    /// is asserted here, and it is true under any profile home. The parent is
-    /// asserted by its own name (`channel-state`) rather than by a second
-    /// reading of the global, so nothing here can be decided by another
-    /// thread's env mutation.
+    /// the nextest leg of that same run (position 5267/18053). One process for
+    /// all 79 tests is the difference, and it is why that leg exists.
+    /// `.config/env-global-helper-debt.txt` had carried the pair, dated, under
+    /// gh#1233 — so the debt did not decay quietly, it cost the release branch
+    /// a red run before it was paid.
     #[test]
     fn state_path_is_stable_and_channel_specific() {
-        let a = state_path("telegram-main");
-        let a2 = state_path("telegram-main");
-        let b = state_path("telegram-alt");
-        assert_eq!(
-            a.file_name(),
-            a2.file_name(),
-            "same channel must map to the same file"
-        );
-        assert_ne!(
-            a.file_name(),
-            b.file_name(),
-            "different channels must not collide"
-        );
-        assert_eq!(
-            a.parent().and_then(|p| p.file_name()),
-            Some(std::ffi::OsStr::new("channel-state")),
-            "state files must live under the profile's channel-state directory"
-        );
-        // Non-vacuity: two missing `file_name()`s compare equal as `None`, so
-        // the equality above would pass on a path that has no name at all.
-        // Asserted on the SHAPE rather than a length constant -- the first
-        // draft of this line said 25 and the real name is 32, which the suite
-        // caught immediately.
-        let name = a.file_name().unwrap().to_string_lossy().into_owned();
-        let hex = name
-            .strip_prefix("telegram-")
-            .and_then(|s| s.strip_suffix(".offset"))
-            .unwrap_or_else(|| panic!("expected telegram-<hex>.offset, got {name}"));
+        let root = std::env::temp_dir().join("wcore-telegram-state-path-probe");
+        let a = state_path(Some(&root), "telegram-main");
+        let a2 = state_path(Some(&root), "telegram-main");
+        let b = state_path(Some(&root), "telegram-alt");
+        assert_eq!(a, a2, "same channel must map to the same file");
+        assert_ne!(a, b, "different channels must not collide");
         assert!(
-            hex.len() == 16 && hex.chars().all(|c| c.is_ascii_hexdigit()),
-            "expected a 16-digit hex key, got {hex:?} from {name}"
+            a.starts_with(&root),
+            "a stated root must decide where the file lands, got {}",
+            a.display()
+        );
+        // CONTROL: `None` is a DIFFERENT root, so the stated arm above is not
+        // silently the production path with extra steps.
+        assert_ne!(
+            state_path(None, "telegram-main"),
+            a,
+            "the stated root and the profile-home default resolved to the same \
+             file, so the override does nothing"
         );
     }
 }
