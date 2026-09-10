@@ -44,6 +44,11 @@
 //! * liveness — hardening does not simply break `git`;
 //! * and the RESIDUAL, pinned as an assertion rather than as prose, so that
 //!   the day it stops holding this test says so instead of quietly agreeing.
+//!    That pin is anchored on the EXPLICIT-PID arm, not the parent-donated
+//!    one, and every message it can print quotes BOTH -- core#434: the
+//!    parent-donated field went quiet in CI run 33713740549 while the
+//!    explicit-pid field in the same report still showed the child on the
+//!    operator console, and the old message read that as the escape closing.
 //!
 //! The residual is tracked as FerroxLabs/wayland-core#389 (core#380 asked
 //! for this measurement and is answered by it); see the ledger entry for
@@ -89,11 +94,27 @@ fn shares_console_with_driver() -> bool {
     let Ok(driver): Result<u32, _> = driver.parse() else {
         return false;
     };
-    let mut pids = [0u32; 64];
-    // SAFETY: `pids` is a live, correctly sized buffer and its length is passed
-    // as the count. A process with no console returns 0 and writes nothing.
-    let n = unsafe { GetConsoleProcessList(pids.as_mut_ptr(), pids.len() as u32) } as usize;
-    n > 0 && n <= pids.len() && pids[..n].contains(&driver)
+    // The count is asked for FIRST and the buffer is then sized to it. When the
+    // console has more clients than the buffer holds, `GetConsoleProcessList`
+    // writes NOTHING and returns the required size -- a fixed 64-entry buffer
+    // therefore answers `false` for a console the driver is very much on. That
+    // is one more way this pin could report the #338 c2 residual CLOSED for a
+    // reason that has nothing to do with containment (core#434 c1), so it is
+    // removed rather than documented.
+    let mut pids = vec![0u32; 64];
+    for _ in 0..4 {
+        // SAFETY: `pids` is a live buffer and its length is passed as the count.
+        // A process with no console returns 0 and writes nothing.
+        let n = unsafe { GetConsoleProcessList(pids.as_mut_ptr(), pids.len() as u32) } as usize;
+        if n == 0 {
+            return false;
+        }
+        if n <= pids.len() {
+            return pids[..n].contains(&driver);
+        }
+        pids = vec![0u32; n];
+    }
+    false
 }
 
 /// Does THIS process have a console AT ALL — window or not?
@@ -426,6 +447,105 @@ fn field<'a>(report: &'a str, key: &str) -> Option<&'a str> {
     })
 }
 
+/// BOTH routes a `DETACHED_PROCESS` child has back onto the operator's console,
+/// rendered for an assertion message.
+///
+/// core#434 c2. A residual pin that quotes only the field it tripped on invites
+/// exactly one reading -- "the escape closed" -- and CI run 33713740549 shows
+/// that reading being wrong: `SHARES_USER_CONSOLE_AFTER=false` (parent-donated)
+/// sat eight lines above `SHARES_USER_CONSOLE_AFTER_EXPLICIT=true` (explicit
+/// pid) in the SAME report. Following the old message would have inverted a
+/// security pin against evidence inside its own payload. Every residual message
+/// below therefore carries both arms and the rule for reading them together.
+fn residual_arms(report: &str) -> String {
+    format!(
+        "PARENT-DONATED arm, via AttachConsole(ATTACH_PARENT_PROCESS) -- reaches \
+         the operator's console only while the PARENT still owns one to donate, \
+         so it can go quiet for reasons unrelated to containment: \
+         ATTACH_PARENT_PROCESS={:?} SHARES_USER_CONSOLE_AFTER={:?} \
+         CONOUT_AFTER={:?}. EXPLICIT-PID arm, via AttachConsole(<driver pid>) -- \
+         names the driver to the kernel and does NOT depend on the parent: \
+         ATTACH_BY_EXPLICIT_PID={:?} SHARES_USER_CONSOLE_AFTER_EXPLICIT={:?} \
+         CONOUT_AFTER_EXPLICIT={:?}. READ THEM TOGETHER: the #338 c2 residual is \
+         CLOSED only if BOTH SHARES_USER_CONSOLE_AFTER and \
+         SHARES_USER_CONSOLE_AFTER_EXPLICIT are `false`. Either one `true` means \
+         a DETACHED_PROCESS child still reaches the operator's console, the \
+         escape is still OPEN, and this pin must NOT be inverted.",
+        field(report, "ATTACH_PARENT_PROCESS"),
+        field(report, "SHARES_USER_CONSOLE_AFTER"),
+        field(report, "CONOUT_AFTER"),
+        field(report, "ATTACH_BY_EXPLICIT_PID"),
+        field(report, "SHARES_USER_CONSOLE_AFTER_EXPLICIT"),
+        field(report, "CONOUT_AFTER_EXPLICIT"),
+    )
+}
+
+/// core#434 c2, graded rather than asserted in prose: a QUIET parent-donated
+/// arm must not read as the #338 c2 escape closing.
+///
+/// The fixture carries the field VALUES measured in CI run 33713740549 -- the
+/// run this file was allowlisted for -- laid out in the order `run_as_probe`
+/// prints them. It is a reconstruction of that report's fields and not a
+/// verbatim copy of the artifact, and it is used only to grade the MESSAGE the
+/// pin would print, which is the whole of what c2 is about.
+///
+/// THE OLD MESSAGE, quoted from 4f82ce8c1, named one field and invited one
+/// reading: "the Windows residual behind #338 c2 (core#389) appears to have
+/// changed: the reattached child is no longer on the USER'S console. Re-grade
+/// c2 on Windows and replace this pin." Against this very payload, following it
+/// would have inverted a security pin while the same payload said the child
+/// still reached the operator console by explicit pid.
+#[test]
+fn a_quiet_parent_arm_does_not_read_as_the_residual_closing() {
+    const CI_33713740549: &str = "\
+PROBE_PID=12345
+CONSOLE_WINDOW_AT_CREATION=NONE
+CONOUT_BEFORE=DENIED(6)
+SHARES_USER_CONSOLE_BEFORE=false
+ATTACH_PARENT_PROCESS=SUCCEEDED
+CONOUT_AFTER=OPEN
+SHARES_USER_CONSOLE_AFTER=false
+ATTACH_BY_EXPLICIT_PID=SUCCEEDED
+CONOUT_AFTER_EXPLICIT=OPEN
+SHARES_USER_CONSOLE_AFTER_EXPLICIT=true
+ALLOC_CONSOLE=SUCCEEDED
+SHARES_USER_CONSOLE_AFTER_ALLOC=false
+";
+
+    // The arm the old pin hung on is quiet in this payload -- that is the
+    // failure CI actually reported.
+    assert_eq!(
+        field(CI_33713740549, "SHARES_USER_CONSOLE_AFTER"),
+        Some("false")
+    );
+    // ...and the escape is OPEN in the same payload, by the arm that does not
+    // depend on the parent. Both facts, one report.
+    assert_eq!(
+        field(CI_33713740549, "SHARES_USER_CONSOLE_AFTER_EXPLICIT"),
+        Some("true")
+    );
+
+    let message = residual_arms(CI_33713740549);
+    assert!(
+        message.contains(r#"SHARES_USER_CONSOLE_AFTER=Some("false")"#),
+        "the message must name the parent-donated field AND its value: {message}"
+    );
+    assert!(
+        message.contains(r#"SHARES_USER_CONSOLE_AFTER_EXPLICIT=Some("true")"#),
+        "the message must name the explicit-pid field AND its value, which is \
+         the one that shows the escape still open: {message}"
+    );
+    assert!(
+        message.contains("CLOSED only if BOTH"),
+        "the message must state the rule for reading the two together, or a \
+         reader still has to supply it: {message}"
+    );
+    assert!(
+        message.contains("must NOT be inverted"),
+        "the message must refuse the inversion the old one invited: {message}"
+    );
+}
+
 /// `#389` c2, the branch actually taken: a quarantine-originated prompt is
 /// LABELLED, so the operator can attribute it.
 ///
@@ -744,33 +864,94 @@ fn quarantine_child_has_no_console_at_creation_on_windows() {
     // This is NOT an assertion that the product is correct. It records, as a
     // measurement the tree carries, that `DETACHED_PROCESS` is weaker than
     // `setsid` and that #338 c2 is therefore satisfied by elimination on unix
-    // ONLY. Tracked as FerroxLabs/wayland-core#389. If either of these ever
-    // stops holding, the elimination argument has become true on Windows too —
-    // at which point delete this block, invert it, and say so in the ledger.
+    // ONLY. Tracked as FerroxLabs/wayland-core#389.
+    //
+    // RE-ANCHORED ON THE EXPLICIT-PID ARM for core#434 c1. This block used to
+    // hang on `ATTACH_PARENT_PROCESS` / `SHARES_USER_CONSOLE_AFTER` /
+    // `CONOUT_AFTER`, all three of which are reached through
+    // `AttachConsole(ATTACH_PARENT_PROCESS)` and therefore require the PARENT
+    // to still own the operator's console at the instant the child asks. In CI
+    // run 33713740549 `SHARES_USER_CONSOLE_AFTER` read `false` while
+    // `SHARES_USER_CONSOLE_AFTER_EXPLICIT=true` sat eight lines below it in the
+    // same report: the escape wide open, same run, by explicit pid, while the
+    // pin said it had closed. The explicit-pid route names the driver to the
+    // kernel and does not depend on the parent, and it has not been observed to
+    // move in any stored artifact, so the residual is anchored there. The
+    // parent-donated arm is kept BELOW as a recorded observation with its
+    // precondition checked, never as a standalone red.
+    //
+    // If these ever stop holding, the elimination argument may have become true
+    // on Windows too -- but read `residual_arms` FIRST: while either arm still
+    // reports the child on the operator's console, the escape is open and this
+    // block must not be inverted.
+    println!("RESIDUAL_ARMS={}", residual_arms(&hardened));
     assert_eq!(
-        field(&hardened, "ATTACH_PARENT_PROCESS"),
+        field(&hardened, "ATTACH_BY_EXPLICIT_PID"),
         Some("SUCCEEDED"),
-        "the Windows residual behind #338 c2 (core#389) appears to be CLOSED: \
-         a DETACHED_PROCESS child could no longer AttachConsole to its parent. \
-         That is good news, not a regression — re-grade c2 on Windows and \
-         replace this pin. hardened report:\n{hardened}"
+        "the Windows residual behind #338 c2 (core#389) may have changed: a \
+         DETACHED_PROCESS child could no longer AttachConsole to the driver BY \
+         EXPLICIT PID. This arm also forecloses the obvious remedy -- while it \
+         holds, reparenting the child onto a console-less process cannot fix \
+         #338 on Windows, because the child never needed ATTACH_PARENT_PROCESS. \
+         DO NOT invert this pin on this line alone: {}\nhardened \
+         report:\n{hardened}",
+        residual_arms(&hardened)
     );
     assert_eq!(
-        field(&hardened, "SHARES_USER_CONSOLE_AFTER"),
+        field(&hardened, "SHARES_USER_CONSOLE_AFTER_EXPLICIT"),
         Some("true"),
-        "the Windows residual behind #338 c2 (core#389) appears to have \
-         changed: the reattached child is no longer on the USER'S console. \
-         Re-grade c2 on Windows and replace this pin. hardened \
-         report:\n{hardened}"
+        "the Windows residual behind #338 c2 (core#389) may have changed: the \
+         child that reattached BY EXPLICIT PID is no longer on the operator's \
+         console. DO NOT invert this pin on this line alone: {}\nhardened \
+         report:\n{hardened}",
+        residual_arms(&hardened)
     );
     assert_eq!(
-        field(&hardened, "CONOUT_AFTER"),
+        field(&hardened, "CONOUT_AFTER_EXPLICIT"),
         Some("OPEN"),
-        "the Windows residual behind #338 c2 (core#389) appears to have \
-         changed: the reattached child could no longer write to the console. \
-         Re-grade c2 on Windows and replace this pin. hardened \
-         report:\n{hardened}"
+        "the Windows residual behind #338 c2 (core#389) may have changed: the \
+         child that reattached BY EXPLICIT PID could no longer write to the \
+         operator's console. DO NOT invert this pin on this line alone: \
+         {}\nhardened report:\n{hardened}",
+        residual_arms(&hardened)
     );
+
+    // The parent-donated arm: RECORDED, and asserted only where its own
+    // precondition holds. core#434 c1 -- `AttachConsole(ATTACH_PARENT_PROCESS)`
+    // lands the child on whatever console the PARENT owns, so a driver with no
+    // console to donate makes `SHARES_USER_CONSOLE_AFTER` read `false` for a
+    // reason that is not containment. That is a skip, not a pass and not a red.
+    // Where the arm IS live, its internal coherence is still worth a pin: a
+    // child that is on the operator's console must have got there by a
+    // successful attach and must be able to write to it.
+    match field(&hardened, "SHARES_USER_CONSOLE_AFTER") {
+        Some("true") => {
+            println!("PARENT_DONATED_ARM=LIVE");
+            assert_eq!(
+                field(&hardened, "ATTACH_PARENT_PROCESS"),
+                Some("SUCCEEDED"),
+                "incoherent report: the child is on the operator's console but \
+                 the attach that put it there did not succeed. {}\nhardened \
+                 report:\n{hardened}",
+                residual_arms(&hardened)
+            );
+            assert_eq!(
+                field(&hardened, "CONOUT_AFTER"),
+                Some("OPEN"),
+                "incoherent report: the child shares the operator's console but \
+                 cannot open CONOUT$ on it. {}\nhardened report:\n{hardened}",
+                residual_arms(&hardened)
+            );
+        }
+        observed => {
+            println!(
+                "PARENT_DONATED_ARM=QUIET SHARES_USER_CONSOLE_AFTER={observed:?} \
+                 -- SKIPPED, and this is NOT evidence that the #338 c2 residual \
+                 closed. {}",
+                residual_arms(&hardened)
+            );
+        }
+    }
     // `AllocConsole` is the other route #380 c1 names. It is NOT the bypass:
     // the console it creates is a new one, so the child does not land on the
     // operator's. Pinned in both directions — if `SHARES_USER_CONSOLE_AFTER_
@@ -789,14 +970,5 @@ fn quarantine_child_has_no_console_at_creation_on_windows() {
         "AllocConsole must give the child a NEW console, never the operator's \
          — if this is `true`, a second bypass exists alongside AttachConsole \
          and core#389 understates the problem. hardened report:\n{hardened}"
-    );
-
-    assert_eq!(
-        field(&hardened, "ATTACH_BY_EXPLICIT_PID"),
-        Some("SUCCEEDED"),
-        "the by-pid arm changed. It exists to foreclose the obvious remedy: \
-         while it holds, reparenting the child onto a console-less process \
-         cannot fix #338 on Windows, because the child never needed \
-         ATTACH_PARENT_PROCESS. hardened report:\n{hardened}"
     );
 }
