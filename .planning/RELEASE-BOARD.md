@@ -9,7 +9,7 @@ Owners come from each ledger's `owner:` on its UNMET criteria — the
 owner is read, not assigned, so a row cannot claim an owner the
 ledger does not.
 
-Blocking issues: 37   Outstanding criteria: 79
+Blocking issues: 35   Outstanding criteria: 72
 
 | Issue | Owner | Outstanding | Title |
 |---|---|---:|---|
@@ -35,9 +35,7 @@ Blocking issues: 37   Outstanding criteria: 79
 | FerroxLabs/wayland#1300 | core | 3 | Windows-only: crashed-holder recovery in the chunked credential write lock is bistable (48x), and it is what times out interrupted_rotations_do_not_leak_entries_without_bound |
 | FerroxLabs/wayland#1301 | core | 3 | First Windows retry-flake cluster: a wall-clock ratio guard and a dispatch-budget test at 94% of its kill line (CI (Array)) |
 | FerroxLabs/wayland#1303 | core | 1 | Windows: a racing chunked credential write fails outright with ACCESS_DENIED (os error 5), and the caller loses a single-use refresh token |
-| FerroxLabs/wayland#1304 | core | 3 | the_streaming_bash_timeout_bounds_the_secret_deny_walk hard-fails ci-linux at ~1 in 9: the manifest walk dominated the deadline and the caller was not told |
 | FerroxLabs/wayland#1308 | core | 4 | Windows: four wcore-skills watcher_tests fail together with ERROR_PATH_NOT_FOUND, and the bare unwrap hides which path |
-| FerroxLabs/wayland#1309 | core | 4 | raw_mode_with_nothing_typed_still_denies: the pty capture ends at the prompt, so a missing denial reason and a truncated read are indistinguishable |
 | FerroxLabs/wayland#1349 | core | 3 | W16 mixed soak fails RSS acceptance twice (41.5x, then 1.83x) with no carrier |
 | FerroxLabs/wayland-core#373 | core | 1 | cargo test --workspace --lib --no-fail-fast cannot be run 10x consecutively: osv_check::tests::ssrf_refusal_is_visible_at_default_log_levels fails ~5% of runs |
 | FerroxLabs/wayland-core#386 | core | 3 | core#325 c2 remainder: one real nightly-windows-soak run with a red sibling |
