@@ -1725,7 +1725,8 @@ async fn run() -> anyhow::Result<ExitCode> {
                     Ok(ExitCode::FAILURE)
                 }
             },
-            TopCmd::Gateway(args) => match wcore_cli::gateway::dispatch_gateway_command(args).await {
+            TopCmd::Gateway(args) => match wcore_cli::gateway::dispatch_gateway_command(args).await
+            {
                 Ok(()) => Ok(ExitCode::SUCCESS),
                 Err(e) => {
                     eprintln!("wayland-core gateway: {e:#}");
