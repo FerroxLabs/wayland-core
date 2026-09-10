@@ -14,8 +14,10 @@ sha256 and checked by content (below). Every iteration is one libtest process
 | `9cd1e5a2d` | `w15/idxlock1355` | tests + `cfg(test)` seams only, lock unchanged | yes |
 | `e1c3bf704` | `w15/idxlock1355` | the repair | yes |
 | `0d0edc54c` | `w15/idxlock1355` | review follow-up: sentinel released on unwind, kill-on-drop test child, doc corrections | yes |
+| `c9d45de2c` | `w15/idxlock1355` | ledger and README claim corrections after review | yes |
 | `516a6b3c2` | `w15/idxlock1355-red-c2` | RED ARM: fix tree with the in-process slot removed | NEVER |
 | `439d54417` | `w15/idxlock1355-red-harness` | RED ARM: fix tree with the old unwinding join shape | NEVER |
+| `119d09760` | `w15/idxlock1355-red-panic` | RED ARM: `0d0edc54c` with sentinel removal skipped on unwind | NEVER |
 
 `crates/wcore-agent/src/session.rs` is the only source file touched. No
 contract `SOURCE_INPUTS` file (engine.rs, bootstrap.rs) was edited.
@@ -200,8 +202,20 @@ check it reddened.
   leave this process's own sentinel for 30 s while releasing the in-process
   slot, so every later writer here failed on its 1 s budget. Release is now a
   `Drop` guard: sentinel first, slot second, on every path. Test
-  `test_1355_a_panic_inside_the_index_lock_releases_the_sentinel`. RECEIPTS
-  PENDING a build slot.
+  `test_1355_a_panic_inside_the_index_lock_releases_the_sentinel`. Receipts,
+  slot `parallel-2`:
+  - GREEN at `c9d45de2c`: `cargo test -p wcore-agent --lib session::` in one
+    process, `41 passed; 0 failed`, the new test `... ok` in the full log
+    (remote_exit 0, complete true, status `6010a4af`).
+  - RED on `119d09760`: `40 passed; 1 failed`, only the new test, at
+    `session.rs:2151` `a panicking holder must remove its own sentinel on
+    unwind` (remote_exit 101, complete true, status `0ce6ace0`).
+  - `clippy -p wcore-agent --all-targets -- -D warnings` at `c9d45de2c`:
+    remote_exit 0 on Linux and on `--target x86_64-pc-windows-gnu`.
+  - Not re-run at `c9d45de2c`: the full lib suite and the load arms, which
+    were measured at `e1c3bf704`.
 - `with_wal_lock` uses the same sentinel and the same 1 s in-process budget,
   and was not touched.
-- Not run on Windows or macOS; no `cfg(windows)` code changed.
+- Not executed on Windows or macOS; no `cfg(windows)` code changed. Windows is
+  covered only by `clippy --target x86_64-pc-windows-gnu` (gnu, not msvc) at
+  `c9d45de2c`.
