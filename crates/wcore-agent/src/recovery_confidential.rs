@@ -1052,6 +1052,7 @@ enum KeyLoadSource {
 ///   an irrelevant one, only costs a share.
 /// * `create` — a read-only load and a load that may create the key are
 ///   different questions with different authority, so they never share.
+///
 /// Not `Debug`, on purpose: nothing about a store's identity needs printing,
 /// and the environment digest has no business in a log line.
 #[derive(PartialEq, Eq)]
