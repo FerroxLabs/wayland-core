@@ -297,3 +297,108 @@ async fn aggregate_replay_pressure_preserves_a_late_stream_first_event() {
         2
     );
 }
+
+/// wayland#1352 c2 guard: the repair must not become "never cancel". While a
+/// keeping-up reader in one session drains a full 16 MiB turn without any
+/// error, a reader in ANOTHER session that stops reading is still detached
+/// with its explicit overload terminal, and its record stays resumable.
+#[tokio::test]
+async fn a_stalled_reader_is_still_detached_while_another_sessions_reader_keeps_up() {
+    let stalled_server = AcpServer::new().with_turn_engine(Arc::new(Burst {
+        chunks: 64,
+        chunk_bytes: 256 * 1024,
+    }));
+    // Same session and log ownership, different fixture output.
+    let fast_server = stalled_server.clone().with_turn_engine(Arc::new(Burst {
+        chunks: 512,
+        chunk_bytes: 32 * 1024,
+    }));
+    let create = || SessionCreateRequest {
+        model: None,
+        tools: vec![],
+        system_prompt: None,
+        agent: None,
+        mcp_servers: vec![],
+    };
+    let stalled = stalled_server
+        .create_session(create())
+        .await
+        .unwrap()
+        .session_id;
+    let fast = fast_server
+        .create_session(create())
+        .await
+        .unwrap()
+        .session_id;
+
+    let stalled_response = stalled_server
+        .send_message(MessageSendRequest {
+            session_id: stalled.clone(),
+            text: "stall".into(),
+            tools: vec![],
+        })
+        .await
+        .unwrap();
+    let fast_frames = tokio::time::timeout(
+        Duration::from_secs(20),
+        fast_server
+            .send_message(MessageSendRequest {
+                session_id: fast.clone(),
+                text: "keep up".into(),
+                tools: vec![],
+            })
+            .await
+            .unwrap()
+            .collect::<Vec<_>>(),
+    )
+    .await
+    .expect("the keeping-up reader finishes while the other reader is stalled");
+    let fast_text: usize = fast_frames
+        .iter()
+        .map(|frame| match frame {
+            MessageEvent::TextDelta { text } => text.len(),
+            _ => 0,
+        })
+        .sum();
+    assert!(
+        !fast_frames
+            .iter()
+            .any(|frame| matches!(frame, MessageEvent::Error { .. })),
+        "a keeping-up reader is never cancelled because another session's reader stalled"
+    );
+    assert_eq!(fast_text, 16 * 1024 * 1024);
+    assert!(matches!(
+        fast_frames.last(),
+        Some(MessageEvent::Done { .. })
+    ));
+
+    // Only now does the stalled reader look at its stream.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while stalled_server.event_tip(&stalled).await.unwrap().position < 65 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the stalled session's recording completes without its reader");
+    let stalled_frames: Vec<_> = stalled_response.collect().await;
+    assert!(
+        stalled_frames
+            .iter()
+            .any(|frame| matches!(frame, MessageEvent::Error { .. })),
+        "a reader that did not keep up is still detached explicitly"
+    );
+    let tip = stalled_server.event_tip(&stalled).await.unwrap();
+    let tail = stalled_server
+        .events_since(
+            &stalled,
+            &Cursor {
+                stream_id: tip.stream_id,
+                position: 64,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(tail.events[0].event, MessageEvent::Done { .. }));
+    stalled_server.delete_session(stalled).await.unwrap();
+    fast_server.delete_session(fast).await.unwrap();
+}
