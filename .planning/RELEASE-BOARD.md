@@ -9,7 +9,7 @@ Owners come from each ledger's `owner:` on its UNMET criteria — the
 owner is read, not assigned, so a row cannot claim an owner the
 ledger does not.
 
-Blocking issues: 32   Outstanding criteria: 63
+Blocking issues: 31   Outstanding criteria: 60
 
 | Issue | Owner | Outstanding | Title |
 |---|---|---:|---|
@@ -24,7 +24,6 @@ Blocking issues: 32   Outstanding criteria: 63
 | FerroxLabs/wayland#1269 | core | 2 | Unmerged lane/f13-* branches held out of 0.13.12: four carry work integ lacks, two await their owning lane, five archived as redundant |
 | FerroxLabs/wayland#1272 | core | 3 | 0.13.12 release board: all 32 blocking issues mapped to an owner (17 in flight, 15 unassigned) |
 | FerroxLabs/wayland#1282 | core | 2 | dangerous_expiry_cancels_production_streaming_bash_process_tree fails only under full-suite contention, and is not allowlisted |
-| FerroxLabs/wayland#1283 | core | 3 | Skills are still injected on every ordinary turn, with no relevance or activation gate (#1280 c3/c4/c5, #1150 c5 skills half) |
 | FerroxLabs/wayland#1284 | core | 1 | Flaky on macOS only: the_live_backend_timeout_bounds compares two wall-clock samples taken under different load |
 | FerroxLabs/wayland#1285 | core | 1 | Two more macOS-only retry flakes: harness_tui_flow resume_repaints and wcore-mcp f016_real_spawn |
 | FerroxLabs/wayland#1286 | core | 1 | macOS retry-flake cluster: redundant_walk_root_is_not_walked_twice is the 5th member; discovery is one per CI cycle |
