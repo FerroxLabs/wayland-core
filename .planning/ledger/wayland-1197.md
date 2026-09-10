@@ -9,13 +9,13 @@ criteria:
   - id: c1
     text: "Either the lint audits writes inside helper functions reachable from a test (the enclosing-fn machinery and closure() are already present), or the exclusion is stated where the criterion is GRADED rather than only in a ci.yml comment"
     state: met
-    evidence: 'file:scripts/check-test-env-globals.py:517:kind = "UNSERIALIZED-HELPER"'
+    evidence: 'file:scripts/check-test-env-globals.py:539:kind = "UNSERIALIZED-HELPER"'
     owner: core
     note: "MET AS WRITTEN by the FIRST branch, and RE-GRADED rather than built: the caller-closure pass landed on integ/f13 ahead of this lane, so the state this entry recorded ('nothing has been done', at 9de21aa1) was stale. Verified against the tree, not against the note. `scan()` now resolves each helper write to its callers by attribution key (impl block -> Type, free fn -> its uniquely-declared name), follows a helper caller one level further, and a key with even one UNSERIALIZED-TEST caller becomes UNSERIALIZED-HELPER, which FAILS exactly like a direct write. Measured on the real tree: the gate prints 'helper writes AUDITED by caller (#1134 c3): 139 reached only serialized callers, 14 reached an unserialized test' -- the 153-site 'helper' bucket the issue counted no longer exists as an excused class. The residual exclusions are STATED in the module docstring under WHAT IT DOES NOT CHECK (production-only callers, single-test binaries, benches/examples, unattributable keys), i.e. beside the code that is graded, not only in a ci.yml comment."
   - id: c2
     text: "--self-test carries a helper fixture in BOTH directions, so the classifier's blind spot cannot be reintroduced silently"
     state: met
-    evidence: "file:scripts/check-test-env-globals.py:579:_HELPER_SERIAL = ("
+    evidence: "file:scripts/check-test-env-globals.py:609:_HELPER_SERIAL = ("
     owner: core
     note: "MET AS WRITTEN. `_HELPER_UNSERIAL` (the write moved one call deep into an RAII guard, caller NOT serialized) must FIRE and `_HELPER_SERIAL` (the identical guard, caller serialized) must stay QUIET -- the same hazard in both, differing only in the caller's attribute, so a classifier that ignored helpers again would fail the first and a classifier that convicted every helper would fail the second. Two further residue arms bound it: `_HELPER_UNCALLED` (a guard nothing constructs) stays quiet, and the debt-file pair proves a line written for one SITE does not excuse a second helper writing the same var in the same binary. Run on this tree: `python3 scripts/check-test-env-globals.py --self-test` exits 0 with 17 arms, 'self-test: both directions proven'."
   - id: c3
