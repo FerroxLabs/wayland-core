@@ -1,0 +1,5 @@
+   Compiling wcore-cli v0.13.14 (/root/waylandcore-stabilization-20260905/slots/parallel-1/source/crates/wcore-cli)
+   Compiling wcore-acp v0.13.14 (/root/waylandcore-stabilization-20260905/slots/parallel-1/source/crates/wcore-acp)
+    Finished `release` profile [optimized] target(s) in 4m 45s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`

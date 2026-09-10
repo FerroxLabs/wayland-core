@@ -29,3 +29,4 @@ proof-1789065861-43584.json 581178a4b nextest run --locked -p wcore-cli --test s
 proof-1789065894-46677.json 581178a4b clippy --locked -p wcore-acp -p wcore-cli --all-targets -- -D warnings remote_exit 0 complete True
 proof-1789065968-51836.json 581178a4b clippy --locked --target x86_64-pc-windows-gnu -p wcore-acp -p wcore-cli --all-targets -- -D warnings remote_exit 0 complete True
 proof-1789066084-58351.json 581178a4b tree --locked -p wcore-cli -e normal,build,features -i wcore-acp remote_exit 0 complete True
+proof-1789066114-59756.json 581178a4b build --locked --release --features voice -p wcore-cli -j 6 remote_exit 0 complete True

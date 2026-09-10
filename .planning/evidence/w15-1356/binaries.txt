@@ -3,7 +3,8 @@ cargo args: build --locked --release --features voice -p wcore-cli -j 6 (receipt
 
 label           source      sha256
 base1356        6f2ea594e   6dafa974124be65b599161e12a3fea4b772a4b33c35c3f75030b232637807928   parent of the #1356 repair, all #1352 fixes
-fix1356         47e4a0d7a   a3fa6dd3ce4bc4f9050b565501e71dd7a557a7bd6965443aca839035536f8a34   the #1356 repair
+fix1356         47e4a0d7a   a3fa6dd3ce4bc4f9050b565501e71dd7a557a7bd6965443aca839035536f8a34   SUPERSEDED: leaks events across overlapping turns, do not run
+fix1356b        581178a4b   d354d416708afcd0d2089d265af7320669cbf6366b5afb66035f3a8290718d9f   the #1356 repair, turn-scoped (4ab69b043 + lock line); strings carry 581178a4b
 diag1356        2fe327290   eaf10da10610a032df2e94b629ff81c9065bf9b3d122a3518647fcfd0512d4a3   unrepaired b348328cc plus W1356DIAG lines, never merge
 
-Stashed at /root/w15-relay1352/bin/<label>-release/wayland-core for the churn arms held until the #1349 soak reports done.
+Stashed at /root/w15-relay1352/bin/<label>-release/wayland-core for the churn arms held (queue-1356-churn.sh FIX now points at fix1356b-release) until the #1349 soak reports done.
