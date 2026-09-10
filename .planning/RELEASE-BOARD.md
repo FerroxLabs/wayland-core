@@ -9,12 +9,13 @@ Owners come from each ledger's `owner:` on its UNMET criteria — the
 owner is read, not assigned, so a row cannot claim an owner the
 ledger does not.
 
-Blocking issues: 5   Outstanding criteria: 12
+Blocking issues: 6   Outstanding criteria: 13
 
 | Issue | Owner | Outstanding | Title |
 |---|---|---:|---|
 | FerroxLabs/wayland#1289 | core | 1 | macOS keyring does not answer within the 5s credential-store timeout; f14_sigkill_recovery hard-fails 3/3 |
 | FerroxLabs/wayland#1301 | core | 2 | First Windows retry-flake cluster: a wall-clock ratio guard and a dispatch-budget test at 94% of its kill line (CI (Array)) |
 | FerroxLabs/wayland#1349 | core | 1 | W16 mixed soak fails RSS acceptance twice (41.5x, then 1.83x) with no carrier |
+| FerroxLabs/wayland#1352 | core | 1 | ACP serve cancels a keeping-up 16 MiB reader with 'protocol relay overloaded' under concurrency |
 | FerroxLabs/wayland#1353 | core | 4 | Concurrent effect-checkpoint stores can jointly exceed the session quota |
 | FerroxLabs/wayland#1355 | core | 4 | Session index writes give up after a 1 s lock wait under contention, and a writer can hit ENOENT |
