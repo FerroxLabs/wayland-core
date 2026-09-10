@@ -10,7 +10,7 @@ import subprocess
 import sys
 import time
 
-WT = pathlib.Path("/Users/seandonahoe/dev/waylandcore-stabilization-20260905/worktrees/w15-quota1353-red")
+WT = pathlib.Path.home() / "dev/waylandcore-stabilization-20260905/worktrees/w15-quota1353-red"
 FILE = WT / "crates/wcore-agent/src/session_journal.rs"
 BASE = "a8fd1ac9c"
 
