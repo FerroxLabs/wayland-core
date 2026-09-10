@@ -144,6 +144,30 @@ plus `just release-board` / `just release-board-live`. Deliberately NOT added
 to `just check-all`: the board is the integrator's file, and a gate that reds
 on every in-progress lane gets bypassed and then deleted.
 
+### 2.1 The gate then went RED on this lane's own grading, and is left red
+
+Grading `wayland-core#386`'s three criteria `met` in the same commit changed
+the blocking list. `python3 scripts/check-release-board.py --offline` now exits
+1 with exactly the two rows it should name:
+
+    FAIL: the release board and the blocking list disagree
+
+      ON THE BOARD BUT NO LONGER BLOCKS  FerroxLabs/wayland-core#386
+      OUTSTANDING COUNT MOVED  FerroxLabs/wayland#1272: board 3, actual 2
+
+That is a REAL-DRIFT positive control the `--self-test` cannot give: the gate
+fired on a list that actually moved, within one commit of it moving.
+`.planning/RELEASE-BOARD.md` is generated and is the integrator's file — this
+lane is forbidden `--write` — so the board is left stale here deliberately.
+**Owed at integration: `python3 scripts/check-release-board.py --write`, before
+the new ci-linux step can pass.**
+
+Read literally, c1's second clause is FALSE at this exact tree. It is graded
+`met` because the criterion's subject is the board's ability to rot SILENTLY,
+and it can no longer do so; on the literal reading c1 could never be met on any
+lane branch, which is the same defect c4 on this ticket has. A reader who
+disagrees should downgrade it — the evidence for both readings is above.
+
 LIMIT: the CI arm runs `--offline`, because the repo-scoped `GITHUB_TOKEN`
 cannot read the second tracker. The online arm additionally corroborates
 `kind:` against tracker labels and resolves handoffs, so it can produce a
