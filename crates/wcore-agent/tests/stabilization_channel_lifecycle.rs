@@ -11,6 +11,25 @@ use wcore_config::config::Config;
 #[path = "../../wcore-cli/tests/support/mock_llm.rs"]
 mod mock_llm;
 
+/// This binary's recovery-request key, stated at the call site.
+///
+/// These tests set `[session] require_durability = true`, so every turn seals
+/// its provider request and asks for a recovery key. Resolved the ordinary
+/// way that key comes from the PROFILE credential store — one file-backed
+/// vault shared by every test process on the host, with a CPU-bound KDF and a
+/// bounded acquire budget. Measured on hetzner-dsm under `cargo nextest run
+/// --workspace --retries 0`: all four tests below red with `Session
+/// persistence authority unavailable: ... the credential store was asked for
+/// the recovery key and did not answer in time`, and all four green when run
+/// alone. The durable path is still exercised; only the shared dependency is
+/// removed.
+///
+/// The value is instance-local on purpose. Pointing the profile at a fixture
+/// vault instead would mean writing `WAYLAND_HOME` — a PROCESS GLOBAL every
+/// concurrent sibling observes, which is the class FerroxLabs/wayland#1233
+/// closed by stating the value at the call site.
+const RECOVERY_TEST_KEY: [u8; 32] = [0x5a; 32];
+
 fn policy(root: &Path, posture: ChannelToolPosture) -> ChannelConfig {
     ChannelConfig {
         name: "fixture".into(),
@@ -48,13 +67,16 @@ fn dispatcher(root: &Path, url: &str, channel: ChannelConfig) -> Arc<ChannelTurn
         .with_cache(false),
     );
     let policies = Arc::new(ChannelPolicyRegistry::from_configs(vec![channel], root).unwrap());
-    Arc::new(ChannelTurnDispatcher::new(
-        config,
-        root.to_string_lossy().into_owned(),
-        provider,
-        policies,
-        None,
-    ))
+    Arc::new(
+        ChannelTurnDispatcher::new(
+            config,
+            root.to_string_lossy().into_owned(),
+            provider,
+            policies,
+            None,
+        )
+        .with_recovery_test_key(RECOVERY_TEST_KEY),
+    )
 }
 
 async fn turn(

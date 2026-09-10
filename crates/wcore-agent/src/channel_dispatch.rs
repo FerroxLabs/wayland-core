@@ -98,6 +98,13 @@ pub struct ChannelTurnDispatcher {
     /// stay bare-URL summaries. Resolves image/audio attachments to derived
     /// text before the turn prompt is built.
     media: Option<Arc<ChannelMediaEnricher>>,
+    /// Recovery-request key stated by a test harness instead of resolved from
+    /// the profile credential store. `None` — production, and the only value
+    /// this crate ever builds outside a test — leaves every per-session engine
+    /// on its normal store-backed protection. See
+    /// [`Self::with_recovery_test_key`].
+    #[cfg(any(test, feature = "test-utils"))]
+    recovery_test_key: Option<[u8; 32]>,
 }
 
 fn remote_channel_config(mut config: Config) -> Config {
@@ -128,7 +135,38 @@ impl ChannelTurnDispatcher {
             admission: RwLock::new(()),
             reload: Mutex::new(()),
             media,
+            #[cfg(any(test, feature = "test-utils"))]
+            recovery_test_key: None,
         }
+    }
+
+    /// Protect this dispatcher's per-session engines with a STATED recovery
+    /// key instead of asking the profile credential store for one.
+    ///
+    /// The same seam `AgentEngine::use_recovery_test_key` already gives every
+    /// harness that owns its engine directly — 25 call sites across this
+    /// crate's integration tests. A harness driving the real dispatcher cannot
+    /// use it: the engines are built lazily inside `initialize`, so there is no
+    /// moment at which the test holds one.
+    ///
+    /// Why it is needed rather than tidy. With `[session] require_durability =
+    /// true` every turn seals its provider request, which asks the profile
+    /// credential store for the recovery key under a bounded acquire budget.
+    /// That store is per-PROFILE, so on a host running one workspace test
+    /// suite it is one file-backed vault shared by every test process at once,
+    /// and its KDF is CPU-bound. Measured on hetzner-dsm under `cargo nextest
+    /// run --workspace --retries 0`: four `stabilization_channel_lifecycle`
+    /// tests red with `Session persistence authority unavailable: ... the
+    /// credential store was asked for the recovery key and did not answer in
+    /// time`, all four green alone.
+    ///
+    /// Stating the key removes the shared dependency instead of widening the
+    /// budget, which would only move the threshold.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[must_use]
+    pub fn with_recovery_test_key(mut self, bytes: [u8; 32]) -> Self {
+        self.recovery_test_key = Some(bytes);
+        self
     }
 
     /// Build the turn prompt, eagerly enriching inbound media first when an
@@ -253,6 +291,10 @@ impl ChannelTurnDispatcher {
         state.children = Some(result.host_children);
         state.engine = Some(result.engine);
         let engine = state.engine.as_mut().expect("engine just installed");
+        #[cfg(any(test, feature = "test-utils"))]
+        if let Some(bytes) = self.recovery_test_key.as_ref() {
+            engine.use_recovery_test_key(bytes);
+        }
 
         if is_new {
             engine.init_session(&self.config.provider_label, &self.cwd, Some(hashed_id))?;
