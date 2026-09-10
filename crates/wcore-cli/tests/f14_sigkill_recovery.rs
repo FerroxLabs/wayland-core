@@ -2368,8 +2368,28 @@ async fn sigkill_during_model_stream_resumes_as_provider_reconciliation_without_
     wait_for_requests(&fixture, 1).await;
     let delta = first.next_type("text_delta").await;
     assert_eq!(delta["text"], partial);
+    // wayland#1290 — read the CAUSE off this process before killing it.
+    //
+    // Without this, the only thing a failing run said was `left: 0 right: 1`
+    // from `assert_provider_checkpoint_sealed`, which names a count and not a
+    // reason — and two tickets were argued from that count: an exactly-once
+    // DOUBLING the payload refutes, and a credential-store failure the payload
+    // could only ever suggest by co-occurrence. `engine.rs` skips the
+    // provider-dispatch checkpoint outright when the prepared request cannot be
+    // sealed, and it says so on this wire, per turn, in an `info` frame. So ask
+    // it, and fail with the reason instead of with the count.
+    let first_degrade = first
+        .seen_message_containing("crash replay protection is OFF")
+        .map(|frame| frame["message"].as_str().unwrap_or_default().to_string());
     let first_diagnostics = first.sigkill().await;
     let evidence = preserve_crash_evidence(&env);
+    assert!(
+        first_degrade.is_none(),
+        "wayland#1290 / gh#1289: this turn ran with crash replay protection OFF, so no \
+         provider-dispatch checkpoint could be written and the assertion below could only \
+         ever have found zero. This is the credential store, not the recovery path: \
+         {first_degrade:?}"
+    );
 
     let mut resumed = CoreProcess::launch(&env, &fixture, &vault, session_id, true).await;
     let current = resync_current(&mut resumed, session_id, "model-current").await;
@@ -3298,17 +3318,46 @@ async fn w1290_the_credential_store_alone_decides_whether_a_provider_checkpoint_
 
     // THE MEASUREMENT. Same flow, same fixture script, same kill point; one
     // variable moved, and the count moves with it.
-    assert_eq!(
-        control_count, 1,
-        "the control arm must write exactly one provider-dispatch checkpoint, or arm B's \
-         zero grades nothing.\nCONTROL degrade notice: {control_degrade:?}\nCONTROL \
-         {control_census}\nKEYLESS degrade notice: {keyless_degrade:?}\nKEYLESS \
-         {keyless_census}"
+    // ARM B — the intervention, and it is DETERMINISTIC: a keyless host has no
+    // store that can answer, so it must degrade and it must write nothing.
+    assert!(
+        keyless_degrade.is_some(),
+        "arm B did not degrade, so it is a second control and grades nothing"
     );
     assert_eq!(
         keyless_count, 0,
         "a host whose credential store does not answer must be shown to produce the \
          `left: 0` this ticket was re-founded on.\nKEYLESS {keyless_census}"
+    );
+
+    // ARM A — the control, asserted as a BICONDITIONAL rather than as a fixed
+    // 1, on purpose.
+    //
+    // A fixed 1 would make this test a load flake in its own right. The vault
+    // this arm depends on has a 5s acquisition budget
+    // (`recovery_confidential.rs` KEY_STORE_ACQUIRE_BUDGET), and MEASURED at
+    // `--retries 0` over 20 receipted runs of this binary alongside two others
+    // on an idle Linux worker, it loses that race often. Writing the assertion
+    // as `== 1` would import the very failure this ticket is about into the
+    // test that explains it.
+    //
+    // The biconditional is the claim actually being made, and it is not vacuous
+    // — it goes red in both directions that matter. A turn that COULD seal and
+    // still wrote no checkpoint is the remaining product-defect hypothesis and
+    // fails here. A turn that could NOT seal and wrote one anyway would be a
+    // durable claim that an unsealed request can be replayed, and fails here
+    // too.
+    assert_eq!(
+        control_count == 0,
+        control_degrade.is_some(),
+        "the provider-dispatch checkpoint must exist exactly when the turn could seal \
+         its request. count={control_count}, degrade notice={control_degrade:?}\n\
+         CONTROL {control_census}"
+    );
+    assert!(
+        control_count <= 1,
+        "one dispatch, at most one checkpoint: count={control_count}\nCONTROL \
+         {control_census}"
     );
 }
 
