@@ -391,9 +391,17 @@ fn the_audit_key_is_the_session_id_and_not_a_placeholder() {
 ///   and every record is written at task end, after that has happened, so the
 ///   uuid never reaches the file. #1203's own comment says exactly this.
 /// * no journal (this arm): ONE key across the switch,
-///   `b4f97e92-628c-4d36-b9a3-416f717ffe43` on both lines. The uuid DOES reach
-///   the file here — there is no id to re-key from — but `rebind_provider`
-///   writes the second record under the same value, so the two do not differ.
+///   `b4f97e92-628c-4d36-b9a3-416f717ffe43` on both lines.
+///
+/// And the SHIPPED build on this same posture keys by a uuid too —
+/// `47976faa-2321-4f65-9e19-9ed03c693992`, measured on the run that made this
+/// arm green. That is the finding, and it is not what #1203 changed: the uuid
+/// is coming from the durable budget AUTHORITY, which bootstrap installs on
+/// every session and whose id wins the first arm of `budget_session_id()`,
+/// ahead of both the `budget_session_id` field and `current_session_id()`.
+/// `install_spend_guard`'s placeholder — uuid or `UNBOUND_BUDGET_SESSION_ID` —
+/// is overwritten by `sync_spend_guard_session` before any record is written,
+/// in every posture reachable from the TUI.
 ///
 /// So this arm does not discriminate against that mutation, and neither does
 /// any other test in this file. It is a PROPERTY GUARD — a future change that
