@@ -604,6 +604,17 @@ jobs:
           vx cargo clippy -p wcore-sandbox --features live-docker --all-targets -- -D warnings
           vx cargo clippy -p wcore-swarm --features wcore-sandbox/live-docker --all-targets -- -D warnings
 
+      # `fetch` exit 3 means exactly one thing: the sealed binary matches source,
+      # run, toolchain, features, flags, ABI contract, size and SHA-256, and
+      # differs ONLY in the hosted runner image. GitHub rolls new images out
+      # mid-run, so jobs in one run can draw different image versions; run
+      # 34512337639 lost BOTH native test legs to that refusal. The refused
+      # binary is never installed. This leg instead rebuilds with the Build job's
+      # exact cargo invocation, from this checkout and this toolchain, checks the
+      # embedded source, and seals that identity under build-reuse-rebuild/.
+      # Every other refusal still fails the step. Budget: the rebuild (Build legs
+      # measure 15-33 min) replaces the release pre-build this job's 120-minute
+      # post-producer envelope was originally sized with.
       - name: Reuse source-bound native release binary
         shell: bash
         env:
@@ -612,13 +623,32 @@ jobs:
           native_target=$(vx rustc -vV | sed -n "s/^host: //p")
           binary=target/release/wayland-core
           if [ "$RUNNER_OS" = Windows ]; then binary="${binary}.exe"; fi
-          CAPTURE_DIR="$RUNNER_TEMP/wayland-ci-evidence/build-reuse" \
+          evidence="$RUNNER_TEMP/wayland-ci-evidence/build-reuse"
+          status=0
+          CAPTURE_DIR="$evidence" \
             bash .github/scripts/capture-test-command.sh \
             python3 scripts/ci-build-artifact.py fetch \
             --target "$native_target" --profile release --features default \
             --abi-contract "native-${RUNNER_OS}-v1" \
             --producer-job "Build ($native_target)" --artifact "wayland-core-$native_target" \
-            --binary "$binary" --wait-seconds 4500
+            --binary "$binary" --wait-seconds 4500 || status=$?
+          case "$status" in
+            0) ;;
+            3)
+              echo "::warning title=Runner image differs from Build ($native_target) so the release binary was rebuilt here::$(tail -n 1 "$evidence/stderr.log")"
+              vx cargo build --release --target "$native_target" -p wcore-cli
+              mkdir -p "${binary%/*}"
+              cp "target/$native_target/release/${binary##*/}" "$binary"
+              mkdir -p "$evidence-rebuild"
+              python3 scripts/ci-build-artifact.py produce \
+                --target "$native_target" --profile release --features default \
+                --abi-contract "native-${RUNNER_OS}-v1" \
+                --producer-job "Rebuild ($native_target) after runner image mismatch" \
+                --artifact "wayland-core-$native_target" --binary "$binary" \
+                --verify-build-info --output "$evidence-rebuild/build-identity.json"
+              ;;
+            *) exit "$status" ;;
+          esac
 
       # Affected native admission runs before the expensive workspace suite.
       # V1 C2 — release-binary smoke. Catches the v0.2.0 BLOCKER #1 class
@@ -1202,6 +1232,9 @@ jobs:
           Write-Host "C: free = $([math]::Round((Get-PSDrive C).Free / 1GB, 2)) GB"
 
       # FIRST, not after clippy — see the step-order note in this job's header.
+      # Exit 3 (runner image is the ONLY mismatch) rebuilds here; see the twin
+      # step in the `ci` job. Budget: this job's 180-minute post-producer
+      # envelope already includes the ~30-minute cold release pre-build.
       - name: Reuse source-bound native release binary
         shell: bash
         env:
@@ -1210,13 +1243,32 @@ jobs:
           native_target=$(vx rustc -vV | sed -n "s/^host: //p")
           binary=target/release/wayland-core
           if [ "$RUNNER_OS" = Windows ]; then binary="${binary}.exe"; fi
-          CAPTURE_DIR="$RUNNER_TEMP/wayland-ci-evidence/build-reuse" \
+          evidence="$RUNNER_TEMP/wayland-ci-evidence/build-reuse"
+          status=0
+          CAPTURE_DIR="$evidence" \
             bash .github/scripts/capture-test-command.sh \
             python3 scripts/ci-build-artifact.py fetch \
             --target "$native_target" --profile release --features default \
             --abi-contract "native-${RUNNER_OS}-v1" \
             --producer-job "Build ($native_target)" --artifact "wayland-core-$native_target" \
-            --binary "$binary" --wait-seconds 4500
+            --binary "$binary" --wait-seconds 4500 || status=$?
+          case "$status" in
+            0) ;;
+            3)
+              echo "::warning title=Runner image differs from Build ($native_target) so the release binary was rebuilt here::$(tail -n 1 "$evidence/stderr.log")"
+              vx cargo build --release --target "$native_target" -p wcore-cli
+              mkdir -p "${binary%/*}"
+              cp "target/$native_target/release/${binary##*/}" "$binary"
+              mkdir -p "$evidence-rebuild"
+              python3 scripts/ci-build-artifact.py produce \
+                --target "$native_target" --profile release --features default \
+                --abi-contract "native-${RUNNER_OS}-v1" \
+                --producer-job "Rebuild ($native_target) after runner image mismatch" \
+                --artifact "wayland-core-$native_target" --binary "$binary" \
+                --verify-build-info --output "$evidence-rebuild/build-identity.json"
+              ;;
+            *) exit "$status" ;;
+          esac
 
       - name: Release binary smoke (catches plugin dead-code-strip)
         shell: bash

@@ -88,8 +88,23 @@ def audit(text):
             reuse = steps.get("Reuse source-bound native release binary", "")
             if "ci-build-artifact.py fetch" not in reuse or (smoke and reuse and job.index(reuse) >= job.index(smoke)):
                 errors.append(f"{name}: native reuse missing or too late")
-            if "cargo build --release -p wcore-cli" in job:
-                errors.append(f"{name}: duplicate native release compilation")
+            # The only permitted native release compile is the exit-3 branch
+            # (runner image is the sole identity mismatch), and it must be the
+            # Build job's invocation. Any other placement is a duplicate build.
+            rebuild = re.search(
+                r'--wait-seconds 4500 \|\| status=\$\?\n\s*case "\$status" in\n\s*0\) ;;\n'
+                r'\s*3\)\n(.*?)\n\s*;;\n\s*\*\) exit "\$status" ;;\n\s*esac\n', reuse, re.S)
+            if not rebuild:
+                errors.append(f"{name}: native reuse does not confine rebuild to the image-only refusal")
+            offset = job.index(reuse) if reuse else 0
+            span = (offset + rebuild.start(1), offset + rebuild.end(1)) if rebuild else (-1, -1)
+            for release in re.finditer(r"(?:cargo|cross) build\b[^\n]*--release", job):
+                if not span[0] <= release.start() < span[1]:
+                    errors.append(f"{name}: native release compilation outside the image-only fallback")
+            if rebuild and 'vx cargo build --release --target "$native_target" -p wcore-cli\n' not in rebuild.group(1):
+                errors.append(f"{name}: image-only rebuild differs from the Build job invocation")
+    if "vx cargo build --release --target ${{ matrix.target }} -p wcore-cli\n" not in jobs.get("build", ""):
+        errors.append("build producer invocation changed; the image-only rebuild must match it")
     if "Seal reusable native build identity" not in jobs.get("build", ""):
         errors.append("build producer has no identity seal")
     if "build-identity.json" not in jobs.get("build", ""):
@@ -147,6 +162,28 @@ class Contract(unittest.TestCase):
         text = (ROOT / ".github/scripts/annotate-windows-coverage.sh").read_text()
         self.assertIn("(primary Windows route) | $SELF_HOSTED_STATE", text)
         self.assertNotIn("(self-hosted) | $SELF_HOSTED_STATE", text)
+
+    def test_release_rebuild_is_confined_to_the_image_only_refusal(self):
+        smoke = "      - name: Release binary smoke (catches plugin dead-code-strip)\n"
+        early = "      - name: Early native build\n        run: vx cargo build --release --target x86_64-apple-darwin -p wcore-cli\n\n" + smoke
+        self.assertTrue(any("outside the image-only fallback" in error for error in audit(self.source.replace(smoke, early, 1))))
+        on_any_failure = self.source.replace('            *) exit "$status" ;;\n', "            *) ;;\n", 1)
+        self.assertNotEqual(on_any_failure, self.source)
+        self.assertTrue(any("confine rebuild" in error for error in audit(on_any_failure)))
+        for job_marker in ("  ci:\n", "  ci-windows-hosted:\n"):
+            start = self.source.index(job_marker)
+            head, tail = self.source[:start], self.source[start:]
+            unguarded = head + tail.replace("            3)\n", "            1|3)\n", 1)
+            self.assertTrue(any("confine rebuild" in error for error in audit(unguarded)), job_marker)
+
+    def test_rebuild_cannot_drift_from_the_build_job(self):
+        drifted = self.source.replace("vx cargo build --release --target ${{ matrix.target }} -p wcore-cli",
+                                      "vx cargo build --release --locked --target ${{ matrix.target }} -p wcore-cli", 1)
+        self.assertNotEqual(drifted, self.source)
+        self.assertTrue(any("must match it" in error for error in audit(drifted)))
+        local = self.source.replace('vx cargo build --release --target "$native_target" -p wcore-cli', 'vx cargo build --release --target "$native_target" -p wcore-cli --features voice', 1)
+        self.assertNotEqual(local, self.source)
+        self.assertTrue(any("differs from the Build job invocation" in error for error in audit(local)))
 
     def test_consumer_must_wait_for_its_own_bounded_producer(self):
         changed = self.source.replace("--wait-seconds 4500", "--wait-seconds 1", 1)

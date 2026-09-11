@@ -3,7 +3,11 @@
 
 This is build reuse, not release admission. Signing, packaging, smoke tests and
 release evidence retain their existing owners. An incompatible artifact fails;
-there is no rebuild fallback and no default-feature/voice or Linux-ABI alias.
+there is no default-feature/voice or Linux-ABI alias, and this helper never
+rebuilds. One refusal is distinguishable: when the sealed binary is exact in
+every field except the hosted runner image, fetch exits IMAGE_ONLY_EXIT so the
+calling CI step may rebuild natively from the same checkout. A mismatched
+binary is never installed.
 """
 from __future__ import annotations
 
@@ -25,6 +29,13 @@ IMAGE_ENV = (
     "RUNNER_OS", "RUNNER_ARCH", "ImageOS", "ImageVersion",
     "MACOSX_DEPLOYMENT_TARGET", "SDKROOT", "VCToolsVersion", "WindowsSDKVersion",
 )
+# argparse uses 2 and every other refusal uses 1; the capture wrapper reports
+# signals as 128+n and launch failures as 126/127, so 3 cannot be ambiguous.
+IMAGE_ONLY_EXIT = 3
+
+
+class ImageOnlyMismatch(ValueError):
+    """Every sealed field and the binary digest match except runner_image."""
 
 
 def require(condition: bool, message: str) -> None:
@@ -103,10 +114,17 @@ def context(args: argparse.Namespace) -> tuple[dict, dict]:
 
 def validate_identity(record: dict, expected: dict, binary: Path) -> None:
     require(set(record) == set(expected) | {"binary_sha256", "binary_size"}, "unknown or missing build identity fields")
-    for key, value in expected.items():
-        require(record.get(key) == value, f"build identity mismatch: {key}")
+    mismatched = [key for key, value in expected.items() if record.get(key) != value]
+    hard = [key for key in mismatched if key != "runner_image"]
+    require(not hard, f"build identity mismatch: {', '.join(hard)}")
     require(record["binary_size"] == binary.stat().st_size, "binary size mismatch")
     require(record["binary_sha256"] == sha256(binary), "binary SHA-256 mismatch")
+    if mismatched:
+        image = lambda value: json.dumps(value, sort_keys=True, separators=(",", ":"))
+        raise ImageOnlyMismatch(
+            "build identity mismatch: runner_image only "
+            f"(producer {image(record['runner_image'])}, consumer {image(expected['runner_image'])})"
+        )
 
 
 def producer_status(jobs: list[dict], name: str) -> bool:
@@ -156,6 +174,8 @@ def produce(args: argparse.Namespace) -> None:
     expected, _ = context(args)
     binary = Path(args.binary)
     require(binary.is_file() and 0 < binary.stat().st_size <= MAX_BINARY, "build binary is missing or invalid")
+    if args.verify_build_info:
+        validate_build_info(command([str(binary.resolve()), "--build-info"], timeout=90), expected["source_sha"])
     record = dict(expected, binary_sha256=sha256(binary), binary_size=binary.stat().st_size)
     Path(args.output).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     print(f"Produced build identity: source={expected['source_sha']} target={expected['target']} sha256={record['binary_sha256']}", flush=True)
@@ -212,10 +232,14 @@ def main() -> None:
     parser.add_argument("--producer-job", required=True)
     parser.add_argument("--artifact", required=True)
     parser.add_argument("--wait-seconds", type=int, default=1800)
+    parser.add_argument("--verify-build-info", action="store_true",
+                        help="produce: require the binary's embedded source to equal the checkout")
     args = parser.parse_args()
     require(args.action != "produce" or args.output, "produce requires --output")
     try:
         (produce if args.action == "produce" else fetch)(args)
+    except ImageOnlyMismatch as error:
+        parser.exit(IMAGE_ONLY_EXIT, f"build artifact refused: {error}\n")
     except (ValueError, KeyError, subprocess.SubprocessError, OSError, json.JSONDecodeError, zipfile.BadZipFile) as error:
         parser.exit(1, f"build artifact refused: {error}\n")
 
