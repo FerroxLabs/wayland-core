@@ -415,3 +415,37 @@ async fn an_exclusive_hold_on_the_log_map_does_not_stall_a_running_turn() {
     drop(feed);
     server.delete_session(id).await.unwrap();
 }
+
+/// Re-review MINOR on 4ab69b043: a recorder that finds no log for its session
+/// (the session was deleted mid-send) publishes `Lost`. Its per-event count
+/// must not overwrite that, or delivery never reads it and the stream ends
+/// with no terminal at all instead of the -32003 overload frame. The default
+/// test runtime is single-threaded, so the recorder overwrites `Lost` before
+/// delivery is scheduled again: deterministic, not load-dependent.
+#[tokio::test(start_paused = true)]
+async fn a_turn_whose_session_log_is_gone_ends_with_the_overload_frame() {
+    let server = AcpServer::new().with_isolated_delivery_budget();
+    let lifecycle = Arc::new(SessionLifecycle::default());
+    let slot = Arc::new(tokio::sync::Semaphore::new(1))
+        .acquire_owned()
+        .await
+        .unwrap();
+    let upstream = futures::stream::iter(vec![
+        MessageEvent::TextDelta {
+            text: "never recorded".into(),
+        },
+        MessageEvent::Done {
+            stop_reason: "end_turn".into(),
+            turn_id: "lost".into(),
+        },
+    ])
+    .boxed();
+    let stream = server.tee_into_log("no-such-session", upstream, &lifecycle, slot, "lost".into());
+    let frames: Vec<MessageEvent> = tokio::time::timeout(Duration::from_secs(60), stream.collect())
+        .await
+        .expect("the stream ends");
+    assert!(
+        matches!(frames.as_slice(), [MessageEvent::Error { error, .. }] if error.code == -32003),
+        "a turn with no session log must end with exactly the overload frame: {frames:?}"
+    );
+}
