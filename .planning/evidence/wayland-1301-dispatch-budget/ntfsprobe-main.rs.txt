@@ -1,0 +1,127 @@
+//! THROWAWAY NTFS probe for FerroxLabs/wayland#1301 fix 2 (07272c36b). Not committed
+//! to any lane branch; its source is recorded in the #1301 evidence.
+//!
+//! Question: after a temporary file is fully written and synced, then hard-linked to
+//! its published name and the temporary name removed, does the size the directory
+//! listing reports for the published name (`DirEntry::metadata`, which on Windows is
+//! built from FindFirstFileW/FindNextFileW data with no per-file open) equal the size
+//! a per-file open reports (`symlink_metadata`), and the true size?
+//!
+//! Checked immediately, after every handle on the file is closed, and again after 1 s,
+//! in three handle shapes:
+//!   Closed               the writing handle is closed before the link is made
+//!   WriterOpen           the writing handle is still open at link and removal time,
+//!                        which is the shape `store_effect_checkpoint` has
+//!   WriterAndReaderOpen  as WriterOpen, plus a second handle open on the temporary
+//!
+//! Exits non-zero if any comparison disagrees.
+
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
+use std::path::Path;
+use std::time::Duration;
+
+#[derive(Clone, Copy, Debug)]
+enum Mode {
+    Closed,
+    WriterOpen,
+    WriterAndReaderOpen,
+}
+
+fn listed(dir: &Path, name: &str) -> std::io::Result<(u64, bool, bool)> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        if entry.file_name().to_str() == Some(name) {
+            let metadata = entry.metadata()?;
+            return Ok((
+                metadata.len(),
+                metadata.is_file(),
+                metadata.file_type().is_symlink(),
+            ));
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "published name is not in the directory listing",
+    ))
+}
+
+fn main() {
+    let mut args = std::env::args().skip(1);
+    let root = args.next().expect("usage: ntfsprobe <work-dir> [reps]");
+    let reps: usize = args.next().map_or(5, |value| value.parse().expect("reps"));
+    let root = Path::new(&root);
+    let _ = fs::remove_dir_all(root);
+    fs::create_dir_all(root).expect("create work dir");
+
+    let sizes: [u64; 6] = [0, 1, 4095, 4096, 1 << 20, 64 << 20];
+    let modes = [Mode::Closed, Mode::WriterOpen, Mode::WriterAndReaderOpen];
+    let mut checks = 0_u64;
+    let mut mismatches = 0_u64;
+
+    println!("size,mode,rep,when,expected,listing_len,open_len,listing_is_file,listing_is_symlink,ok");
+    for &size in &sizes {
+        let payload = vec![0xA5_u8; usize::try_from(size).expect("size fits usize")];
+        for &mode in &modes {
+            for rep in 0..reps {
+                let dir = root.join(format!("{size}-{mode:?}-{rep}"));
+                fs::create_dir_all(&dir).expect("case dir");
+                // A 64-character lowercase hex name: exactly what fix 2 classifies as
+                // a published checkpoint.
+                let published = format!(
+                    "{:064x}",
+                    (u128::from(size) << 64) | ((rep as u128) << 8) | (mode as u128)
+                );
+                let temporary = dir.join(format!(".{published}.{}.probe.tmp", std::process::id()));
+
+                let mut writer = OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&temporary)
+                    .expect("create temporary");
+                writer.write_all(&payload).expect("write");
+                writer.sync_all().expect("sync_all");
+                let reader = match mode {
+                    Mode::WriterAndReaderOpen => Some(File::open(&temporary).expect("second handle")),
+                    _ => None,
+                };
+                let writer = match mode {
+                    Mode::Closed => {
+                        drop(writer);
+                        None
+                    }
+                    _ => Some(writer),
+                };
+                fs::hard_link(&temporary, dir.join(&published)).expect("hard_link");
+                fs::remove_file(&temporary).expect("remove temporary");
+
+                let mut compare = |when: &str| {
+                    let (listing_len, is_file, is_symlink) =
+                        listed(&dir, &published).expect("listing lookup");
+                    let open_len = fs::symlink_metadata(dir.join(&published))
+                        .expect("symlink_metadata")
+                        .len();
+                    let ok = listing_len == size && open_len == size && is_file && !is_symlink;
+                    checks += 1;
+                    if !ok {
+                        mismatches += 1;
+                    }
+                    println!(
+                        "{size},{mode:?},{rep},{when},{size},{listing_len},{open_len},{is_file},{is_symlink},{ok}"
+                    );
+                };
+                compare("immediate");
+                drop(reader);
+                drop(writer);
+                compare("after_close");
+                std::thread::sleep(Duration::from_secs(1));
+                compare("after_1s");
+                fs::remove_dir_all(&dir).expect("remove case dir");
+            }
+        }
+    }
+    println!("PROBE checks={checks} mismatches={mismatches}");
+    if mismatches != 0 {
+        std::process::exit(1);
+    }
+}

@@ -1,5 +1,7 @@
 wayland#1301 c3/c4: fix1_dispatch_budget_aborts_with_partial_result AGAINST ITS WINDOWS KILL LINE
 ==================================================================================================
+HOST LABELS: WinHost = the self-hosted Windows 11 (build 26200, 32-core) measurement box; LinuxHost = the
+shared 96-core Linux build box. Neither is the CI executor.
 Lane w15/win1301, 2026-09-10. Every sample is listed; the MAXIMUM decides, because c3 grades the
 worst case against a kill line, not the average.
 
@@ -13,7 +15,7 @@ debug runs at 240.025 s and 240.026 s. Headroom = 240 / measured seconds. 1.5x r
 
 WHAT CI RUNS TODAY, AND WHY THE OLD FIGURE IS STALE
 ---------------------------------------------------
-* `CI (Array)` runs on GitHub-HOSTED `windows-latest`, not SeanDesktop:
+* `CI (Array)` runs on GitHub-HOSTED `windows-latest`, not WinHost:
   `.github/workflows/ci.yml:229` `runs-on: ${{ contains(matrix.os, 'self-hosted') && 'windows-latest' || matrix.os }}`.
   Confirmed from the jobs API: labels ["windows-latest"], runner group "GitHub Actions".
 * Since 1780b3164 (2026-09-08) Windows runs this test ONLY in its own step,
@@ -55,28 +57,28 @@ final-status line and the Summary line agree).
 SHARED-POOL DEBUG FIGURE (the condition that produced the allowlist row), recorded for comparison:
     CI (Array), 2026-09-02/03, ten runs, 185.46-226.28 s -> 1.06x at max.
 
-BASELINE, SeanDesktop (Windows 11 build 26200, 32 cores), n=10 PER ARM, INTERLEAVED
+BASELINE, WinHost (Windows 11 build 26200, 32 cores), n=10 PER ARM, INTERLEAVED
 -----------------------------------------------------------------------------------
 Exact CI invocation, runner-idle check before AND after every run (Runner.Worker count), all 20 runs
-0/0, none contaminated. SeanDesktop is not the CI executor; supplementary only.
+0/0, none contaminated. WinHost is not the CI executor; supplementary only.
     release: 54.987 58.098 58.193 62.944 79.254 87.975 91.322 93.776 93.792 94.212  max 94.212 -> 2.55x
     debug:   148.513 149.298 149.840 150.127 150.835 151.156 151.218 151.726 151.908 154.730  max -> 1.55x
 
 WHERE THE TIME GOES ON WINDOWS
 ------------------------------
 WERFAULT IS NOT PART OF IT. Measured: a WerFault.exe / WerFaultSecure.exe poll on every one of 24
-SeanDesktop headroom runs, 24 hosted baseline runs and 12 attribution runs saw none, and sampled runs
+WinHost headroom runs, 24 hosted baseline runs and 12 attribution runs saw none, and sampled runs
 recorded no child process of the test binary. Nothing on the dispatch path spawns a process or calls
 abort().
 
-It is not CPU. The same release build of the same test on Linux (hetzner-dsm, 38f82b87f) passes in
+It is not CPU. The same release build of the same test on Linux (LinuxHost, 38f82b87f) passes in
 15.068 s. Sampled hosted release runs: 122-126 s wall, 25-27 s user CPU, 39-43 s kernel CPU,
-~5.67-5.69 million non-read/write I/O operations per run (SeanDesktop: 4.26-4.38 million).
+~5.67-5.69 million non-read/write I/O operations per run (WinHost: 4.26-4.38 million).
 
 Stage-timing instrument (throwaway branch timing/w15-1301-instr, e554ba8a0, never merged), release,
 whole-run totals in seconds (calls):
 
-                                  SeanDesktop run1 / run2 / run3        Linux (hetzner)
+                                  WinHost run1 / run2 / run3        Linux (LinuxHost)
     test wall                         61.5 / 76.2 / 55.7                  15.1
     path_identity (2 per append)      17.58 / 20.52 / 16.37  (8029)       0.27   flat
     child_tool_registry (PATH search)  9.76 / 12.99 /  8.51  (1000)       0.13   flat
@@ -91,7 +93,7 @@ Growth, run 1, seconds per 100-dispatch window, first -> last: effects_dir_bytes
 inspect clone 0.056 -> 0.427; reduce clone 0.041 -> 0.347. path_identity 2.390 -> 1.552 and the tool
 registry 1.343 -> 0.747 do not grow.
 
-Environment-only arms (SeanDesktop, n=4 each, interleaved, runner idle, no code change):
+Environment-only arms (WinHost, n=4 each, interleaved, runner idle, no code change):
     base         53.757 53.994 58.572 76.053
     PATH=System32 + PATHEXT=.EXE   75.376 65.509 73.292 72.999
     fresh WAYLAND_HOME (0-byte spend audit, not the real 18.9 MB one)   83.601 84.322 50.849 84.442
@@ -107,18 +109,18 @@ THE FIXES (w15/win1301)
 aa8f42912 perf(journal): read one durable child without cloning session state
     DurableChildStore::inspect cloned the whole ReducedSessionState to read one record, three times per
     dispatch. SessionJournal::durable_child takes the same lock and error and clones only that record.
-    Share: 2.3-3.7 s of 55.7-76.2 s on SeanDesktop; 2.34 s of 15.1 s on Linux.
+    Share: 2.3-3.7 s of 55.7-76.2 s on WinHost; 2.34 s of 15.1 s on Linux.
 07272c36b perf(journal): size published checkpoints from the directory listing
     checkpoint_directory_bytes opened every entry of the checkpoint store on every store. Entries whose
     whole name is exactly a valid_sha256_hex digest are published checkpoints -- created only by
     hard-linking a fully written and synced temporary, never rewritten in place by any production
     writer -- and are sized from the directory entry. Temporaries, leftovers and unknown names keep the
-    per-file symlink_metadata open. Share: 6.3-10.1 s of 55.7-76.2 s on SeanDesktop.
+    per-file symlink_metadata open. Share: 6.3-10.1 s of 55.7-76.2 s on WinHost.
 Neither touches a SOURCE_INPUTS file (durable_child.rs, session_journal.rs,
 tests/durable_child_store_test.rs). Neither changes what the test proves: the same 1000-dispatch
 budget constant, the same real dispatches, the same assertions, the same kill line.
 
-Verification of 07272c36b on hetzner-dsm parallel-2 (each remote_exit 0, complete true):
+Verification of 07272c36b on LinuxHost parallel-2 (each remote_exit 0, complete true):
     clippy -p wcore-agent --all-targets -D warnings                               Linux
     clippy -p wcore-agent --all-targets --target x86_64-pc-windows-gnu -D warnings
     nextest --profile ci --retries 0: 57 run, 57 passed, including
@@ -129,7 +131,7 @@ Verification of 07272c36b on hetzner-dsm parallel-2 (each remote_exit 0, complet
 aa8f42912 additionally: 70 tests across durable_child_store, durable_spawner, child_transaction_gate,
 child_transaction_parent_cas, bootstrap and workflow_limits test binaries, all passed.
 
-BASE-VS-FIX A/B, SeanDesktop, n=10 PER ARM, INTERLEAVED (supplementary)
+BASE-VS-FIX A/B, WinHost, n=10 PER ARM, INTERLEAVED (supplementary)
 -----------------------------------------------------------------------
 Windows 11 build 26200, 32 cores. Base = 38f82b87f source; fix = the same source plus
 38f82b87f..07272c36b applied with `git apply --check` first; arm identity asserted before any build
@@ -143,9 +145,9 @@ Per round (base / fix): r1 75.957/52.615  r2 54.965/47.977  r3 75.304/62.326  r4
 r5 94.187/77.300  r6 70.144/74.915  r7 92.791/46.989  r8 83.333/58.392  r9 67.381/53.801  r10 63.205/56.985.
 Fix faster in 8 of 10 rounds; max -18 percent, median about -21 percent. This box is not the CI executor.
 
-LINUX CONTROL, hetzner-dsm slot parallel-2, n=3 PER ARM (context only)
+LINUX CONTROL, LinuxHost slot parallel-2, n=3 PER ARM (context only)
 ---------------------------------------------------------------------
-Exact CI invocation, one sample per remote-proof run, arm order alternated per pair. hetzner-dsm is a
+Exact CI invocation, one sample per remote-proof run, arm order alternated per pair. LinuxHost is a
 shared 96-core box with other lanes building on it; load was recorded for pair 3 only.
     base (f0b9199ce = 38f82b87f + throwaway workflow/harness files, no code change):
           14.979   38.555 (load not recorded)   16.535 (loadavg 58.51 -> 47.78)
@@ -223,5 +225,68 @@ SEPARATE DEFECT FOUND, NOT FIXED HERE: FerroxLabs/wayland#1353
 --------------------------------------------------------------
 The session-quota check in store_effect_checkpoint is not atomic with the write it admits and holds no
 lock across both. Probe 506aed92e (branch timing/w15-1301-quota-race) lets two stores pass the check
-before either writes: RED on hetzner-dsm, total 570425344 bytes > quota 536870912 (+32 MiB), both
+before either writes: RED on LinuxHost, total 570425344 bytes > quota 536870912 (+32 MiB), both
 accepted. Its repair touches the same scan as 07272c36b and lands after it, in another lane.
+
+NATIVE WINDOWS CHECK OF FIX 2 (07272c36b), WinHost, msvc toolchain
+------------------------------------------------------------------
+Why: no Windows run had yet ASSERTED fix 2's sizes. CI (Array) test steps were skipped by a runner-image
+refusal, and the hosted A/B timed fix 2 without checking its answers. The open question was whether an
+NTFS directory listing (DirEntry::metadata, built from FindFirstFileW/FindNextFileW with no per-file open)
+reports the current size for a freshly created hard link.
+
+TREE IDENTITY, BY BLOB ID, NOT BY NAME
+  The WinHost fix tree was the 38f82b87f archive plus `git apply` of 38f82b87f..07272c36b. The first
+  verification attempt REFUSED to run: all three fixed files had blob ids that did not match 07272c36b.
+  Measured cause: WinHost's system Git sets core.autocrlf=true, so `git apply` outside a repository wrote
+  CRLF. CR count equalled LF count in each of the three files (4649, 551, 1144); after CRLF->LF each blob
+  id matched 07272c36b exactly; an untouched control file (orchestration/workflow/limits.rs) had 0 CR
+  and matched its blob. The three files were then replaced with the exact bytes of `git show
+  07272c36b:<path>`, re-verified on WinHost (blob ids 04760f37..., 3f632da1..., e237e6d4..., 0 CR, fresh
+  mtimes so the build could not reuse stale objects), and only then did the check run.
+
+  Consequence for the earlier WinHost measurements, measured rather than assumed: rustc 1.95.0 (msvc) on
+  WinHost compiled a source file whose every line ending is CRLF and which has a newline inside both a
+  plain and a raw string literal; both literals came out as `x\ny`, length 3, no CR. rustc normalises CRLF
+  to LF on input, so a tree that differs only in line endings compiles to the same code, and the WinHost
+  base-vs-fix A/B and the WinHost stage-instrument runs stand.
+
+FIX 2's OWN TESTS, NATIVE
+  Filter: cargo test --locked -p wcore-agent --lib session_journal
+  Tree identity: all three fixed files matched 07272c36b by blob id before the build.
+  Result: exit 0, `test result: ok. 56 passed; 0 failed; 0 ignored; 0 measured; 2658 filtered out`, runner idle (Runner.Worker count 0).
+  Named: session_journal::fault_tests::checkpoint_quota_sizes_only_exact_digest_names_from_the_listing ... ok
+  Named: session_journal::fault_tests::published_checkpoint_names_are_exact_lowercase_digests_only ... ok
+
+NTFS HARD-LINK SIZE PROBE
+  Throwaway standalone binary, not committed to any branch. Source recorded beside this file as
+  ntfsprobe-main.rs.txt (sha256 8221f378a1ff4301c11bf102c40920477c43b81198f33e88dc2c068962014dbd).
+  For sizes 0, 1, 4095, 4096, 1 MiB and 64 MiB, three handle shapes (writer closed before the link;
+  writer still open at link and removal, which is store_effect_checkpoint's shape; writer plus a second
+  handle open) and 5 repetitions each: write the bytes to a `.{digest}.*.tmp` temporary, sync_all,
+  hard_link to a 64-hex published name, remove the temporary, then compare the listing size
+  (read_dir + DirEntry::metadata().len()) against a per-file open (symlink_metadata().len()) and against
+  the true size -- immediately, after every handle is closed, and again after 1 s.
+  Result: exit 0, `PROBE checks=270 mismatches=0`, runner idle (Runner.Worker count 0). Every row: listing size == per-file-open size ==
+  true size, the listing reports a regular file, never a symlink.
+    size (bytes)   handle shape           checks  listing==open==true size   when checked
+               0   Closed                     15  15/15 yes                    immediate/after_close/after_1s x reps 0-4
+               0   WriterOpen                 15  15/15 yes                    immediate/after_close/after_1s x reps 0-4
+               0   WriterAndReaderOpen        15  15/15 yes                    immediate/after_close/after_1s x reps 0-4
+               1   Closed                     15  15/15 yes                    immediate/after_close/after_1s x reps 0-4
+               1   WriterOpen                 15  15/15 yes                    immediate/after_close/after_1s x reps 0-4
+               1   WriterAndReaderOpen        15  15/15 yes                    immediate/after_close/after_1s x reps 0-4
+            4095   Closed                     15  15/15 yes                    immediate/after_close/after_1s x reps 0-4
+            4095   WriterOpen                 15  15/15 yes                    immediate/after_close/after_1s x reps 0-4
+            4095   WriterAndReaderOpen        15  15/15 yes                    immediate/after_close/after_1s x reps 0-4
+            4096   Closed                     15  15/15 yes                    immediate/after_close/after_1s x reps 0-4
+            4096   WriterOpen                 15  15/15 yes                    immediate/after_close/after_1s x reps 0-4
+            4096   WriterAndReaderOpen        15  15/15 yes                    immediate/after_close/after_1s x reps 0-4
+         1048576   Closed                     15  15/15 yes                    immediate/after_close/after_1s x reps 0-4
+         1048576   WriterOpen                 15  15/15 yes                    immediate/after_close/after_1s x reps 0-4
+         1048576   WriterAndReaderOpen        15  15/15 yes                    immediate/after_close/after_1s x reps 0-4
+        67108864   Closed                     15  15/15 yes                    immediate/after_close/after_1s x reps 0-4
+        67108864   WriterOpen                 15  15/15 yes                    immediate/after_close/after_1s x reps 0-4
+        67108864   WriterAndReaderOpen        15  15/15 yes                    immediate/after_close/after_1s x reps 0-4
+  VERDICT: fix 2's premise holds on NTFS for a freshly created hard link in every shape tested,
+  including the production shape where the writing handle is still open at link and removal time.
