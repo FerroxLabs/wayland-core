@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "ACP serve detaches a keeping-up reader at stage 2 when large events are followed by small ones"
 status: open
-last_verified_commit: 06d9d4ded
+last_verified_commit: 7c76d3e66
 criteria:
   - id: c1
     text: "The mechanism is NAMED with the instrument that named it (which limit fired, at what reader position), with a deterministic red test that does not depend on load."
