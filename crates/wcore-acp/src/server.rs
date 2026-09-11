@@ -626,7 +626,10 @@ impl AcpServer {
                 // Wake delivery. A count, not a queue: it cannot overflow
                 // however many events are recorded ahead of the reader. Never
                 // wait for live delivery while draining the real protocol relay.
-                if !progress_tx.is_closed() {
+                // With no log, `Lost` stays published: overwriting it with a
+                // count of 0 would leave delivery waiting, ending with no
+                // terminal at all instead of its overload frame.
+                if log.is_some() && !progress_tx.is_closed() {
                     progress_tx.send_replace(Recorded::Through(seq));
                     // Ready upstream/log futures need not yield. Give the
                     // independent delivery and HTTP tasks a scheduling turn.
