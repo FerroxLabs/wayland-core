@@ -30,3 +30,10 @@ proof-1789065894-46677.json 581178a4b clippy --locked -p wcore-acp -p wcore-cli 
 proof-1789065968-51836.json 581178a4b clippy --locked --target x86_64-pc-windows-gnu -p wcore-acp -p wcore-cli --all-targets -- -D warnings remote_exit 0 complete True
 proof-1789066084-58351.json 581178a4b tree --locked -p wcore-cli -e normal,build,features -i wcore-acp remote_exit 0 complete True
 proof-1789066114-59756.json 581178a4b build --locked --release --features voice -p wcore-cli -j 6 remote_exit 0 complete True
+proof-1789087125-57919.json 3d8f1fd6f nextest run --locked -p wcore-acp --lib --retries 0 --no-fail-fast -E test(a_turn_whose_session_log_is_gone) remote_exit 100 complete True
+proof-1789087152-60975.json 06d9d4ded nextest run --locked -p wcore-acp --retries 0 --no-fail-fast remote_exit 0 complete True
+proof-1789087171-63249.json 06d9d4ded test --locked -p wcore-acp --lib remote_exit 0 complete True
+proof-1789087183-64263.json 06d9d4ded nextest run --locked -p wcore-cli --test stabilization_acp_lifecycle --test stabilization_acp_durable --test stabilization_acp_failed_bootstrap --test acp_engine_turn --test acp_gate_d012 --test acp_mcp_tool_selection --test acp_tool_selection --test headless_acp_boot --retries 0 --no-fail-fast remote_exit 0 complete True
+proof-1789087216-65301.json 06d9d4ded clippy --locked -p wcore-acp -p wcore-cli --all-targets -- -D warnings remote_exit 0 complete True
+proof-1789087248-66872.json 06d9d4ded clippy --locked --target x86_64-pc-windows-gnu -p wcore-acp -p wcore-cli --all-targets -- -D warnings remote_exit 0 complete True
+proof-1789087279-67662.json 06d9d4ded tree --locked -p wcore-cli -e normal,build,features -i wcore-acp remote_exit 0 complete True

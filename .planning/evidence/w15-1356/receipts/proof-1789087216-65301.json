@@ -1,0 +1,25 @@
+{
+  "slot": "parallel-1",
+  "remote_root": "/root/waylandcore-stabilization-20260905/slots/parallel-1",
+  "source": "06d9d4deda0f608340fd4caa9a45d88a8a8d24d0",
+  "tree": "8e6388e54372f125725da82b2b466335e41216fb",
+  "bundle_import_anchor": "0cdd998adb1cd2ab13966a40b1b98c6136fd72d0",
+  "cargo_args": [
+    "clippy",
+    "--locked",
+    "-p",
+    "wcore-acp",
+    "-p",
+    "wcore-cli",
+    "--all-targets",
+    "--",
+    "-D",
+    "warnings"
+  ],
+  "core_binary_profile": null,
+  "ssh_exit": 0,
+  "remote_exit": 0,
+  "complete": true,
+  "duration_seconds": 28.46183204650879,
+  "status_sha256": "1ee71e89131a0a8b287999ba54e8de5c52e0b001241bce642f964eaf2ebaa00e"
+}

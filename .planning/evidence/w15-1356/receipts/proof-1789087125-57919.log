@@ -1,0 +1,28 @@
+   Compiling wcore-acp v0.13.14 (/root/waylandcore-stabilization-20260905/slots/parallel-1/source/crates/wcore-acp)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.61s
+────────────
+ Nextest run ID e9c2b4d3-98ea-488d-825b-94750c238a2f with nextest profile: default
+    Starting 1 test across 1 binary (147 tests skipped)
+        FAIL [   0.006s] (1/1) wcore-acp server::eviction_tests::a_turn_whose_session_log_is_gone_ends_with_the_overload_frame
+  stdout ───
+
+    running 1 test
+    test server::eviction_tests::a_turn_whose_session_log_is_gone_ends_with_the_overload_frame ... FAILED
+
+    failures:
+
+    failures:
+        server::eviction_tests::a_turn_whose_session_log_is_gone_ends_with_the_overload_frame
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 147 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'server::eviction_tests::a_turn_whose_session_log_is_gone_ends_with_the_overload_frame' (2422916) panicked at crates/wcore-acp/src/server/eviction_tests.rs:447:5:
+    a turn with no session log must end with exactly the overload frame: []
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   0.007s] 1 test run: 0 passed, 1 failed, 147 skipped
+        FAIL [   0.006s] (1/1) wcore-acp server::eviction_tests::a_turn_whose_session_log_is_gone_ends_with_the_overload_frame
+error: test run failed

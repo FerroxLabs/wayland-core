@@ -1,0 +1,12 @@
+wcore-acp v0.13.14 (/root/waylandcore-stabilization-20260905/slots/parallel-1/source/crates/wcore-acp)
+└── wcore-acp feature "default"
+    └── wcore-cli v0.13.14 (/root/waylandcore-stabilization-20260905/slots/parallel-1/source/crates/wcore-cli)
+        ├── wcore-cli feature "default" (command-line)
+        ├── wcore-cli feature "monitor"
+        │   └── wcore-cli feature "default" (command-line)
+        ├── wcore-cli feature "remote-registry"
+        │   └── wcore-cli feature "default" (command-line)
+        ├── wcore-cli feature "review_artifact"
+        │   └── wcore-cli feature "default" (command-line)
+        └── wcore-cli feature "workflow"
+            └── wcore-cli feature "default" (command-line)

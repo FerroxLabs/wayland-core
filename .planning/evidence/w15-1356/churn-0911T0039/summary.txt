@@ -1,0 +1,5 @@
+diag1356 batches=10 fast_rows=124 fast_c32=112 fast_pass=79 stage1=0 stage2=45 stage2_c32=45 rows_pass=203 rss_peak_mib=3318 quiescent_max_mib=126 diag_sites={'budget_or_closed': 136, 'positions_full': 149, 'replay_gap': 33}
+base1356 batches=10 fast_rows=124 fast_c32=112 fast_pass=102 stage1=0 stage2=22 stage2_c32=22 rows_pass=226 rss_peak_mib=3655 quiescent_max_mib=127 diag_sites={}
+fix1356 batches=10 fast_rows=124 fast_c32=112 fast_pass=101 stage1=0 stage2=23 stage2_c32=23 rows_pass=225 rss_peak_mib=3032 quiescent_max_mib=128 diag_sites={}
+
+diag1356 budget_or_closed exits by budget_left_ms: 0 -> 74, 1000 -> 62
