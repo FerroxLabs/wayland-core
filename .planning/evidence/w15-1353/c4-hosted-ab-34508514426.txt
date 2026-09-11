@@ -1,0 +1,56 @@
+wayland#1353 c4 -- hosted windows-latest base-vs-fix A/B of the isolated #1301 dispatch-budget step
+Run: FerroxLabs/wayland-core actions run 34508514426 (branch timing/w15-1353-ab, head 92a4d8127), both jobs conclusion success.
+Recomputed 2026-09-11 from the run's downloaded artifacts (samples.csv + per-run nextest stderr) and job logs, not from the lane's report.
+Test: wcore-agent::workflow_limits_test fix1_dispatch_budget_aborts_with_partial_result, release, exact CI isolated-step invocation.
+Kill line 240s (.config/nextest.toml 120s x terminate-after 2); #1301 c3 bar 1.5x = 160.000s.
+
+ARM IDENTITY (job log, counted by content in each checked-out tree):
+  shard a: base CheckpointQuota=0 is_published_checkpoint_name=4
+  shard a: fix  CheckpointQuota=15 is_published_checkpoint_name=4
+  shard a: base_head=92a4d81274ffba0b3f1b1b26692cbcbbbc3cccb9
+  shard a: fix_head=8ab83a98aa19e848ae300e2210e128c06ecaad00
+  shard b: base CheckpointQuota=0 is_published_checkpoint_name=4
+  shard b: fix  CheckpointQuota=15 is_published_checkpoint_name=4
+  shard b: base_head=92a4d81274ffba0b3f1b1b26692cbcbbbc3cccb9
+  shard b: fix_head=8ab83a98aa19e848ae300e2210e128c06ecaad00
+  CPUs (job log Win32_Processor): shard a INTEL(R) XEON(R) PLATINUM 8573C; shard b AMD EPYC 7763 64-Core Processor
+  base = b37b69505 + aa8f42912 + 07272c36b (+ harness files), no #1353 repair; fix = scratch 8ab83a98a = the #1353 repair on that base.
+
+shard a meta: HARNESS_AB_START 2026-09-10T18:13:26.2537162+00:00 N=6 arms=base/fix CORES=4 HARNESS_AB_DONE 2026-09-10T18:33:50.9009670+00:00
+shard b meta: HARNESS_AB_START 2026-09-10T18:16:43.9511162+00:00 N=6 arms=base/fix CORES=4 HARNESS_AB_DONE 2026-09-10T18:34:51.7399725+00:00
+
+EVERY SAMPLE (shard,round,arm,nextest_reported_s,wall_s,exit,werfault), in run order within each round:
+  a,1,base,91.984,95.573,0,0
+  a,1,fix,113.807,117.630,0,0
+  a,2,base,94.669,97.674,0,0
+  a,2,fix,96.597,99.622,0,0
+  a,3,base,93.853,97.374,0,0
+  a,3,fix,97.255,100.474,0,0
+  a,4,base,97.059,100.519,0,0
+  a,4,fix,94.581,98.447,0,0
+  a,5,base,93.214,96.510,0,0
+  a,5,fix,98.954,102.846,0,0
+  a,6,base,107.828,111.509,0,0
+  a,6,fix,102.864,106.395,0,0
+  b,1,base,82.689,86.742,0,0
+  b,1,fix,88.527,92.509,0,0
+  b,2,base,86.427,89.613,0,0
+  b,2,fix,88.737,92.856,0,0
+  b,3,base,85.157,88.743,0,0
+  b,3,fix,84.792,88.688,0,0
+  b,4,base,86.910,90.722,0,0
+  b,4,fix,84.932,88.769,0,0
+  b,5,base,86.712,89.793,0,0
+  b,5,fix,86.775,90.649,0,0
+  b,6,base,90.878,94.889,0,0
+  b,6,fix,89.921,93.722,0,0
+
+nextest-reported: base n=12 median 91.431 max 107.828 (2.23x) | fix n=12 median 92.251 max 113.807 (2.11x)
+nextest-reported: paired fix-base sorted -4.964 -2.478 -1.978 -0.957 -0.365 +0.063 +1.928 +2.310 +3.402 +5.740 +5.838 +21.823; median +0.995 mean +2.530; fix slower 7/12
+process wall: base n=12 median 95.231 max 111.509 (2.15x) | fix n=12 median 96.084 max 117.630 (2.04x)
+process wall: paired fix-base sorted -5.114 -2.072 -1.953 -1.167 -0.055 +0.856 +1.948 +3.100 +3.243 +5.767 +6.336 +22.057; median +1.402 mean +2.745; fix slower 7/12
+
+GRADE (c4): NOT REGRESSED at this instrument's resolution. Median paired difference +0.995s nextest-reported (+1.402s wall), about 1%,
+fix slower in 7 of 12 rounds; one round (shard a round 1, +21.823s) sets both the mean and the fix max. Fix max 113.807s = 2.11x,
+0 of 12 fix samples above 160.000s, so #1301 c3's 1.5x bar still holds with the repair. 24/24 exit 0, WerFault 0.
+NOT CLAIMED: n=12 on two VMs cannot resolve an effect of a few seconds -- VM-to-VM spread (shard a vs b medians ~8s apart) exceeds it.

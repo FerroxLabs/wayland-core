@@ -9,9 +9,8 @@ Owners come from each ledger's `owner:` on its UNMET criteria — the
 owner is read, not assigned, so a row cannot claim an owner the
 ledger does not.
 
-Blocking issues: 2   Outstanding criteria: 4
+Blocking issues: 1   Outstanding criteria: 3
 
 | Issue | Owner | Outstanding | Title |
 |---|---|---:|---|
-| FerroxLabs/wayland#1353 | core | 1 | Concurrent effect-checkpoint stores can jointly exceed the session quota |
 | FerroxLabs/wayland#1356 | core | 3 | ACP serve detaches a keeping-up reader at stage 2 when large events are followed by small ones |
