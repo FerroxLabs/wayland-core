@@ -198,7 +198,7 @@ jobs:
 
       - name: Upload the ledger
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: windows-flake-ledger-${{ github.run_id }}
           path: |
@@ -284,7 +284,7 @@ jobs:
 
       - name: Upload the hosted ledger
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: windows-hosted-flake-ledger-${{ github.run_id }}
           path: |
